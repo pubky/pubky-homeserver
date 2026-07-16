@@ -237,32 +237,15 @@ impl AppContext {
     }
 
     /// Connect to the SQL database.
-    /// In test builds with `?pubky-test=true`, creates an ephemeral database.
+    ///
+    /// In test builds with `?pubky-test=true`, `SqlDb::connect` automatically
+    /// creates an ephemeral database (see [`SqlDb::connect`]).
     async fn connect_to_sql_db(
         config_toml: &ConfigToml,
     ) -> Result<SqlDb, AppContextConversionError> {
-        #[cfg(any(test, feature = "testing"))]
-        {
-            // Pass the configured URL so the correct host/port are used
-            // (important when Postgres is on a non-default address, e.g. Docker).
-            return if config_toml.general.database_url.is_test_db() {
-                SqlDb::test_postgres_db(Some(config_toml.general.database_url.clone()))
-                    .await
-                    .map_err(AppContextConversionError::SqlDb)
-            } else {
-                SqlDb::connect(&config_toml.general.database_url)
-                    .await
-                    .map_err(AppContextConversionError::SqlDb)
-            };
-        }
-
-        #[cfg(not(any(test, feature = "testing")))]
-        {
-            // If we are not in a test environment, we use the normal db connection.
-            return SqlDb::connect(&config_toml.general.database_url)
-                .await
-                .map_err(AppContextConversionError::SqlDb);
-        }
+        SqlDb::connect(&config_toml.general.database_url)
+            .await
+            .map_err(AppContextConversionError::SqlDb)
     }
 }
 
