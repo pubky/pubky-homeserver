@@ -42,11 +42,16 @@ impl ConnectionString {
 
 #[cfg(any(test, feature = "testing"))]
 impl ConnectionString {
-    /// Returns a connection string for a test database.
-    /// This is a postgres database that is not real.
-    /// It is used as an indicator for a empheral test database.
+    /// Default connection string for ephemeral test databases.
+    ///
+    /// This is the same as [`super::sql_db::DEFAULT_TEST_CONNECTION_STRING`] with
+    /// `?pubky-test=true` appended to signal ephemeral database creation.
     pub fn default_test_db() -> Self {
-        Self::new("postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true").unwrap()
+        Self::new(&format!(
+            "{}?pubky-test=true",
+            super::sql_db::DEFAULT_TEST_CONNECTION_STRING
+        ))
+        .unwrap()
     }
 
     /// Returns true if the connection string is for a test database.
