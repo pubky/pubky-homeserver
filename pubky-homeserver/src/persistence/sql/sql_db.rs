@@ -127,18 +127,28 @@ impl SqlDb {
     }
 
     /// Derives the admin connection string to use for the test database creation.
-    /// If the user passed a connection string, use it.
-    /// If the user passed a connection string as a env variable, use it.
-    /// If no connection string is passed, use the default test connection string.
+    ///
+    /// Priority:
+    /// 1. Explicitly provided URL (if different from [`ConnectionString::default_test_db`])
+    /// 2. `TEST_PUBKY_CONNECTION_STRING` environment variable
+    /// 3. [`DEFAULT_TEST_CONNECTION_STRING`] fallback
+    ///
+    /// An explicitly provided URL that equals the default is treated as "no
+    /// explicit config" so the env var can still override it. This lets Docker
+    /// Postgres (non-default URL) pass through while the default config defers
+    /// to the user's env var.
     pub fn derive_connection_string(
         admin_con_string: Option<ConnectionString>,
     ) -> ConnectionString {
-        if let Some(con_string) = admin_con_string {
-            // If the user passed a connection string, use it.
-            return con_string.clone();
+        // If an explicitly non-default connection string was provided, use it.
+        if let Some(ref con_string) = admin_con_string {
+            if *con_string != ConnectionString::default_test_db() {
+                return con_string.clone();
+            }
         }
+
+        // Check the environment variable.
         if let Ok(raw_con_string) = std::env::var("TEST_PUBKY_CONNECTION_STRING") {
-            // If the user passed a connection string as a env variable, use it.
             match ConnectionString::new(&raw_con_string) {
                 Ok(con_string) => return con_string,
                 Err(e) => {
@@ -147,7 +157,7 @@ impl SqlDb {
             }
         }
 
-        // If no connection string is passed, use the default test connection string.
+        // Final fallback.
         ConnectionString::new(DEFAULT_TEST_CONNECTION_STRING)
             .expect("Default test connection string is valid")
     }
