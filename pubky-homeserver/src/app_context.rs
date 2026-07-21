@@ -237,9 +237,7 @@ impl AppContext {
     }
 
     /// Connect to the SQL database.
-    ///
-    /// In test builds with `?pubky-test=true`, `SqlDb::connect` automatically
-    /// creates an ephemeral database (see [`SqlDb::connect`]).
+    /// In test builds with `?pubky-test=true`, creates an ephemeral database.
     async fn connect_to_sql_db(
         config_toml: &ConfigToml,
     ) -> Result<SqlDb, AppContextConversionError> {
