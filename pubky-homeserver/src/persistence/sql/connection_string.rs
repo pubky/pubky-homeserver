@@ -11,11 +11,16 @@ impl ConnectionString {
     /// Create a new connection string from a string.
     /// This function validates that the connection string is a postgres connection string.
     pub fn new(con_string: &str) -> anyhow::Result<Self> {
-        let con = Self(url::Url::parse(con_string)?);
-        if !con.is_postgres() {
+        Self::validated(url::Url::parse(con_string)?)
+    }
+
+    /// Shared validation: ensures the URL uses a postgres scheme.
+    fn validated(url: url::Url) -> anyhow::Result<Self> {
+        let cs = Self(url);
+        if !cs.is_postgres() {
             anyhow::bail!("Only postgres database urls are supported");
         }
-        Ok(con)
+        Ok(cs)
     }
 
     /// Get the connection string as a str.
@@ -29,7 +34,6 @@ impl ConnectionString {
 
     /// Get the database name
     /// For postgres, this is the database name directly
-    /// For sqlite, this is the path to the database file
     pub fn database_name(&self) -> &str {
         self.0.path().trim_start_matches("/")
     }
@@ -42,18 +46,6 @@ impl ConnectionString {
 
 #[cfg(any(test, feature = "testing"))]
 impl ConnectionString {
-    /// Default connection string for ephemeral test databases.
-    ///
-    /// This is the same as [`super::sql_db::DEFAULT_TEST_CONNECTION_STRING`] with
-    /// `?pubky-test=true` appended to signal ephemeral database creation.
-    pub fn default_test_db() -> Self {
-        Self::new(&format!(
-            "{}?pubky-test=true",
-            super::sql_db::DEFAULT_TEST_CONNECTION_STRING
-        ))
-        .unwrap()
-    }
-
     /// Returns true if the connection string is for a test database.
     pub fn is_test_db(&self) -> bool {
         self.0
@@ -62,17 +54,19 @@ impl ConnectionString {
     }
 }
 
-impl From<url::Url> for ConnectionString {
-    fn from(url: url::Url) -> Self {
-        Self(url)
+impl TryFrom<url::Url> for ConnectionString {
+    type Error = anyhow::Error;
+
+    fn try_from(url: url::Url) -> Result<Self, Self::Error> {
+        Self::validated(url)
     }
 }
 
 impl FromStr for ConnectionString {
-    type Err = url::ParseError;
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(url::Url::parse(s)?))
+        Self::new(s)
     }
 }
 
@@ -101,25 +95,20 @@ impl<'de> Deserialize<'de> for ConnectionString {
     }
 }
 
-impl Default for ConnectionString {
-    fn default() -> Self {
-        Self::new("postgres://localhost:5432/pubky_homeserver").unwrap()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_create_db() {
-        let con_strings = vec![
-            "postgres://localhost:5432/pubky_homeserver",
-            "sqlite:///path/to/sqlite.db",
-        ];
-        for con_string in con_strings {
-            let _: ConnectionString = con_string.parse().unwrap();
-        }
+    #[test]
+    fn test_valid_postgres_url() {
+        let _: ConnectionString = "postgres://localhost:5432/pubky_homeserver"
+            .parse()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_non_postgres_url_rejected() {
+        let result: Result<ConnectionString, _> = "sqlite:///path/to/sqlite.db".parse();
+        assert!(result.is_err(), "sqlite URLs should be rejected");
     }
 }

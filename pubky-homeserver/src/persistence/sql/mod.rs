@@ -20,6 +20,6 @@ pub use entities::signup_code;
 pub(crate) use entities::user;
 pub use migrator::Migrator;
 pub(crate) use pg_event_listener::PgEventListener;
-pub use sql_db::SqlDb;
+pub use sql_db::{SqlDb, SqlDbConnectError};
 pub(crate) use unified_executor::uexecutor;
 pub(crate) use unified_executor::UnifiedExecutor;

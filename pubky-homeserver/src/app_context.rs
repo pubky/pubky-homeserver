@@ -35,7 +35,7 @@ pub enum AppContextConversionError {
     Keypair(anyhow::Error),
     /// Failed to open SQL DB.
     #[error("Failed to open SQL DB: {0}")]
-    SqlDb(sqlx::Error),
+    SqlDb(crate::persistence::sql::SqlDbConnectError),
     /// Failed to run migrations.
     #[error("Failed to run migrations: {0}")]
     Migrations(anyhow::Error),
@@ -151,7 +151,9 @@ impl AppContext {
             .read_or_create_keypair()
             .map_err(AppContextConversionError::Keypair)?;
 
-        let sql_db = Self::connect_to_sql_db(&conf).await?;
+        let sql_db = SqlDb::connect(conf.general.database_url.clone())
+            .await
+            .map_err(AppContextConversionError::SqlDb)?;
         Migrator::new(&sql_db)
             .run()
             .await
@@ -203,7 +205,14 @@ impl AppContext {
     fn build_pkarr_builder_from_config(config_toml: &ConfigToml) -> pkarr::ClientBuilder {
         let mut builder = pkarr::ClientBuilder::default();
         #[cfg(any(test, feature = "testing"))]
-        if config_toml.general.database_url.is_test_db() {
+        // None (no explicit URL) or a `?pubky-test=true` URL both indicate a test
+        // environment where we must avoid contacting the public DHT.
+        if config_toml
+            .general
+            .database_url
+            .as_ref()
+            .is_none_or(|url| url.is_test_db())
+        {
             builder
                 .no_default_network()
                 // Keep the client buildable without contacting the public DHT.
@@ -235,31 +244,29 @@ impl AppContext {
         }
         builder
     }
-
-    /// Connect to the SQL database.
-    /// In test builds with `?pubky-test=true`, creates an ephemeral database.
-    async fn connect_to_sql_db(
-        config_toml: &ConfigToml,
-    ) -> Result<SqlDb, AppContextConversionError> {
-        SqlDb::connect(&config_toml.general.database_url)
-            .await
-            .map_err(AppContextConversionError::SqlDb)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Verifies that the test pkarr builder doesn't contact the public DHT.
+    /// Uses Debug output because pkarr::ClientBuilder has no config getters.
     #[test]
-    fn test_pkarr_builder_does_not_use_default_network() {
+    fn pkarr_builder_does_not_use_default_network() {
         let builder =
             AppContext::build_pkarr_builder_from_config(&ConfigToml::default_test_config());
         let builder_debug = format!("{builder:?}");
 
-        assert!(builder_debug.contains("127.0.0.1:9"));
+        assert!(
+            builder_debug.contains("127.0.0.1:9"),
+            "expected sentinel bootstrap node in builder: {builder_debug}"
+        );
         for relay in pkarr::DEFAULT_RELAYS {
-            assert!(!builder_debug.contains(relay));
+            assert!(
+                !builder_debug.contains(relay),
+                "default relay {relay} should not appear in test builder: {builder_debug}"
+            );
         }
         builder.build().expect("isolated pkarr client should build");
     }
