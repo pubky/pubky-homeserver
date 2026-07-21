@@ -196,7 +196,7 @@ impl EphemeralTestnetBuilder {
             .unwrap_or_else(ConfigToml::minimal_test_config);
 
         if let Some(connection_string) = testnet.postgres_connection_string.as_ref() {
-            config.general.database_url = connection_string.clone();
+            config.general.database_url = Some(connection_string.clone());
         }
 
         let keypair = self
@@ -329,7 +329,7 @@ impl EphemeralTestnet {
         let mut config = config.unwrap_or_else(ConfigToml::minimal_test_config);
 
         if let Some(connection_string) = self.testnet.postgres_connection_string.as_ref() {
-            config.general.database_url = connection_string.clone();
+            config.general.database_url = Some(connection_string.clone());
         }
 
         let mock_dir = MockDataDir::new(config, Some(Keypair::random()))?;

@@ -288,7 +288,7 @@ mod tests {
     ///
     /// This also validates that `app_context.rs` correctly passes the configured
     /// connection string (random Docker port + `?pubky-test=true`) through to
-    /// `test_postgres_db()`. Without that, it would fall back to `localhost:5432`
+    /// `create_ephemeral_test_db()`. Without that, it would fall back to `localhost:5432`
     /// and fail to connect.
     #[tokio::test]
     async fn test_shared_docker_postgres_provides_db_isolation() {

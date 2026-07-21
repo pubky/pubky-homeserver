@@ -124,7 +124,8 @@ pub struct GeneralToml {
     )]
     #[serde(default)]
     pub user_storage_quota_mb: u64,
-    pub database_url: ConnectionString,
+    #[serde(default)]
+    pub database_url: Option<ConnectionString>,
 }
 
 /// A config for Homeserver tracing subscriber configuration
@@ -246,7 +247,7 @@ impl ConfigToml {
     #[cfg(any(test, feature = "testing"))]
     pub fn default_test_config() -> Self {
         let mut config = Self::default();
-        config.general.database_url = ConnectionString::default_test_db(); // Mark this db as test. This indicates that the db is not real.
+        config.general.database_url = None; // Resolved downstream via env var or default fallback.
         config.general.signup_mode = SignupMode::Open;
         // Use ephemeral ports (0) so parallel tests don't collide.
         config.drive.icann_listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
