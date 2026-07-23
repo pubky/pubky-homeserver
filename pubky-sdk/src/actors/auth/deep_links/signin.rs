@@ -109,6 +109,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_capability_with_context() {
+        let error = "pubkyauth://signin?caps=/:rw,invalid:w&relay=https://httprelay.pubky.app/inbox/&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8"
+            .parse::<SigninDeepLink>()
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Invalid query parameter caps: invalid capability at position 2 (`invalid:w`): capability scope must start with `/`"
+        );
+    }
+
+    #[test]
     fn rejects_wrong_intent() {
         let error = "pubkyauth://signup?caps=/:rw&relay=https://httprelay.pubky.app/inbox/&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8"
             .parse::<SigninDeepLink>()

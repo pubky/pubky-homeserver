@@ -52,7 +52,7 @@ fn start_flow(cli: &Cli) -> Result<PubkyGrantAuthFlow> {
     } else {
         Pubky::new()?
     };
-    let caps = Capabilities::try_from(cli.capabilities.as_str())?.normalize();
+    let caps = cli.capabilities.parse::<Capabilities>()?.normalize();
     let client_id = ClientId::new(&cli.client_id)?;
     let relay = auth_relay(cli)?;
 

@@ -1,5 +1,5 @@
 use pubky::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
-use pubky_common::{auth::jws::ClientId, capabilities::Capabilities};
+use pubky_common::auth::jws::ClientId;
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, rc::Rc};
 use tsify::Tsify;
@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     js_error::{JsResult, PubkyError, PubkyErrorName},
-    wrappers::capabilities::validate_capabilities,
+    wrappers::capabilities::parse_capabilities,
 };
 
 /// Options for starting a grant-backed pubkyauth flow.
@@ -88,8 +88,7 @@ impl GrantAuthFlow {
         options: GrantAuthFlowOptions,
         client: Option<pubky::PubkyHttpClient>,
     ) -> JsResult<GrantAuthFlow> {
-        let normalized = validate_capabilities(capabilities.as_str())?;
-        let caps = Capabilities::try_from(normalized.as_str())?;
+        let caps = parse_capabilities(&capabilities)?;
         let client_id = ClientId::new(&options.client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;
@@ -130,8 +129,7 @@ impl GrantAuthFlow {
         options: GrantAuthFlowOptions,
         client: Option<pubky::PubkyHttpClient>,
     ) -> JsResult<GrantAuthFlow> {
-        let normalized = validate_capabilities(capabilities.as_str())?;
-        let caps = Capabilities::try_from(normalized.as_str())?;
+        let caps = parse_capabilities(&capabilities)?;
         let client_id = ClientId::new(&options.client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;

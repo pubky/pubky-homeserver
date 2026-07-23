@@ -319,9 +319,9 @@ try {
 }
 ```
 
-On invalid input, `validateCapabilities` throws a `PubkyError` with
-`{ name: "InvalidInput", message: "Invalid capability entries: …" }`, so you can
-surface precise feedback to the user.
+On invalid input, `validateCapabilities` throws a `PubkyError` identifying the
+first malformed entry and its position. Its `data.invalidEntries` array contains
+that entry so applications can surface precise feedback to the user.
 
 #### Http Relay & reliability
 

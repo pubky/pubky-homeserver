@@ -8,8 +8,7 @@ use super::DeepLinkParseError;
 
 pub(super) fn parse_capabilities(url: &Url) -> Result<Capabilities, DeepLinkParseError> {
     required_query(url, "caps")?
-        .as_str()
-        .try_into()
+        .parse()
         .map_err(|e| DeepLinkParseError::InvalidQueryParameter("caps", Box::new(e)))
 }
 

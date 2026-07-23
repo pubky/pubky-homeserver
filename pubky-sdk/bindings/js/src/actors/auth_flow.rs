@@ -4,7 +4,6 @@
 )]
 
 use pubky::PubkyCookieAuthFlow;
-use pubky_common::capabilities::Capabilities;
 use std::{cell::RefCell, rc::Rc};
 use url::Url;
 
@@ -15,7 +14,7 @@ use wasm_bindgen_futures::JsFuture;
 use super::{in_flight::InFlightGuard, session::Session};
 use crate::{
     js_error::{JsResult, PubkyError, PubkyErrorName},
-    wrappers::{auth_token::AuthToken, capabilities::validate_capabilities, keys::PublicKey},
+    wrappers::{auth_token::AuthToken, capabilities::parse_capabilities, keys::PublicKey},
 };
 
 /// Start and control a pubkyauth authorization flow.
@@ -84,12 +83,8 @@ impl AuthFlow {
         relay: Option<String>,
         client: Option<pubky::PubkyHttpClient>,
     ) -> JsResult<AuthFlow> {
-        // 1) Validate & normalize capability string
-        let normalized = validate_capabilities(capabilities.as_str())?;
-        // 2) Build native Capabilities
-        let caps = Capabilities::try_from(normalized.as_str())?;
+        let caps = parse_capabilities(&capabilities)?;
 
-        // 3) Build the flow with optional relay and optional client
         let mut builder = PubkyCookieAuthFlow::builder(&caps, kind.0);
         if let Some(c) = client {
             builder = builder.client(c);

@@ -5,7 +5,7 @@
 //! A single capability is serialized as: `"<scope>:<actions>"`
 //!
 //! - `scope` must start with `/` (e.g. `"/pub/my-cool-app/"`, `"/"`).
-//! - `actions` is a compact string of letters, currently:
+//! - `actions` contains at least one action letter, currently:
 //!   - `r` => read (GET)
 //!   - `w` => write (PUT/POST/DELETE)
 //!
@@ -227,13 +227,13 @@ impl From<&Action> for char {
 }
 
 impl TryFrom<char> for Action {
-    type Error = Error;
+    type Error = CapabilityParseError;
 
-    fn try_from(value: char) -> Result<Self, Error> {
+    fn try_from(value: char) -> Result<Self, Self::Error> {
         match value {
             'r' => Ok(Self::Read),
             'w' => Ok(Self::Write),
-            _ => Err(Error::InvalidAction),
+            _ => Err(CapabilityParseError::InvalidAction(value)),
         }
     }
 }
@@ -250,57 +250,62 @@ impl Display for Capability {
 }
 
 impl TryFrom<String> for Capability {
-    type Error = Error;
+    type Error = CapabilityParseError;
 
-    fn try_from(value: String) -> Result<Self, Error> {
-        value.as_str().try_into()
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
 impl FromStr for Capability {
-    type Err = Error;
+    type Err = CapabilityParseError;
 
-    fn from_str(s: &str) -> Result<Self, Error> {
-        s.try_into()
+    /// Parse `"<scope>:<actions>"`.
+    ///
+    /// ```
+    /// use pubky_common::capabilities::Capability;
+    /// let capability: Capability = "/pub/my-cool-app/:rw".parse().unwrap();
+    /// assert_eq!(capability.to_string(), "/pub/my-cool-app/:rw");
+    /// ```
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (scope, actions_str) = value
+            .split_once(':')
+            .ok_or(CapabilityParseError::InvalidFormat)?;
+
+        if actions_str.contains(':') {
+            return Err(CapabilityParseError::InvalidFormat);
+        }
+
+        if !scope.starts_with('/') {
+            return Err(CapabilityParseError::InvalidScope);
+        }
+
+        if actions_str.is_empty() {
+            return Err(CapabilityParseError::MissingActions);
+        }
+
+        let mut actions = Vec::new();
+
+        for character in actions_str.chars() {
+            let action = Action::try_from(character)?;
+
+            if let Err(index) = actions.binary_search(&action) {
+                actions.insert(index, action);
+            }
+        }
+
+        Ok(Self {
+            scope: scope.to_string(),
+            actions,
+        })
     }
 }
 
 impl TryFrom<&str> for Capability {
-    type Error = Error;
-    /// Parse `"<scope>:<actions>"`. Scope must start with `/`; actions must be valid letters.
-    ///
-    /// ```
-    /// use pubky_common::capabilities::Capability;
-    /// let cap: Capability = "/pub/my-cool-app/:rw".try_into().unwrap();
-    /// assert_eq!(cap.to_string(), "/pub/my-cool-app/:rw");
-    /// ```
-    fn try_from(value: &str) -> Result<Self, Error> {
-        if value.matches(':').count() != 1 {
-            return Err(Error::InvalidFormat);
-        }
+    type Error = CapabilityParseError;
 
-        if !value.starts_with('/') {
-            return Err(Error::InvalidScope);
-        }
-
-        let actions_str = value.rsplit(':').next().unwrap_or("");
-
-        let mut actions = Vec::new();
-
-        for char in actions_str.chars() {
-            let ability = Action::try_from(char)?;
-
-            match actions.binary_search_by(|element| char::from(element).cmp(&char)) {
-                Ok(_) => {}
-                Err(index) => {
-                    actions.insert(index, ability);
-                }
-            }
-        }
-
-        let scope = value[0..value.len() - actions_str.len() - 1].to_string();
-
-        Ok(Self { scope, actions })
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
@@ -322,25 +327,41 @@ impl<'de> Deserialize<'de> for Capability {
     {
         let string: String = Deserialize::deserialize(deserializer)?;
 
-        string.try_into().map_err(serde::de::Error::custom)
+        string.parse().map_err(serde::de::Error::custom)
     }
 }
 
-#[derive(thiserror::Error, Debug, PartialEq, Eq)]
 /// Error parsing a [Capability].
-pub enum Error {
-    #[error("Capability: Invalid scope: does not start with `/`")]
-    /// Capability: Invalid scope: does not start with `/`
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum CapabilityParseError {
+    /// The scope does not start with `/`.
+    #[error("capability scope must start with `/`")]
     InvalidScope,
-    #[error("Capability: Invalid format should be <scope>:<abilities>")]
-    /// Capability: Invalid format should be `<scope>:<abilities>`
+    /// The capability does not follow the `<scope>:<actions>` format.
+    #[error("capability must have format `<scope>:<actions>`")]
     InvalidFormat,
-    #[error("Capability: Invalid Action")]
-    /// Capability: Invalid Action
-    InvalidAction,
-    #[error("Capabilities: Invalid capabilities format")]
-    /// Capabilities: Invalid capabilities format
-    InvalidCapabilities,
+    /// No actions were provided.
+    #[error("capability must contain at least one action")]
+    MissingActions,
+    /// The action is not supported.
+    #[error("invalid capability action `{0}`")]
+    InvalidAction(char),
+}
+
+/// Backwards-compatible name for [`CapabilityParseError`].
+pub type Error = CapabilityParseError;
+
+/// Error parsing a comma-separated [`Capabilities`] list.
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[error("invalid capability at position {position} (`{entry}`): {source}")]
+pub struct CapabilitiesParseError {
+    /// One-based position of the invalid entry.
+    pub position: usize,
+    /// The exact invalid entry.
+    pub entry: String,
+    /// The reason the entry is invalid.
+    #[source]
+    pub source: CapabilityParseError,
 }
 
 /// A wrapper around `Vec<Capability>` that controls how capabilities are
@@ -415,30 +436,21 @@ impl Capabilities {
     /// Expects a comma-separated list of capability strings, e.g.:
     /// `?caps=/pub/my-cool-app/:rw,/foo:r`
     ///
-    /// Invalid entries are ignored.
-    ///
     /// # Examples
     /// ```
     /// # use url::Url;
     /// # use pubky_common::capabilities::Capabilities;
     /// let url = Url::parse("https://example/app?caps=/pub/my-cool-app/:rw,/foo:r").unwrap();
-    /// let caps = Capabilities::from_caps_url(&url);
+    /// let caps = Capabilities::try_from_caps_url(&url).unwrap();
     /// assert!(!caps.is_empty());
     /// ```
-    pub fn from_caps_url(url: &Url) -> Self {
-        // Get the first `caps` entry if present.
+    pub fn try_from_caps_url(url: &Url) -> Result<Self, CapabilitiesParseError> {
         let value = url
             .query_pairs()
             .find_map(|(k, v)| (k == "caps").then(|| v.to_string()))
             .unwrap_or_default();
 
-        // Parse comma-separated capabilities, skipping invalid pieces.
-        let caps: Vec<_> = value
-            .split(',')
-            .filter_map(|s| Capability::try_from(s).ok())
-            .collect();
-
-        Self::from(caps)
+        value.parse()
     }
 
     /// Borrow the inner capabilities as a slice without allocating.
@@ -549,18 +561,33 @@ impl From<Capabilities> for Vec<Capability> {
 }
 
 impl TryFrom<&str> for Capabilities {
-    type Error = Error;
+    type Error = CapabilitiesParseError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let mut caps = vec![];
+        value.parse()
+    }
+}
 
-        for s in value.split(',') {
-            if let Ok(cap) = Capability::try_from(s) {
-                caps.push(cap);
-            };
+impl FromStr for Capabilities {
+    type Err = CapabilitiesParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty() {
+            return Ok(Self::default());
         }
 
-        Ok(Self::from(caps))
+        value
+            .split(',')
+            .enumerate()
+            .map(|(index, entry)| {
+                entry.parse().map_err(|source| CapabilitiesParseError {
+                    position: index + 1,
+                    entry: entry.to_string(),
+                    source,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self::from)
     }
 }
 
@@ -593,15 +620,7 @@ impl<'de> Deserialize<'de> for Capabilities {
     {
         let string: String = Deserialize::deserialize(deserializer)?;
 
-        let mut caps = vec![];
-
-        for s in string.split(',') {
-            if let Ok(cap) = Capability::try_from(s) {
-                caps.push(cap);
-            };
-        }
-
-        Ok(Self::from(caps))
+        string.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -668,7 +687,7 @@ mod tests {
 
         assert_eq!(cap.to_string(), expected_string);
 
-        assert_eq!(Capability::try_from(expected_string), Ok(cap))
+        assert_eq!(expected_string.parse(), Ok(cap))
     }
 
     #[test]
@@ -678,7 +697,7 @@ mod tests {
         assert_eq!(cap.actions, vec![Action::Read, Action::Write]);
         assert_eq!(cap.to_string(), "/:rw");
         // And it round-trips through the string form:
-        assert_eq!(Capability::try_from("/:rw"), Ok(cap));
+        assert_eq!("/:rw".parse(), Ok(cap));
     }
 
     #[test]
@@ -761,7 +780,8 @@ mod tests {
     #[test]
     fn parse_from_string_list() {
         // From a comma-separated string:
-        let parsed = Capabilities::try_from("/:rw,/pub/my-cool-app/:r")
+        let parsed = "/:rw,/pub/my-cool-app/:r"
+            .parse::<Capabilities>()
             .unwrap()
             .normalize();
         let built = Capabilities::builder()
@@ -775,16 +795,47 @@ mod tests {
     #[test]
     fn parse_errors_are_informative() {
         // Invalid scope (doesn't start with '/'):
-        let e = Capability::try_from("not/abs:rw").unwrap_err();
-        assert_eq!(e, Error::InvalidScope);
+        let error = "not/abs:rw".parse::<Capability>().unwrap_err();
+        assert_eq!(error, CapabilityParseError::InvalidScope);
 
         // Invalid format (missing ':'):
-        let e = Capability::try_from("/pub/my.app").unwrap_err();
-        assert_eq!(e, Error::InvalidFormat);
+        let error = "/pub/my.app".parse::<Capability>().unwrap_err();
+        assert_eq!(error, CapabilityParseError::InvalidFormat);
+
+        // Missing actions:
+        let error = "/pub/my.app:".parse::<Capability>().unwrap_err();
+        assert_eq!(error, CapabilityParseError::MissingActions);
 
         // Invalid action:
-        let e = Capability::try_from("/pub/my.app:rx").unwrap_err();
-        assert_eq!(e, Error::InvalidAction);
+        let error = "/pub/my.app:rx".parse::<Capability>().unwrap_err();
+        assert_eq!(error, CapabilityParseError::InvalidAction('x'));
+    }
+
+    #[test]
+    fn capabilities_reports_invalid_entry() {
+        let error = "/pub/app/:w,missing-leading-slash:r,/priv/file.txt:x"
+            .parse::<Capabilities>()
+            .unwrap_err();
+
+        assert_eq!(error.position, 2);
+        assert_eq!(error.entry, "missing-leading-slash:r");
+        assert_eq!(error.source, CapabilityParseError::InvalidScope);
+        assert_eq!(
+            error.to_string(),
+            "invalid capability at position 2 (`missing-leading-slash:r`): capability scope must start with `/`"
+        );
+    }
+
+    #[test]
+    fn capabilities_rejects_empty_entries() {
+        for input in [",/:r", "/:r,", "/:r,,/:w"] {
+            assert!(input.parse::<Capabilities>().is_err(), "accepted {input}");
+        }
+    }
+
+    #[test]
+    fn capabilities_accepts_empty_list() {
+        assert_eq!("".parse::<Capabilities>(), Ok(Capabilities::default()));
     }
 
     #[test]
@@ -801,11 +852,10 @@ mod tests {
 
     #[test]
     fn redundant_capabilities_string_dedup() {
-        let parsed = Capabilities::try_from(
-            "/pub/example.com/:rw,/pub/example.com/:rw,/pub/example.com/subfolder:w",
-        )
-        .unwrap()
-        .normalize();
+        let parsed = "/pub/example.com/:rw,/pub/example.com/:rw,/pub/example.com/subfolder:w"
+            .parse::<Capabilities>()
+            .unwrap()
+            .normalize();
 
         let caps = Capabilities::builder()
             .read_write("/pub/example.com/")
@@ -821,9 +871,18 @@ mod tests {
             "https://example.test?caps=/pub/example.com/:rw,/pub/example.com/documents:w",
         )
         .unwrap();
-        let caps = Capabilities::from_caps_url(&url).normalize();
+        let caps = Capabilities::try_from_caps_url(&url).unwrap().normalize();
 
         assert_eq!(caps.to_string(), "/pub/example.com/:rw");
+    }
+
+    #[test]
+    fn capabilities_from_url_rejects_invalid_entry() {
+        let url = Url::parse("https://example.test?caps=/:r,invalid:w").unwrap();
+        let error = Capabilities::try_from_caps_url(&url).unwrap_err();
+
+        assert_eq!(error.position, 2);
+        assert_eq!(error.entry, "invalid:w");
     }
 
     #[test]
@@ -874,6 +933,13 @@ mod tests {
 
         let back: Capabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(back, caps);
+    }
+
+    #[test]
+    fn serde_rejects_invalid_capability_entry() {
+        let error = serde_json::from_str::<Capabilities>(r#""/:r,invalid:w""#).unwrap_err();
+
+        assert!(error.to_string().contains("invalid:w"));
     }
 
     // --- scope_covers_path: trailing slash semantics ---

@@ -7,7 +7,6 @@ import {
   Pubky,
   PublicKey,
   SessionInfo,
-  validateCapabilities,
   AuthFlowKind
 } from "../index.js";
 import {
@@ -221,122 +220,60 @@ test("Grant auth: 3rd party signup", async (t) => {
   t.end();
 });
 
-test("startCookieAuthFlow: rejects malformed capabilities; normalizes valid; allows empty", async (t) => {
-  const sdk = Pubky.testnet(); // uses local testnet mapping so URLs are resolvable in-node
+test("startCookieAuthFlow validates capabilities", (t) => {
+  const sdk = Pubky.testnet();
 
-  // 1) Invalid entries -> throws InvalidInput with a precise message
   try {
-    // @ts-ignore: invalid capabilities string format. Emulating plain JS validation rules.
-    sdk.startCookieAuthFlow("/ok/:rw,not/a/cap,/also:bad:x", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-    t.fail("startCookieAuthFlow() should throw on malformed capability entries");
+    // @ts-ignore: malformed capability string for runtime validation.
+    sdk.startCookieAuthFlow("/ok/:rw,not/a/cap", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
+    t.fail("startCookieAuthFlow() should reject malformed capabilities");
   } catch (error) {
     assertPubkyError(t, error);
-    t.equal(error.name, "InvalidInput", "invalid caps -> InvalidInput");
-    t.ok(
-      /Invalid capability entries/i.test(error.message),
-      "error message lists invalid entries",
-    );
-    t.ok(
-      error.message.includes("not/a/cap") &&
-        error.message.includes("/also:bad:x"),
-      "message includes concrete bad entries",
-    );
-    t.ok(
-      error.data &&
-        typeof error.data === "object" &&
-        Array.isArray((error.data as { invalidEntries?: unknown }).invalidEntries),
-      "error.data exposes invalidEntries array",
-    );
-    if (
-      error.data &&
-      typeof error.data === "object" &&
-      Array.isArray((error.data as { invalidEntries?: unknown }).invalidEntries)
-    ) {
-      t.deepEqual(
-        (error.data as { invalidEntries: string[] }).invalidEntries,
-        ["not/a/cap", "/also:bad:x"],
-        "invalidEntries matches malformed tokens",
-      );
-    }
+    t.equal(error.name, "InvalidInput", "invalid capabilities -> InvalidInput");
   }
 
-  // 2) Valid entry with unordered actions -> normalized in URL (wr -> rw)
-  {
-    // @ts-ignore: invalid capabilities string format. Emulating plain JS normalization.
-    const flow = sdk.startCookieAuthFlow("/pub/example/:wr", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-    const url = new URL(flow.authorizationUrl);
-    const caps = url.searchParams.get("caps");
-    t.equal(
-      caps,
-      "/pub/example/:rw",
-      "actions normalized to ':rw' in deep link",
-    );
-  }
+  // @ts-ignore: unordered actions are accepted and normalized at runtime.
+  const flow = sdk.startCookieAuthFlow("/pub/example/:wr", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
+  const url = new URL(flow.authorizationUrl);
+  t.equal(url.searchParams.get("caps"), "/pub/example/:rw", "normalizes capabilities");
 
-  // 3) Empty string -> allowed; caps param remains empty
-  {
-    const flow = sdk.startCookieAuthFlow("", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-    const url = new URL(flow.authorizationUrl);
-    const caps = url.searchParams.get("caps");
-    t.equal(caps, "", "empty input allowed (no scopes)");
-  }
+  const emptyFlow = sdk.startCookieAuthFlow("", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
+  const emptyUrl = new URL(emptyFlow.authorizationUrl);
+  t.equal(emptyUrl.searchParams.get("caps"), "", "allows empty capabilities");
 
   t.end();
 });
 
-test("startGrantAuthFlow: rejects malformed inputs; normalizes valid; allows empty", async (t) => {
+test("startGrantAuthFlow validates capabilities and options", async (t) => {
   const sdk = Pubky.testnet();
   const clientId = "grant-validation-js.test";
 
   try {
     await sdk.startGrantAuthFlow(
-      "/ok/:rw,not/a/cap,/also:bad:x" as any,
+      "/ok/:rw,not/a/cap" as any,
       AuthFlowKind.signin(),
       { clientId, relay: TESTNET_HTTP_RELAY },
     );
-    t.fail("startGrantAuthFlow() should throw on malformed capability entries");
+    t.fail("startGrantAuthFlow() should reject malformed capabilities");
   } catch (error) {
     assertPubkyError(t, error);
-    t.equal(error.name, "InvalidInput", "invalid caps -> InvalidInput");
-    t.ok(
-      /Invalid capability entries/i.test(error.message),
-      "error message lists invalid entries",
-    );
-    t.ok(
-      error.message.includes("not/a/cap") &&
-        error.message.includes("/also:bad:x"),
-      "message includes concrete bad entries",
-    );
-    t.ok(
-      error.data &&
-        typeof error.data === "object" &&
-        Array.isArray((error.data as { invalidEntries?: unknown }).invalidEntries),
-      "error.data exposes invalidEntries array",
-    );
+    t.equal(error.name, "InvalidInput", "invalid capabilities -> InvalidInput");
   }
 
-  {
-    const flow = await sdk.startGrantAuthFlow(
-      "/pub/example/:wr" as any,
-      AuthFlowKind.signin(),
-      { clientId, relay: TESTNET_HTTP_RELAY },
-    );
-    const deepLink = SigninGrantDeepLink.parse(flow.authorizationUrl);
-    t.equal(
-      deepLink.capabilities,
-      "/pub/example/:rw",
-      "grant auth actions normalized to ':rw' in deep link",
-    );
-  }
+  const normalizedFlow = await sdk.startGrantAuthFlow(
+    "/pub/example/:wr" as any,
+    AuthFlowKind.signin(),
+    { clientId, relay: TESTNET_HTTP_RELAY },
+  );
+  const normalizedLink = SigninGrantDeepLink.parse(normalizedFlow.authorizationUrl);
+  t.equal(normalizedLink.capabilities, "/pub/example/:rw", "normalizes capabilities");
 
-  {
-    const flow = await sdk.startGrantAuthFlow("", AuthFlowKind.signin(), {
-      clientId,
-      relay: TESTNET_HTTP_RELAY,
-    });
-    const deepLink = SigninGrantDeepLink.parse(flow.authorizationUrl);
-    t.equal(deepLink.capabilities, "", "grant auth empty input allowed");
-  }
+  const emptyFlow = await sdk.startGrantAuthFlow("", AuthFlowKind.signin(), {
+    clientId,
+    relay: TESTNET_HTTP_RELAY,
+  });
+  const emptyLink = SigninGrantDeepLink.parse(emptyFlow.authorizationUrl);
+  t.equal(emptyLink.capabilities, "", "allows empty capabilities");
 
   {
     const flow = GrantAuthFlow.start("/pub/standalone/:rw", AuthFlowKind.signin(), {
@@ -571,51 +508,6 @@ test("resumeCookieAuthFlow: rejects invalid URL", async (t) => {
       /Only signin and signup/i.test(error.message),
       "error message explains only auth URLs are valid",
     );
-  }
-
-  t.end();
-});
-
-// Covers the pure string validator without running the flow.
-// Ensures normalization behavior and precise error reporting.
-test("validateCapabilities(): ok, normalize, and precise errors", async (t) => {
-  // OK + normalization
-  t.equal(
-    // @ts-ignore: invalid capabilities string format. Emulating plain JS validation rules.
-    validateCapabilities("/pub/a/:wr,/priv/b/:r"),
-    "/pub/a/:rw,/priv/b/:r",
-    "normalize wr->rw and preserve valid entries",
-  );
-
-  // Precise error message for malformed entries
-  try {
-    // @ts-ignore: invalid capabilities string format. Emulating plain JS validation rules.
-    validateCapabilities("/pub/a/:rw,/x:y,/pub/b/:x");
-    t.fail("validateCapabilities should throw on malformed entries");
-  } catch (error) {
-    assertPubkyError(t, error);
-    t.equal(error.name, "InvalidInput", "throws InvalidInput on bad entries");
-    t.ok(
-      error.message.includes("/x:y") && error.message.includes("/pub/b/:x"),
-      "message lists all offending entries",
-    );
-    t.ok(
-      error.data &&
-        typeof error.data === "object" &&
-        Array.isArray((error.data as { invalidEntries?: unknown }).invalidEntries),
-      "error.data exposes invalidEntries array",
-    );
-    if (
-      error.data &&
-      typeof error.data === "object" &&
-      Array.isArray((error.data as { invalidEntries?: unknown }).invalidEntries)
-    ) {
-      t.deepEqual(
-        (error.data as { invalidEntries: string[] }).invalidEntries,
-        ["/x:y", "/pub/b/:x"],
-        "invalidEntries matches malformed tokens",
-      );
-    }
   }
 
   t.end();

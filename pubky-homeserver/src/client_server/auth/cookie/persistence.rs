@@ -185,10 +185,9 @@ impl FromRow<'_, PgRow> for SessionEntity {
             .try_into()
             .map_err(|e: pkarr::errors::PublicKeyError| sqlx::Error::Decode(e.into()))?;
         let capabilities: String = row.try_get(SessionIden::Capabilities.to_string().as_str())?;
-        let capabilities: Capabilities = capabilities
-            .as_str()
-            .try_into()
-            .map_err(|e: pubky_common::capabilities::Error| sqlx::Error::Decode(e.into()))?;
+        let capabilities: Capabilities = capabilities.parse().map_err(
+            |e: pubky_common::capabilities::CapabilitiesParseError| sqlx::Error::Decode(e.into()),
+        )?;
         let created_at: sqlx::types::chrono::NaiveDateTime =
             row.try_get(SessionIden::CreatedAt.to_string().as_str())?;
         Ok(SessionEntity {
