@@ -117,7 +117,7 @@ fn session_has_action(
     let granted = session
         .capabilities()
         .iter()
-        .any(|cap| cap.scope_covers_path(path) && cap.actions.contains(&action));
+        .any(|cap| cap.scope_covers_path(path) && cap.actions().contains(&action));
     if granted {
         return Ok(());
     }

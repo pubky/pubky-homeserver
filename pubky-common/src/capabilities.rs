@@ -27,7 +27,8 @@
 //! let cap = Capability::builder("/pub/my-cool-app/")
 //!     .read()
 //!     .write()
-//!     .finish();
+//!     .finish()
+//!     .unwrap();
 //! assert_eq!(cap.to_string(), "/pub/my-cool-app/:rw");
 //!
 //! // Multiple caps builder
@@ -48,15 +49,15 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capability {
     /// Scope of resources (e.g. a directory or file). Must start with `/`.
-    pub scope: String,
+    scope: String,
     /// Allowed actions within `scope`. Serialized as a compact action string (e.g. `"rw"`).
-    pub actions: Vec<Action>,
+    actions: Vec<Action>,
 }
 
 impl Capability {
     /// Shorthand for a root capability at `/` with read+write.
     ///
-    /// Equivalent to `Capability { scope: "/".into(), actions: vec![Read, Write] }`.
+    /// Equivalent to a capability with scope `/` and both read and write actions.
     ///
     /// ```
     /// use pubky_common::capabilities::Capability;
@@ -81,7 +82,10 @@ impl Capability {
     /// ```
     #[inline]
     pub fn read<S: Into<String>>(scope: S) -> Self {
-        Self::builder(scope).read().finish()
+        Self::builder(scope)
+            .read()
+            .finish()
+            .expect("read adds a valid action")
     }
 
     /// Construct a write-only capability for `scope`.
@@ -92,7 +96,10 @@ impl Capability {
     /// ```
     #[inline]
     pub fn write<S: Into<String>>(scope: S) -> Self {
-        Self::builder(scope).write().finish()
+        Self::builder(scope)
+            .write()
+            .finish()
+            .expect("write adds a valid action")
     }
 
     /// Construct a read+write capability for `scope`.
@@ -103,7 +110,11 @@ impl Capability {
     /// ```
     #[inline]
     pub fn read_write<S: Into<String>>(scope: S) -> Self {
-        Self::builder(scope).read().write().finish()
+        Self::builder(scope)
+            .read()
+            .write()
+            .finish()
+            .expect("read and write are valid actions")
     }
 
     /// Start building a single capability for `scope`.
@@ -112,7 +123,7 @@ impl Capability {
     ///
     /// ```
     /// use pubky_common::capabilities::Capability;
-    /// let cap = Capability::builder("pub/my.app").read().finish();
+    /// let cap = Capability::builder("pub/my.app").read().finish().unwrap();
     /// assert_eq!(cap.to_string(), "/pub/my.app:r");
     /// ```
     pub fn builder<S: Into<String>>(scope: S) -> CapabilityBuilder {
@@ -120,6 +131,16 @@ impl Capability {
             scope: normalize_scope(scope.into()),
             actions: BTreeSet::new(),
         }
+    }
+
+    /// Return the resource scope covered by this capability.
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// Return the actions allowed by this capability.
+    pub fn actions(&self) -> &[Action] {
+        &self.actions
     }
 
     /// Whether this is the root capability (`/:rw`).
@@ -193,13 +214,29 @@ impl CapabilityBuilder {
     /// Finalize and produce the [`Capability`].
     ///
     /// Actions are de-duplicated and emitted in a stable order.
-    pub fn finish(self) -> Capability {
-        let v: Vec<Action> = self.actions.into_iter().collect();
-        // BTreeSet sorts; keep stable & dedup’d
-        Capability {
-            scope: self.scope,
-            actions: v,
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no action was added or an unknown action was used.
+    pub fn finish(self) -> Result<Capability, CapabilityParseError> {
+        if self.actions.is_empty() {
+            return Err(CapabilityParseError::MissingActions);
         }
+
+        if let Some(Action::Unknown(character)) = self
+            .actions
+            .iter()
+            .find(|action| matches!(action, Action::Unknown(_)))
+        {
+            return Err(CapabilityParseError::InvalidAction(*character));
+        }
+
+        let actions = self.actions.into_iter().collect();
+        // BTreeSet sorts; keep stable & dedup’d
+        Ok(Capability {
+            scope: self.scope,
+            actions,
+        })
     }
 }
 
@@ -506,16 +543,21 @@ impl CapsBuilder {
     /// use pubky_common::capabilities::Capabilities;
     /// let caps = Capabilities::builder()
     ///     .capability("/pub/my-cool-app/", |b| b.read().write())
+    ///     .unwrap()
     ///     .finish();
     /// assert_eq!(caps.to_string(), "/pub/my-cool-app/:rw");
     /// ```
-    pub fn capability<F>(mut self, scope: impl Into<String>, f: F) -> Self
+    pub fn capability<F>(
+        mut self,
+        scope: impl Into<String>,
+        f: F,
+    ) -> Result<Self, CapabilityParseError>
     where
         F: FnOnce(CapabilityBuilder) -> CapabilityBuilder,
     {
-        let cap = f(Capability::builder(scope)).finish();
+        let cap = f(Capability::builder(scope)).finish()?;
         self.caps.push(cap);
-        self
+        Ok(self)
     }
 
     /// Add a read-only capability for `scope`.
@@ -706,7 +748,8 @@ mod tests {
         let cap1 = Capability::builder("/pub/my-cool-app/")
             .read()
             .write()
-            .finish();
+            .finish()
+            .unwrap();
         assert_eq!(cap1.to_string(), "/pub/my-cool-app/:rw");
 
         // Shortcuts:
@@ -745,6 +788,7 @@ mod tests {
         // Build a capability inline with fine-grained control, then push it:
         let caps = Capabilities::builder()
             .capability("/pub/my-cool-app/", |c| c.read().write())
+            .unwrap()
             .finish();
 
         assert_eq!(caps.to_string(), "/pub/my-cool-app/:rw");
@@ -758,16 +802,47 @@ mod tests {
             .read()
             .read()
             .write()
-            .finish();
-        assert_eq!(cap.actions, vec![Action::Read, Action::Write]);
+            .finish()
+            .unwrap();
+        assert_eq!(cap.actions(), &[Action::Read, Action::Write]);
         assert_eq!(cap.to_string(), "/:rw");
+    }
+
+    #[test]
+    fn builder_rejects_missing_actions() {
+        let error = Capability::builder("/pub/app/").finish().unwrap_err();
+
+        assert_eq!(error, CapabilityParseError::MissingActions);
+    }
+
+    #[test]
+    fn builder_rejects_unknown_actions() {
+        let error = Capability::builder("/pub/app/")
+            .allow(Action::Unknown('x'))
+            .finish()
+            .unwrap_err();
+
+        assert_eq!(error, CapabilityParseError::InvalidAction('x'));
+    }
+
+    #[test]
+    fn builder_output_round_trips() {
+        let capability = Capability::builder("/pub/app/")
+            .read()
+            .write()
+            .finish()
+            .unwrap();
+
+        assert_eq!(capability.scope(), "/pub/app/");
+        assert_eq!(capability.actions(), &[Action::Read, Action::Write]);
+        assert_eq!(capability.to_string().parse(), Ok(capability));
     }
 
     #[test]
     fn normalize_scope_adds_leading_slash() {
         // No leading slash? The helpers normalize it.
         let cap = Capability::read("pub/my.app");
-        assert_eq!(cap.scope, "/pub/my.app");
+        assert_eq!(cap.scope(), "/pub/my.app");
         assert_eq!(cap.to_string(), "/pub/my.app:r");
 
         // CapsBuilder helpers also normalize:
