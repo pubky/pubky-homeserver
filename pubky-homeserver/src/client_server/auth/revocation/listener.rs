@@ -265,10 +265,10 @@ mod tests {
     #[pubky_test_utils::test]
     async fn listeners_on_two_instances_receive_the_same_revocation() {
         let db = SqlDb::test().await;
-        let service_a = RevocationListener::start(db.pool()).await.unwrap();
-        let service_b = RevocationListener::start(db.pool()).await.unwrap();
-        let mut receiver_a = service_a.subscribe().await.unwrap();
-        let mut receiver_b = service_b.subscribe().await.unwrap();
+        let listener_a = RevocationListener::start(db.pool()).await.unwrap();
+        let listener_b = RevocationListener::start(db.pool()).await.unwrap();
+        let mut receiver_a = listener_a.subscribe().await.unwrap();
+        let mut receiver_b = listener_b.subscribe().await.unwrap();
 
         notify_cookie_revocation(db.pool(), 42).await;
 
@@ -286,8 +286,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn a_lost_connection_closes_private_streams_until_a_replacement_listener_takes_over() {
         let db = SqlDb::test().await;
-        let service = RevocationListener::start(db.pool()).await.unwrap();
-        let mut orphaned = service.subscribe().await.unwrap();
+        let listener = RevocationListener::start(db.pool()).await.unwrap();
+        let mut orphaned = listener.subscribe().await.unwrap();
 
         let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
             .bind(listener_backend_pid(db.pool()).await)
@@ -301,7 +301,7 @@ mod tests {
 
         expect_closed(&mut orphaned).await;
 
-        let mut receiver = service
+        let mut receiver = listener
             .subscribe()
             .await
             .expect("a later subscription should start a replacement listener");
@@ -317,8 +317,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn an_invalid_notification_payload_closes_private_streams() {
         let db = SqlDb::test().await;
-        let service = RevocationListener::start(db.pool()).await.unwrap();
-        let mut receiver = service.subscribe().await.unwrap();
+        let listener = RevocationListener::start(db.pool()).await.unwrap();
+        let mut receiver = listener.subscribe().await.unwrap();
 
         notify(db.pool(), "not-an-auth-revocation").await;
 
@@ -329,11 +329,11 @@ mod tests {
     #[pubky_test_utils::test]
     async fn dropping_the_last_service_clone_releases_the_postgres_listener() {
         let db = SqlDb::test().await;
-        let service = RevocationListener::start(db.pool()).await.unwrap();
-        let spare = service.clone();
+        let listener = RevocationListener::start(db.pool()).await.unwrap();
+        let spare = listener.clone();
         let pid = listener_backend_pid(db.pool()).await;
 
-        drop(service);
+        drop(listener);
         let mut receiver = spare
             .subscribe()
             .await
