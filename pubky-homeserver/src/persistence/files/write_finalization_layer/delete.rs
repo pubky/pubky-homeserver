@@ -1,7 +1,11 @@
 use std::{mem::take, sync::Arc};
 
-use crate::persistence::files::{entry::EntryService, events::EventType, FileIoError};
-use crate::persistence::sql::{entry::EntryEntity, user::UserEntity, UnifiedExecutor};
+use crate::persistence::files::events::EventType;
+use crate::persistence::sql::{
+    entry::{EntryEntity, EntryRepository},
+    user::UserEntity,
+    UnifiedExecutor,
+};
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
@@ -151,9 +155,9 @@ impl Finalizer {
             }
         };
 
-        let deleted_entry = match EntryService::new().delete_entry(entry_path, executor).await {
+        let deleted_entry = match EntryRepository::get_by_path(entry_path, executor).await {
             Ok(entry) => entry,
-            Err(FileIoError::NotFound) => return Ok(None),
+            Err(sqlx::Error::RowNotFound) => return Ok(None),
             Err(error) => {
                 return Err(unexpected(
                     format!("Failed to delete entry {entry_path}"),
@@ -161,6 +165,9 @@ impl Finalizer {
                 ));
             }
         };
+        EntryRepository::delete(deleted_entry.id, executor)
+            .await
+            .map_err(|error| unexpected(format!("Failed to delete entry {entry_path}"), error))?;
 
         Ok(Some(StagedDelete {
             user,

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use crate::persistence::files::{
-    entry::EntryService, events::EventType, layer_domain_error::LayerDomainError, FileMetadata,
-    FileMetadataBuilder,
+    events::EventType, layer_domain_error::LayerDomainError, FileMetadata, FileMetadataBuilder,
 };
 use crate::persistence::sql::{
     entry::{EntryEntity, EntryRepository},
@@ -188,6 +187,32 @@ impl Finalizer {
         PreparedWrite::new(user, existing_entry, file_metadata, self.default_storage_mb)
     }
 
+    async fn persist_entry(
+        user_id: i32,
+        existing_entry: Option<EntryEntity>,
+        entry_path: &EntryPath,
+        file_metadata: &FileMetadata,
+        executor: &mut UnifiedExecutor<'_>,
+    ) -> Result<(), sqlx::Error> {
+        if let Some(mut entry) = existing_entry {
+            entry.content_hash = file_metadata.hash;
+            entry.content_length = file_metadata.length as u64;
+            entry.content_type = file_metadata.content_type.clone();
+            return EntryRepository::update(&entry, executor).await;
+        }
+
+        EntryRepository::create(
+            user_id,
+            entry_path.path(),
+            &file_metadata.hash,
+            file_metadata.length as u64,
+            &file_metadata.content_type,
+            executor,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn apply_write_effects(
         &self,
         prepared: PreparedWrite,
@@ -200,8 +225,7 @@ impl Finalizer {
             existing_entry,
             bytes_delta,
         } = prepared;
-        EntryService::new()
-            .write_entry(user.id, existing_entry, entry_path, file_metadata, executor)
+        Self::persist_entry(user.id, existing_entry, entry_path, file_metadata, executor)
             .await
             .map_err(|error| {
                 unexpected(

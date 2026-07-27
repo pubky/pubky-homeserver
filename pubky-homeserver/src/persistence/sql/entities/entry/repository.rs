@@ -55,37 +55,6 @@ impl EntryRepository {
         Ok(entry_id)
     }
 
-    /// Get an entry by its id.
-    /// The executor can either be db.pool() or a transaction.
-    pub async fn get<'a>(
-        id: i64,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<EntryEntity, sqlx::Error> {
-        let statement = Query::select()
-            .from(ENTRY_TABLE)
-            .columns([
-                (ENTRY_TABLE, EntryIden::Id),
-                (ENTRY_TABLE, EntryIden::User),
-                (ENTRY_TABLE, EntryIden::Path),
-                (ENTRY_TABLE, EntryIden::ContentHash),
-                (ENTRY_TABLE, EntryIden::ContentLength),
-                (ENTRY_TABLE, EntryIden::ContentType),
-                (ENTRY_TABLE, EntryIden::ModifiedAt),
-                (ENTRY_TABLE, EntryIden::CreatedAt),
-            ])
-            .column((USER_TABLE, UserIden::PublicKey))
-            .left_join(
-                USER_TABLE,
-                Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
-            )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).eq(id))
-            .to_owned();
-        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
-        let con = executor.get_con().await?;
-        let entry: EntryEntity = sqlx::query_as_with(&query, values).fetch_one(con).await?;
-        Ok(entry)
-    }
-
     /// Get an entry by its path.
     /// The executor can either be db.pool() or a transaction.
     pub async fn get_by_path<'a>(
@@ -487,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_create_get_entry() {
+    async fn test_create_get_and_delete_entry_by_path() {
         let db = SqlDb::test().await;
         let user_pubkey = Keypair::random().public_key();
 
@@ -508,25 +477,17 @@ mod tests {
         .await
         .unwrap();
 
-        // Test get entry
-        let entry = EntryRepository::get(entry_id, &mut db.pool().into())
+        // Test get entry by path
+        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap());
+        let entry = EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
             .await
             .unwrap();
         assert_eq!(entry.id, entry_id);
         assert_eq!(entry.user_id, user.id);
-        assert_eq!(
-            entry.path,
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap())
-        );
+        assert_eq!(entry.path, entry_path);
         assert_eq!(entry.content_hash, [0; 32]);
         assert_eq!(entry.content_length, 100);
         assert_eq!(entry.content_type, "text/plain");
-
-        // test get by path
-        let entry_by_path = EntryRepository::get_by_path(&entry.path, &mut db.pool().into())
-            .await
-            .unwrap();
-        assert_eq!(entry_by_path.id, entry_id);
 
         // test delete
         EntryRepository::delete_by_path(&entry.path, &mut db.pool().into())

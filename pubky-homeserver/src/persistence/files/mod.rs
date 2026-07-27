@@ -11,7 +11,6 @@
 //! [`file`] provides the high-level [`FileService`](file::file_service::FileService)
 //! used by route handlers.
 
-mod entry;
 mod file;
 mod layer_domain_error;
 mod opendal;
