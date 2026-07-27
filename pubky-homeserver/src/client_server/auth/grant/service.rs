@@ -1143,7 +1143,9 @@ mod tests {
     fn require_root_capability_fails_without_root() {
         let session = GrantSession::test(
             Keypair::random().public_key(),
-            Capabilities::builder().cap(Capability::read("/")).finish(),
+            Capabilities::builder()
+                .cap(Capability::read("/").unwrap())
+                .finish(),
             GrantId::generate(),
             0,
         );

@@ -139,7 +139,7 @@ mod tests {
 
     use crate::persistence::sql::user::UserRepository;
     use crate::persistence::sql::SqlDb;
-    use crate::shared::webdav::WebDavPath;
+    use crate::shared::webdav::StoragePath;
 
     use super::*;
 
@@ -151,7 +151,7 @@ mod tests {
         path: &str,
         size_hint: Option<u64>,
     ) -> HttpResult<()> {
-        let entry_path = EntryPath::new(user.public_key.clone(), WebDavPath::new(path).unwrap());
+        let entry_path = EntryPath::new(user.public_key.clone(), StoragePath::new(path).unwrap());
         fail_if_size_hint_exceeds_quota(
             size_hint,
             user,

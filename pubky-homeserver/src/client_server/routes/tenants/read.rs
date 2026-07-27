@@ -784,10 +784,13 @@ mod tests {
         assert_private_cache_policy(unauthorized.headers());
         assert_no_validators(unauthorized.headers());
 
-        let write_only_cookie =
-            sign_in_with_capabilities(&server, &keypair, vec![Capability::write("/priv/")])
-                .await
-                .unwrap();
+        let write_only_cookie = sign_in_with_capabilities(
+            &server,
+            &keypair,
+            vec![Capability::write("/priv/").unwrap()],
+        )
+        .await
+        .unwrap();
         let forbidden = server
             .get("/priv/secret.txt")
             .add_header("host", public_key.z32())

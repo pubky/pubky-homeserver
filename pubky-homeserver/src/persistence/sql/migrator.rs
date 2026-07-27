@@ -10,7 +10,7 @@ use crate::persistence::sql::{
         M20250815CreateEntryMigration, M20251014EventsTableIndexAndContentHashMigration,
         M20260325CreateGrantSessionsMigration, M20260327AddQuotaColumnsMigration,
         M20260507AddAllowedWritePathsMigration, M20260609AddSignupCodeUsedAtMigration,
-        M20260723RemoveActionlessCapabilitiesMigration,
+        M20260723SanitizeCapabilitiesMigration,
     },
     sql_db::SqlDb,
 };
@@ -44,7 +44,7 @@ impl<'a> Migrator<'a> {
             Box::new(M20260327AddQuotaColumnsMigration),
             Box::new(M20260507AddAllowedWritePathsMigration),
             Box::new(M20260609AddSignupCodeUsedAtMigration),
-            Box::new(M20260723RemoveActionlessCapabilitiesMigration),
+            Box::new(M20260723SanitizeCapabilitiesMigration),
         ]
     }
 

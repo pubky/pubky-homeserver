@@ -288,7 +288,7 @@ mod tests {
     use crate::persistence::files::events::EventType;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
-    use crate::shared::webdav::{EntryPath, WebDavPath};
+    use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::test_support::{all_events, create_user, test_operator, user_usage};
 
@@ -298,7 +298,7 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test.txt").unwrap());
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
 
         operator
             .write(entry_path.as_str(), vec![1; 10])

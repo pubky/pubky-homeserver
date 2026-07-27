@@ -249,7 +249,7 @@ mod tests {
     use super::*;
     use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
     use crate::persistence::sql::user::UserRepository;
-    use crate::shared::webdav::WebDavPath;
+    use crate::shared::webdav::StoragePath;
 
     #[tokio::test]
     #[pubky_test_utils::test]
@@ -263,7 +263,7 @@ mod tests {
         UserRepository::create(&pubky, &mut context.sql_db.pool().into())
             .await
             .unwrap();
-        let path = EntryPath::new(pubky, WebDavPath::new("/test.txt").unwrap());
+        let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
         assert!(!service.exists(&path).await.unwrap());
     }
 
@@ -277,7 +277,7 @@ mod tests {
             OpendalService::new(&context).expect("Failed to create OpenDAL service for testing");
         let pubky = pubky_common::crypto::Keypair::random().public_key();
         UserRepository::create_with_quota_mb(&context.sql_db, &pubky, 1).await;
-        let path = EntryPath::new(pubky, WebDavPath::new("/test.txt").unwrap());
+        let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
         let write_result = service.write(&path, vec![42u8; 1024 * 1024]).await;
         assert!(write_result.is_err());
         assert!(matches!(
@@ -295,7 +295,7 @@ mod tests {
             let file_service = OpendalService::new_from_operator(operator);
 
             let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, WebDavPath::new("/test.txt").unwrap());
+            let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
 
             // Write a 10KB file filled with test data
             let should_chunk_count = 5;
@@ -357,7 +357,7 @@ mod tests {
             let file_service = OpendalService::new_from_operator(operator);
 
             let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, WebDavPath::new("/test_stream.txt").unwrap());
+            let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
 
             // Create test data - multiple chunks to test streaming
             let chunk_count = 3;

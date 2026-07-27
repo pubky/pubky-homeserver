@@ -275,7 +275,7 @@ mod tests {
     use crate::persistence::files::events::EventType;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
-    use crate::shared::webdav::{EntryPath, WebDavPath};
+    use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
         all_events, create_user, test_finalizer, test_operator, user_usage,
@@ -364,7 +364,7 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let missing_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/missing.txt").unwrap());
+        let missing_path = EntryPath::new(pubkey.clone(), StoragePath::new("/missing.txt").unwrap());
 
         operator.delete(missing_path.as_str()).await.unwrap();
 
@@ -378,9 +378,9 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let deleted_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/deleted.txt").unwrap());
+        let deleted_path = EntryPath::new(pubkey.clone(), StoragePath::new("/deleted.txt").unwrap());
         let retained_path =
-            EntryPath::new(pubkey.clone(), WebDavPath::new("/retained.txt").unwrap());
+            EntryPath::new(pubkey.clone(), StoragePath::new("/retained.txt").unwrap());
 
         operator
             .write(deleted_path.as_str(), vec![1; 10])
@@ -434,7 +434,7 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test.txt").unwrap());
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
         let content = vec![1; 10];
 
         operator
@@ -470,9 +470,9 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let failing_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/failing.txt").unwrap());
+        let failing_path = EntryPath::new(pubkey.clone(), StoragePath::new("/failing.txt").unwrap());
         let succeeding_path =
-            EntryPath::new(pubkey.clone(), WebDavPath::new("/succeeding.txt").unwrap());
+            EntryPath::new(pubkey.clone(), StoragePath::new("/succeeding.txt").unwrap());
 
         operator
             .write(failing_path.as_str(), vec![1; 10])

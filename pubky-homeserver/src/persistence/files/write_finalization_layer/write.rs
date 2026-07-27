@@ -270,7 +270,7 @@ mod tests {
     use crate::persistence::files::FileIoError;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
-    use crate::shared::webdav::{EntryPath, WebDavPath};
+    use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{all_events, create_user, test_operator, user_usage};
     use super::*;
@@ -281,7 +281,7 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test.txt").unwrap());
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
 
         sqlx::query(
             r#"
@@ -324,10 +324,10 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let ancestor = EntryPath::new(pubkey.clone(), WebDavPath::new("/pub/app/foo").unwrap());
+        let ancestor = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/foo").unwrap());
         let descendant = EntryPath::new(
             pubkey.clone(),
-            WebDavPath::new("/pub/app/foo/bar.json").unwrap(),
+            StoragePath::new("/pub/app/foo/bar.json").unwrap(),
         );
 
         let mut ancestor_writer = operator.writer(ancestor.as_str()).await.unwrap();

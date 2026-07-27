@@ -4028,6 +4028,7 @@ dependencies = [
  "blake3",
  "crypto_secretbox",
  "ed25519-dalek",
+ "percent-encoding",
  "pkarr",
  "postcard",
  "pubky-timestamp",

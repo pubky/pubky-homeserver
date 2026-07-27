@@ -72,3 +72,24 @@ test("validateCapabilities rejects malformed list entries", (t) => {
 
   t.end();
 });
+
+test("validateCapabilities rejects noncanonical scopes", (t) => {
+  const cases = [
+    "/pub//app/:r",
+    "/pub/./app/:r",
+    "/pub/a/../app/:r",
+    "/pub/a:b:r",
+  ];
+
+  for (const input of cases) {
+    try {
+      validateCapabilities(input as any);
+      t.fail(`accepted noncanonical capability: ${input}`);
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "InvalidInput", `rejects ${input}`);
+    }
+  }
+
+  t.end();
+});

@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_require_root_capability_rejects_read_only() {
-        let auth = bearer_auth(Capabilities::builder().read("/").finish());
+        let auth = bearer_auth(Capabilities::builder().read("/").unwrap().finish());
         let err = GrantAuthService::require_root_capability(&auth).unwrap_err();
         let resp = HttpError::from(err).into_response();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -200,7 +200,12 @@ mod tests {
 
     #[test]
     fn test_require_root_capability_rejects_scoped_rw() {
-        let auth = bearer_auth(Capabilities::builder().read_write("/pub/app/").finish());
+        let auth = bearer_auth(
+            Capabilities::builder()
+                .read_write("/pub/app/")
+                .unwrap()
+                .finish(),
+        );
         let err = GrantAuthService::require_root_capability(&auth).unwrap_err();
         let resp = HttpError::from(err).into_response();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);

@@ -343,7 +343,7 @@ fn accept_live_event(
 mod tests {
     use super::*;
     use crate::persistence::sql::{user::UserRepository, SqlDb};
-    use crate::shared::webdav::WebDavPath;
+    use crate::shared::webdav::StoragePath;
     use pubky_common::crypto::Keypair;
 
     #[tokio::test]
@@ -357,7 +357,7 @@ mod tests {
             .await
             .unwrap();
 
-        let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test.txt").unwrap());
+        let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test.txt").unwrap());
 
         // Subscribe before creating event
         let mut rx = events_service.subscribe();
@@ -402,7 +402,7 @@ mod tests {
         // 3=/pub/b, 4=/priv/y, 5=/pub/c.
         let paths = ["/pub/a", "/priv/x", "/pub/b", "/priv/y", "/pub/c"];
         for p in paths {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             events_service
                 .create_event(
                     user.id,
@@ -458,7 +458,7 @@ mod tests {
         // 3=/pub/b, 4=/priv/y, 5=/pub/c.
         let paths = ["/pub/a", "/priv/x", "/pub/b", "/priv/y", "/pub/c"];
         for p in paths {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             events_service
                 .create_event(
                     user.id,
@@ -495,7 +495,7 @@ mod tests {
         );
 
         // A union of path filters scopes to those roots (here a single private directory).
-        let path_filters = [PathFilter::from(WebDavPath::new("/priv/").unwrap())];
+        let path_filters = [PathFilter::from(StoragePath::new("/priv/").unwrap())];
         let events = events_service
             .get_all_events(
                 None,
@@ -512,8 +512,8 @@ mod tests {
 
         // Multiple path filters union (any-match): an exact file OR a directory subtree.
         let path_filters = [
-            PathFilter::from(WebDavPath::new("/pub/a").unwrap()),
-            PathFilter::from(WebDavPath::new("/priv/").unwrap()),
+            PathFilter::from(StoragePath::new("/pub/a").unwrap()),
+            PathFilter::from(StoragePath::new("/priv/").unwrap()),
         ];
         let events = events_service
             .get_all_events(

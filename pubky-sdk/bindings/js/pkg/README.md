@@ -323,6 +323,10 @@ On invalid input, `validateCapabilities` throws a `PubkyError` identifying the
 first malformed entry and its position. Its `data.invalidEntries` array contains
 that entry so applications can surface precise feedback to the user.
 
+Capability scopes must be canonical absolute paths. Repeated separators and
+`.` or `..` segments are rejected rather than normalized. Percent sequences are
+literal scope characters; URL encoding is handled by the enclosing deep link.
+
 #### Http Relay & reliability
 
 - If you don’t specify a relay, the auth flow defaults to a Synonym-hosted relay. If that relay is down, logins won’t complete.

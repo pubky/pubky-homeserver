@@ -1,11 +1,11 @@
 /// The problem we have is that we need to cover these cases of webdav paths:
 ///
-/// - `WebdavPath` = Basically a regular absolute filesystem path like `/home/shacollision/test.txt`. This is used in the internal `file_service` as this should not be tied to the `/pub` requirement.
-/// - `EntryPath` = A WebdavPath that starts with a public key.
+/// - `StoragePath` = Basically a regular absolute filesystem path like `/home/shacollision/test.txt`. This is used in the internal `file_service` as this should not be tied to the `/pub` requirement.
+/// - `EntryPath` = A `StoragePath` that starts with a public key.
 /// - `WebDavPathAxum` = A webdav path without the leading `/` because axum delivers the path param without the slash. The storage-root (`/pub/`, `/priv/`) requirement is enforced separately as an authorization concern, not by this type.
 /// - `EntryPathPub` = An `EntryPath` wrapper used by admin routes.
 ///
-/// One reason we can't just exclusively use the `Entrypath` and need to use `WebDavPath(Axum)` is because sometimes, the public key comes from the `pubky-host` instead of the url.
+/// One reason we can't just exclusively use the `EntryPath` and need to use `WebDavPathAxum` is because sometimes, the public key comes from the `pubky-host` instead of the URL.
 ///
 /// # How to fix it
 /// ## `pubky-host`
@@ -27,10 +27,9 @@
 ///
 mod entry_path;
 mod entry_path_pub;
-mod webdav_path;
 mod webdav_path_axum;
 
 pub use entry_path::EntryPath;
 pub use entry_path_pub::EntryPathPub;
-pub use webdav_path::WebDavPath;
+pub use pubky_common::StoragePath;
 pub use webdav_path_axum::{WebDavFilePathAxum, WebDavPathAxum};

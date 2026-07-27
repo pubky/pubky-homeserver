@@ -142,7 +142,7 @@ impl FileService {
 mod tests {
     use crate::{
         persistence::sql::user::UserRepository, services::user_service::FILE_METADATA_SIZE,
-        shared::webdav::WebDavPath,
+        shared::webdav::StoragePath,
     };
     use futures_lite::StreamExt;
 
@@ -163,7 +163,7 @@ mod tests {
         // User should not have any data usage yet
         assert_eq!(user.used_bytes, 0);
 
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
 
         // Test getting a non-existent file
         match file_service.get_stream(&path).await {
@@ -218,7 +218,7 @@ mod tests {
         // Test OpenDal location
         let path = EntryPath::new(
             pubkey.clone(),
-            WebDavPath::new("/test_opendal.txt").unwrap(),
+            StoragePath::new("/test_opendal.txt").unwrap(),
         );
         let chunks = vec![Ok(Bytes::from(test_data.as_slice()))];
         let stream = futures_util::stream::iter(chunks);
@@ -277,13 +277,13 @@ mod tests {
         let test_data = b"Hello, world!";
         let buffer = Buffer::from(test_data.as_slice());
 
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         file_service.write(&path, buffer.clone()).await.unwrap();
         let content = file_service.get(&path).await.unwrap();
         assert_eq!(content.as_ref(), test_data);
 
         // Test OpenDal
-        let opendal_path = EntryPath::new(pubkey, WebDavPath::new("/test_opendal.txt").unwrap());
+        let opendal_path = EntryPath::new(pubkey, StoragePath::new("/test_opendal.txt").unwrap());
         file_service.write(&opendal_path, buffer).await.unwrap();
         let content = file_service.get(&opendal_path).await.unwrap();
         assert_eq!(content.as_ref(), test_data);
@@ -299,7 +299,7 @@ mod tests {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
 
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024];
         let buffer = Buffer::from(test_data.clone());
 
@@ -328,7 +328,7 @@ mod tests {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
 
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024];
         let buffer = Buffer::from(test_data.clone());
 
@@ -336,7 +336,7 @@ mod tests {
 
         let test_data2 = vec![2u8; 1024];
         let buffer2 = Buffer::from(test_data2.clone());
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
 
         file_service.write(&path, buffer2).await.unwrap();
 
@@ -361,10 +361,10 @@ mod tests {
             .await
             .unwrap();
 
-        let exact_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/pub/app/foo").unwrap());
+        let exact_path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/foo").unwrap());
         let descendant_path = EntryPath::new(
             pubkey.clone(),
-            WebDavPath::new("/pub/app/foo/bar.json").unwrap(),
+            StoragePath::new("/pub/app/foo/bar.json").unwrap(),
         );
 
         file_service
@@ -399,9 +399,9 @@ mod tests {
             .await
             .unwrap();
 
-        let exact_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/pub/app/foo").unwrap());
+        let exact_path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/foo").unwrap());
         let descendant_path =
-            EntryPath::new(pubkey, WebDavPath::new("/pub/app/foo/bar.json").unwrap());
+            EntryPath::new(pubkey, StoragePath::new("/pub/app/foo/bar.json").unwrap());
 
         file_service
             .write(&descendant_path, Buffer::from(vec![1; 10]))
@@ -434,7 +434,7 @@ mod tests {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
 
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024 * 1024 - FILE_METADATA_SIZE as usize];
         let buffer = Buffer::from(test_data.clone());
 
@@ -459,7 +459,7 @@ mod tests {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
 
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024 * 1024 + 1];
         let buffer = Buffer::from(test_data.clone());
 
@@ -491,7 +491,7 @@ mod tests {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
 
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024];
         let buffer = Buffer::from(test_data.clone());
 
@@ -499,7 +499,7 @@ mod tests {
 
         let test_data2 = vec![2u8; 1024 * 1024 + 1];
         let buffer2 = Buffer::from(test_data2.clone());
-        let path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test_file.txt").unwrap());
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
 
         match file_service.write(&path, buffer2).await {
             Ok(_) => panic!("Should error for file above quota"),

@@ -79,7 +79,9 @@ mod tests {
     fn creates_signin_deep_link_from_params() {
         let capabilities = Capabilities::builder()
             .read_write("/")
+            .unwrap()
             .read("/test")
+            .unwrap()
             .finish();
         let relay = Url::parse("https://httprelay.pubky.app/inbox/").unwrap();
         let secret = [123; 32];
@@ -116,7 +118,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Invalid query parameter caps: invalid capability at position 2 (`invalid:w`): capability scope must start with `/`"
+            "Invalid query parameter caps: invalid capability at position 2 (`invalid:w`): invalid capability scope: path must be absolute"
         );
     }
 

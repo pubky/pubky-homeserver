@@ -65,7 +65,9 @@ async fn auth_flow() {
     //    with `cid` and `cpk` query params.
     let caps = Capabilities::builder()
         .read_write("/pub/pubky.app/")
+        .unwrap()
         .read("/pub/foo.bar/file")
+        .unwrap()
         .finish();
     let app_kp = Keypair::random();
     let auth = PubkyGrantAuthFlow::builder(
@@ -238,7 +240,9 @@ async fn auth_flow_survives_long_poll_timeout() {
 
     let capabilities = Capabilities::builder()
         .read_write("/pub/pubky.app/")
+        .unwrap()
         .read("/pub/foo.bar/file")
+        .unwrap()
         .finish();
 
     let client = testnet
@@ -506,6 +510,7 @@ async fn non_root_session_cannot_list_revoke_grants() {
 
     let scoped_caps = Capabilities::builder()
         .read_write("/pub/scoped.app/")
+        .unwrap()
         .finish();
     let auth = PubkyGrantAuthFlow::builder(
         &scoped_caps,
@@ -571,6 +576,7 @@ async fn root_session_can_list_and_revoke_scoped_grant() {
 
     let scoped_caps = Capabilities::builder()
         .read_write("/pub/scoped.app/")
+        .unwrap()
         .finish();
     let auth = PubkyGrantAuthFlow::builder(
         &scoped_caps,
@@ -665,6 +671,7 @@ async fn auth_flow_signup_creates_scoped_session() {
     // App initiates a signup-shaped flow with grant binding.
     let caps = Capabilities::builder()
         .read_write("/pub/signup.app/")
+        .unwrap()
         .finish();
     let auth = PubkyGrantAuthFlow::builder(
         &caps,

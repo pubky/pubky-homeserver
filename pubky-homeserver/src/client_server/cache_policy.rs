@@ -5,9 +5,8 @@ use axum::{
     response::Response,
 };
 use percent_encoding::percent_decode_str;
-use pubky_common::storage;
 
-use crate::shared::webdav::WebDavPath;
+use crate::{constants::PRIVATE_ROOT, shared::webdav::StoragePath};
 
 pub(crate) const CACHE_CONTROL_NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 pub(crate) const VARY_PRIVATE: HeaderValue =
@@ -46,7 +45,7 @@ fn remove_validators(response: &mut Response) {
 }
 
 fn is_private_tenant_request_path(raw_path: &str) -> bool {
-    if storage::is_private_path(raw_path) {
+    if raw_path.starts_with(PRIVATE_ROOT) {
         return true;
     }
 
@@ -55,12 +54,12 @@ fn is_private_tenant_request_path(raw_path: &str) -> bool {
         .map(|path| path.into_owned())
         .unwrap_or_else(|_| raw_path.to_string());
 
-    if storage::is_private_path(&decoded) {
+    if decoded.starts_with(PRIVATE_ROOT) {
         return true;
     }
 
-    WebDavPath::new(&decoded)
-        .map(|path| storage::is_private_path(path.as_str()))
+    StoragePath::normalize(&decoded)
+        .map(|path| path.as_str().starts_with(PRIVATE_ROOT))
         .unwrap_or(false)
 }
 

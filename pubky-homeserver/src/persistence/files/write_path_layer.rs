@@ -187,18 +187,18 @@ mod tests {
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
     use crate::shared::user_quota::UserQuota;
-    use crate::shared::webdav::WebDavPath;
+    use crate::shared::webdav::StoragePath;
 
     use super::*;
 
-    fn wdp(s: &str) -> WebDavPath {
+    fn wdp(s: &str) -> StoragePath {
         s.parse().unwrap()
     }
 
     /// Create a user and set allowed_write_paths on them.
     async fn create_user_with_write_paths(
         db: &SqlDb,
-        allowed_write_paths: Option<Vec<WebDavPath>>,
+        allowed_write_paths: Option<Vec<StoragePath>>,
     ) -> pubky_common::crypto::PublicKey {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         let user = UserRepository::create(&pubkey, &mut db.pool().into())

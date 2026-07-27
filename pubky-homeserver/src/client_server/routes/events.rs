@@ -16,7 +16,7 @@ use axum::{
     },
 };
 use futures_util::stream::Stream;
-use pubky_common::{crypto::PublicKey, storage};
+use pubky_common::crypto::PublicKey;
 use serde::Deserialize;
 use std::{collections::HashMap, convert::Infallible, time::Instant};
 use tower_cookies::Cookies;
@@ -31,7 +31,7 @@ use crate::{
         query_params::ListQueryParams,
         AppState,
     },
-    constants::PUBLIC_ROOT,
+    constants::{PRIVATE_ROOT, PUBLIC_ROOT},
     observability::ConnectionGuard,
     persistence::{
         files::events::{
@@ -39,7 +39,7 @@ use crate::{
         },
         sql::SqlDb,
     },
-    shared::{webdav::WebDavPath, HttpError, HttpResult},
+    shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -83,7 +83,7 @@ pub struct EventStreamQueryParams {
     pub user_cursors: Vec<(PublicKey, Option<String>)>,
     /// Repeatable path filters. Each value is a path WITHOUT the `pubky://`
     /// scheme or user pubkey, e.g. `/pub/files/`, `pub/files/`, `/priv/app/`..
-    pub paths: Vec<WebDavPath>,
+    pub paths: Vec<StoragePath>,
 }
 
 #[derive(Clone, Copy)]
@@ -94,10 +94,10 @@ enum EventStreamTenantScope<'a> {
 }
 
 impl<'a> EventStreamTenantScope<'a> {
-    fn from_query(paths: &[WebDavPath], user_cursors: &'a [(PublicKey, Option<String>)]) -> Self {
+    fn from_query(paths: &[StoragePath], user_cursors: &'a [(PublicKey, Option<String>)]) -> Self {
         if !paths
             .iter()
-            .any(|path| storage::is_private_path(path.as_str()))
+            .any(|path| path.as_str().starts_with(PRIVATE_ROOT))
         {
             return Self::PublicOnly;
         }
@@ -234,7 +234,7 @@ impl TryFrom<RawEventStreamQueryParams> for EventStreamQueryParams {
                 format!("/{}", p)
             };
 
-            let path = WebDavPath::new(&normalized_path).map_err(|_| {
+            let path = StoragePath::normalize(&normalized_path).map_err(|_| {
                 EventStreamError::InvalidParameter(format!("Invalid path: {}", normalized_path))
             })?;
             paths.push(path);
@@ -591,14 +591,14 @@ async fn resolve_tenant_cookie_session(
 }
 
 fn authorized_paths(
-    paths: &[WebDavPath],
+    paths: &[StoragePath],
     scope: EventStreamTenantScope<'_>,
     session: Option<&AuthSession>,
 ) -> Result<Vec<PathFilter>, HttpError> {
     if paths.is_empty() {
-        return Ok(vec![
-            WebDavPath::new_unchecked(PUBLIC_ROOT.to_string()).into()
-        ]);
+        return Ok(vec![StoragePath::new(PUBLIC_ROOT)
+            .expect("public root is canonical")
+            .into()]);
     }
 
     let mut allowed = Vec::with_capacity(paths.len());
@@ -646,8 +646,8 @@ mod tests {
         Keypair::random().public_key()
     }
 
-    fn wd(s: &str) -> WebDavPath {
-        WebDavPath::new(s).expect("valid test path")
+    fn wd(s: &str) -> StoragePath {
+        StoragePath::new(s).expect("valid test path")
     }
 
     fn pf(s: &str) -> PathFilter {
@@ -688,7 +688,7 @@ mod tests {
     }
 
     fn authorize(
-        paths: &[WebDavPath],
+        paths: &[StoragePath],
         user_cursors: &[(PublicKey, Option<String>)],
         session: Option<&AuthSession>,
     ) -> Result<Vec<PathFilter>, HttpError> {
@@ -808,7 +808,7 @@ mod tests {
         let owner = pk();
         let session = grant_session(
             owner.clone(),
-            Capabilities::from(vec![Capability::read("/priv/app/")]),
+            Capabilities::from(vec![Capability::read("/priv/app/").unwrap()]),
         );
         let status = reject_status(authorize(
             &[wd("/priv/other/")],
@@ -823,7 +823,7 @@ mod tests {
         let owner = pk();
         let session = grant_session(
             owner.clone(),
-            Capabilities::from(vec![Capability::read("/priv/app/")]),
+            Capabilities::from(vec![Capability::read("/priv/app/").unwrap()]),
         );
         let filters = authorize(
             &[wd("/pub/"), wd("/priv/app/")],
