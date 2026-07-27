@@ -9,13 +9,24 @@ use crate::persistence::sql::{
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
-use opendal::Result;
+use opendal::{Error, Result};
 
 use super::layer::{unexpected, Finalizer};
 
 struct StagedDelete {
     user: UserEntity,
     deleted_entry: EntryEntity,
+}
+
+struct PendingDelete {
+    entry_path: EntryPath,
+    args: OpDelete,
+}
+
+#[derive(Default)]
+struct DeleteQueueOutcome {
+    should_notify: bool,
+    first_error: Option<Error>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +39,7 @@ enum DeleteOutcome {
 pub struct WriteFinalizationDeleter<R> {
     inner: R,
     finalizer: Arc<Finalizer>,
-    delete_queue: Vec<EntryPath>,
+    delete_queue: Vec<PendingDelete>,
 }
 
 impl<R> WriteFinalizationDeleter<R> {
@@ -41,47 +52,88 @@ impl<R> WriteFinalizationDeleter<R> {
     }
 }
 
+impl<R: oio::Delete> WriteFinalizationDeleter<R> {
+    async fn process_delete_queue(&mut self) -> DeleteQueueOutcome {
+        let mut outcome = DeleteQueueOutcome::default();
+        let mut failed_deletes = Vec::new();
+
+        for pending in take(&mut self.delete_queue) {
+            match self.finalize_and_queue_blob_delete(&pending).await {
+                Ok(DeleteOutcome::Deleted) => outcome.should_notify = true,
+                Ok(DeleteOutcome::NotFound) => {}
+                Err(error) => {
+                    failed_deletes.push(pending);
+                    outcome.first_error.get_or_insert(error);
+                }
+            }
+        }
+        self.delete_queue = failed_deletes;
+
+        outcome
+    }
+
+    async fn finalize_and_queue_blob_delete(
+        &mut self,
+        pending: &PendingDelete,
+    ) -> Result<DeleteOutcome> {
+        // Only forward the blob delete after its database finalization succeeds.
+        let outcome = match self.finalizer.finalize_delete(&pending.entry_path).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::error!(
+                    path = %pending.entry_path,
+                    error = %error,
+                    "Failed to finalize deleted path"
+                );
+                return Err(error);
+            }
+        };
+
+        self.inner
+            .delete(pending.entry_path.as_str(), pending.args.clone())
+            .map_err(|error| {
+                tracing::error!(
+                    path = %pending.entry_path,
+                    error = %error,
+                    "Failed to queue finalized path for blob deletion"
+                );
+                error
+            })?;
+
+        Ok(outcome)
+    }
+
+    async fn flush_blob_deletes(&mut self, earlier_error: Option<Error>) -> Result<usize> {
+        let flush_result = self.inner.flush().await;
+        match (earlier_error, flush_result) {
+            (Some(error), Err(flush_error)) => {
+                tracing::error!(
+                    error = %flush_error,
+                    "Failed to flush blob deletions after an earlier delete error"
+                );
+                Err(error)
+            }
+            (Some(error), Ok(_)) => Err(error),
+            (None, result) => result,
+        }
+    }
+}
+
 impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
     fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         let entry_path = EntryPath::parse_opendal(path)?;
-        self.inner.delete(entry_path.as_str(), args)?;
-        self.delete_queue.push(entry_path);
+        self.delete_queue.push(PendingDelete { entry_path, args });
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<usize> {
-        let mut should_notify = false;
-        let mut first_error = None;
-        let mut failed_paths = Vec::new();
+        let outcome = self.process_delete_queue().await;
 
-        // Commit database effects before deleting blobs. If finalization fails,
-        // the inner queue remains unflushed and the blob stays available.
-        for entry_path in take(&mut self.delete_queue) {
-            match self.finalizer.finalize_delete(&entry_path).await {
-                Ok(DeleteOutcome::Deleted) => should_notify = true,
-                Ok(DeleteOutcome::NotFound) => {}
-                Err(error) => {
-                    tracing::error!(
-                        path = %entry_path,
-                        error = %error,
-                        "Failed to finalize deleted path"
-                    );
-                    failed_paths.push(entry_path);
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        self.delete_queue = failed_paths;
-
-        if should_notify {
+        if outcome.should_notify {
             self.finalizer.notify_event();
         }
 
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-
-        self.inner.flush().await
+        self.flush_blob_deletes(outcome.first_error).await
     }
 }
 
@@ -232,17 +284,21 @@ mod tests {
 
     #[derive(Default)]
     struct BatchDelete {
-        queued: usize,
+        queued_paths: Vec<String>,
+        flushed_paths: Vec<String>,
     }
 
     impl oio::Delete for BatchDelete {
-        fn delete(&mut self, _path: &str, _args: OpDelete) -> Result<()> {
-            self.queued += 1;
+        fn delete(&mut self, path: &str, _args: OpDelete) -> Result<()> {
+            self.queued_paths.push(path.to_string());
             Ok(())
         }
 
         async fn flush(&mut self) -> Result<usize> {
-            Ok(std::mem::take(&mut self.queued))
+            let queued_paths = std::mem::take(&mut self.queued_paths);
+            let deleted = queued_paths.len();
+            self.flushed_paths.extend(queued_paths);
+            Ok(deleted)
         }
     }
 
@@ -454,5 +510,10 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events.last().unwrap().event_type, EventType::Delete);
         assert_eq!(events.last().unwrap().path, succeeding_path);
+        assert_eq!(
+            deleter.inner.flushed_paths,
+            vec![succeeding_path.as_str().to_string()],
+            "successfully finalized paths should still be deleted from the backend"
+        );
     }
 }
