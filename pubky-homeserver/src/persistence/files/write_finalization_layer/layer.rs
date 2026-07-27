@@ -9,13 +9,16 @@ use opendal::Result;
 
 use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
 
-/// Finalizes storage mutations whose database effects must share one transaction.
+/// Keeps file entries, events, and user quotas in sync with blob writes and deletes.
 ///
-/// App-facing operators enable collision checks; admin operators do not.
-/// The transaction makes the database effects atomic. The external blob backend
-/// cannot join that transaction, so write-side backend changes cannot be rolled
-/// back after a database failure, while delete-side backend failures may leave
-/// an unreferenced blob.
+/// The related database changes are committed together in one transaction.
+/// App-facing operators also reject path collisions; admin operators allow them
+/// so they can repair legacy data.
+///
+/// Blob storage cannot be part of the database transaction. If the database
+/// update after a write fails, the blob may remain without a matching entry.
+/// If deleting a blob fails after its database update, an unreferenced blob may
+/// remain.
 #[derive(Clone)]
 pub struct WriteFinalizationLayer {
     finalizer: Arc<Finalizer>,
