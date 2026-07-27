@@ -14,7 +14,8 @@ use opendal::raw::oio;
 use opendal::Result;
 
 use super::{
-    check_no_path_collision, resolve_storage_max_bytes, unexpected, would_exceed_limit, Finalizer,
+    layer::{check_no_path_collision, unexpected, Finalizer},
+    resolve_storage_max_bytes, would_exceed_limit,
 };
 
 struct PreparedWrite {
@@ -271,7 +272,7 @@ mod tests {
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, WebDavPath};
 
-    use super::super::test_support::{all_events, create_user, test_operator, user_usage};
+    use super::super::layer::test_support::{all_events, create_user, test_operator, user_usage};
     use super::*;
 
     #[tokio::test]

@@ -11,7 +11,7 @@ use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
 use opendal::Result;
 
-use super::{unexpected, Finalizer};
+use super::layer::{unexpected, Finalizer};
 
 struct StagedDelete {
     user: UserEntity,
@@ -225,7 +225,7 @@ mod tests {
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, WebDavPath};
 
-    use super::super::test_support::{
+    use super::super::layer::test_support::{
         all_events, create_user, test_finalizer, test_operator, user_usage,
     };
     use super::*;
