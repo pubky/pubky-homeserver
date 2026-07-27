@@ -187,32 +187,6 @@ impl Finalizer {
         PreparedWrite::new(user, existing_entry, file_metadata, self.default_storage_mb)
     }
 
-    async fn persist_entry(
-        user_id: i32,
-        existing_entry: Option<EntryEntity>,
-        entry_path: &EntryPath,
-        file_metadata: &FileMetadata,
-        executor: &mut UnifiedExecutor<'_>,
-    ) -> Result<(), sqlx::Error> {
-        if let Some(mut entry) = existing_entry {
-            entry.content_hash = file_metadata.hash;
-            entry.content_length = file_metadata.length as u64;
-            entry.content_type = file_metadata.content_type.clone();
-            return EntryRepository::update(&entry, executor).await;
-        }
-
-        EntryRepository::create(
-            user_id,
-            entry_path.path(),
-            &file_metadata.hash,
-            file_metadata.length as u64,
-            &file_metadata.content_type,
-            executor,
-        )
-        .await?;
-        Ok(())
-    }
-
     async fn apply_write_effects(
         &self,
         prepared: PreparedWrite,
@@ -225,17 +199,33 @@ impl Finalizer {
             existing_entry,
             bytes_delta,
         } = prepared;
-        Self::persist_entry(user.id, existing_entry, entry_path, file_metadata, executor)
+        match existing_entry {
+            Some(mut entry) => {
+                entry.content_hash = file_metadata.hash;
+                entry.content_length = file_metadata.length as u64;
+                entry.content_type = file_metadata.content_type.clone();
+                EntryRepository::update(&entry, executor).await
+            }
+            None => EntryRepository::create(
+                user.id,
+                entry_path.path(),
+                &file_metadata.hash,
+                file_metadata.length as u64,
+                &file_metadata.content_type,
+                executor,
+            )
             .await
-            .map_err(|error| {
-                unexpected(
-                    format!(
-                        "Failed to write entry {} after backend close; potential orphaned file",
-                        entry_path
-                    ),
-                    error,
-                )
-            })?;
+            .map(|_| ()),
+        }
+        .map_err(|error| {
+            unexpected(
+                format!(
+                    "Failed to write entry {} after backend close; potential orphaned file",
+                    entry_path
+                ),
+                error,
+            )
+        })?;
         self.events_service
             .create_event(
                 user.id,
