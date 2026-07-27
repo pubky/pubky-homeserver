@@ -364,7 +364,8 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let missing_path = EntryPath::new(pubkey.clone(), StoragePath::new("/missing.txt").unwrap());
+        let missing_path =
+            EntryPath::new(pubkey.clone(), StoragePath::new("/missing.txt").unwrap());
 
         operator.delete(missing_path.as_str()).await.unwrap();
 
@@ -378,7 +379,8 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let deleted_path = EntryPath::new(pubkey.clone(), StoragePath::new("/deleted.txt").unwrap());
+        let deleted_path =
+            EntryPath::new(pubkey.clone(), StoragePath::new("/deleted.txt").unwrap());
         let retained_path =
             EntryPath::new(pubkey.clone(), StoragePath::new("/retained.txt").unwrap());
 
@@ -470,7 +472,8 @@ mod tests {
         let db = SqlDb::test().await;
         let operator = test_operator(&db);
         let pubkey = create_user(&db).await;
-        let failing_path = EntryPath::new(pubkey.clone(), StoragePath::new("/failing.txt").unwrap());
+        let failing_path =
+            EntryPath::new(pubkey.clone(), StoragePath::new("/failing.txt").unwrap());
         let succeeding_path =
             EntryPath::new(pubkey.clone(), StoragePath::new("/succeeding.txt").unwrap());
 

@@ -675,6 +675,14 @@ mod tests {
             Capability::read("/pub//my.app").unwrap_err(),
             CapabilityParseError::InvalidScope(StoragePathError::EmptySegment)
         );
+        assert_eq!(
+            Capability::read("/priv/report ").unwrap_err(),
+            CapabilityParseError::InvalidScope(StoragePathError::TrailingWhitespace)
+        );
+        assert_eq!(
+            Capability::read("/priv/app\\..\\secret").unwrap_err(),
+            CapabilityParseError::InvalidScope(StoragePathError::Backslash)
+        );
     }
 
     #[test]

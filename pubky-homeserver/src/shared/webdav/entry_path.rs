@@ -118,6 +118,7 @@ impl<'de> serde::Deserialize<'de> for EntryPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH;
 
     #[test]
     fn test_entry_path_from_str() {
@@ -134,5 +135,15 @@ mod tests {
         let string = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/pub/folder/file.txt";
         let entry_path = EntryPath::from_str(string).unwrap();
         assert_eq!(entry_path.to_string(), string);
+    }
+
+    #[test]
+    fn maximum_storage_path_fits_storage_object_key_limit() {
+        let pubkey =
+            PublicKey::from_str("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo").unwrap();
+        let path = StoragePath::new(&"/a".repeat(MAX_STORAGE_PATH_TOTAL_LENGTH / 2)).unwrap();
+        let entry_path = EntryPath::new(pubkey, path);
+
+        assert_eq!(entry_path.as_str().len(), 1024);
     }
 }

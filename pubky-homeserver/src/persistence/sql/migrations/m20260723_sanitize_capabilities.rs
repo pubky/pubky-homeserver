@@ -94,7 +94,7 @@ mod tests {
 
     use super::*;
 
-    const CASES: [(&str, Option<&str>); 11] = [
+    const CASES: [(&str, Option<&str>); 13] = [
         ("/foo:r", Some("/foo:r")),
         ("/foo:r,/bar:wr", Some("/foo:r,/bar:rw")),
         ("/foo:r,/foo:w", Some("/foo:rw")),
@@ -106,6 +106,8 @@ mod tests {
         ("/pub/a/../b/:w", None),
         ("/foo,/bar:w", None),
         ("/foo:r,,/bar:w", None),
+        ("/priv/report :w", None),
+        ("/priv/app\\..\\secret:w", None),
     ];
 
     #[tokio::test]

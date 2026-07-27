@@ -7,11 +7,15 @@ use serde::{Deserialize, Serialize};
 /// Maximum decoded UTF-8 byte length of one path segment.
 pub const MAX_STORAGE_PATH_SEGMENT_LENGTH: usize = 255;
 /// Maximum decoded UTF-8 byte length of a complete canonical path.
-pub const MAX_STORAGE_PATH_TOTAL_LENGTH: usize = 4096;
+///
+/// This leaves room for the 52-byte z32 tenant key in a 1024-byte storage object key.
+/// This contraint is enforced by the storage backend, so we enforce it here to avoid creating invalid paths.
+pub const MAX_STORAGE_PATH_TOTAL_LENGTH: usize = 972;
 
 /// A canonical decoded Pubky storage path that can be encoded as an HTTP/WebDAV URI path.
 ///
 /// Percent signs are literal. URL decoding must happen before construction.
+/// Paths cannot end in whitespace because storage backends may trim it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StoragePath(String);
 
@@ -52,6 +56,7 @@ impl StoragePath {
         }
 
         validate_total_length(&canonical)?;
+        validate_trailing_whitespace(&canonical)?;
         Ok(Self(canonical))
     }
 
@@ -157,6 +162,12 @@ pub enum StoragePathError {
     /// A segment contains a Unicode control character.
     #[error("path contains a control character")]
     ControlCharacter,
+    /// A segment contains a backslash, which is a path separator on some platforms.
+    #[error("path must not contain a backslash")]
+    Backslash,
+    /// The complete path ends in Unicode whitespace.
+    #[error("path must not end in whitespace")]
+    TrailingWhitespace,
     /// A decoded segment exceeds the byte limit.
     #[error("path segment is {actual} bytes; maximum is {maximum}")]
     SegmentTooLong {
@@ -209,6 +220,7 @@ fn validate_canonical(path: &str) -> Result<(), StoragePathError> {
         }
     }
 
+    validate_trailing_whitespace(path)?;
     Ok(())
 }
 
@@ -222,6 +234,9 @@ fn validate_segment(segment: &str) -> Result<(), StoragePathError> {
     if segment.chars().any(char::is_control) {
         return Err(StoragePathError::ControlCharacter);
     }
+    if segment.contains('\\') {
+        return Err(StoragePathError::Backslash);
+    }
     Ok(())
 }
 
@@ -231,6 +246,13 @@ fn validate_total_length(path: &str) -> Result<(), StoragePathError> {
             actual: path.len(),
             maximum: MAX_STORAGE_PATH_TOTAL_LENGTH,
         });
+    }
+    Ok(())
+}
+
+fn validate_trailing_whitespace(path: &str) -> Result<(), StoragePathError> {
+    if path.chars().last().is_some_and(char::is_whitespace) {
+        return Err(StoragePathError::TrailingWhitespace);
     }
     Ok(())
 }
@@ -339,7 +361,43 @@ mod tests {
             StoragePath::normalize("/a\nb/.."),
             Err(StoragePathError::ControlCharacter)
         );
-        assert_eq!(StoragePath::new("/a\\b").unwrap().as_str(), "/a\\b");
+    }
+
+    #[test]
+    fn rejects_backslashes() {
+        for path in ["/a\\b", "/pub/app/\\..\\secret", "/a\\b/.."] {
+            assert_eq!(
+                StoragePath::new(path),
+                Err(StoragePathError::Backslash),
+                "{path:?}"
+            );
+            assert_eq!(
+                StoragePath::normalize(path),
+                Err(StoragePathError::Backslash),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_trailing_unicode_whitespace() {
+        for path in ["/a ", "/a\u{a0}", "/a\u{3000}"] {
+            assert_eq!(
+                StoragePath::new(path),
+                Err(StoragePathError::TrailingWhitespace),
+                "{path:?}"
+            );
+            assert_eq!(
+                StoragePath::normalize(path),
+                Err(StoragePathError::TrailingWhitespace),
+                "{path:?}"
+            );
+        }
+
+        for path in ["/My File", "/ leading", "/directory /file"] {
+            assert!(StoragePath::new(path).is_ok(), "{path:?}");
+            assert!(StoragePath::normalize(path).is_ok(), "{path:?}");
+        }
     }
 
     #[test]
@@ -388,12 +446,16 @@ mod tests {
 
     #[test]
     fn strict_parser_reports_errors_in_validation_order() {
-        let oversized_with_empty_segment = format!("//{}", "a".repeat(4095));
-        assert_eq!(oversized_with_empty_segment.len(), 4097);
+        let oversized_with_empty_segment =
+            format!("//{}", "a".repeat(MAX_STORAGE_PATH_TOTAL_LENGTH));
+        assert_eq!(
+            oversized_with_empty_segment.len(),
+            MAX_STORAGE_PATH_TOTAL_LENGTH + 2
+        );
         assert_eq!(
             StoragePath::new(&oversized_with_empty_segment),
             Err(StoragePathError::PathTooLong {
-                actual: 4097,
+                actual: MAX_STORAGE_PATH_TOTAL_LENGTH + 2,
                 maximum: MAX_STORAGE_PATH_TOTAL_LENGTH,
             })
         );
@@ -432,8 +494,8 @@ mod tests {
 
     #[test]
     fn url_encoding_preserves_only_path_separators_and_unreserved_characters() {
-        let decoded = StoragePath::new("/AZaz09-._~/:,?#@\\/%").unwrap();
-        assert_eq!(decoded.url_encode(), "/AZaz09-._~/%3A%2C%3F%23%40%5C/%25");
+        let decoded = StoragePath::new("/AZaz09-._~/:,?#@/%").unwrap();
+        assert_eq!(decoded.url_encode(), "/AZaz09-._~/%3A%2C%3F%23%40/%25");
         assert_eq!(StoragePath::new("/").unwrap().url_encode(), "/");
         assert_eq!(StoragePath::new("/a/").unwrap().url_encode(), "/a/");
     }
@@ -461,12 +523,17 @@ mod tests {
         assert_eq!(json, r#""/pub/über%20""#);
         assert_eq!(serde_json::from_str::<StoragePath>(&json).unwrap(), path);
 
-        let escaped = StoragePath::new("/a\"\\b").unwrap();
+        let escaped = StoragePath::new("/a\"b").unwrap();
         let json = serde_json::to_string(&escaped).unwrap();
-        assert_eq!(json, r#""/a\"\\b""#);
+        assert_eq!(json, r#""/a\"b""#);
         assert_eq!(serde_json::from_str::<StoragePath>(&json).unwrap(), escaped);
 
-        for invalid in [r#""/pub//file""#, r#""/pub/./file""#, r#""relative""#] {
+        for invalid in [
+            r#""/pub//file""#,
+            r#""/pub/./file""#,
+            r#""/pub/a\\b""#,
+            r#""relative""#,
+        ] {
             assert!(serde_json::from_str::<StoragePath>(invalid).is_err());
         }
         for non_string in ["null", "123", "[]", "{}"] {
