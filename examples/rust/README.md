@@ -6,22 +6,35 @@ Minimal examples for different flows and functions you might need to implement u
 
 Run the example commands from the `examples/rust` directory.
 
-Examples using `--testnet` expect a local testnet to be running. The testnet requires PostgreSQL; see the [Pubky Testnet README](../../pubky-testnet/README.md) for setup instructions.
+Most examples use `--testnet` and expect a local testnet to be running. The testnet requires PostgreSQL.
 
-From the repository root, start the testnet:
+### Quick start
+
+The fastest way to get a testnet running (requires Docker):
 
 ```bash
-cargo run -p pubky-testnet
+# Start a disposable Postgres container (one-time, runs in background)
+docker run --name pubky-postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 127.0.0.1:5432:5432 \
+  -d postgres:18
+
+# Start the testnet (keep this terminal open)
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+  cargo run -p pubky-testnet
 ```
 
-Wait for `Testnet running` and keep that terminal open. In another terminal, run an example:
+Wait for `Testnet running`, then in another terminal run the examples. Eg:
 
 ```bash
 cd examples/rust
 cargo run --bin signup -- --testnet
 ```
 
-The logging and testnet examples start their own ephemeral testnet and require Docker by default.
+For more options (persistent mode, custom config, etc.) see the [Pubky Testnet README](../../pubky-testnet/README.md).
+
+The logging and testnet examples (8 and 9) start their own ephemeral testnet and do not need the steps above.
 
 ## Utilities
 
@@ -38,4 +51,4 @@ The logging and testnet examples start their own ephemeral testnet and require D
 6. [**Events Stream**](./6-events_stream/README.md): subscribe to Server-Sent Events from a user's homeserver.
 7. [**Session Management**](./7-session_management/README.md): create, list, and delete grant-backed sessions from the command line.
 8. [**Logging**](./8-logging/README.md): configure tracing and watch the SDK emit debug output during a storage roundtrip.
-9. [**Testnet**](./9-testnet/README.md): shows how to build a pubky app offline against a local ephemeral homeserver.
+9. [**Testnet**](./9-testnet/README.md): spin up an embedded `EphemeralTestnet` programmatically for integration tests or self-contained demos.

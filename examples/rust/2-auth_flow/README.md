@@ -11,17 +11,15 @@ It consists of 2 parts:
 
 For the browser version of the third-party app, see the JavaScript [2-auth-flow](../../javascript/2-auth-flow/README.md) example.
 
+## Prerequisites
+
+Examples using `--testnet` require a running local testnet. See the [examples README](../README.md#quick-start) for setup.
+
 ## Recovery File
 
 This example defaults to `../../sample_recovery.key`. You may supply a custom recovery file.
 
 ## Usage
-
-First you need to be running a local testnet Homeserver, in the root of this repo run
-
-```bash
-cargo run -p pubky-testnet
-```
 
 Run the third-party auth client in one terminal:
 

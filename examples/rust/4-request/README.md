@@ -2,6 +2,10 @@
 
 Raw HTTP client powered by `PubkyHttpClient`. Works with plain HTTPS (including pkarr public-key hosts and `_pubky.<user>`).
 
+## Prerequisites
+
+Examples using `--testnet` require a running local testnet. See the [examples README](../README.md#quick-start) for setup.
+
 ## Usage
 
 ```bash

@@ -10,6 +10,10 @@ This example defaults to:
 
 If the recovery file cannot be decrypted with an empty passphrase, the CLI prompts for a passphrase.
 
+## Prerequisites
+
+Examples using `--testnet` require a running local testnet. See the [examples README](../README.md#quick-start) for setup.
+
 ## Usage
 
 Run against a local testnet:

@@ -10,13 +10,11 @@ It consists of 2 parts:
 - asking the user for consent 
 - generating the AuthToken
 
+## Prerequisites
+
+This example requires a running local testnet. See the [examples README](../README.md#quick-start) for setup.
+
 ## Usage
-
-First you need to be running a local testnet Homeserver, in the root of this repo run
-
-```bash
-cargo run -p pubky-testnet
-```
 
 Run the frontend of the 3rd party app
 
