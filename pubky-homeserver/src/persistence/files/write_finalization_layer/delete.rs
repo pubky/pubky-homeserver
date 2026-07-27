@@ -246,6 +246,62 @@ mod tests {
         }
     }
 
+    async fn fail_all_delete_event_inserts(db: &SqlDb) {
+        sqlx::query(
+            r#"
+            CREATE FUNCTION fail_delete_event_insert() RETURNS trigger AS $$
+            BEGIN
+                IF NEW.type = 'DEL' THEN
+                    RAISE EXCEPTION 'forced delete event insert failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER fail_delete_event_insert_trigger
+            BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION fail_delete_event_insert()
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn fail_delete_event_inserts_for_failing_path(db: &SqlDb) {
+        sqlx::query(
+            r#"
+            CREATE FUNCTION fail_selected_delete_event() RETURNS trigger AS $$
+            BEGIN
+                IF NEW.type = 'DEL' AND NEW.path = '/failing.txt' THEN
+                    RAISE EXCEPTION 'forced selected delete event failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER fail_selected_delete_event_trigger
+            BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION fail_selected_delete_event()
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn deleting_without_an_entry_does_not_emit_an_event() {
@@ -331,31 +387,7 @@ mod tests {
             .unwrap();
         let usage_before_delete = user_usage(&db, &pubkey).await;
 
-        sqlx::query(
-            r#"
-            CREATE FUNCTION fail_delete_event_insert() RETURNS trigger AS $$
-            BEGIN
-                IF NEW.type = 'DEL' THEN
-                    RAISE EXCEPTION 'forced delete event insert failure';
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            CREATE TRIGGER fail_delete_event_insert_trigger
-            BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION fail_delete_event_insert()
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        fail_all_delete_event_inserts(&db).await;
 
         operator
             .delete(entry_path.as_str())
@@ -395,31 +427,7 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::query(
-            r#"
-            CREATE FUNCTION fail_selected_delete_event() RETURNS trigger AS $$
-            BEGIN
-                IF NEW.type = 'DEL' AND NEW.path = '/failing.txt' THEN
-                    RAISE EXCEPTION 'forced selected delete event failure';
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            CREATE TRIGGER fail_selected_delete_event_trigger
-            BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION fail_selected_delete_event()
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        fail_delete_event_inserts_for_failing_path(&db).await;
 
         let mut deleter =
             WriteFinalizationDeleter::new(BatchDelete::default(), Arc::new(test_finalizer(&db)));
