@@ -13,6 +13,7 @@ pub struct M20260723SanitizeCapabilitiesMigration;
 impl MigrationTrait for M20260723SanitizeCapabilitiesMigration {
     async fn up(&self, tx: &mut Transaction<'static, sqlx::Postgres>) -> anyhow::Result<()> {
         sanitize_sessions(tx).await?;
+        // No need to santize grants as they do not exist yet at the creation of this migration.
         Ok(())
     }
 
