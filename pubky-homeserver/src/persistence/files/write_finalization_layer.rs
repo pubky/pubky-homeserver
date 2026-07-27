@@ -11,12 +11,15 @@ use crate::services::user_service::{UserService, FILE_METADATA_SIZE};
 use crate::shared::webdav::EntryPath;
 use opendal::raw::*;
 use opendal::Result;
+use std::mem::take;
 
 /// Finalizes storage mutations whose database effects must share one transaction.
 ///
 /// App-facing operators enable collision checks; admin operators do not.
-/// The transaction makes the database effects atomic; the external blob backend
-/// cannot be rolled back if a later database operation fails after `close()`.
+/// The transaction makes the database effects atomic. The external blob backend
+/// cannot join that transaction, so write-side backend changes cannot be rolled
+/// back after a database failure, while delete-side backend failures may leave
+/// an unreferenced blob.
 #[derive(Clone)]
 pub struct WriteFinalizationLayer {
     finalizer: Arc<Finalizer>,
@@ -516,15 +519,14 @@ impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
     }
 
     async fn flush(&mut self) -> Result<usize> {
-        let deleted_count = self.inner.flush().await?;
-        let deleted_paths = self
-            .delete_queue
-            .drain(0..deleted_count)
-            .collect::<Vec<_>>();
         let mut should_notify = false;
         let mut first_error = None;
-        for entry_path in &deleted_paths {
-            match self.finalizer.finalize_delete(entry_path).await {
+        let mut failed_paths = Vec::new();
+
+        // Commit database effects before deleting blobs. If finalization fails,
+        // the inner queue remains unflushed and the blob stays available.
+        for entry_path in take(&mut self.delete_queue) {
+            match self.finalizer.finalize_delete(&entry_path).await {
                 Ok(path_should_notify) => should_notify |= path_should_notify,
                 Err(error) => {
                     tracing::error!(
@@ -532,10 +534,12 @@ impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
                         error = %error,
                         "Failed to finalize deleted path"
                     );
+                    failed_paths.push(entry_path);
                     first_error.get_or_insert(error);
                 }
             }
         }
+        self.delete_queue = failed_paths;
 
         if should_notify {
             self.finalizer.notify_event();
@@ -545,7 +549,7 @@ impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
             return Err(error);
         }
 
-        Ok(deleted_count)
+        self.inner.flush().await
     }
 }
 
@@ -780,6 +784,66 @@ mod tests {
             .expect_err("entry insert should roll back");
         assert_eq!(user_usage(&db, &pubkey).await, 0);
         assert!(all_events(&db).await.is_empty());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn delete_finalization_failure_preserves_blob_and_database_state() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new("/test.txt").unwrap());
+        let content = vec![1; 10];
+
+        operator
+            .write(entry_path.as_str(), content.clone())
+            .await
+            .unwrap();
+        let usage_before_delete = user_usage(&db, &pubkey).await;
+
+        sqlx::query(
+            r#"
+            CREATE FUNCTION fail_delete_event_insert() RETURNS trigger AS $$
+            BEGIN
+                IF NEW.type = 'DEL' THEN
+                    RAISE EXCEPTION 'forced delete event insert failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER fail_delete_event_insert_trigger
+            BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION fail_delete_event_insert()
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        operator
+            .delete(entry_path.as_str())
+            .await
+            .expect_err("forced event failure should fail the delete");
+
+        assert_eq!(
+            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
+            content,
+            "failed delete finalization must preserve the blob"
+        );
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect("failed delete finalization must preserve the entry");
+        assert_eq!(user_usage(&db, &pubkey).await, usage_before_delete);
+        let events = all_events(&db).await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].event_type, EventType::Put { .. }));
     }
 
     #[tokio::test]
