@@ -80,12 +80,14 @@ async fn my_test() {
 
 ### Postgres for tests
 
-You need a running PostgreSQL instance (see [Quick start](#quick-start) for a Docker one-liner). By default, `EphemeralTestnet` reads the `TEST_PUBKY_CONNECTION_STRING` environment variable. The `?pubky-test=true` parameter tells the homeserver to create an ephemeral `pubky_test_*` database. The `#[pubky_testnet::test]` macro ensures the database is cleaned up after the test completes or panics.
+You need a running PostgreSQL instance (see [Quick start](#quick-start) for a Docker one-liner). By default, `EphemeralTestnet` reads the `TEST_PUBKY_CONNECTION_STRING` environment variable:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo test -p my-crate
 ```
+
+Each test automatically gets its own ephemeral `pubky_test_{uuid}` database on the configured server. The `#[pubky_testnet::test]` macro ensures the database is cleaned up after the test completes or panics.
 
 You can also pass the connection string programmatically:
 
@@ -96,7 +98,7 @@ use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConnectionString};
 #[pubky_testnet::test]
 async fn my_test() {
     let connection_string = ConnectionString::new(
-        "postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true"
+        "postgres://postgres:postgres@localhost:5432/postgres"
     ).unwrap();
 
     let testnet = EphemeralTestnet::builder()
@@ -132,9 +134,6 @@ async fn main() {
         .unwrap();
 }
 ```
-
-This uses [testcontainers](https://docs.rs/testcontainers) to run PostgreSQL in a Docker container.
-Docker must be running on the host. The container is automatically cleaned up on drop and on Ctrl+C/SIGTERM.
 
 > **Important**: If you have multiple tests, see [Sharing Docker Postgres Across Tests](#sharing-docker-postgres-across-tests) below.
 
@@ -174,39 +173,6 @@ async fn test_two() {
 # }
 ```
 
-Each testnet still gets its own ephemeral database within the shared PostgreSQL instance, so tests remain isolated.
-
-### External PostgreSQL
-
-If you prefer to use an external Postgres instance, set the `TEST_PUBKY_CONNECTION_STRING` environment variable:
-
-```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
-  cargo test -p my-crate
-```
-
-Or pass the connection string programmatically:
-
-```rust,no_run
-use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConnectionString};
-
-#[tokio::test]
-#[pubky_testnet::test]
-async fn my_test() {
-    let connection_string = ConnectionString::new(
-        "postgres://postgres:postgres@localhost:5432/postgres"
-    ).unwrap();
-
-    let testnet = EphemeralTestnet::builder()
-        .postgres(connection_string)
-        .build()
-        .await
-        .unwrap();
-}
-```
-
-Each test automatically gets its own ephemeral `pubky_test_{uuid}` database on the configured server. The `#[pubky_testnet::test]` macro ensures the database is cleaned up after the test completes or panics.
-
 ### Custom Configuration
 
 ```rust,no_run
@@ -236,49 +202,4 @@ async fn main() {
         .unwrap();
     let http_relay = testnet.http_relay();
 }
-```
-
-## StaticTestnet (CLI / Interactive)
-
-A long-running testnet with fixed, well-known ports. Use this when external processes need to connect (browser tests, mobile apps, manual debugging).
-
-### Fixed Ports
-
-| Component | Port |
-|-----------|------|
-| DHT bootstrap node | `6881` |
-| Pkarr relay | `15411` |
-| HTTP relay | `15412` |
-| Homeserver ICANN HTTP | `6286` |
-| Homeserver Pubky HTTPS | `6287` |
-| Homeserver admin | `6288` |
-
-Homeserver address: `8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo`
-
-### In-Memory Mode
-
-State is lost on shutdown. An ephemeral database is automatically created and cleaned up:
-
-```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
-  cargo run -p pubky-testnet
-```
-
-### Persistent Mode
-
-State survives restarts. The data directory is auto-initialized on first run with a `config.toml` and server keypair. On subsequent runs, the existing state is picked up and the homeserver keeps the same identity.
-
-Persistent mode requires an explicit `database_url` in `config.toml` (the env var is not used):
-
-```bash
-cargo run -p pubky-testnet -- persist ./my-testnet-data
-```
-
-### Custom Homeserver Config
-
-Seed a custom config on first run (errors if `config.toml` already exists in the data directory):
-
-```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
-  cargo run -p pubky-testnet -- --homeserver-config my-config.toml persist ./my-testnet-data
 ```
