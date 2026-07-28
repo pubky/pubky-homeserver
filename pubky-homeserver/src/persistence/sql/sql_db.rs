@@ -143,21 +143,37 @@ impl SqlDb {
         max_connections: u32,
         acquire_timeout: std::time::Duration,
     ) -> Self {
-        let admin_con_string = Self::derive_connection_string(None);
-        let test_db_con_string = Self::create_test_database(admin_con_string.clone())
+        use uuid::Uuid;
+
+        let mode = DatabaseMode::resolve_test(None);
+        let admin_url = match mode {
+            DatabaseMode::EphemeralTest(url) => url,
+            DatabaseMode::Direct(url) => url,
+        };
+        let admin_con = Self::connect_inner(&admin_url)
+            .await
+            .expect("Failed to connect to admin database");
+        let test_db_name = format!("pubky_test_{}", Uuid::new_v4().as_simple());
+        let query = format!("CREATE DATABASE \"{}\"", test_db_name);
+        sqlx::query(&query)
+            .execute(admin_con.pool())
             .await
             .expect("Failed to create test database");
+
+        let mut test_db_url = admin_url.clone();
+        test_db_url.set_database_name(&test_db_name);
+
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(acquire_timeout)
-            .connect(test_db_con_string.as_str())
+            .connect(test_db_url.as_str())
             .await
             .expect("Failed to connect to test database");
         let db = Self {
             pool,
             db_dropper: Some(std::sync::Arc::new(TestDbDropper::new(
-                test_db_con_string.database_name().to_string(),
-                admin_con_string.to_string(),
+                test_db_name,
+                admin_url.to_string(),
             ))),
         };
         let migrator = crate::persistence::sql::migrator::Migrator::new(&db);
