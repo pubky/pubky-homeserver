@@ -26,44 +26,6 @@ Examples:
 - `pubkyapp.synonym.to`
 - `example-app`
 
-## Signer Signup and Signin
-
-The signer methods `signup()` and `signin()` changed.
-- `signup()` does not establish a session anymore. It only signs up a user. Therefore, it does not have a return value.
-- `signin()` uses the new Grant authentication now. It requires a client ID.
-
-### JavaScript
-
-```js
-await signer.signup(homeserver, signupToken);
-const session = await signer.signin("my-app.example");
-```
-
-For blocking signin, pass the same client ID:
-
-```js
-const session = await signer.signinBlocking("my-app.example");
-```
-
-### Rust
-
-```rust
-use pubky::ClientId;
-
-signer.signup(&homeserver, signup_token).await?;
-
-let client_id = ClientId::new("my-app.example")?;
-let session = signer.signin(client_id).await?;
-```
-
-For blocking signin:
-
-```rust
-let session = signer
-    .signin_blocking(ClientId::new("my-app.example")?)
-    .await?;
-```
-
 ## Auth Flow / QR Login
 
 Grant auth flows add a required client ID and produce a grant-backed, self-refreshing session.
@@ -101,6 +63,44 @@ let session = flow.await_approval().await?;
 
 Use `PubkyGrantAuthFlow::builder(...)` when you need a custom relay or HTTP client.
 
+## Signer Signup and Signin
+
+The signer is used to create a session with root permissions. The methods `signup()` and `signin()` changed.
+- `signup()` does not establish a session anymore. It only signs up a user. Therefore, it does not have a return value.
+- `signin()` uses the new Grant authentication now. It requires a client ID.
+
+### JavaScript
+
+```js
+await signer.signup(homeserver, signupToken);
+const session = await signer.signin("my-app.example");
+```
+
+For blocking signin, pass the same client ID:
+
+```js
+const session = await signer.signinBlocking("my-app.example");
+```
+
+### Rust
+
+```rust
+use pubky::ClientId;
+
+signer.signup(&homeserver, signup_token).await?;
+
+let client_id = ClientId::new("my-app.example")?;
+let session = signer.signin(client_id).await?;
+```
+
+For blocking signin:
+
+```rust
+let session = signer
+    .signin_blocking(ClientId::new("my-app.example")?)
+    .await?;
+```
+
 ## Session Persistence
 
 Persisting the current one-hour bearer is not useful. Persist the grant and its PoP key material; restoring it mints a fresh bearer. Treat exported local credentials as bearer-equivalent secrets until the grant is revoked.
@@ -109,7 +109,7 @@ Persisting the current one-hour bearer is not useful. Persist the grant and its 
 
 The `v0.10` SDK provides a new out-of-the-box `BrowserSessionStore` that handles session persistence in supported browsers.
 
-It supports delegated, non-extractable WebCrypto keys when available and falls back to storing the keys in local storage in other browser environments.
+It supports delegated, non-extractable WebCrypto keys when available and falls back to storing the keys in IndexDB in other browser environments.
 
 ```js
 const store = pubky.browserSessionStore;
