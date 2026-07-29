@@ -1,7 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
-use pubky::{AuthFlowKind, Capabilities, ClientId, Pubky, PubkyGrantAuthFlow, PubkySession};
+use pubky::{
+    AuthFlowKind, Capabilities, ClientId, Pubky, PubkyGrantAuthFlow, PubkySession, PublicKey,
+};
 use url::Url;
+
+#[path = "../testnet.rs"]
+mod testnet;
 
 const DEFAULT_CLIENT_ID: &str = "grant-auth.example";
 const DEFAULT_CAPABILITIES: &str = "/pub/pubky.app/:rw,/pub/example.com/nested:rw";
@@ -21,6 +26,18 @@ struct Cli {
     /// HTTP relay inbox URL. Defaults to the local relay in testnet mode.
     #[arg(long)]
     relay: Option<Url>,
+
+    /// Sign up for a new account before authorizing the app
+    #[arg(long)]
+    signup: bool,
+
+    /// Homeserver identifier to sign up on. Defaults to the local homeserver in testnet mode.
+    #[arg(long, requires = "signup")]
+    homeserver: Option<String>,
+
+    /// Optional signup code required by the homeserver
+    #[arg(long, requires = "signup")]
+    signup_code: Option<String>,
 
     /// Use the local testnet defaults instead of mainnet relays
     #[arg(long)]
@@ -55,15 +72,33 @@ fn start_flow(cli: &Cli) -> Result<PubkyGrantAuthFlow> {
     let caps = Capabilities::try_from(cli.capabilities.as_str())?.normalize();
     let client_id = ClientId::new(&cli.client_id)?;
     let relay = auth_relay(cli)?;
+    let flow_kind = auth_flow_kind(cli)?;
 
-    let mut builder = PubkyGrantAuthFlow::builder(&caps, AuthFlowKind::signin(), client_id)
-        .client(pubky.client().clone());
+    let mut builder =
+        PubkyGrantAuthFlow::builder(&caps, flow_kind, client_id).client(pubky.client().clone());
 
     if let Some(relay) = relay {
         builder = builder.relay(relay);
     }
 
     Ok(builder.start()?)
+}
+
+fn auth_flow_kind(cli: &Cli) -> Result<AuthFlowKind> {
+    if !cli.signup {
+        return Ok(AuthFlowKind::signin());
+    }
+
+    let homeserver = match (&cli.homeserver, cli.testnet) {
+        (Some(homeserver), _) => homeserver.as_str(),
+        (None, true) => testnet::TESTNET_HOMESERVER,
+        (None, false) => anyhow::bail!("--homeserver is required for mainnet signup"),
+    };
+
+    Ok(AuthFlowKind::signup(
+        PublicKey::try_from(homeserver)?,
+        cli.signup_code.clone(),
+    ))
 }
 
 fn auth_relay(cli: &Cli) -> Result<Option<Url>> {

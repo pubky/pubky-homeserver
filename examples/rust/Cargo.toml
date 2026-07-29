@@ -38,10 +38,6 @@ name = "request"
 path = "./4-request/main.rs"
 
 [[bin]]
-name = "authenticator_signup"
-path = "./5-auth_flow_signup/authenticator.rs"
-
-[[bin]]
 name = "events_stream"
 path = "./6-events_stream/main.rs"
 

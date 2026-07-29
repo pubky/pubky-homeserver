@@ -1,8 +1,8 @@
-# Pubky Grant Auth Signin Example
+# Pubky Grant Auth Example
 
-This example shows third-party grant authorization in Pubky from two Rust CLIs.
+This example shows third-party grant authorization for signin and signup in Pubky from two Rust CLIs.
 
-The `auth_client` starts a grant auth flow, prints a Pubky Auth deep link, and waits for a grant-backed session. The `authenticator` approves the request by signing a `pubky-grant` JWS, which the client exchanges for a self-refreshing session.
+The `auth_client` starts a grant auth flow, prints a Pubky Auth deep link, and waits for a grant-backed session. The `authenticator` signs up the account when requested, then approves the app's capabilities by signing a `pubky-grant` JWS. The client exchanges that grant for a self-refreshing session.
 
 It consists of 2 parts:
 
@@ -34,6 +34,22 @@ cargo run --bin auth_client -- --testnet \
 
 Copy the Pubky Auth URL from the client output. It should use the `signin_grant` intent and include `cid` and `cpk` query parameters.
 
+To create an account on the local testnet and authorize the app in one flow, start the client with `--signup`:
+
+```bash
+cargo run --bin auth_client -- --testnet --signup
+```
+
+For a non-testnet homeserver, provide its public key and any required signup code:
+
+```bash
+cargo run --bin auth_client -- --signup \
+  --homeserver <HOMESERVER_PUBLIC_KEY> \
+  --signup-code <SIGNUP_CODE>
+```
+
+The signup URL uses the `signup_grant` intent. The authenticator first creates the account on the homeserver embedded in the URL and then approves the app grant. Use a recovery file for a key that does not already have an account on that homeserver.
+
 Finally run the authenticator in another terminal to approve it:
 
 ```bash
@@ -46,4 +62,3 @@ cargo run --bin authenticator -- "<Auth_URL>" --testnet --recovery-file <RECOVER
 Where the auth URL should be within quotation marks, and `--testnet` uses the local homeserver.
 
 You should see the client receive the approval and print the grant-backed session details.
-

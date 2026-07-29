@@ -44,10 +44,9 @@ The logging and testnet examples (8 and 9) start their own ephemeral testnet and
 ## Examples
 
 1. [**Signup**](./1-signup/README.md): shows how to signup, signin or signout to and from a homeserver.
-2. [**Auth Flow**](./2-auth_flow/README.md): shows how to set up Pubky grant auth with a headless third-party client and an authenticator CLI.
+2. [**Auth Flow**](./2-auth_flow/README.md): shows how to sign in or sign up through Pubky grant auth with a headless third-party client and an authenticator CLI.
 3. [**Storage**](./3-storage/README.md): authenticated write, read, and delete lifecycle on homeserver storage.
 4. [**Request**](./4-request/README.md): shows how to make direct HTTP requests to Pubky URLs.
-5. [**Auth Flow Signup**](./5-auth_flow_signup/README.md): shows how to setup Pubky authz for a 3rd party application and how to implement an authenticator to sign up such app.
 6. [**Events Stream**](./6-events_stream/README.md): subscribe to Server-Sent Events from a user's homeserver.
 7. [**Session Management**](./7-session_management/README.md): create, list, and delete grant-backed sessions from the command line.
 8. [**Logging**](./8-logging/README.md): configure tracing and watch the SDK emit debug output during a storage roundtrip.
