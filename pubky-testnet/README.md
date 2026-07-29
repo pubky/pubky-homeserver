@@ -14,6 +14,8 @@ docker run --name pubky-postgres \
   -d postgres:18
 ```
 
+> For more Postgres setup options see the [Install Guide — Set Up PostgreSQL](../docs/INSTALL.md#set-up-postgresql).
+
 Run a local testnet with persistent state:
 
 ```bash
