@@ -402,14 +402,14 @@ mod tests {
 
     use crate::{
         persistence::sql::{user::UserRepository, SqlDb},
-        shared::webdav::WebDavPath,
+        shared::webdav::StoragePath,
     };
 
     use super::*;
     use std::ops::Add;
 
     fn pf(s: &str) -> PathFilter {
-        WebDavPath::new(s).unwrap().into()
+        StoragePath::new(s).unwrap().into()
     }
 
     #[tokio::test]
@@ -425,7 +425,7 @@ mod tests {
 
         // Create events
         for _ in 0..10 {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test").unwrap());
             let _ = EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(events[0].user_id, user.id);
         assert_eq!(
             events[0].path,
-            EntryPath::new(user_pubkey, WebDavPath::new("/test").unwrap())
+            EntryPath::new(user_pubkey, StoragePath::new("/test").unwrap())
         );
         assert!(matches!(events[0].event_type, EventType::Put { .. }));
     }
@@ -478,7 +478,7 @@ mod tests {
             "/pub",         // 7: bare root, not under `/pub/` -> excluded
         ];
         for p in paths {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -550,7 +550,7 @@ mod tests {
         for i in 0..10 {
             let timestamp = Timestamp::now().add(1_000_000 * i); // Add 1s for each event
             let created_at = timestamp_to_sqlx_datetime(&timestamp);
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test").unwrap());
             let event = EventRepository::create_with_timestamp(
                 user.id,
                 EventType::Put {
@@ -591,7 +591,7 @@ mod tests {
         for i in 0..5 {
             let timestamp = Timestamp::now().add(1_000_000 * i); // Add 1s for each event
             let created_at = timestamp_to_sqlx_datetime(&timestamp);
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test").unwrap());
             let event = EventRepository::create_with_timestamp(
                 user.id,
                 EventType::Put {
@@ -681,7 +681,7 @@ mod tests {
             "/pub/b",           // 6 public
         ];
         for p in paths {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -746,7 +746,7 @@ mod tests {
             .unwrap();
 
         for p in ["/priv/a_b/x", "/priv/axb/y", "/priv/a%/m", "/priv/apct/n"] {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -801,7 +801,7 @@ mod tests {
 
         for (k, uid) in [(&ka, ua.id), (&kb, ub.id)] {
             for p in ["/pub/x", "/priv/secret"] {
-                let path = EntryPath::new(k.clone(), WebDavPath::new(p).unwrap());
+                let path = EntryPath::new(k.clone(), StoragePath::new(p).unwrap());
                 EventRepository::create(
                     uid,
                     EventType::Put {

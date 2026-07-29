@@ -61,7 +61,7 @@ where
         let limit = params
             .get("limit")
             // Treat `limit=` as None
-            .and_then(|l| if l.is_empty() { None } else { Some(l) })
+            .filter(|&l| !l.is_empty())
             .and_then(|l| l.parse::<u16>().ok());
         let cursor = Self::extract_cursor(&params);
 

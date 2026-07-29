@@ -378,13 +378,13 @@ impl BrowserGrantKeyStore {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let _ = key_id;
-            return delegated_sign_callback(|_| async {
+            delegated_sign_callback(|_| async {
                 Err(pubky::Error::Authentication(
                     pubky::errors::AuthError::Validation(
                         "Delegated grant signing is only available in wasm browser builds.".into(),
                     ),
                 ))
-            });
+            })
         }
     }
 

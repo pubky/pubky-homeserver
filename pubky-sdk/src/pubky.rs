@@ -14,7 +14,10 @@
 //! # async fn run() -> pubky::Result<()> {
 //! let pubky = Pubky::new()?; // or Pubky::testnet() / Pubky::with_client(...)
 //!
-//! let caps = Capabilities::builder().write("/pub/demoapp/").finish();
+//! let caps = Capabilities::builder()
+//!     .write("/pub/demoapp/")
+//!     .expect("static scope is canonical")
+//!     .finish();
 //! let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
 //! println!("Scan to sign in: {}", flow.authorization_url());
 //!
@@ -209,11 +212,9 @@ impl Pubky {
         Pkdns::with_client(self.client.clone())
     }
 
-    /// Resolve current homeserver host for a user public key via Pkarr.
+    /// Resolve a user's homeserver public key via Pkarr.
     ///
-    /// Returns the `_pubky` SVCB/HTTPS target (domain or pubkey-as-host),
-    /// or `None` if the record is missing/unresolvable. Uses an internal
-    /// read-only [`Pkdns`] actor.
+    /// Returns `None` for missing records and for domain-only `_pubky` targets.
     pub async fn get_homeserver_of(&self, user_public_key: &PublicKey) -> Option<PublicKey> {
         Pkdns::with_client(self.client.clone())
             .get_homeserver_of(user_public_key)
@@ -410,6 +411,10 @@ fn parse_auth_deep_link(url: &str) -> Result<(Capabilities, url::Url, [u8; 32], 
         DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) => Err(AuthError::Validation(
             "grant auth flows cannot be resumed from the authorization URL alone; the PoP client private key is required and is not encoded in the deep link."
                 .into(),
+        )
+        .into()),
+        DeepLink::DirectSignup(_) => Err(AuthError::Validation(
+            "Direct signup URLs cannot be resumed as cookie auth flows.".into(),
         )
         .into()),
         DeepLink::SeedExport(_) => {

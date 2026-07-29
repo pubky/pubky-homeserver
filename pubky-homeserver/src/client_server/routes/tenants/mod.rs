@@ -9,9 +9,9 @@
 //! read handlers call [`crate::client_server::auth::has_read_permission`] to
 //! enforce capability-based access control.
 
-use axum::{extract::DefaultBodyLimit, routing::get, Router};
+use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};
 
-use crate::client_server::AppState;
+use crate::client_server::{cache_policy::private_cache_policy, AppState};
 
 pub mod read;
 pub mod write;
@@ -30,4 +30,5 @@ pub fn router() -> Router<AppState> {
         )
         // TODO: different max size for sessions and other routes?
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        .layer(middleware::from_fn(private_cache_policy))
 }

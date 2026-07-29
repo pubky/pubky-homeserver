@@ -258,10 +258,12 @@ fn parse_grant_metadata(
     sqlx::Error,
 > {
     let capabilities: String = row.try_get(GrantIden::Capabilities.to_string().as_str())?;
-    let capabilities: Capabilities = capabilities
-        .as_str()
-        .try_into()
-        .map_err(|e: pubky_common::capabilities::Error| sqlx::Error::Decode(e.into()))?;
+    let capabilities: Capabilities =
+        capabilities
+            .parse()
+            .map_err(|e: pubky_common::capabilities::CapabilitiesParseError| {
+                sqlx::Error::Decode(e.into())
+            })?;
     let issued_at: i64 = row.try_get(GrantIden::IssuedAt.to_string().as_str())?;
     let expires_at: i64 = row.try_get(GrantIden::ExpiresAt.to_string().as_str())?;
     let revoked_at: Option<i64> = row.try_get(GrantIden::RevokedAt.to_string().as_str())?;

@@ -9,7 +9,7 @@ use crate::shared::user_quota::UserQuota;
 pub const USER_TABLE: &str = "users";
 
 /// All columns needed to construct a `UserEntity` from a row.
-/// Single source of truth — used by `get`, `get_for_update`, and `get_all`.
+/// Single source of truth for queries that construct a `UserEntity`.
 const ALL_USER_COLUMNS: [UserIden; 11] = [
     UserIden::Id,
     UserIden::PublicKey,
@@ -77,6 +77,27 @@ impl UserRepository {
             .columns(ALL_USER_COLUMNS)
             .and_where(Expr::col(UserIden::PublicKey).eq(public_key.z32()))
             .lock(sea_query::LockType::Update)
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        let user: UserEntity = sqlx::query_as_with(&query, values).fetch_one(con).await?;
+        Ok(user)
+    }
+
+    /// Get a user by their public key with a `FOR NO KEY UPDATE` row lock.
+    ///
+    /// This lock serializes changes to a user's storage accounting while still
+    /// allowing foreign-key checks for new entries and events.
+    /// Must be called within a transaction to hold the lock.
+    pub async fn get_for_no_key_update<'a>(
+        public_key: &PublicKey,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<UserEntity, sqlx::Error> {
+        let statement = Query::select()
+            .from(USER_TABLE)
+            .columns(ALL_USER_COLUMNS)
+            .and_where(Expr::col(UserIden::PublicKey).eq(public_key.z32()))
+            .lock(sea_query::LockType::NoKeyUpdate)
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;

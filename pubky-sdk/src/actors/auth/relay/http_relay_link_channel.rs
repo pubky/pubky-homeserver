@@ -394,7 +394,7 @@ mod tests {
         let chan = channel.clone();
         let produce_handle = tokio::spawn(async move {
             // Wait for the first poll to timeout
-            tokio::time::sleep(Duration::from_millis(1_000)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             let client = PubkyHttpClient::new().unwrap();
             chan.produce(&client, b"Hello, world!").await.unwrap();
         });

@@ -2,6 +2,7 @@
 //! Contains the following:
 //! - `SigninDeepLink` - A deep link for signing into a Pubky homeserver (legacy cookie flow).
 //! - `SignupDeepLink` - A deep link for signing up to a Pubky homeserver (legacy cookie flow).
+//! - `DirectSignupDeepLink` - A deep link for registering an account directly on a Pubky homeserver.
 //! - `SigninGrantDeepLink` - A deep link for signing in via the grant flow.
 //! - `SignupGrantDeepLink` - A deep link for signing up via the grant flow.
 //! - `SeedExportDeepLink` - A deep link for exporting a user secret to a signer like Pubky Ring.
@@ -13,6 +14,7 @@
 //! to communicate with a Pubky Signer like Pubky Ring.
 
 mod deep_link;
+mod direct_signup;
 mod error;
 mod query_params;
 mod schemes;
@@ -27,6 +29,7 @@ mod typed_deep_link;
 pub const DEEP_LINK_SCHEMES: [&str; 2] = ["pubkyauth", "pubkyring"];
 
 pub use deep_link::DeepLink;
+pub use direct_signup::{DirectSignupDeepLink, DirectSignupIntent, DirectSignupParams};
 pub use error::DeepLinkParseError;
 pub use schemes::DeepLinkScheme;
 pub use seed_export::{SecretExportIntent, SeedExportDeepLink, SeedExportParams};

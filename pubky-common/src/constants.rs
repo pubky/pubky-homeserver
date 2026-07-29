@@ -7,6 +7,15 @@ pub mod reserved_param_keys {
     pub const HTTP_PORT: u16 = 65280;
 }
 
+/// Pubky storage namespace roots.
+pub mod storage {
+    /// Storage root for private data.
+    pub const PRIVATE_ROOT: &str = "/priv/";
+
+    /// Storage root for public, world-readable data.
+    pub const PUBLIC_ROOT: &str = "/pub/";
+}
+
 /// Local test network's hardcoded port numbers for local development.
 pub mod testnet_ports {
     /// The local test network's hardcoded DHT bootstrapping node's port number.

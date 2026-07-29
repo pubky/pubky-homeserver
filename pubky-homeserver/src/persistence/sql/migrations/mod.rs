@@ -8,6 +8,7 @@ pub(crate) mod m20260325_create_grant_sessions;
 mod m20260327_add_quota_columns;
 mod m20260507_add_allowed_write_paths;
 mod m20260609_add_signup_code_used_at;
+mod m20260723_sanitize_capabilities;
 
 pub(crate) use m20250806_create_user::M20250806CreateUserMigration;
 pub(crate) use m20250812_create_signup_code::M20250812CreateSignupCodeMigration;
@@ -19,3 +20,4 @@ pub(crate) use m20260325_create_grant_sessions::M20260325CreateGrantSessionsMigr
 pub(crate) use m20260327_add_quota_columns::M20260327AddQuotaColumnsMigration;
 pub(crate) use m20260507_add_allowed_write_paths::M20260507AddAllowedWritePathsMigration;
 pub(crate) use m20260609_add_signup_code_used_at::M20260609AddSignupCodeUsedAtMigration;
+pub(crate) use m20260723_sanitize_capabilities::M20260723SanitizeCapabilitiesMigration;

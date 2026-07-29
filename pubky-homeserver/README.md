@@ -1,116 +1,90 @@
 # Pubky Homeserver
 
-Pubky homeserver that acts as user's agent on the Internet, providing data availability and more.
+A homeserver for Pubky. Stores and serves user data via HTTP APIs with public-key authentication.
 
-## Usage
+For standalone deployment, see the [install guide](../docs/INSTALL.md).
 
-### Library
+## Development
 
-Use the Homeserver as a library in other crates/binaries or for testing purposes.
-The `HomeserverApp` is all bells and wistles included.
+Run the homeserver directly from the source tree:
+
+```bash
+cargo run -p pubky-homeserver -- --data-dir ~/.pubky
+```
+
+See [config.sample.toml](config.sample.toml) for all configuration options.
+
+## API Specifications
+
+- [Client API](openapi-client.yml) — user authentication, tenant storage, and event feeds.
+- [Admin API](openapi-admin.yml) — homeserver administration and WebDAV operations.
+
+## Architecture
+
+- [PKARR republishing](../docs/REPUBLISHING.md) — cache-first resolution, network fallback, and retry behavior.
+
+## Library Usage
+
+Use the homeserver as a library in other crates or for testing.
+
+```toml
+[dependencies]
+pubky-homeserver = "0.x"  # replace with the latest version
+```
+
+`HomeserverApp` starts the full server stack (client server, admin server, metrics server, DHT republishers):
 
 ```rust
-use anyhow::Result;
 use pubky_homeserver::HomeserverApp;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-  let app = HomeserverApp::run_with_data_dir_path(PathBuf::from("~/.pubky")).await?;
-  println!(
-      "Homeserver HTTP listening on {}",
-      server.core().icann_http_url()
-  );
-  println!(
-      "Homeserver Pubky TLS listening on {} and {}",
-      server.core().pubky_tls_dns_url(),
-      server.core().pubky_tls_ip_url()
-  );
-  println!(
-      "Admin server listening on http://{}",
-      server.admin().listen_socket()
-  );
-  tokio::signal::ctrl_c().await?;
+    let app = HomeserverApp::start_with_persistent_data_dir_path(
+        PathBuf::from("~/.pubky")
+    ).await?;
 
-  println!("Shutting down Homeserver");
-  Ok(())
+    println!("Homeserver HTTP: {}", app.icann_http_url());
+    println!("Homeserver Pubky TLS: {}", app.pubky_url());
+
+    if let Some(admin) = app.admin_server() {
+        println!("Admin server: http://{}", admin.listen_socket());
+    }
+
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
 ```
 
-Run the app with a temporary directory and your custom config. This is a good way to test the server.
+For testing, use `MockDataDir` to create a temporary directory that is cleaned up on drop. Enable the `testing` feature:
 
-```rust
-use anyhow::Result;
-use pubky_homeserver::{HomeserverApp, DataDirMock};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-  let mut config = ConfigToml::default(); // Use ConfigToml::test() for random ports.
-  // Set config values however you like
-  config.admin.admin_password = "alternative_password".to_string();
-  // Creates a temporary directory that gets cleaned up 
-  // as soon as the app is dropped.
-  let mock_dir = DataDirMock::new(config, None).unwrap(); 
-  let app = HomeserverApp::run_with_data_dir_mock(mock_dir).await.unwrap();
-}
+```toml
+[dev-dependencies]
+pubky-homeserver = { version = "0.x", features = ["testing"] }
 ```
 
-Run the `HomeserverCore` only without the admin server.
+```rust,ignore
+use pubky_homeserver::{HomeserverApp, MockDataDir, ConfigToml};
 
-```rust
-use anyhow::Result;
-use pubky_homeserver::HomeserverCore;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut core = HomeserverCore::from_data_dir_path(PathBuf::from("~/.pubky")).await?;
-    core.listen().await?;
-    println!(
-        "Homeserver HTTP listening on {}",
-        core().icann_http_url()
-    );
-    println!(
-        "Homeserver Pubky TLS listening on {} and {}",
-        core().pubky_tls_dns_url(),
-        core().pubky_tls_ip_url()
-    );
-}
+let config = ConfigToml::default_test_config();
+let mock_dir = MockDataDir::new(config, None).unwrap();
+let app = HomeserverApp::start_with_mock_data_dir(mock_dir).await.unwrap();
 ```
 
 ### Binary
 
-Use `cargo run -- --data-dir=~/.pubky`.
-
-## Signup Token
-
-If homeserver is set to require signup tokens, you can create a new signup token using the admin endpoint:
-
-```rust,ignore
-let response = pubky_client
-    .get(&format!("http://127.0.0.1:6288/generate_signup_token"))
-    .header("X-Admin-Password", "admin") // Use your admin password. This is testnet default pwd.
-    .send()
-    .await
-    .unwrap();
-let signup_token = response.text().await.unwrap();
-```
-
-via CLI with `curl`
+See [Install and Run Pubky Homeserver](../docs/INSTALL.md) for full setup instructions.
 
 ```bash
-curl -X GET "http://127.0.0.1:6288/generate_signup_token" \
-     -H "X-Admin-Password: admin"
-     # Use your admin password. This is testnet default pwd.
+pubky-homeserver --data-dir ~/.pubky
 ```
 
-or from JS
+## Caching and Proxies
 
-```js
-const url = "http://127.0.0.1:6288/generate_signup_token";
-const response = await client.fetch(url, {
-  method: "GET",
-  headers: {
-    "X-Admin-Password": "admin", // use your admin password, defaults to testnet password.
-  },
-});
-const signupToken = await response.text();
-```
+Tenant-private responses must never be stored by shared caches. `/priv/...`
+data responses and `/events-stream` use `Cache-Control: no-store` and vary on
+`pubky-host`, `Authorization`, and `Cookie`; `/pub/...` file validators keep
+their existing tenant-aware caching behavior.
+
+Note: CORS preflight `OPTIONS` is
+handled upstream by the CORS layer and carries no private body.

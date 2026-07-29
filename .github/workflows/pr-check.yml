@@ -228,10 +228,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: pubky-sdk/bindings/js/pkg/package-lock.json
 
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+
+      - name: Install JS dependencies
+        working-directory: pubky-sdk/bindings/js/pkg
+        run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
@@ -267,7 +273,6 @@ jobs:
       - name: Build WASM
         working-directory: pubky-sdk/bindings/js/pkg
         run: |
-          npm install
           npm run build
 
       - name: Run the testnet

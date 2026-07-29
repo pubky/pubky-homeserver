@@ -10,6 +10,9 @@ on:
   push:
     branches: [main]
 
+env:
+  CROSS_REV: 51f46f296253d8122c927c5bb933e3c4f27cc317
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,8 +29,22 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cache Cargo downloads and installed tools, but exclude target artifacts.
+          # Cross images tagged :latest may change and make restored artifacts incompatible.
+          cache-targets: false
+
+          # Cache the installed cross executable by its pinned source revision.
+          # Changing CROSS_REV therefore creates a fresh cache entry.
+          # Include ImageOS to avoid runner glibc incompatibilities.
+          key: cross-${{ env.CROSS_REV }}
+          env-vars: ImageOS
+
       - name: Install cross # Tool to cross-compile the binaries
-        run: cargo install cross --locked --git https://github.com/cross-rs/cross --rev 51f46f296253d8122c927c5bb933e3c4f27cc317
+        run: cargo install cross --locked --git https://github.com/cross-rs/cross --rev "$CROSS_REV"
 
 
       # Build artifacts
@@ -44,5 +61,3 @@ jobs:
           path: target/github-release.tar.gz
           if-no-files-found: error
           overwrite: true
-
-

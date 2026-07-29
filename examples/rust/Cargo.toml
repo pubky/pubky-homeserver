@@ -11,35 +11,43 @@ publish = false
 
 [[bin]]
 name = "testnet"
-path = "./1-testnet/main.rs"
+path = "./9-testnet/main.rs"
 
 [[bin]]
 name = "logging"
-path = "./0-logging/main.rs"
+path = "./8-logging/main.rs"
 
 [[bin]]
 name = "signup"
-path = "./2-signup/signup.rs"
+path = "./1-signup/signup.rs"
 
 [[bin]]
 name = "authenticator"
-path = "./3-auth_flow/authenticator.rs"
+path = "./2-auth_flow/authenticator.rs"
+
+[[bin]]
+name = "auth_client"
+path = "./2-auth_flow/client.rs"
 
 [[bin]]
 name = "storage"
-path = "./4-storage/main.rs"
+path = "./3-storage/main.rs"
 
 [[bin]]
 name = "request"
-path = "./5-request/main.rs"
+path = "./4-request/main.rs"
 
 [[bin]]
 name = "authenticator_signup"
-path = "./6-auth_flow_signup/authenticator.rs"
+path = "./5-auth_flow_signup/authenticator.rs"
 
 [[bin]]
 name = "events_stream"
-path = "./7-events_stream/main.rs"
+path = "./6-events_stream/main.rs"
+
+[[bin]]
+name = "sessions"
+path = "./7-session_management/main.rs"
 
 [[bin]]
 name = "keygen"

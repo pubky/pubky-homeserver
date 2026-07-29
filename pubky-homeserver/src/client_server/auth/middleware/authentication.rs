@@ -56,15 +56,19 @@ impl<S> Layer<S> for AuthenticationLayer {
 mod tests {
     use super::*;
     use crate::app_context::AppContext;
+    use crate::client_server::auth::cookie::persistence::SessionRepository;
     use crate::client_server::auth::AuthSession;
     use crate::client_server::middleware::pubky_host::PubkyHost;
+    use crate::persistence::sql::user::UserRepository;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
+    use pubky_common::capabilities::{Capabilities, Capability};
     use pubky_common::crypto::Keypair;
     use std::convert::Infallible;
     use std::sync::Arc;
     use tower::{Service, ServiceExt};
+    use tower_cookies::{Cookie, Cookies};
 
     async fn test_state() -> (AuthState, Keypair) {
         let context = AppContext::test().await;
@@ -93,6 +97,20 @@ mod tests {
                 Ok::<_, Infallible>(StatusCode::OK.into_response())
             }
         })
+    }
+
+    async fn cookie_for_user(context: &AppContext, keypair: &Keypair) -> Cookie<'static> {
+        let user = UserRepository::create(&keypair.public_key(), &mut context.sql_db.pool().into())
+            .await
+            .unwrap();
+        let secret = SessionRepository::create(
+            user.id,
+            &Capabilities::from(vec![Capability::root()]),
+            &mut context.sql_db.pool().into(),
+        )
+        .await
+        .unwrap();
+        Cookie::new(keypair.public_key().z32(), secret.to_string())
     }
 
     #[tokio::test]
@@ -124,6 +142,28 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut().insert(PubkyHost(pk));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn invalid_bearer_falls_through_to_user_addressed_cookie() {
+        let context = AppContext::test().await;
+        let keypair = Keypair::random();
+        let state = AuthState::new(&context);
+        let svc = AuthenticationLayer::new(state).layer(assert_handler(true));
+
+        let mut req = Request::builder()
+            .uri("/pub/file.txt")
+            .header("Authorization", "Bearer not-a-valid-jws")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(PubkyHost(keypair.public_key()));
+        let cookies = Cookies::default();
+        cookies.add(cookie_for_user(&context, &keypair).await);
+        req.extensions_mut().insert(cookies);
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

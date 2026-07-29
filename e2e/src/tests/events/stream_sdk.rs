@@ -1,14 +1,31 @@
 use super::*;
+use futures::StreamExt;
+use pubky_testnet::pubky::errors::{Error, RequestError};
+use pubky_testnet::pubky::{ClientId, EventCursor, PubkySession, PublicKey};
+use tokio::time::{timeout, Duration};
+
+/// Sign up a fresh user and return its public key plus an authenticated
+/// (root-capability) grant session.
+async fn signed_in_user(
+    testnet: &pubky_testnet::EphemeralTestnet,
+    client_id: &str,
+) -> (PublicKey, PubkySession) {
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let session = signer
+        .signin(ClientId::new(client_id).unwrap())
+        .await
+        .unwrap();
+    (signer.public_key(), session)
+}
 
 /// Test the SDK builder API: `event_stream_for()` and `add_users()`
 /// This tests the high-level SDK interface rather than raw HTTP requests.
 #[tokio::test]
 #[pubky_testnet::test]
 async fn events_stream_sdk_builder_api() {
-    use futures::StreamExt;
-    use pubky_testnet::pubky::EventCursor;
-    use tokio::time::{timeout, Duration};
-
     let testnet = build_full_testnet().await;
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
@@ -297,5 +314,275 @@ async fn events_stream_sdk_builder_api() {
         err.contains("50 users"),
         "add_users: Error should mention 50 user limit, got: {}",
         err
+    );
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_sdk_private_authorized_scoping() {
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let (user, session) = signed_in_user(&testnet, "sdk-owner.test").await;
+
+    session.storage().put("/pub/a.txt", vec![1]).await.unwrap();
+    session
+        .storage()
+        .put("/priv/app/secret.txt", vec![2])
+        .await
+        .unwrap();
+    session
+        .storage()
+        .put("/priv/other/z.txt", vec![3])
+        .await
+        .unwrap();
+
+    let mut stream = pubky
+        .event_stream_for(&server.public_key())
+        .add_users([(&user, None)])
+        .unwrap()
+        .session(&session)
+        .path("/priv/app/")
+        .limit(1)
+        .subscribe()
+        .await
+        .unwrap();
+
+    let event = stream
+        .next()
+        .await
+        .expect("should receive the in-scope private event")
+        .unwrap();
+    assert_eq!(event.resource.owner.z32(), user.z32());
+    assert!(
+        event
+            .resource
+            .path
+            .as_str()
+            .contains("/priv/app/secret.txt"),
+        "expected the in-scope private event, got: {}",
+        event.resource.path
+    );
+    drop(stream);
+
+    let mut stream = pubky
+        .event_stream_for(&server.public_key())
+        .add_users([(&user, None)])
+        .unwrap()
+        .session(&session)
+        .path("/pub/")
+        .path("/priv/app/")
+        .limit(2)
+        .subscribe()
+        .await
+        .unwrap();
+
+    let mut paths = Vec::new();
+    while let Some(result) = stream.next().await {
+        let event = result.unwrap();
+        let p = event.resource.path.to_string();
+        assert!(
+            !p.contains("/priv/other/"),
+            "union leaked an unrequested private scope: {p}"
+        );
+        paths.push(p);
+        if paths.len() >= 2 {
+            break;
+        }
+    }
+    assert!(paths.iter().any(|p| p.contains("/pub/a.txt")));
+    assert!(paths.iter().any(|p| p.contains("/priv/app/secret.txt")));
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_sdk_session_does_not_override_target_homeserver() {
+    let mut testnet = build_full_testnet().await;
+    let hs1 = testnet.homeserver_app().public_key();
+    let hs2 = testnet
+        .create_random_homeserver()
+        .await
+        .unwrap()
+        .public_key();
+    assert_ne!(hs1, hs2, "test needs two distinct homeservers");
+
+    let pubky = testnet.sdk().unwrap();
+
+    let me = pubky.signer(Keypair::random());
+    me.signup(&hs1, None).await.unwrap();
+    let my_session = me
+        .signin(ClientId::new("sdk-override.test").unwrap())
+        .await
+        .unwrap();
+
+    let other_signer = pubky.signer(Keypair::random());
+    other_signer.signup(&hs2, None).await.unwrap();
+    let other = other_signer.public_key();
+    let other_session = other_signer
+        .signin(ClientId::new("sdk-override-other.test").unwrap())
+        .await
+        .unwrap();
+    other_session
+        .storage()
+        .put("/pub/hello.txt", vec![1])
+        .await
+        .unwrap();
+
+    let mut stream = pubky
+        .event_stream_for_user(&other, None)
+        .session(&my_session)
+        .path("/pub/")
+        .limit(1)
+        .subscribe()
+        .await
+        .unwrap();
+
+    let event = stream
+        .next()
+        .await
+        .expect("should receive other's public event from their own homeserver")
+        .unwrap();
+    assert_eq!(event.resource.owner.z32(), other.z32());
+    assert!(
+        event.resource.path.as_str().contains("/pub/hello.txt"),
+        "expected other's public event, got: {}",
+        event.resource.path
+    );
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_sdk_signin_cookie_private_authorized() {
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+
+    let signer = pubky.signer(Keypair::random());
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let session = signer.signin_cookie().await.unwrap();
+    let user = signer.public_key();
+
+    session
+        .storage()
+        .put("/priv/app/signin-cookie.txt", vec![42])
+        .await
+        .unwrap();
+
+    let mut stream = pubky
+        .event_stream_for(&server.public_key())
+        .add_users([(&user, None)])
+        .unwrap()
+        .session(&session)
+        .path("/priv/app/")
+        .limit(1)
+        .subscribe()
+        .await
+        .unwrap();
+
+    let event = stream
+        .next()
+        .await
+        .expect("signin-cookie session should receive its private event")
+        .unwrap();
+    assert_eq!(event.resource.owner.z32(), user.z32());
+    assert!(
+        event
+            .resource
+            .path
+            .as_str()
+            .contains("/priv/app/signin-cookie.txt"),
+        "expected the signin-cookie private event, got: {}",
+        event.resource.path
+    );
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_sdk_cookie_bound_homeserver_is_enforced() {
+    let mut testnet = build_full_testnet().await;
+    let hs1 = testnet.homeserver_app().public_key();
+    let hs2 = testnet
+        .create_random_homeserver()
+        .await
+        .unwrap()
+        .public_key();
+    assert_ne!(hs1, hs2, "test needs two distinct homeservers");
+
+    let pubky = testnet.sdk().unwrap();
+
+    let me = pubky.signer(Keypair::random());
+    let my_session = me.signup_cookie(&hs1, None).await.unwrap();
+    let my_user = me.public_key();
+
+    let result = pubky
+        .event_stream_for(&hs2)
+        .add_users([(&my_user, None)])
+        .unwrap()
+        .session(&my_session)
+        .path("/priv/app/")
+        .subscribe()
+        .await;
+
+    let err = result
+        .err()
+        .expect("a cookie bound to HS1 must not authenticate a private stream on HS2");
+    let Error::Request(RequestError::Validation { message }) = err else {
+        panic!("expected local validation error, got: {err}");
+    };
+    assert!(
+        message.contains("cannot attach session credential"),
+        "got: {message}"
+    );
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_sdk_cookie_live_private_receives_in_scope() {
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+
+    let signer = pubky.signer(Keypair::random());
+    let session = signer
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    let user = signer.public_key();
+
+    let mut stream = pubky
+        .event_stream_for(&server.public_key())
+        .add_users([(&user, None)])
+        .unwrap()
+        .session(&session)
+        .path("/priv/app/")
+        .live()
+        .subscribe()
+        .await
+        .unwrap();
+
+    let writer = session.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        writer
+            .storage()
+            .put("/priv/other/skip.txt", vec![9])
+            .await
+            .unwrap();
+        writer
+            .storage()
+            .put("/priv/app/live.txt", vec![1])
+            .await
+            .unwrap();
+    });
+
+    let event = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("should receive a live event within the timeout")
+        .expect("stream should yield an event")
+        .unwrap();
+    assert!(
+        event.resource.path.as_str().contains("/priv/app/live.txt"),
+        "expected the in-scope live private event (out-of-scope excluded), got: {}",
+        event.resource.path
     );
 }

@@ -131,6 +131,13 @@ impl PubkyCookieAuthFlow {
     /// [`await_credential`](Self::await_credential) directly if you need to
     /// inspect or persist the credential before building a session.
     ///
+    /// Signup flows bind the cookie credential to the homeserver named in the
+    /// signup deep link. Signin flows do not name a homeserver, so their cookie
+    /// credential remains unbound until a successful
+    /// [`PubkySession::revalidate`](PubkySession::revalidate). Until then, the
+    /// session can still use normal cookie storage APIs, but it will not
+    /// authenticate private event streams.
+    ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Authentication`] if the relay channel
     ///   expires before approval.
@@ -148,16 +155,23 @@ impl PubkyCookieAuthFlow {
     /// The credential can be inspected, persisted, or lifted into a full
     /// [`PubkySession`] via [`PubkySession::from_cookie_credential`].
     ///
+    /// Signup credentials are bound immediately to the deep link homeserver.
+    /// Signin credentials are unbound because the signin deep link carries no
+    /// homeserver; call [`PubkySession::revalidate`](PubkySession::revalidate)
+    /// after constructing a session if it needs to authenticate private event
+    /// streams.
+    ///
     /// # Errors
     /// - See [`await_approval`](Self::await_approval).
     pub async fn await_credential(self) -> Result<CookieCredential> {
+        let homeserver = self.target_homeserver();
         let Self {
             relay_listener,
             client,
             ..
         } = self;
         let approval = Self::await_decoded_approval(relay_listener).await?;
-        CookieCredential::from_auth_token(&approval.0, &client).await
+        CookieCredential::from_auth_token(&approval.0, &client, homeserver).await
     }
 
     /// Block until the signer approves and we receive an [`AuthToken`].
@@ -203,7 +217,8 @@ impl PubkyCookieAuthFlow {
             return Ok(None);
         };
         Ok(Some(
-            CookieCredential::from_auth_token(&approval.0, &self.client).await?,
+            CookieCredential::from_auth_token(&approval.0, &self.client, self.target_homeserver())
+                .await?,
         ))
     }
 
@@ -219,6 +234,18 @@ impl PubkyCookieAuthFlow {
             Ok(Some(approval)) => Some(Ok(approval.0)),
             Ok(None) => None,
             Err(error) => Some(Err(error)),
+        }
+    }
+
+    /// Homeserver this flow targets, when the deep link names one.
+    ///
+    /// Only signup links carry it. Signin links intentionally return `None`; a
+    /// signin cookie stays unbound and private event streams remain anonymous
+    /// until the resulting session successfully revalidates.
+    fn target_homeserver(&self) -> Option<crate::PublicKey> {
+        match &self.auth_url {
+            DeepLink::Signup(link) => Some(link.params().homeserver.clone()),
+            _ => None,
         }
     }
 
@@ -245,6 +272,20 @@ mod tests {
     use crate::actors::auth::relay::http_relay_inbox_channel::EncryptedHttpRelayInboxChannel;
     use crate::{Keypair, Pubky};
     use std::str::FromStr;
+
+    async fn build_flow(auth_kind: AuthFlowKind) -> PubkyCookieAuthFlow {
+        let relay = http_relay::HttpRelay::builder()
+            .http_port(0)
+            .run()
+            .await
+            .unwrap();
+        let inbox_base = relay.local_url().join("inbox").unwrap();
+        PubkyCookieAuthFlow::builder(&Capabilities::default(), auth_kind)
+            .client(PubkyHttpClient::new().unwrap())
+            .relay(inbox_base)
+            .start()
+            .unwrap()
+    }
 
     async fn assert_resume_reconnects(auth_kind: AuthFlowKind) {
         let relay = http_relay::HttpRelay::builder()
@@ -332,5 +373,43 @@ mod tests {
         let url = "pubkyauth://secret_export?secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8";
         let result = pubky.resume_cookie_auth_flow(url);
         assert!(result.is_err(), "seed export URL should fail to resume");
+    }
+
+    #[test]
+    fn resume_rejects_direct_signup_url() {
+        let client = PubkyHttpClient::new().unwrap();
+        let pubky = Pubky::with_client(client);
+
+        let url =
+            "pubkyauth://direct_signup?hs=5jsjx1o6fzu6aeeo697r3i5rx15zq41kikcye8wtwdqm4nb4tryo";
+        let result = pubky.resume_cookie_auth_flow(url);
+        assert!(result.is_err(), "direct signup URL should fail to resume");
+    }
+
+    #[tokio::test]
+    async fn signup_flow_binds_cookie_to_deep_link_homeserver() {
+        let homeserver = Keypair::random().public_key();
+        let flow = build_flow(AuthFlowKind::signup(
+            homeserver.clone(),
+            Some("token".to_string()),
+        ))
+        .await;
+
+        assert_eq!(
+            flow.target_homeserver(),
+            Some(homeserver),
+            "signup deep link binds the cookie to its homeserver"
+        );
+    }
+
+    #[tokio::test]
+    async fn signin_flow_leaves_cookie_unbound() {
+        let flow = build_flow(AuthFlowKind::signin()).await;
+
+        assert_eq!(
+            flow.target_homeserver(),
+            None,
+            "signin deep link names no homeserver; the cookie binds on revalidate"
+        );
     }
 }

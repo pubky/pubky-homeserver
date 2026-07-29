@@ -49,7 +49,7 @@ pub(crate) async fn import_session(
     // Browser WASM cannot read Set-Cookie, so the secret is None and
     // attachment is delegated to the runtime cookie jar.
     let credential: Arc<dyn SessionCredential> =
-        Arc::new(CookieCredential::new(user, None, record));
+        Arc::new(CookieCredential::new(user, None, record, None));
     let session = PubkySession::from_credential(client, Arc::clone(&credential));
     // Revalidate updates the credential's internal state automatically.
     session
@@ -120,8 +120,12 @@ pub(crate) async fn import_session_secret(
     // Build minimal session; placeholder record will be replaced
     // after validation.
     let placeholder = CookieSessionRecord::new(&public_key, Capabilities::default(), None);
-    let cookie_credential =
-        CookieCredential::new(public_key.clone(), Some(cookie.to_string()), placeholder);
+    let cookie_credential = CookieCredential::new(
+        public_key.clone(),
+        Some(cookie.to_string()),
+        placeholder,
+        None,
+    );
     let credential: Arc<dyn SessionCredential> = Arc::new(cookie_credential);
     let session = PubkySession::from_credential(client, Arc::clone(&credential));
 

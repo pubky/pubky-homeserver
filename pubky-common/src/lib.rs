@@ -20,3 +20,6 @@ pub mod timestamp {
     //! Timestamp used across Pubky crates.
     pub use pubky_timestamp::*;
 }
+
+pub mod storage_path;
+pub use storage_path::{StoragePath, StoragePathError};

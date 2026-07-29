@@ -68,6 +68,15 @@ pub struct PubkyHttpClientBuilder {
 }
 
 impl PubkyHttpClientBuilder {
+    #[cfg(test)]
+    pub(crate) fn isolated_pkarr_test(&mut self) -> &mut Self {
+        self.pkarr
+            .no_default_network()
+            .bootstrap(&["127.0.0.1:1"])
+            .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
+        self
+    }
+
     /// Configure this builder to talk to a **local Pubky testnet** on `localhost`.
     ///
     /// Concretely:
@@ -126,11 +135,13 @@ impl PubkyHttpClientBuilder {
     pub fn testnet_with_host(&mut self, host: &str) -> &mut Self {
         cross_log!(info, "Configuring testnet builders for host {host}");
         #[cfg(not(target_arch = "wasm32"))]
-        self.pkarr.bootstrap(&[format!(
-            "{}:{}",
-            host,
-            pubky_common::constants::testnet_ports::BOOTSTRAP
-        )]);
+        self.pkarr
+            .bootstrap(&[format!(
+                "{}:{}",
+                host,
+                pubky_common::constants::testnet_ports::BOOTSTRAP
+            )])
+            .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
 
         self.pkarr
             .relays(&[format!(

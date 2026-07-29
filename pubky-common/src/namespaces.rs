@@ -1,4 +1,4 @@
 //! Namespaces using to prepend signed messages to avoid collisions.
 
-/// Pubky Auth namespace as defined at the [spec](https://pubky.github.io/pubky-core/spec/auth.html)
+/// Namespace used by the Pubky Auth protocol.
 pub const PUBKY_AUTH: &[u8; 10] = b"PUBKY:AUTH";

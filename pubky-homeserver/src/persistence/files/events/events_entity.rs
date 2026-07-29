@@ -6,7 +6,7 @@ use sqlx::{postgres::PgRow, types::chrono::NaiveDateTime, FromRow, Row};
 
 use crate::{
     persistence::{files::events::events_repository::EventIden, sql::user::UserIden},
-    shared::webdav::{EntryPath, WebDavPath},
+    shared::webdav::{EntryPath, StoragePath},
 };
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -52,7 +52,7 @@ impl FromRow<'_, PgRow> for EventEntity {
             PublicKey::try_from_z32(&user_public_key).map_err(|e| sqlx::Error::Decode(e.into()))?;
         let event_type_str: String = row.try_get(EventIden::Type.to_string().as_str())?;
         let path: String = row.try_get(EventIden::Path.to_string().as_str())?;
-        let path = WebDavPath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
+        let path = StoragePath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
         let created_at: NaiveDateTime = row.try_get(EventIden::CreatedAt.to_string().as_str())?;
 
         let content_hash_bytes: Option<Vec<u8>> =

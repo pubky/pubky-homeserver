@@ -13,10 +13,65 @@ const CURRENT_VERSION: u8 = 0;
 // 3 minutes in the past or the future
 const TIMESTAMP_WINDOW: i64 = 180 * 1_000_000;
 
+mod signature_serde {
+    use core::fmt;
+
+    use serde::{
+        de::{self, SeqAccess, Visitor},
+        ser::SerializeTuple,
+        Deserializer, Serializer,
+    };
+
+    use crate::crypto::Signature;
+
+    pub fn serialize<S: Serializer>(
+        signature: &Signature,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut tuple = serializer.serialize_tuple(Signature::BYTE_SIZE)?;
+
+        for byte in signature.to_bytes() {
+            tuple.serialize_element(&byte)?;
+        }
+
+        tuple.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Signature, D::Error> {
+        struct SignatureVisitor;
+
+        impl<'de> Visitor<'de> for SignatureVisitor {
+            type Value = Signature;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a 64-byte Ed25519 signature")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut bytes = [0; Signature::BYTE_SIZE];
+
+                for (index, byte) in bytes.iter_mut().enumerate() {
+                    *byte = sequence
+                        .next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(index, &self))?;
+                }
+
+                Ok(Signature::from_bytes(&bytes))
+            }
+        }
+
+        deserializer.deserialize_tuple(Signature::BYTE_SIZE, SignatureVisitor)
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-/// Implementation of the [Pubky Auth spec](https://pubky.github.io/pubky-core/spec/auth.html).
+/// Authentication token used by the Pubky Auth protocol.
 pub struct AuthToken {
     /// Signature over the token.
+    #[serde(with = "signature_serde")]
     signature: Signature,
     /// A namespace to ensure this signature can't be used for any
     /// other purposes that share the same message structurea by accident.
@@ -166,6 +221,9 @@ mod tests {
         let token = AuthToken::sign(&signer, capabilities.clone());
 
         let serialized = &token.serialize();
+        assert_eq!(serialized[..64], token.signature.to_bytes());
+        assert_eq!(&serialized[64..74], PUBKY_AUTH);
+        assert_eq!(serialized[74], CURRENT_VERSION);
 
         let verified = AuthToken::verify(serialized).unwrap();
 

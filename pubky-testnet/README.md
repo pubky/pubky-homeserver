@@ -9,36 +9,20 @@ Two testnet types are provided:
 | [`EphemeralTestnet`] | Random | In-memory | Automated tests (`#[tokio::test]`) - parallel-safe, no port conflicts |
 | [`StaticTestnet`] | Fixed, well-known | In-memory or persistent | Interactive / CLI use - browser tests, mobile apps, manual debugging |
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [EphemeralTestnet (Automated Tests)](#ephemeraltestnet-automated-tests)
-  - [Writing Tests](#writing-tests)
-  - [Docker PostgreSQL](#docker-postgresql)
-  - [Sharing Docker Postgres Across Tests](#sharing-docker-postgres-across-tests)
-  - [Custom Configuration](#custom-configuration)
-- [StaticTestnet (CLI / Interactive)](#statictestnet-cli--interactive)
-  - [Fixed Ports](#fixed-ports)
-  - [In-Memory Mode](#in-memory-mode)
-  - [Persistent Mode](#persistent-mode)
-  - [Custom Homeserver Config](#custom-homeserver-config)
-- [Troubleshooting](#troubleshooting)
-
 ## Prerequisites
 
 All testnet modes require a PostgreSQL database. You can either:
 
 - **Use Docker Postgres** (recommended for tests) — enable the `docker-postgres` feature, no external setup needed.
-- **Run your own Postgres** — set the `TEST_PUBKY_CONNECTION_STRING` environment variable.
+- **Run your own Postgres** - set the `TEST_PUBKY_CONNECTION_STRING` environment variable.
 
 ```bash
 # Example: start a local Postgres container
 docker run --name pubky-postgres \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=pubky_homeserver \
   -p 127.0.0.1:5432:5432 \
-  -d postgres:18-alpine
+  -d postgres:18
 ```
 
 The `TEST_PUBKY_CONNECTION_STRING` environment variable is used by both testnet types to configure the database connection.
@@ -75,7 +59,7 @@ For testing without a separate Postgres installation, enable the `docker-postgre
 
 ```toml
 [dev-dependencies]
-pubky-testnet = { version = "0.9", features = ["docker-postgres"] }
+pubky-testnet = { version = "<version>", features = ["docker-postgres"] }
 ```
 
 ```rust,no_run
@@ -138,6 +122,37 @@ async fn test_two() {
 ```
 
 Each testnet still gets its own ephemeral database within the shared PostgreSQL instance, so tests remain isolated.
+
+### External PostgreSQL
+
+If you prefer to use an external Postgres instance, set the `TEST_PUBKY_CONNECTION_STRING` environment variable:
+
+```bash
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+  cargo test -p my-crate
+```
+
+Or pass the connection string programmatically:
+
+```rust,no_run
+use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConnectionString};
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn my_test() {
+    let connection_string = ConnectionString::new(
+        "postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true"
+    ).unwrap();
+
+    let testnet = EphemeralTestnet::builder()
+        .postgres(connection_string)
+        .build()
+        .await
+        .unwrap();
+}
+```
+
+The `?pubky-test=true` parameter tells the homeserver to create an ephemeral `pubky_test_*` database. The `#[pubky_testnet::test]` macro ensures the database is cleaned up after the test completes or panics.
 
 ### Custom Configuration
 
@@ -217,19 +232,3 @@ Seed a custom config on first run (errors if `config.toml` already exists in the
 TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo run -p pubky-testnet -- --homeserver-config my-config.toml persist ./my-testnet-data
 ```
-
-## Troubleshooting
-
-### Docker not running
-
-The `docker-postgres` feature requires Docker. If you see `"Is Docker running?"` errors, ensure the Docker daemon is started and your user has permission to access it (e.g., is in the `docker` group).
-
-### Docker Hub rate limits
-
-The Postgres image is pulled from Docker Hub. Anonymous pulls are limited to 100 per 6 hours. If you hit this, either `docker login` or pre-pull the image:
-
-```bash
-docker pull postgres
-```
-
-Once cached locally, subsequent test runs won't pull again.

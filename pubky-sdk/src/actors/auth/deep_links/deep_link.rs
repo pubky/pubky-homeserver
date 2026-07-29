@@ -3,9 +3,9 @@ use std::{fmt::Display, str::FromStr};
 use url::Url;
 
 use crate::actors::auth::deep_links::{
-    DEEP_LINK_SCHEMES, error::DeepLinkParseError, seed_export::SeedExportDeepLink,
-    signin::SigninDeepLink, signin_grant::SigninGrantDeepLink, signup::SignupDeepLink,
-    signup_grant::SignupGrantDeepLink,
+    DEEP_LINK_SCHEMES, direct_signup::DirectSignupDeepLink, error::DeepLinkParseError,
+    seed_export::SeedExportDeepLink, signin::SigninDeepLink, signin_grant::SigninGrantDeepLink,
+    signup::SignupDeepLink, signup_grant::SignupGrantDeepLink,
 };
 
 /// A parsed Pubky deep link.
@@ -19,6 +19,8 @@ pub enum DeepLink {
     Signin(SigninDeepLink),
     /// A signup deep link (legacy cookie flow).
     Signup(SignupDeepLink),
+    /// A direct signup deep link.
+    DirectSignup(DirectSignupDeepLink),
     /// A signin deep link for the grant flow.
     SigninGrant(SigninGrantDeepLink),
     /// A signup deep link for the grant flow.
@@ -34,6 +36,7 @@ impl DeepLink {
         match self {
             DeepLink::Signin(signin) => signin.into(),
             DeepLink::Signup(signup) => signup.into(),
+            DeepLink::DirectSignup(signup) => signup.into(),
             DeepLink::SigninGrant(signin) => signin.into(),
             DeepLink::SignupGrant(signup) => signup.into(),
             DeepLink::SeedExport(seed_export) => seed_export.into(),
@@ -46,6 +49,7 @@ impl Display for DeepLink {
         match self {
             DeepLink::Signin(signin) => write!(f, "{signin}"),
             DeepLink::Signup(signup) => write!(f, "{signup}"),
+            DeepLink::DirectSignup(signup) => write!(f, "{signup}"),
             DeepLink::SigninGrant(signin) => write!(f, "{signin}"),
             DeepLink::SignupGrant(signup) => write!(f, "{signup}"),
             DeepLink::SeedExport(seed_export) => write!(f, "{seed_export}"),
@@ -65,6 +69,9 @@ impl FromStr for DeepLink {
         match intent.as_str() {
             "signin" => Ok(DeepLink::Signin(SigninDeepLink::parse_url(&url)?)),
             "signup" => Ok(DeepLink::Signup(SignupDeepLink::parse_url(&url)?)),
+            "direct_signup" => Ok(DeepLink::DirectSignup(DirectSignupDeepLink::parse_url(
+                &url,
+            )?)),
             "signin_grant" => Ok(DeepLink::SigninGrant(SigninGrantDeepLink::parse_url(&url)?)),
             "signup_grant" => Ok(DeepLink::SignupGrant(SignupGrantDeepLink::parse_url(&url)?)),
             "secret_export" => Ok(DeepLink::SeedExport(SeedExportDeepLink::parse_url(&url)?)),
@@ -116,6 +123,13 @@ mod tests {
         let deep_link = "pubkyauth://signup?caps=/pub/pubky.app/:rw&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&relay=https://httprelay.pubky.app/inbox&hs=5jsjx1o6fzu6aeeo697r3i5rx15zq41kikcye8wtwdqm4nb4tryo&st=1234567890";
         let parsed: DeepLink = deep_link.parse().unwrap();
         assert!(matches!(parsed, DeepLink::Signup(_)));
+    }
+
+    #[test]
+    fn test_parse_deep_link_direct_signup() {
+        let deep_link = "pubkyauth://direct_signup?hs=5jsjx1o6fzu6aeeo697r3i5rx15zq41kikcye8wtwdqm4nb4tryo&st=1234567890";
+        let parsed: DeepLink = deep_link.parse().unwrap();
+        assert!(matches!(parsed, DeepLink::DirectSignup(_)));
     }
 
     #[test]

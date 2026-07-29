@@ -1,9 +1,17 @@
-mod multi_republisher;
-mod publisher;
+mod batch_republisher;
+mod republish_summary;
 mod republisher;
-mod resilient_client;
-mod verify;
+mod retrying_republisher;
 
-pub use multi_republisher::{MultiRepublishResult, MultiRepublisher};
-pub use republisher::RepublisherSettings;
-pub use resilient_client::ResilientClientBuilderError;
+pub use batch_republisher::{BatchRepublisher, BatchRepublisherSettings};
+pub use republish_summary::RepublishSummary;
+
+#[cfg(test)]
+pub(super) fn test_client_builder(testnet: &pkarr::mainline::Testnet) -> pkarr::ClientBuilder {
+    let mut builder = pkarr::ClientBuilder::default();
+    builder
+        .no_default_network()
+        .bootstrap(&testnet.bootstrap)
+        .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
+    builder
+}

@@ -24,6 +24,7 @@ axum-extra = { version = "0.10", features = [
     "typed-header",
     "async-read-body",
 ] }
+backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
 base32.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -56,7 +57,7 @@ governor = "0.10"
 fast-glob = "0.4"
 tokio-util = "0.7"
 percent-encoding = "2"
-serde_valid = "1"
+serde_valid = "2"
 opendal = { version = "0.54", features = ["services-fs"] }
 infer = "0.19"
 mime_guess = "2"

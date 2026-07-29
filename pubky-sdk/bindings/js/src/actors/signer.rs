@@ -123,6 +123,16 @@ impl Signer {
         Ok(())
     }
 
+    /// Handle a `pubkyauth://` deep link.
+    ///
+    /// Auth requests are approved through their relay. A `direct_signup` link
+    /// creates an account on its target homeserver.
+    #[wasm_bindgen(js_name = "handleDeepLink")]
+    pub async fn handle_deeplink(&self, pubkyauth_url: String) -> JsResult<()> {
+        self.0.handle_deeplink(&pubkyauth_url).await?;
+        Ok(())
+    }
+
     /// Get a PKDNS actor bound to this signer's client & keypair (publishing enabled).
     ///
     /// @returns {Pkdns}

@@ -14,7 +14,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use axum::{routing::get, Router};
+use axum::{middleware as axum_middleware, routing::get, Router};
 use axum_server::{
     tls_rustls::{RustlsAcceptor, RustlsConfig},
     Handle,
@@ -25,6 +25,7 @@ use tower_cookies::CookieManagerLayer;
 use tower_http::cors::CorsLayer;
 
 use super::auth::{self, AuthenticationLayer};
+use super::cache_policy;
 use super::middleware::{
     pubky_host::PubkyHostLayer,
     rate_limiter::{BandwidthQuotaLimitLayer, RequestRateLimitLayer},
@@ -210,7 +211,11 @@ fn base() -> Router<AppState> {
         .route("/signup_tokens/{token}", get(signup_tokens::get))
         // Events
         .route("/events/", get(events::feed))
-        .route("/events-stream", get(events::feed_stream))
+        .route(
+            "/events-stream",
+            get(events::feed_stream)
+                .layer(axum_middleware::from_fn(cache_policy::sse_cache_policy)),
+        )
 
     // TODO: add size limit
     // TODO: revisit if we enable streaming big payloads

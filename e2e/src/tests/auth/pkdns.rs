@@ -25,7 +25,7 @@ async fn republish_if_stale_triggers_timestamp_bump() {
     // Capture initial record timestamp
     let ts1 = client
         .pkarr()
-        .resolve_most_recent(&pubky)
+        .resolve(&pubky, pkarr::ResolvePolicy::NetworkOnly)
         .await
         .unwrap()
         .timestamp()
@@ -41,7 +41,7 @@ async fn republish_if_stale_triggers_timestamp_bump() {
 
     let ts2 = client
         .pkarr()
-        .resolve_most_recent(&pubky)
+        .resolve(&pubky, pkarr::ResolvePolicy::NetworkOnly)
         .await
         .unwrap()
         .timestamp()
@@ -73,7 +73,7 @@ async fn conditional_publish_skips_when_fresh() {
 
     let ts1 = client
         .pkarr()
-        .resolve_most_recent(&pubky)
+        .resolve(&pubky, pkarr::ResolvePolicy::NetworkOnly)
         .await
         .unwrap()
         .timestamp()
@@ -86,7 +86,7 @@ async fn conditional_publish_skips_when_fresh() {
 
     let ts2 = client
         .pkarr()
-        .resolve_most_recent(&pubky)
+        .resolve(&pubky, pkarr::ResolvePolicy::NetworkOnly)
         .await
         .unwrap()
         .timestamp()
@@ -118,7 +118,7 @@ async fn test_republish_homeserver() {
     let ts1 = pubky
         .client()
         .pkarr()
-        .resolve_most_recent(&public_key)
+        .resolve(&public_key, pkarr::ResolvePolicy::NetworkOnly)
         .await
         .unwrap()
         .timestamp()
@@ -131,7 +131,7 @@ async fn test_republish_homeserver() {
     let ts2 = pubky
         .client()
         .pkarr()
-        .resolve_most_recent(&public_key)
+        .resolve(&public_key, pkarr::ResolvePolicy::NetworkOnly)
         .await
         .unwrap()
         .timestamp()
@@ -147,7 +147,7 @@ async fn test_republish_homeserver() {
     let ts3 = pubky
         .client()
         .pkarr()
-        .resolve_most_recent(&public_key)
+        .resolve(&public_key, pkarr::ResolvePolicy::NetworkOnly)
         .await
         .unwrap()
         .timestamp()

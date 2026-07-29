@@ -8,13 +8,13 @@
 use std::time::Duration;
 
 use pkarr::{
-    SignedPacket, Timestamp,
+    ResolvePolicy, SignedPacket, Timestamp,
     dns::rdata::{RData, SVCB},
 };
 
 use crate::{
     Keypair, PubkyHttpClient, PubkySigner, PublicKey, cross_log,
-    errors::{AuthError, Error, PkarrError, Result},
+    errors::{AuthError, Error, PkarrError, RequestError, Result},
 };
 
 /// Default staleness window for homeserver `_pubky` Pkarr records (1 hour).
@@ -139,17 +139,21 @@ impl Pkdns {
 
     // -------------------- Reads --------------------
 
-    /// Resolve current homeserver host for a user public key via Pkarr (no keypair required).
+    /// Resolve a user's homeserver public key via Pkarr.
     ///
-    /// Returns the `_pubky` SVCB/HTTPS target (domain or pubkey-as-host),
-    /// or `None` if the record is missing/unresolvable.
+    /// Returns `None` for missing records and for domain-only `_pubky` targets.
     pub async fn get_homeserver_of(&self, user_public_key: &PublicKey) -> Option<PublicKey> {
         cross_log!(
             info,
             "Resolving homeserver for public key {} via PKARR",
             user_public_key
         );
-        let packet = self.client.pkarr().resolve(user_public_key).await?;
+        let packet = self
+            .client
+            .pkarr()
+            .resolve(user_public_key, ResolvePolicy::CacheFirst)
+            .await
+            .ok()?;
         let s = extract_host_from_packet(&packet)?;
         let result = PublicKey::try_from_z32(&s).ok();
         cross_log!(
@@ -159,6 +163,20 @@ impl Pkdns {
             result
         );
         result
+    }
+
+    pub(crate) async fn require_homeserver_of(
+        &self,
+        user_public_key: &PublicKey,
+    ) -> Result<PublicKey> {
+        self.get_homeserver_of(user_public_key)
+            .await
+            .ok_or_else(|| {
+                RequestError::Validation {
+                    message: format!("could not resolve homeserver for {}", user_public_key.z32()),
+                }
+                .into()
+            })
     }
 
     /// Convenience: resolve the homeserver for **this** user (requires keypair on `Pkdns`).
@@ -226,7 +244,22 @@ impl Pkdns {
             pubky,
             mode
         );
-        let existing = self.client.pkarr().resolve_most_recent(&pubky).await;
+        let resolved = self
+            .client
+            .pkarr()
+            .resolve(&pubky, ResolvePolicy::NetworkOnly)
+            .await
+            .ok();
+        // `NetworkOnly` can observe an older packet while a newer packet is still
+        // propagating. The client never downgrades its cache, so reconcile with the
+        // cache after resolving before using the packet as the basis for a write.
+        let cached = self
+            .client
+            .pkarr()
+            .resolve(&pubky, ResolvePolicy::CacheOnly)
+            .await
+            .ok();
+        let existing = most_recent_packet(resolved, cached);
 
         // 2) Decide host string to publish.
         let Some(host_str) = Self::select_host(&pubky, host_override, existing.as_ref()) else {
@@ -260,7 +293,7 @@ impl Pkdns {
 
         self.client
             .pkarr()
-            .publish(&signed_packet, existing.map(|s| s.timestamp()))
+            .publish(&signed_packet)
             .await
             .map_err(PkarrError::from)?;
 
@@ -408,6 +441,19 @@ enum PublishMode {
     IfStale,
 }
 
+/// Select the most recent of two packets for the same public key.
+fn most_recent_packet(
+    first: Option<SignedPacket>,
+    second: Option<SignedPacket>,
+) -> Option<SignedPacket> {
+    match (first, second) {
+        (Some(first), Some(second)) if first.more_recent_than(&second) => Some(first),
+        (Some(_first), Some(second)) => Some(second),
+        (Some(packet), None) | (None, Some(packet)) => Some(packet),
+        (None, None) => None,
+    }
+}
+
 /// Pick a host to publish: explicit override or the one found in the DHT packet.
 fn determine_host(
     override_host: Option<&PublicKey>,
@@ -436,6 +482,27 @@ pub fn extract_host_from_packet(packet: &SignedPacket) -> Option<String> {
 mod tests {
     use super::*;
     use pkarr::dns::rdata::TXT;
+
+    #[tokio::test]
+    async fn require_homeserver_of_returns_validation_when_unresolved() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .expect("client");
+        let pkdns = Pkdns::with_client(client);
+        let user = Keypair::random().public_key();
+
+        let err = pkdns
+            .require_homeserver_of(&user)
+            .await
+            .expect_err("missing homeserver should be a validation error");
+
+        assert!(matches!(
+            err,
+            Error::Request(crate::errors::RequestError::Validation { message })
+                if message == format!("could not resolve homeserver for {}", user.z32())
+        ));
+    }
 
     #[test]
     fn republish_preserves_non_pubky_records() {
@@ -492,5 +559,52 @@ mod tests {
 
         assert_eq!(republished_dnslink.ttl, original_dnslink.ttl);
         assert_eq!(republished_dnslink.rdata, original_dnslink.rdata);
+    }
+
+    #[test]
+    fn republish_uses_newer_cached_packet_as_record_source() {
+        let keypair = Keypair::random();
+        let host = Keypair::random().public_key().z32();
+
+        let network_packet = SignedPacket::builder()
+            .timestamp(Timestamp::from(1))
+            .https(
+                "_pubky".try_into().expect("_pubky name"),
+                SVCB::new(0, host.as_str().try_into().expect("host name conversion")),
+                3600,
+            )
+            .sign(&keypair)
+            .expect("signed network packet");
+
+        let mut dnslink_txt = TXT::new();
+        dnslink_txt
+            .add_string("dnslink=/ipfs/newer")
+            .expect("valid dnslink string");
+        let cached_packet = SignedPacket::builder()
+            .timestamp(Timestamp::from(2))
+            .https(
+                "_pubky".try_into().expect("_pubky name"),
+                SVCB::new(0, host.as_str().try_into().expect("host name conversion")),
+                3600,
+            )
+            .txt(
+                "_dnslink".try_into().expect("_dnslink name"),
+                dnslink_txt,
+                3600,
+            )
+            .sign(&keypair)
+            .expect("signed cached packet");
+
+        let existing = most_recent_packet(Some(network_packet), Some(cached_packet))
+            .expect("most recent packet");
+        let republished = Pkdns::build_homeserver_packet(&keypair, &host, Some(&existing))
+            .expect("republished packet");
+
+        assert!(
+            republished
+                .all_resource_records()
+                .any(|record| record.name.to_string().starts_with("_dnslink")),
+            "records from the newer cached packet should be preserved"
+        );
     }
 }

@@ -7,6 +7,7 @@
 mod app;
 pub(crate) mod app_state;
 pub(crate) mod auth;
+pub(crate) mod cache_policy;
 mod middleware;
 mod query_params;
 pub(crate) mod routes;

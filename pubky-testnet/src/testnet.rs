@@ -161,10 +161,16 @@ impl Testnet {
             .disable_rate_limiter()
             .http_port(0)
             .storage(dir.path().to_path_buf())
-            .pkarr(|builder| {
-                builder.no_default_network();
-                builder.bootstrap(&self.dht.bootstrap);
-                builder
+            .report_policy(pkarr::dht::ReportPolicy::testnet())
+            .dht(|config| {
+                config.bootstrap = Some(
+                    self.dht
+                        .bootstrap
+                        .iter()
+                        .map(|address| address.parse().expect("testnet bootstrap address is valid"))
+                        .collect(),
+                );
+                config
             });
         let relay = unsafe { builder.run().await? };
         let url = relay.local_url();
@@ -178,12 +184,11 @@ impl Testnet {
     /// Returns a list of DHT bootstrapping nodes.
     pub fn dht_bootstrap_nodes(&self) -> Vec<DomainPort> {
         self.dht
-            .nodes
+            .bootstrap
             .iter()
-            .map(|node| {
-                let addr = node.info().local_addr();
-                DomainPort::from_str(&format!("{}:{}", addr.ip(), addr.port()))
-                    .expect("boostrap nodes from the pkarr dht are always valid domain:port pairs")
+            .map(|address| {
+                DomainPort::from_str(address)
+                    .expect("bootstrap nodes from the pkarr dht are always valid domain:port pairs")
             })
             .collect()
     }
@@ -199,19 +204,20 @@ impl Testnet {
 
         let mut builder = pubky::PubkyHttpClient::builder();
         builder.pkarr(|builder| {
-            builder.no_default_network();
-            builder.bootstrap(&self.dht.bootstrap);
+            builder
+                .no_default_network()
+                .bootstrap(&self.dht.bootstrap)
+                .dht_report_policy(pkarr::dht::ReportPolicy::testnet())
+                // 100ms timeout for requests. This makes network-only resolution fast
+                // because it doesn't need to wait the default 2s which would slow down the tests.
+                .request_timeout(Duration::from_millis(100));
             if relays.is_empty() {
-                builder.no_relays();
+                builder.no_relays()
             } else {
                 builder
                     .relays(&relays)
-                    .expect("testnet relays should be valid urls");
+                    .expect("testnet relays should be valid urls")
             }
-            // 100ms timeout for requests. This makes methods like `resolve_most_recent` fast
-            // because it doesn't need to wait the default 2s which would slow down the tests.
-            builder.request_timeout(Duration::from_millis(100));
-            builder
         });
 
         builder
@@ -236,7 +242,9 @@ impl Testnet {
         let relays = self.dht_relay_urls();
         let mut builder = pkarr::Client::builder();
         builder.no_default_network(); // Remove DHT bootstrap nodes and relays
-        builder.bootstrap(&self.dht.bootstrap);
+        builder
+            .bootstrap(&self.dht.bootstrap)
+            .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
         if !relays.is_empty() {
             builder
                 .relays(&relays)
@@ -305,7 +313,10 @@ mod test {
 
         // Make sure the pkarr packet of the hs is resolvable.
         let pkarr_client = testnet.pkarr_client_builder().build().unwrap();
-        let _packet = pkarr_client.resolve(&hs_pubky).await.unwrap();
+        let _packet = pkarr_client
+            .resolve(&hs_pubky, pkarr::ResolvePolicy::CacheFirst)
+            .await
+            .unwrap();
 
         // Make sure the pkarr can resolve the hs_pubky.
         let pubkey = hs_pubky.z32();
@@ -329,14 +340,16 @@ mod test {
         // Publish packet on the DHT without using the relay.
         let client = testnet.pkarr_client_builder().build().unwrap();
         let signed = pkarr::SignedPacket::builder().sign(&keypair).unwrap();
-        client.publish(&signed, None).await.unwrap();
+        client.publish(&signed).await.unwrap();
 
         // Resolve packet with a new client to prevent caching
         // Only use the DHT, no relays
         let client = testnet.pkarr_client_builder().no_relays().build().unwrap();
-        let packet = client.resolve(&keypair.public_key()).await;
+        let packet = client
+            .resolve(&keypair.public_key(), pkarr::ResolvePolicy::CacheFirst)
+            .await;
         assert!(
-            packet.is_some(),
+            packet.is_ok(),
             "Published packet is not available over the DHT."
         );
 
@@ -344,9 +357,11 @@ mod test {
         // Only use the relay, no DHT
         // This simulates pkarr clients in a browser.
         let client = testnet.pkarr_client_builder().no_dht().build().unwrap();
-        let packet = client.resolve(&keypair.public_key()).await;
+        let packet = client
+            .resolve(&keypair.public_key(), pkarr::ResolvePolicy::CacheFirst)
+            .await;
         assert!(
-            packet.is_some(),
+            packet.is_ok(),
             "Published packet is not available over the relay only."
         );
     }

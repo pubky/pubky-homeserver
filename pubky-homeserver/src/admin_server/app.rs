@@ -227,7 +227,7 @@ mod tests {
     ) -> pubky_common::crypto::PublicKey {
         use crate::persistence::files::events::EventType;
         use crate::persistence::sql::user::UserRepository;
-        use crate::shared::webdav::{EntryPath, WebDavPath};
+        use crate::shared::webdav::{EntryPath, StoragePath};
         use pubky_common::crypto::{Hash, Keypair};
 
         let pubkey = Keypair::random().public_key();
@@ -235,7 +235,7 @@ mod tests {
             .await
             .unwrap();
         for p in paths {
-            let path = EntryPath::new(pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(p).unwrap());
             context
                 .events_service
                 .create_event(
@@ -478,7 +478,7 @@ mod tests {
         let server = create_test_server(&context);
         let auth_value = auth_header();
 
-        // Register a user so writes are accepted by the entry layer
+        // Register a user so storage finalization can lock and account for the write.
         let keypair = Keypair::from_secret(&[0; 32]);
         let pubkey = keypair.public_key();
         UserRepository::create(&pubkey, &mut context.sql_db.pool().into())

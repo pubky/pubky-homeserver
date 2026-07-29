@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::WebDavPath;
+use super::StoragePath;
 
 /// A webdav path that can be used with axum.
 ///
@@ -17,10 +17,10 @@ use super::WebDavPath;
 ///
 /// `Path(path): Path<WebDavPathAxum>`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct WebDavPathAxum(WebDavPath);
+pub struct WebDavPathAxum(StoragePath);
 
 impl WebDavPathAxum {
-    pub fn inner(&self) -> &WebDavPath {
+    pub fn inner(&self) -> &StoragePath {
         &self.0
     }
 }
@@ -36,7 +36,7 @@ impl FromStr for WebDavPathAxum {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let with_slash = format!("/{}", s);
-        let inner = WebDavPath::new(&with_slash)?;
+        let inner = StoragePath::normalize(&with_slash)?;
         Ok(Self(inner))
     }
 }
@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for WebDavPathAxum {
 pub struct WebDavFilePathAxum(WebDavPathAxum);
 
 impl WebDavFilePathAxum {
-    pub fn inner(&self) -> &WebDavPath {
+    pub fn inner(&self) -> &StoragePath {
         self.0.inner()
     }
 }

@@ -1,0 +1,19 @@
+{
+  "name": "pubky-browser-session-persistence",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "npm run dev",
+    "dev": "vite --host --open",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@synonymdev/pubky": "file:../../../pubky-sdk/bindings/js/pkg",
+    "lit": "^3.2.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.2"
+  }
+}

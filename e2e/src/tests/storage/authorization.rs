@@ -72,60 +72,27 @@ async fn unauthorized_put_delete() {
 
 #[tokio::test]
 #[pubky_testnet::test]
-async fn priv_writes_are_accepted() {
-    // `/priv/` writes are authorized exactly like `/pub/` writes
+async fn priv_owner_with_cap_is_authorized() {
+    // The owner exercises the full read/write surface on their own `/priv/` data,
+    // and gets a real 404 (not 401/403) for an absent private path. Denial for the
+    // other actor tiers is covered by the `private_data` matrix.
     let testnet = build_full_testnet().await;
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
 
     let owner = pubky.signer(Keypair::random());
-    let owner_session = owner
+    let session = owner
         .signup_cookie(&server.public_key(), None)
         .await
         .unwrap();
 
-    let path = "/priv/foo.txt";
+    let path = "/priv/app/secret.txt";
+    let content = vec![1, 2, 3];
 
-    // Owner writes to /priv successfully
-    let resp = owner_session
-        .storage()
-        .put(path, vec![0, 1, 2, 3, 4])
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-
-    // Owner deletes the /priv file successfully.
-    let resp = owner_session.storage().delete(path).await.unwrap();
-    assert!(resp.status().is_success());
-}
-
-#[tokio::test]
-#[pubky_testnet::test]
-async fn priv_reads_require_auth() {
-    // The owner can read back their own `/priv/` data, anonymous callers get 401.
-    let testnet = build_full_testnet().await;
-    let server = testnet.homeserver_app();
-    let pubky = testnet.sdk().unwrap();
-
-    let owner = pubky.signer(Keypair::random());
-    let owner_session = owner
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
-
-    let path = "/priv/secret.txt";
-    let content = vec![9, 8, 7, 6, 5];
-
-    // Owner writes the private file.
-    let resp = owner_session
-        .storage()
-        .put(path, content.clone())
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-
-    // Owner reads it back → 200 with the same bytes.
-    let body = owner_session
+    // Write, then read back the same bytes.
+    let resp = session.storage().put(path, content.clone()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = session
         .storage()
         .get(path)
         .await
@@ -135,22 +102,30 @@ async fn priv_reads_require_auth() {
         .unwrap();
     assert_eq!(body, bytes::Bytes::from(content));
 
-    // Anonymous read of the owners private path → 401 Unauthorized.
-    let owner_url = format!(
-        "{}/{}",
-        owner_session.info().public_key(),
-        path.trim_start_matches('/')
-    );
-    let owner_transport_url = owner_url
-        .into_pubky_resource()
+    // The private directory lists for the owner.
+    let listing = session
+        .storage()
+        .list("/priv/app/")
         .unwrap()
-        .to_transport_url()
-        .unwrap();
-    let response = pubky
-        .client()
-        .request(Method::GET, &owner_transport_url)
         .send()
         .await
         .unwrap();
-    assert!(matches!(response.status(), StatusCode::UNAUTHORIZED));
+    assert!(
+        !listing.is_empty(),
+        "owner should see their private listing"
+    );
+
+    // Delete succeeds.
+    let resp = session.storage().delete(path).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // An absent private path is a real 404 for the authorized owner.
+    let err = session
+        .storage()
+        .get("/priv/app/absent.txt")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::NOT_FOUND)
+    );
 }

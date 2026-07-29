@@ -1,5 +1,6 @@
 //! HTTP methods that support `https://` with Pkarr domains, including `_pubky.<pk>` URLs
 
+use super::homeserver_url;
 use crate::PublicKey;
 use crate::errors::{PkarrError, RequestError, Result};
 use crate::{PubkyHttpClient, cross_log};
@@ -9,6 +10,12 @@ use pkarr::extra::endpoints::Endpoint;
 use reqwest::{IntoUrl, Method, RequestBuilder};
 use url::Url;
 
+#[derive(Clone, Copy)]
+enum AmbientCredentials {
+    Include,
+    Omit,
+}
+
 impl PubkyHttpClient {
     /// A wrapper around [`PubkyHttpClient::request`], with the same signature between native and WASM.
     pub(crate) async fn cross_request<T: IntoUrl>(
@@ -16,15 +23,54 @@ impl PubkyHttpClient {
         method: Method,
         url: T,
     ) -> Result<RequestBuilder> {
+        self.cross_request_with_credentials(method, url, AmbientCredentials::Include)
+            .await
+    }
+
+    /// Like [`Self::cross_request`], but omits ambient browser cookies.
+    pub(crate) async fn cross_request_anonymous<T: IntoUrl>(
+        &self,
+        method: Method,
+        url: T,
+    ) -> Result<RequestBuilder> {
+        self.cross_request_with_credentials(method, url, AmbientCredentials::Omit)
+            .await
+    }
+
+    /// Route through `homeserver` while addressing `pubky_host`.
+    pub(crate) async fn cross_request_via_homeserver(
+        &self,
+        method: Method,
+        homeserver: &PublicKey,
+        pubky_host: &PublicKey,
+        path: &str,
+    ) -> Result<RequestBuilder> {
+        let mut url = homeserver_url(homeserver, path)?;
+        self.prepare_request(&mut url).await?;
+
+        Ok(self
+            .http
+            .request(method, url)
+            .fetch_credentials_include()
+            .header("pubky-host", pubky_host.z32()))
+    }
+
+    async fn cross_request_with_credentials<T: IntoUrl>(
+        &self,
+        method: Method,
+        url: T,
+        credentials: AmbientCredentials,
+    ) -> Result<RequestBuilder> {
         let original_url = url.as_str();
         let mut url = Url::parse(original_url)?;
 
         let pubky_host = self.prepare_request(&mut url).await?;
 
-        let builder = self
-            .http
-            .request(method, url.clone())
-            .fetch_credentials_include();
+        let request = self.http.request(method, url.clone());
+        let builder = match credentials {
+            AmbientCredentials::Include => request.fetch_credentials_include(),
+            AmbientCredentials::Omit => request.fetch_credentials_omit(),
+        };
 
         let builder = if let Some(pubky_host) = pubky_host {
             builder.header("pubky-host", pubky_host)

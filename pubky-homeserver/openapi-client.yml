@@ -1,0 +1,893 @@
+---
+openapi: 3.1.0
+info:
+  title: Pubky Homeserver Client API
+  description: |-
+    The Client Server is the primary Pubky Homeserver API for user authentication,
+    tenant file storage, and event streaming.
+
+    ## Tenant Identification
+
+    Per-tenant (user) routes resolve the target user from these sources (highest priority first):
+    1. `pubky-host` header (explicit override; takes precedence over `Host`)
+    2. `Host` header (e.g. from TLS SNI on the Pubky socket)
+    3. `?pubky-host=` query parameter (fallback when no key is found in headers)
+
+    The value must be a z-base-32 encoded Ed25519 public key.
+
+    ## Authentication
+
+    Two authentication methods exist:
+    - **Grant-based (current):** `Authorization: Bearer <token>` obtained via `POST /auth/grant/session`.
+    - **Cookie-based (deprecated):** Session cookie set by `POST /signup` or `POST /session`.
+
+    Grant middleware runs first; if it produces a session, cookie middleware is skipped.
+
+    ## Capabilities
+
+    Write operations and private reads are gated by capability-based access control.
+    Capabilities are path-scoped (e.g. `read_write:/pub/app/`) or `root`.
+
+    ## Write Path Restriction
+
+    All PUT/DELETE operations require paths under `/pub/` or `/priv/`. Attempts to
+    write elsewhere return `403 Forbidden`.
+  version: 0.9.0
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+- url: http://localhost:6287
+  description: Client server (Pubky socket, default port)
+security: []
+tags:
+- name: General
+  description: Health check and public info
+- name: Auth - Grant
+  description: Grant-based authentication (current)
+- name: Auth - Cookie
+  description: Cookie-based authentication (deprecated)
+- name: Data
+  description: Per-tenant file read/write and directory listing
+- name: Events
+  description: Event streaming and historical feeds
+- name: Signup Tokens
+  description: Signup token management
+paths:
+  "/":
+    get:
+      tags:
+      - General
+      summary: Server info
+      description: Basic health check / server identification.
+      operationId: getRoot
+      responses:
+        '200':
+          description: Server name
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Pubky Homeserver
+  "/signup_tokens/{token}":
+    get:
+      tags:
+      - Signup Tokens
+      summary: Check signup token status
+      operationId: getSignupToken
+      parameters:
+      - name: token
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Token status
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SignupTokenResponse"
+        '400':
+          description: Invalid token format or signup tokens not required
+        '404':
+          description: Token not found
+  "/auth/grant/signup":
+    post:
+      tags:
+      - Auth - Grant
+      summary: Create account with grant
+      operationId: grantSignup
+      parameters:
+      - name: signup_token
+        in: query
+        required: false
+        description: Required if the server's signup mode is `TokenRequired`.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CreateGrantSessionRequest"
+      responses:
+        '204':
+          description: Account created successfully
+        '400':
+          description: Invalid token format, invalid grant format, or signup token
+            required
+        '401':
+          description: Invalid grant signature, expired grant, invalid/used signup
+            token, or PoP verification failed
+        '409':
+          description: User already exists
+  "/auth/grant/session":
+    post:
+      tags:
+      - Auth - Grant
+      summary: Exchange grant + PoP for bearer token
+      operationId: createGrantSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CreateGrantSessionRequest"
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/GrantSessionResponse"
+        '400':
+          description: Invalid grant format or invalid signup grant
+        '401':
+          description: Invalid grant signature, expired grant, PoP verification failed,
+            nonce replay, or grant revoked/expired
+        '404':
+          description: User not found
+    get:
+      tags:
+      - Auth - Grant
+      summary: Get current grant session info
+      operationId: getGrantSession
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Session info
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/GrantSessionInfo"
+        '401':
+          description: No valid grant session
+    delete:
+      tags:
+      - Auth - Grant
+      summary: Revoke current grant session
+      description: Idempotent — returns 200 even without a valid session.
+      operationId: deleteGrantSession
+      security:
+      - bearerAuth: []
+      - {}
+      responses:
+        '200':
+          description: Session revoked (idempotent)
+  "/auth/grant/sessions":
+    get:
+      tags:
+      - Auth - Grant
+      summary: List all active grants
+      description: Requires root capability.
+      operationId: listGrants
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: List of active grants
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  "$ref": "#/components/schemas/GrantInfo"
+        '401':
+          description: No valid session
+        '403':
+          description: Session lacks root capability
+  "/auth/grant/session/{gid}":
+    delete:
+      tags:
+      - Auth - Grant
+      summary: Revoke a specific grant
+      description: Requires root capability. Revokes the grant and all its sessions.
+      operationId: revokeGrant
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: gid
+        in: path
+        required: true
+        description: Grant ID to revoke
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Grant revoked
+        '400':
+          description: Invalid grant ID format
+        '401':
+          description: No valid session
+        '403':
+          description: Session lacks root capability or grant does not belong to authenticated
+            user
+        '404':
+          description: Grant not found
+  "/signup":
+    post:
+      tags:
+      - Auth - Cookie
+      summary: Create user and login (deprecated)
+      operationId: cookieSignup
+      deprecated: true
+      parameters:
+      - name: signup_token
+        in: query
+        required: false
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: Postcard-serialized AuthToken
+      responses:
+        '200':
+          description: Signup successful
+          headers:
+            Set-Cookie:
+              description: Session cookie
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Postcard-serialized session record
+        '400':
+          description: Invalid AuthToken, token format, or signup token required
+        '401':
+          description: Invalid or already-used signup token
+        '409':
+          description: User already exists
+  "/session":
+    post:
+      tags:
+      - Auth - Cookie
+      summary: Sign in (deprecated)
+      operationId: cookieSignin
+      deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: Postcard-serialized AuthToken
+      responses:
+        '200':
+          description: Signin successful
+          headers:
+            Set-Cookie:
+              description: Session cookie
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid AuthToken
+        '404':
+          description: User not found
+    get:
+      tags:
+      - Auth - Cookie
+      summary: Get current session info (deprecated)
+      operationId: getCookieSession
+      deprecated: true
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Session info
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Postcard-serialized legacy session info
+        '401':
+          description: No valid cookie session
+    delete:
+      tags:
+      - Auth - Cookie
+      summary: Logout (deprecated)
+      description: Idempotent — returns 200 even without a valid session.
+      operationId: cookieSignout
+      deprecated: true
+      security:
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          description: Logged out (idempotent)
+          headers:
+            Set-Cookie:
+              description: Cookie removal header
+              schema:
+                type: string
+  "/{path}":
+    parameters:
+    - name: path
+      in: path
+      required: true
+      description: |
+        WebDAV path relative to the tenant. Must start with `pub/` or `priv/` for
+        reads and writes. May contain slashes (multi-segment).
+      schema:
+        type: string
+      examples:
+        file:
+          value: pub/documents/notes.txt
+        directory:
+          value: pub/documents/
+    - "$ref": "#/components/parameters/PubkyHost"
+    - "$ref": "#/components/parameters/PubkyHostQuery"
+    get:
+      tags:
+      - Data
+      summary: Get file or list directory
+      description: |
+        If the path points to a file, returns the file content with caching headers.
+        If the path points to a directory (trailing `/`), returns a newline-separated
+        list of `pubky://` URLs.
+
+        Supports conditional requests via `If-None-Match` and `If-Modified-Since`.
+      operationId: getEntry
+      security:
+      - {}
+      - bearerAuth: []
+      - cookieAuth: []
+      parameters:
+      - name: limit
+        in: query
+        description: Items per page (directory listing only)
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      - name: cursor
+        in: query
+        description: Pagination cursor (directory listing only). May be a bare path
+          or `pubky://` prefixed.
+        schema:
+          type: string
+      - name: shallow
+        in: query
+        description: List only immediate children instead of deep recursive listing.
+        schema:
+          type: boolean
+          default: false
+      - name: reverse
+        in: query
+        description: Reverse listing order.
+        schema:
+          type: boolean
+          default: false
+      - name: If-None-Match
+        in: header
+        description: Return 304 if any listed ETag matches.
+        schema:
+          type: string
+      - name: If-Modified-Since
+        in: header
+        description: Return 304 if file has not been modified since this date.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: File content or directory listing
+          headers:
+            Content-Type:
+              description: Detected from magic bytes or file extension (files), or
+                `text/plain` (directories).
+              schema:
+                type: string
+            Content-Length:
+              description: File size in bytes (files only).
+              schema:
+                type: integer
+            ETag:
+              description: Quoted base64-encoded BLAKE3 hash (files only).
+              schema:
+                type: string
+                example: '"r0NJufX5oaagQE3qNtzJSZvLJcmtwRK3zJqTyuQfMmI="'
+            Last-Modified:
+              description: HTTP date of last modification (files only).
+              schema:
+                type: string
+            Cache-Control:
+              description: |
+                `/pub/...` files use `private, must-revalidate`; `/priv/...`
+                files and private directory listings use `no-store`.
+              schema:
+                type: string
+                example: no-store
+            Vary:
+              description: |
+                `/pub/...` files vary by `pubky-host`; authentication-dependent
+                `/priv/...` responses vary by `pubky-host, Authorization, Cookie`.
+              schema:
+                type: string
+                example: pubky-host, Authorization, Cookie
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: File content (for file paths)
+            text/plain:
+              schema:
+                type: string
+                description: 'Newline-separated list of `pubky://` URLs (for directory
+                  paths).
+
+'
+                example: |
+                  pubky://o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo/pub/notes.txt
+                  pubky://o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo/pub/photo.png
+        '304':
+          description: Not modified
+          headers:
+            ETag:
+              schema:
+                type: string
+            Last-Modified:
+              schema:
+                type: string
+            Cache-Control:
+              description: "`private, must-revalidate` for `/pub/...`; `no-store`
+                for `/priv/...`.\n"
+              schema:
+                type: string
+            Vary:
+              description: "`pubky-host` for `/pub/...`; `pubky-host, Authorization,
+                Cookie` for `/priv/...`.\n"
+              schema:
+                type: string
+        '400':
+          description: Invalid cursor
+        '401':
+          description: Authentication is required to read a `/priv/` path
+        '403':
+          description: |
+            Session user does not match the target tenant, session lacks read
+            capability for a `/priv/` path, or path is outside `/pub/` and `/priv/`.
+        '404':
+          description: File or directory not found, or tenant (user) does not exist
+          headers:
+            Cache-Control:
+              description: Present as `no-store` for private-path errors.
+              schema:
+                type: string
+                example: no-store
+            Vary:
+              description: Present as full auth vary for private-path errors.
+              schema:
+                type: string
+                example: pubky-host, Authorization, Cookie
+    head:
+      tags:
+      - Data
+      summary: Get file metadata
+      description: Returns the same headers as GET but without the response body.
+      operationId: headEntry
+      security:
+      - {}
+      - bearerAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          description: File metadata in headers
+          headers:
+            Content-Type:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+            ETag:
+              schema:
+                type: string
+            Last-Modified:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+            Vary:
+              schema:
+                type: string
+        '401':
+          description: Authentication is required to read a `/priv/` path
+        '403':
+          description: |
+            Session user does not match the target tenant, session lacks read
+            capability for a `/priv/` path, or path is outside `/pub/` and `/priv/`.
+        '404':
+          description: File not found, or tenant (user) does not exist
+    put:
+      tags:
+      - Data
+      summary: Create or update file
+      description: |
+        Writes a file at the given path. Path must be under `/pub/` or `/priv/`.
+        The authenticated user must match the target tenant and have write capability
+        covering the path.
+
+        If `Content-Length` is provided, a quota pre-check is performed before streaming.
+      operationId: putEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: File created or updated
+        '401':
+          description: No valid session
+        '403':
+          description: |
+            Session user does not match target tenant, path is outside `/pub/` and
+            `/priv/`, session lacks write capability for path, or user account is disabled.
+        '507':
+          description: Storage quota exceeded
+    delete:
+      tags:
+      - Data
+      summary: Delete file
+      description: |
+        Deletes a file at the given path. Path must be under `/pub/` or `/priv/`.
+        The authenticated user must match the target tenant and have write capability.
+      operationId: deleteEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      responses:
+        '204':
+          description: File deleted
+        '401':
+          description: No valid session
+        '403':
+          description: Insufficient permissions or path outside `/pub/` and `/priv/`
+        '404':
+          description: File not found
+  "/events/":
+    get:
+      tags:
+      - Events
+      summary: Historical event feed (plain text)
+      description: 'Legacy endpoint returning a plain-text feed of file change events.
+
+'
+      operationId: getEventFeed
+      parameters:
+      - name: cursor
+        in: query
+        description: Starting cursor position. Defaults to `"0"` (beginning) when
+          omitted.
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Maximum number of events to return.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      responses:
+        '200':
+          description: Event feed
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                PUT pubky://o1gg96ewuo.../pub/example.txt
+                DEL pubky://o1gg96ewuo.../pub/old.txt
+                cursor: 12345
+        '400':
+          description: Invalid cursor
+  "/events-stream":
+    get:
+      tags:
+      - Events
+      summary: Real-time event stream (SSE)
+      description: |-
+        Server-Sent Events endpoint with two modes:
+        - **Batch mode** (`live=false` or omitted): fetches historical events then closes.
+        - **Live mode** (`live=true`): fetches historical events, then streams new events in real-time.
+
+        The repeatable `user` parameter is required. Each value contains a z-base-32 public
+        key and may append its own cursor as `<pubkey>:<cursor>`.
+
+        Public paths may be streamed anonymously. Private `/priv/...` paths require exactly
+        one target user plus a bearer or cookie session with matching read capability.
+        Slow clients that fall behind in live mode will have their connection closed.
+
+        Each SSE message has an event type (`PUT` or `DEL`) and multiline data:
+        ```
+        event: PUT
+        data: pubky://user_pubkey/pub/example.txt
+        data: cursor: 42
+        data: content_hash: r0NJufX5oaagQE3qNtzJSZvLJcmtwRK3zJqTyuQfMmI=
+        ```
+      operationId: getClientEventStream
+      security:
+      - {}
+      - bearerAuth: []
+      - cookieAuth: []
+      parameters:
+      - name: user
+        in: query
+        required: true
+        description: |-
+          One or more user public keys (z-base-32), repeated for multiple users.
+          Append `:cursor` to an individual value to resume that user's feed.
+        schema:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          maxItems: 50
+        style: form
+        explode: true
+        examples:
+          single:
+            value:
+            - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo
+          withCursor:
+            value:
+            - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo:42
+      - name: limit
+        in: query
+        description: Maximum total events to send.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      - name: reverse
+        in: query
+        description: Reverse chronological order. Cannot be combined with `live=true`.
+        schema:
+          type: boolean
+          default: false
+      - name: live
+        in: query
+        description: Enable live streaming mode. Cannot be combined with `reverse=true`.
+        schema:
+          type: boolean
+          default: false
+      - name: path
+        in: query
+        description: |-
+          Path filter (repeatable; union semantics). A trailing slash matches a directory
+          and its descendants; otherwise the exact file is matched. Private `/priv/...`
+          filters require exactly one target user and an authorized session capability.
+        schema:
+          type: array
+          items:
+            type: string
+        style: form
+        explode: true
+        examples:
+          publicDir:
+            value:
+            - "/pub/files/"
+          mixed:
+            value:
+            - "/pub/"
+            - "/priv/app/"
+      responses:
+        '200':
+          description: SSE event stream
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+            Vary:
+              schema:
+                type: string
+                example: pubky-host, Authorization, Cookie
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: |-
+            Invalid user public key or cursor, missing or excessive user parameters,
+            zero/invalid limit, incompatible `live=true` and `reverse=true`, or invalid path.
+        '401':
+          description: A private path was requested without a valid session.
+        '403':
+          description: The session lacks read capability for a requested private path.
+        '404':
+          description: A requested user was not found.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Grant-based bearer token from `POST /auth/grant/session`.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+      description: |
+        Deprecated. In practice, the cookie name is the user's z-base-32
+        public key and the value is the session secret. The `name` field here
+        is a placeholder; the actual name varies per user.
+  parameters:
+    PubkyHost:
+      name: pubky-host
+      in: header
+      required: false
+      description: |
+        Target tenant's z-base-32 encoded public key.
+        On the Pubky TLS socket, this is derived from the `Host` header / SNI.
+      schema:
+        type: string
+    PubkyHostQuery:
+      name: pubky-host
+      in: query
+      required: false
+      description: |
+        Fallback for tenant identification when the `pubky-host` header and
+        `Host` header do not contain a valid public key.
+      schema:
+        type: string
+  schemas:
+    CreateGrantSessionRequest:
+      type: object
+      required:
+      - grant
+      - pop
+      properties:
+        grant:
+          type: string
+          description: Grant JWS in compact form (user-signed).
+        pop:
+          type: string
+          description: Proof-of-Possession JWS in compact form (client-signed).
+    GrantSessionResponse:
+      type: object
+      required:
+      - token
+      - session
+      properties:
+        token:
+          type: string
+          description: Opaque bearer token.
+        session:
+          "$ref": "#/components/schemas/GrantSessionInfo"
+    GrantSessionInfo:
+      type: object
+      required:
+      - homeserver
+      - pubky
+      - client_id
+      - capabilities
+      - grant_id
+      - token_expires_at
+      - grant_expires_at
+      - created_at
+      properties:
+        homeserver:
+          type: string
+          description: z-base-32 encoded homeserver public key.
+        pubky:
+          type: string
+          description: z-base-32 encoded user public key.
+        client_id:
+          type: string
+          description: Application identifier (domain string).
+        capabilities:
+          type: array
+          items:
+            type: string
+          description: Authorized capabilities (e.g. `["/:rw"]` for root, `["/pub/app/:rw"]`
+            for scoped read-write).
+        grant_id:
+          type: string
+          description: Grant identifier.
+        token_expires_at:
+          type: integer
+          format: int64
+          minimum: 0
+          description: When the bearer token expires (Unix seconds).
+        grant_expires_at:
+          type: integer
+          format: int64
+          minimum: 0
+          description: When the underlying grant expires (Unix seconds).
+        created_at:
+          type: integer
+          format: int64
+          minimum: 0
+          description: When this session was created (Unix seconds).
+    GrantInfo:
+      type: object
+      required:
+      - grant_id
+      - client_id
+      - capabilities
+      - issued_at
+      - expires_at
+      properties:
+        grant_id:
+          type: string
+          description: Grant identifier (revocation target).
+        client_id:
+          type: string
+          description: Application identifier.
+        capabilities:
+          type: string
+          description: Comma-separated capability string.
+        issued_at:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Issued-at timestamp (Unix seconds).
+        expires_at:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Expiry timestamp (Unix seconds).
+    SignupTokenResponse:
+      type: object
+      required:
+      - status
+      - created_at
+      properties:
+        status:
+          type: string
+          enum:
+          - valid
+          - used
+        created_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp.

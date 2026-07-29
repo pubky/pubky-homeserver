@@ -158,8 +158,10 @@ fn js_fetch(req: &web_sys::Request) -> Promise {
 
 #[cfg(test)]
 mod tests {
+    use std::{num::NonZeroUsize, sync::Arc};
+
     use super::*;
-    use pkarr::{CacheKey, SignedPacket};
+    use pkarr::{Cache, CacheKey, InMemoryCache, SignedPacket};
     use pubky::Keypair;
     use wasm_bindgen_test::*;
 
@@ -168,9 +170,14 @@ mod tests {
     // Missing PKARR endpoints must surface a descriptive error so callers can react.
     #[wasm_bindgen_test(async)]
     async fn prepare_missing_endpoint_returns_error() {
-        let client = Client::testnet(None).unwrap();
+        let cache = Arc::new(InMemoryCache::new(NonZeroUsize::MIN));
+        let mut builder = pubky::PubkyHttpClient::builder();
+        builder
+            .testnet_with_host("localhost")
+            .pkarr(|pkarr| pkarr.cache(cache.clone()));
+        let client = Client(builder.build().unwrap());
         let keypair = Keypair::random();
-        seed_pkarr_testnet_endpoint(&client, &keypair, "localhost", 15411);
+        seed_pkarr_testnet_endpoint(cache.as_ref(), &keypair, "localhost", 15411);
         let pk = keypair.public_key().to_z32();
         let mut url = Url::parse(&format!("https://_pubky.{}/pub/file.txt", pk)).unwrap();
 
@@ -197,12 +204,12 @@ mod tests {
         assert!(host_opt.is_none());
     }
 
-    fn seed_pkarr_testnet_endpoint(client: &Client, keypair: &Keypair, _host: &str, _port: u16) {
-        let pkarr_client = client.0.pkarr();
-        let cache = pkarr_client
-            .cache()
-            .expect("pkarr client should expose a cache for tests");
-
+    fn seed_pkarr_testnet_endpoint(
+        cache: &InMemoryCache,
+        keypair: &Keypair,
+        _host: &str,
+        _port: u16,
+    ) {
         let pkarr_public_key = pkarr::PublicKey::from(keypair.public_key());
         let cache_key: CacheKey = pkarr_public_key.into();
         let signed_packet = SignedPacket::builder()

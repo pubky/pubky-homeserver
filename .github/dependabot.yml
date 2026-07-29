@@ -3,12 +3,15 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "monthly"
+      interval: "weekly"
       time: "08:00"
       day: "tuesday"
     commit-message:
       prefix: "deps"
     rebase-strategy: "auto"
+    # Cover both direct and transitive deps
+    allow:
+      - dependency-type: "all"
     groups:
       cargo-dependencies:
         patterns:

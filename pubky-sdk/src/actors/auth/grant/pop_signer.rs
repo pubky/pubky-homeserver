@@ -186,18 +186,18 @@ mod tests {
 
     #[tokio::test]
     async fn delegated_signer_sign_value() {
+        #[derive(serde::Serialize)]
+        struct DummyClaims;
+        let claims = DummyClaims {};
+
         let signer = GrantPopSigner::delegated(
             "delegated-test-key".into(),
             Keypair::random().public_key(),
             delegated_sign_callback(|_| async { Ok(vec![0; 64]) }),
         );
 
-        #[derive(serde::Serialize)]
-        struct DummyClaims;
-        let claims = DummyClaims {};
-
-        let signed = signer.sign_jws("test", &claims).await.unwrap();
-        let base64_signature = signed.split('.').nth(2).unwrap();
+        let signed_jwt = signer.sign_jws("test", &claims).await.unwrap();
+        let base64_signature = signed_jwt.split('.').nth(2).unwrap();
         assert_eq!(
             base64_signature,
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

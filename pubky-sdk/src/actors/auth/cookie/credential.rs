@@ -39,6 +39,8 @@ use crate::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::errors::AuthError;
 
+const SESSION_PATH: &str = "/session";
+
 /// Cookie-based session credential (legacy).
 ///
 /// On native and Node.js WASM the credential owns the opaque secret string
@@ -54,6 +56,8 @@ pub struct CookieCredential {
     /// Cookie secret captured from `Set-Cookie`. `None` only on browser
     /// WASM where the value is hidden by the fetch spec.
     cookie: Option<String>,
+    /// Homeserver this cookie may attach to.
+    homeserver: Arc<RwLock<Option<PublicKey>>>,
 }
 
 impl CookieCredential {
@@ -62,17 +66,32 @@ impl CookieCredential {
         user: PublicKey,
         cookie: Option<String>,
         record: CookieSessionRecord,
+        homeserver: Option<PublicKey>,
     ) -> Self {
         Self {
             user,
             record: Arc::new(RwLock::new(record)),
             cookie,
+            homeserver: Arc::new(RwLock::new(homeserver)),
         }
     }
 
+    pub(crate) fn set_homeserver(&self, homeserver: PublicKey) {
+        if let Ok(mut hs) = self.homeserver.write() {
+            *hs = Some(homeserver);
+        }
+    }
+
+    fn bound_homeserver(&self) -> Option<PublicKey> {
+        self.homeserver.read().ok().and_then(|hs| hs.clone())
+    }
+
     /// Build a cookie credential from a successful `/session` or `/signup`
-    /// response.
-    pub(crate) async fn from_response(response: Response) -> Result<Self> {
+    /// response. `homeserver` is the homeserver that served it, when known.
+    pub(crate) async fn from_response(
+        response: Response,
+        homeserver: Option<PublicKey>,
+    ) -> Result<Self> {
         let raw_set_cookies = collect_set_cookies(&response);
 
         let bytes = response.bytes().await?;
@@ -103,31 +122,28 @@ impl CookieCredential {
         }
 
         cross_log!(info, "Hydrated cookie credential for {}", user);
-        Ok(Self::new(user, cookie, record))
+        Ok(Self::new(user, cookie, record, homeserver))
     }
 
     /// Establish a cookie credential from a signed [`AuthToken`] (legacy flow).
-    ///
-    /// POSTs the token to the homeserver's `/session` endpoint and constructs
-    /// a [`CookieCredential`] ready to be lifted into a [`PubkySession`] via
-    /// [`PubkySession::from_cookie_credential`].
     pub(crate) async fn from_auth_token(
         token: &AuthToken,
         client: &PubkyHttpClient,
+        homeserver: Option<PublicKey>,
     ) -> Result<Self> {
-        let url = format!("pubky{}/session", token.public_key().z32());
         cross_log!(
             info,
             "Establishing new session exchange for {}",
             token.public_key()
         );
-        let resolved = resolve_pubky(&url)?;
-        let response = client
-            .cross_request(Method::POST, resolved)
-            .await?
-            .body(token.serialize())
-            .send()
-            .await?;
+        let request = session_request(
+            client,
+            Method::POST,
+            token.public_key(),
+            homeserver.as_ref(),
+        )
+        .await?;
+        let response = request.body(token.serialize()).send().await?;
 
         let response = check_http_status(response).await?;
         cross_log!(
@@ -135,7 +151,7 @@ impl CookieCredential {
             "Session exchange for {} succeeded; constructing credential",
             token.public_key()
         );
-        Self::from_response(response).await
+        Self::from_response(response, homeserver).await
     }
 
     /// Cookie secret accessor — used by [`super::view::CookieSessionView`]
@@ -158,6 +174,26 @@ impl CookieCredential {
             *r = record;
         }
     }
+}
+
+fn session_resource(user: &PublicKey) -> String {
+    format!("pubky{}{}", user.z32(), SESSION_PATH)
+}
+
+async fn session_request(
+    client: &PubkyHttpClient,
+    method: Method,
+    user: &PublicKey,
+    homeserver: Option<&PublicKey>,
+) -> Result<RequestBuilder> {
+    if let Some(homeserver) = homeserver {
+        return client
+            .cross_request_via_homeserver(method, homeserver, user, SESSION_PATH)
+            .await;
+    }
+
+    let resolved = resolve_pubky(session_resource(user))?;
+    client.cross_request(method, resolved).await
 }
 
 /// Cross-target reader for `Set-Cookie` response header values.
@@ -187,9 +223,15 @@ impl SessionCredential for CookieCredential {
     }
 
     async fn signout(&self, client: &PubkyHttpClient) -> Result<()> {
-        let url = format!("pubky{}/session", self.user.z32());
-        let resolved = resolve_pubky(&url)?;
-        let rb = client.cross_request(Method::DELETE, resolved).await?;
+        let homeserver = match self.bound_homeserver() {
+            Some(homeserver) => Some(homeserver),
+            None => {
+                crate::Pkdns::with_client(client.clone())
+                    .get_homeserver_of(&self.user)
+                    .await
+            }
+        };
+        let rb = session_request(client, Method::DELETE, &self.user, homeserver.as_ref()).await?;
         let rb = self.attach(rb, client).await?;
         let response = rb.send().await.map_err(crate::Error::from)?;
         check_http_status(response).await?;
@@ -201,16 +243,28 @@ impl SessionCredential for CookieCredential {
         rb: RequestBuilder,
         _client: &PubkyHttpClient,
     ) -> Result<RequestBuilder> {
-        // When we own the secret (native, Node.js WASM) we attach it
-        // manually. When we don't (browser WASM) the runtime cookie jar
-        // is the source of truth and we leave the request alone.
+        // When we own the secret (native, Node.js WASM) we attach it manually.
         match &self.cookie {
             Some(cookie) => {
                 let cookie_name = self.user.z32();
                 Ok(rb.header(reqwest::header::COOKIE, format!("{cookie_name}={cookie}")))
             }
-            None => Ok(rb),
+            None => {
+                // Browser WASM keeps the secret in the cookie jar.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Ok(rb.fetch_credentials_include())
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    Ok(rb)
+                }
+            }
         }
+    }
+
+    async fn can_attach_to(&self, homeserver: &PublicKey) -> bool {
+        self.bound_homeserver().as_ref() == Some(homeserver)
     }
 
     async fn revalidate(
@@ -218,9 +272,17 @@ impl SessionCredential for CookieCredential {
         client: &PubkyHttpClient,
         user: &PublicKey,
     ) -> Result<Option<SessionInfo>> {
-        let url = format!("pubky{}/session", user.z32());
-        let resolved = resolve_pubky(&url)?;
-        let rb = client.cross_request(Method::GET, resolved).await?;
+        let bound_homeserver = self.bound_homeserver();
+        let bind_on_success = bound_homeserver.is_none();
+        let homeserver = match bound_homeserver {
+            Some(homeserver) => Some(homeserver),
+            None => {
+                crate::Pkdns::with_client(client.clone())
+                    .get_homeserver_of(user)
+                    .await
+            }
+        };
+        let rb = session_request(client, Method::GET, user, homeserver.as_ref()).await?;
         let rb = self.attach(rb, client).await?;
         let response = rb.send().await.map_err(crate::Error::from)?;
         if credential_session_missing(&response) {
@@ -232,6 +294,10 @@ impl SessionCredential for CookieCredential {
         let record = CookieSessionRecord::deserialize(&bytes)?;
         let info = SessionInfo::new(record.public_key().clone(), record.capabilities().to_vec());
         self.replace_record(record);
+
+        if bind_on_success && let Some(homeserver) = homeserver {
+            self.set_homeserver(homeserver);
+        }
         Ok(Some(info))
     }
 
@@ -250,5 +316,53 @@ impl PubkySession {
     #[must_use]
     pub fn from_cookie_credential(client: PubkyHttpClient, credential: CookieCredential) -> Self {
         Self::from_credential(client, Arc::new(credential))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pubky_common::{
+        capabilities::{Capabilities, Capability},
+        crypto::Keypair,
+    };
+
+    fn cookie_credential(user: &PublicKey, homeserver: Option<PublicKey>) -> CookieCredential {
+        let record =
+            CookieSessionRecord::new(user, Capabilities::from(vec![Capability::root()]), None);
+        CookieCredential::new(
+            user.clone(),
+            Some("cookie-secret".to_string()),
+            record,
+            homeserver,
+        )
+    }
+
+    #[tokio::test]
+    async fn can_attach_to_only_matches_bound_homeserver() {
+        let user = Keypair::random().public_key();
+        let bound = Keypair::random().public_key();
+        let other = Keypair::random().public_key();
+        let credential = cookie_credential(&user, Some(bound.clone()));
+
+        assert!(credential.can_attach_to(&bound).await);
+        assert!(!credential.can_attach_to(&other).await);
+    }
+
+    #[tokio::test]
+    async fn can_attach_to_is_false_until_bound() {
+        let user = Keypair::random().public_key();
+        let credential = cookie_credential(&user, None);
+        let homeserver = Keypair::random().public_key();
+
+        assert!(!credential.can_attach_to(&homeserver).await);
+
+        credential.set_homeserver(homeserver.clone());
+        assert!(credential.can_attach_to(&homeserver).await);
+        assert!(
+            !credential
+                .can_attach_to(&Keypair::random().public_key())
+                .await
+        );
     }
 }

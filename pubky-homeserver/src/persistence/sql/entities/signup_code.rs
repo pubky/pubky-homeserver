@@ -657,11 +657,11 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_signup_token_write_paths_applied_to_user() {
         use crate::persistence::sql::user::UserRepository;
-        use crate::shared::webdav::WebDavPath;
+        use crate::shared::webdav::StoragePath;
 
         let db = SqlDb::test().await;
 
-        fn wdp(s: &str) -> WebDavPath {
+        fn wdp(s: &str) -> StoragePath {
             s.parse().unwrap()
         }
 

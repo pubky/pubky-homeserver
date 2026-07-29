@@ -1,88 +1,56 @@
-<h1 align="center"><a href="https://pubky.org/"><img alt="pubky" src="./.svg/pubky-core-logo.svg" width="200" /></a></h1>
+<h1 align="center"><a href="https://pubky.org/"><img alt="Pubky" src="./.svg/pubky-core-logo.svg" width="200" /></a></h1>
 
 <h3 align="center">
-	An open protocol for per-public-key backends for censorship resistant web applications.
+  Homeserver and SDKs for Pubky.
 </h3>
-
-
-
 
 <div align="center">
   <h3>
-    <a href="https://pubky.github.io/pubky-core/">
-      Docs Site
-    </a>
+    <a href="https://pubky.org/">Docs</a>
     <span> | </span>
-    <a href="https://docs.rs/pubky">
-      Rust Client's Docs
-    </a>
+    <a href="https://docs.rs/pubky">Rust SDK</a>
     <span> | </span>
-    <span> | </span>
-    <a href="https://www.npmjs.com/package/@synonymdev/pubky">
-      JS bindings 
-    </a>
+    <a href="https://www.npmjs.com/package/@synonymdev/pubky">JavaScript SDK</a>
   </h3>
+  <a href="https://github.com/pubky/pubky-core/blob/main/LICENSE"><img src="https://img.shields.io/github/license/pubky/pubky-core" alt="GitHub License" /></a>
+  <a href="https://github.com/pubky/pubky-core/releases/latest/"><img src="https://img.shields.io/github/v/release/pubky/pubky-core" alt="GitHub Release" /></a>
+  <a href="https://crates.io/crates/pubky"><img src="https://img.shields.io/crates/v/pubky" alt="Crates.io Version" /></a>
+  <a href="https://www.npmjs.com/package/@synonymdev/pubky"><img src="https://img.shields.io/npm/v/@synonymdev/pubky" alt="npm Version" /></a>
+  <br/>
+  <a href="https://t.me/pubkycore"><img src="https://img.shields.io/badge/Chat-Telegram-violet" alt="Telegram Chat Group" /></a>
+  <a href="https://deepwiki.com/pubky/pubky-core"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
 </div>
 
-[![GitHub Release](https://img.shields.io/github/v/release/pubky/pkdns)](https://github.com/pubky/pubky-core/releases/latest/)
-[![Crates.io Version](https://img.shields.io/crates/v/pubky)](https://crates.io/crates/pubky)
-[![Telegram Chat Group](https://img.shields.io/badge/Chat-Telegram-violet)](https://t.me/pubkycore)
-[![GitHub License](https://img.shields.io/github/license/pubky/pubky-core)](https://github.com/pubky/pubky-core/blob/main/LICENSE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pubky/pubky-core)
+<br/>
 
-> The Web, long centralized, must decentralize; Long decentralized, must centralize.
+[Pubky](https://pubky.org) is an open protocol for building censorship-resistant applications where users own their identity, data, and connections. No platform lock-in, no losing everything when a service shuts down. Your keys are your identity, and you choose where your data lives.
 
-## Overview
+To learn more about the vision, see [What is Pubky?](https://pubky.org/tldr/), [Censorship Resistance](https://pubky.org/explore/concepts/censorship/), and [Credible Exit](https://pubky.org/explore/concepts/credible-exit/).
 
-Pubky-core combines a [censorship resistant public-key based alternative to DNS](https://pkarr.org) with conventional, tried and tested web technologies, to keep users in control of their identities and data, while enabling developers to build software with as much availability as web apps, without the costs of managing a central database.
+This repository contains the core infrastructure: a homeserver that stores and serves user data, Rust and JavaScript SDKs for building apps, a local testnet, and examples.
 
-## Features
-- Public key based authentication.
-- Public key based 3rd party authorization.
-- Key-value store through PUT/GET/DELETE HTTP API + pagination.
+## Who Is This For?
 
-## Getting started
+- **Operators**: [Install and run a homeserver](./docs/INSTALL.md), then [deploy it publicly](./docs/DEPLOY.md).
+- **App developers**: Use the [SDK](https://pubky.org/explore/pubkycore/sdk/) to build apps that read and write user data on homeservers. Guides coming soon.
 
-This repository contains a [Homeserver](./pubky-homeserver), and a [SDK](./pubky-sdk) (both Rust and JS wasm bindings).
-You can a run a local homeserver using `cargo run` with more instructions in the README.
-Check  the [Examples](./examples) directory for small feature-focesed examples of how to use the Pubky SDK.
+## What Is a Homeserver?
 
-### JavaScript
-If you prefer to use JavaScript in NodeJs/Browser or any runtime with Wasm support, you can either install from npm [`@synonymdev/pubky`](https://www.npmjs.com/package/@synonymdev/pubky)
-or build the bindings yourself:
-```bash
-cd pubky-sdk/bindings/js/pkg
-npm i
-npm run build
-```
+A Pubky homeserver stores and serves user data. Users choose which homeserver holds their data, and can move to another at any time. The homeserver exposes HTTP APIs for authenticated writes and public reads, and publishes [PKARR](https://github.com/pubky/pkarr) records so other clients can discover where a user's data lives.
 
-#### Testing
-There are unit tests for the JavaScript bindings in both NodeJs and headless web browser, but first you need to run a local temporary Homeserver
-```bash
-npm run testnet
-```
-Then in a different terminal window:
-```bash
-npm test
-```
+- Public-key based sign-up, sign-in and third-party app authorization.
+- File storage via HTTP `PUT`, `GET`, `DELETE`, and listing APIs (WebDAV-like).
+- PKARR/PKDNS publishing for homeserver discovery.
+- Admin and metrics endpoints for operators.
 
-### Docker
+## Repository Layout
 
-An alternative way to start tinkering with Pubky is to build an isolated container and run it locally. Here is an 
-example command how to build an image:
-
-```bash
-docker build --build-arg TARGETARCH=x86_64 -t pubky:core .
-```
-
-A command for running it in an isolated environment with log output:
-
-```bash
-docker run -it pubky:core
-```
-
-Additional optional arguments can be used to run it in the background, but the most important is `--network=host`, which allows the container to access the network and provides an admin endpoint accessible from the host machine. Please refer to the Docker documentation for more detailed options.
-
-## Links
-
-- [Contributors Guide](./CONTRIBUTORS.md)
+| Path | Purpose |
+| --- | --- |
+| [`pubky-homeserver`](./pubky-homeserver) | Homeserver binary and library crate. |
+| [`pubky-sdk`](./pubky-sdk) | Rust client for Pubky apps, plus JS/WASM bindings. |
+| [`pubky-common`](./pubky-common) | Shared types and helpers used by the SDK and homeserver. |
+| [`pubky-testnet`](./pubky-testnet) | Local ephemeral Pubky network for development and tests. |
+| [`examples`](./examples) | Rust and JavaScript examples for signup, auth, storage, and requests. |
+| [`e2e`](./e2e) | End-to-end tests covering cross-crate workflows. |
+| [`docs`](./docs) | Install guides, local development, and testing docs. |

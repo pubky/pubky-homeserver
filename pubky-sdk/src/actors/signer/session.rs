@@ -101,12 +101,8 @@ impl PubkySigner {
         client_id: ClientId,
         mode: PublishMode,
     ) -> Result<PubkySession> {
-        let homeserver = self.pkdns().get_homeserver().await?.ok_or_else(|| {
-            crate::errors::AuthError::Validation(format!(
-                "could not resolve homeserver for {}",
-                self.keypair.public_key().z32()
-            ))
-        })?;
+        let user = self.keypair.public_key();
+        let homeserver = self.pkdns().require_homeserver_of(&user).await?;
         let client_keypair = Keypair::random();
         let (grant_jws, grant_claims) = self.session_grant(client_id, &client_keypair);
         let client_signer = GrantPopSigner::local(client_keypair);
@@ -149,7 +145,8 @@ impl PubkySigner {
             .await?;
 
         self.publish_signup_homeserver(homeserver).await?;
-        let cookie_credential = CookieCredential::from_response(response).await?;
+        let cookie_credential =
+            CookieCredential::from_response(response, Some(homeserver.clone())).await?;
         Ok(PubkySession::from_credential(
             self.client.clone(),
             Arc::new(cookie_credential),
@@ -177,7 +174,10 @@ impl PubkySigner {
 
     async fn signin_cookie_with_publish(&self, mode: PublishMode) -> Result<PubkySession> {
         let token = self.root_capability_token();
-        let credential = CookieCredential::from_auth_token(&token, &self.client).await?;
+        let user = self.keypair.public_key();
+        let homeserver = self.pkdns().get_homeserver_of(&user).await;
+        let credential =
+            CookieCredential::from_auth_token(&token, &self.client, homeserver).await?;
         let session = PubkySession::from_cookie_credential(self.client.clone(), credential);
         self.publish_after_signin(mode).await?;
         Ok(session)
@@ -265,8 +265,7 @@ impl PubkySigner {
     ) -> GrantClaims {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         GrantClaims {
             iss: self.keypair.public_key(),
             client_id,
