@@ -27,8 +27,6 @@ The data directory is auto-initialized on first run with a `config.toml` and ser
 
 The `TEST_PUBKY_CONNECTION_STRING` environment variable is read on every startup and overrides the `database_url` in the on-disk config.
 
-> **Warning**: Do not use `?pubky-test=true` in the connection string with `persist` — it causes the database to be deleted on shutdown.
-
 To seed a custom homeserver config on first run (errors if `config.toml` already exists):
 
 ```bash
