@@ -1,0 +1,30 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["pubky.d.ts"],
+  "tsconfig": "tsconfig.typedoc.json",
+  "out": "docs",
+  "hostedBaseUrl": "https://pubky.github.io/pubky-core/js-sdk-typedoc/",
+  "name": "@synonymdev/pubky",
+  "readme": "none",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "plugin": ["./typedoc-plugin-exclude-names.cjs"],
+  "exclude": ["**/node_modules/**"],
+  "visibilityFilters": {},
+  "navigation": {
+    "includeCategories": true,
+    "includeGroups": true
+  },
+  "categorizeByGroup": false,
+  "defaultCategory": "Other",
+  "categoryOrder": [
+    "Client",
+    "Authentication",
+    "Storage",
+    "Events",
+    "Keys & Identity",
+    "Deep Links",
+    "Types",
+    "Other"
+  ]
+}
