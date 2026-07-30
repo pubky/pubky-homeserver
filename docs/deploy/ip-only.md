@@ -130,55 +130,12 @@ curl -I http://YOUR_IP
 curl -I https://YOUR_IP
 ```
 
-### Find Your Public Key
-
-The remaining checks need your homeserver's public key. The admin API binds to localhost, so run this from the server itself:
-
-```bash
-# Use your configured admin password. Default is "admin".
-curl -s "http://127.0.0.1:6288/info" -H "X-Admin-Password: admin"
-```
-
-The response is JSON — look for the `public_key` field.
-
-### Check PKARR Record
-
-Look up your public key on [pkdns.net](https://pkdns.net/). The record should contain your server's public IP (from `icann_domain`).
-
-For a more thorough check, resolve the record from the DHT directly using the `resolve` example from the [pkarr](https://github.com/pubky/pkarr) repository:
-
-```bash
-cargo run --example resolve <homeserver-public-key>
-```
-
-This performs a cold lookup, a cached lookup, and a network-only lookup, printing the resolved DNS records and timings for each. Verify that the output contains an `A` record with your server's public IP and `HTTPS` (SVCB) records — one for the Pubky TLS port and one pointing to your IP address.
-
-### Check Internal Ports Are Not Exposed
-
-```bash
-# These should all fail/timeout from an external machine:
-curl http://YOUR_IP:6286   # ICANN HTTP (internal)
-curl http://YOUR_IP:6288   # Admin API
-curl http://YOUR_IP:6289   # Metrics
-```
-
-### Check Pubky TLS
-
-From a separate machine with the [pkarr](https://github.com/pubky/pkarr) repository cloned:
-
-```bash
-cargo run --features=reqwest-builder --example http-get https://<homeserver-public-key>
-```
-
-A successful response prints `Pubky Homeserver`.
+Then follow the [common verification steps](post-setup.md): find your public key, check your PKARR record, and test Pubky TLS.
 
 ## Production Notes
 
-- Back up the homeserver's state regularly:
-  - The keypair at `~/.pubky/secret` — this is the homeserver's identity. If lost, the server cannot be recovered.
-  - User data — by default stored in `~/.pubky/data/files` (depends on `storage.type`).
-  - The PostgreSQL database.
-- Change the default admin password in `[admin].admin_password`.
+See the [common production notes](post-setup.md#production-notes), plus:
+
 - **Shortlived certificates expire in ~6 days.** Caddy renews them automatically, but if renewal fails for more than a few days your HTTPS endpoint will go down. Ensure port 80 stays reachable.
 
 ## Troubleshooting
@@ -189,14 +146,4 @@ Ensure ports 80 and 443 are open and reachable from the internet. Caddy attempts
 
 Ensure you're running Caddy v2.10.1+ (`caddy version`). Older versions don't support IP address certificates. If you see a `rejectedIdentifier` ACME error, make sure the `profile shortlived` is set in your Caddyfile.
 
-### Pubky TLS connections time out
-
-Verify that port 6287 is open in your firewall and that the homeserver is listening on `0.0.0.0:6287`, not `127.0.0.1:6287`. Check with:
-
-```bash
-sudo ss -tlnp | grep 6287
-```
-
-### PKARR record shows wrong IP
-
-Check `pkdns.public_ip` in `~/.pubky/config.toml`. It must be the server's public IP, not a private or localhost address. After updating, restart the homeserver and allow a few minutes for the DHT record to propagate.
+For PKARR and Pubky TLS troubleshooting, see [common troubleshooting](post-setup.md#troubleshooting).
