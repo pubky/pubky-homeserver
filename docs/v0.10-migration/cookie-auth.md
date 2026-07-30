@@ -201,6 +201,7 @@ If your app starts auth flows through the `Pubky` facade, rename `start_auth_flo
 ```rust
 let caps = Capabilities::builder()
     .read_write("/pub/my-cool-app/")
+    .unwrap()
     .finish();
 
 let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
