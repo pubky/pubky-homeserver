@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long)]
     signup: bool,
 
-    /// Homeserver identifier to sign up on. Defaults to the local homeserver in testnet mode.
+    /// Homeserver identifier to sign up with. Defaults to the local homeserver in testnet mode.
     #[arg(long, requires = "signup")]
     homeserver: Option<String>,
 

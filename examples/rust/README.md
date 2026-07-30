@@ -25,7 +25,7 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
   cargo run -p pubky-testnet
 ```
 
-Wait for `Testnet running`, then in another terminal run the examples. Eg:
+Wait for `Testnet running`, then run the examples in another terminal. For example:
 
 ```bash
 cd examples/rust

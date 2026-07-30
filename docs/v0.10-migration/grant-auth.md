@@ -1,6 +1,6 @@
 # Recommended: Grant Authentication
 
-Grant authentication is the new Pubky authentication system based on a Proof of Possession (PoP) client key. In an authorization flow, the signer gives the application a grant that it exchanges, together with a short-lived PoP proof, for an opaque one-hour bearer token. The SDK refreshes the bearer automatically without requiring the user's root key again.
+Grant authentication is the new Pubky authentication system based on a proof-of-possession (PoP) client key. In an authorization flow, the signer gives the application a grant. The application exchanges this grant, together with a short-lived PoP proof, for an opaque bearer token that lasts one hour. The SDK refreshes the bearer automatically without requiring the user's root key again.
 
 **Compared with cookie authentication:**
 
@@ -8,27 +8,28 @@ Grant authentication is the new Pubky authentication system based on a Proof of 
 |------------------------------------------------------------|--------------------------------------------------------------|
 | Credentials are isolated per app and client key            | Websites in the same browser insecurely share the same cookie |
 | Uses Authorization: Bearer tokens                          | Uses an HTTP session cookie                                  |
-| Bearers are short-lived and self-refreshing using PoP      | Cookie sessions can last up to one year                      |
+| Bearers are short-lived and refreshed using PoP            | Cookie sessions can last up to one year                      |
 | Grant replay requires possession of the client private key | No replay prevention                                         |
 | Grants can be listed and revoked individually              | No listing or revocation possible                            |
 | Supports the upcoming homeserver mirroring                 | Doesn't support multiple homeservers                         |
 | Recommended in Pubky v0.10+                                | Deprecated and scheduled for removal                         |
 
-The cookie belongs to the homeserver domain rather than the third-party application. Consequently, website B can receive the same homeserver cookie used by website A and potentially exercise A's permissions. Grant authentication prevents this by using bearer tokens, binding each authorization to an app-specific key, and explicitly scoped capabilities.
+The cookie belongs to the homeserver domain rather than the third-party application. Consequently, website B can receive the same homeserver cookie used by website A and potentially exercise A's permissions. Grant authentication prevents this by using bearer tokens, binding each authorization to an app-specific key, and explicitly scoping its capabilities.
 
 ## Client ID
 
-A new client ID is introduced when creating a grant authentication session. It is an identifier that is saved alongside the session in the homeserver. When a users lists all session with the new session management api, the client ID is listed.
+Grant authentication introduces a client ID when creating a session. The homeserver saves this identifier alongside the session and includes it when the user lists all sessions through the new session management API.
 
-A client name can be any domain like string and should identify your application. 
+A client ID can be any domain-like string and should identify your application.
 
 Examples:
+
 - `pubkyapp.synonym.to`
 - `example-app`
 
 ## Auth Flow / QR Login
 
-Grant auth flows add a required client ID and produce a grant-backed, self-refreshing session.
+Grant auth flows require a client ID and produce grant-backed, self-refreshing sessions.
 
 ### JavaScript
 
@@ -63,11 +64,12 @@ let session = flow.await_approval().await?;
 
 Use `PubkyGrantAuthFlow::builder(...)` when you need a custom relay or HTTP client.
 
-## Signer Signup and Signin
+## Signer Sign-up and Sign-in
 
-The signer is used to create a session with root permissions. The methods `signup()` and `signin()` changed.
-- `signup()` does not establish a session anymore. It only signs up a user. Therefore, it does not have a return value.
-- `signin()` uses the new Grant authentication now. It requires a client ID.
+The signer creates a session with root permissions. The `signup()` and `signin()` methods have changed.
+
+- `signup()` no longer establishes a session. It only signs up a user and therefore has no return value.
+- `signin()` now uses the new grant authentication system and requires a client ID.
 
 ### JavaScript
 
@@ -76,7 +78,7 @@ await signer.signup(homeserver, signupToken);
 const session = await signer.signin("my-app.example");
 ```
 
-For blocking signin, pass the same client ID:
+For blocking sign-in, pass the same client ID:
 
 ```js
 const session = await signer.signinBlocking("my-app.example");
@@ -93,7 +95,7 @@ let client_id = ClientId::new("my-app.example")?;
 let session = signer.signin(client_id).await?;
 ```
 
-For blocking signin:
+For blocking sign-in:
 
 ```rust
 let session = signer
@@ -103,13 +105,13 @@ let session = signer
 
 ## Session Persistence
 
-Persisting the current one-hour bearer is not useful. Persist the grant and its PoP key material; restoring it mints a fresh bearer. Treat exported local credentials as bearer-equivalent secrets until the grant is revoked.
+Persisting the current one-hour bearer token is not useful. Persist the grant and its PoP key material; restoring it mints a fresh bearer. Treat exported local credentials as bearer-equivalent secrets until the grant is revoked.
 
 ### JavaScript Browsers
 
 The `v0.10` SDK provides a new out-of-the-box `BrowserSessionStore` that handles session persistence in supported browsers.
 
-It supports delegated, non-extractable WebCrypto keys when available and falls back to storing the keys in IndexDB in other browser environments.
+It supports delegated, non-extractable WebCrypto keys when available and falls back to storing the keys in IndexedDB in other browser environments.
 
 ```js
 const store = pubky.browserSessionStore;

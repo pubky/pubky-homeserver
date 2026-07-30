@@ -1,13 +1,13 @@
 # Pubky Grant Auth Example
 
-This example shows third-party grant authorization for signin and signup in Pubky from two Rust CLIs.
+This example uses two Rust CLIs to demonstrate third-party grant authorization for signing in and signing up with Pubky.
 
 The `auth_client` starts a grant auth flow, prints a Pubky Auth deep link, and waits for a grant-backed session. The `authenticator` signs up the account when requested, then approves the app's capabilities by signing a `pubky-grant` JWS. The client exchanges that grant for a self-refreshing session.
 
-It consists of 2 parts:
+The example consists of two parts:
 
 1. [Auth client CLI](./client.rs): A headless third-party app that creates the deep link and awaits approval.
-2. [Authenticator CLI](./authenticator.rs): A CLI showing the authenticator (key chain) asking the user for consent and delivering the signed grant.
+2. [Authenticator CLI](./authenticator.rs): A CLI that shows the authenticator (keychain) asking the user for consent and delivering the signed grant.
 
 For the browser version of the third-party app, see the JavaScript [2-auth-flow](../../javascript/2-auth-flow/README.md) example.
 
@@ -26,7 +26,7 @@ Run the third-party auth client in one terminal:
 ```bash
 cargo run --bin auth_client -- --testnet
 
-# with a custom client id or capabilities
+# with a custom client ID or capabilities
 cargo run --bin auth_client -- --testnet \
   --client-id my-app.example \
   --capabilities /pub/my-app/:rw
@@ -50,7 +50,7 @@ cargo run --bin auth_client -- --signup \
 
 The signup URL uses the `signup_grant` intent. The authenticator first creates the account on the homeserver embedded in the URL and then approves the app grant. Use a recovery file for a key that does not already have an account on that homeserver.
 
-Finally run the authenticator in another terminal to approve it:
+Finally, run the authenticator in another terminal to approve the request:
 
 ```bash
 cargo run --bin authenticator -- "<Auth_URL>" --testnet
@@ -59,6 +59,6 @@ cargo run --bin authenticator -- "<Auth_URL>" --testnet
 cargo run --bin authenticator -- "<Auth_URL>" --testnet --recovery-file <RECOVERY_FILE>
 ```
 
-Where the auth URL should be within quotation marks, and `--testnet` uses the local homeserver.
+The auth URL should be enclosed in quotation marks. The `--testnet` option uses the local homeserver.
 
 You should see the client receive the approval and print the grant-backed session details.

@@ -1,6 +1,6 @@
 # Not Recommended: Keep Cookie Authentication
 
-Cookie authentication is deprecated and insecure. Prefer the new [Grant authentication system](./grant-auth.md). This guide shows how stick to Cookie authentication while migrating from `v0.9` to `v0.10`.
+Cookie authentication is deprecated and insecure. Prefer the new [grant authentication system](./grant-auth.md). This guide shows how to keep using cookie authentication while migrating from `v0.9` to `v0.10`.
 
 
 ## TLDR
@@ -25,7 +25,7 @@ For the cookie-auth compatibility path:
 
 ## JavaScript SDK
 
-### Direct Signup
+### Direct Sign-up
 
 In `v0.9.x`, `signup` created the account and returned a cookie-backed session.
 
@@ -34,7 +34,7 @@ In `v0.9.x`, `signup` created the account and returned a cookie-backed session.
 const session = await signer.signup(homeserver, signupToken);
 ```
 
-In v0.10, `signup` no longer returns a session, it only signs up. To keep the old cookie behavior, use `signupCookie`.
+In v0.10, `signup` no longer returns a session; it only signs up the user. To keep the old cookie behavior, use `signupCookie`.
 
 ```js
 // v0.10 cookie-compatible
@@ -47,7 +47,7 @@ If the signup token is optional in your code, keep passing `null` or `undefined`
 const session = await signer.signupCookie(homeserver, null);
 ```
 
-### Direct Signin
+### Direct Sign-in
 
 In `v0.9.x`, `signin` returned a cookie-backed session and did not take arguments.
 
@@ -63,7 +63,7 @@ In v0.10, use `signinCookie` to keep cookie auth.
 const session = await signer.signinCookie();
 ```
 
-For blocking signin:
+For blocking sign-in:
 
 ```js
 // v0.9.x
@@ -144,7 +144,7 @@ Browsers cannot export HTTP-only cookie secrets. In browser apps, keep using the
 
 ## Rust SDK
 
-### Direct Signup
+### Direct Sign-up
 
 In `v0.9.x`, `signup` created the account and returned a cookie-backed `PubkySession`.
 
@@ -168,7 +168,7 @@ let session = signer
     .await?;
 ```
 
-### Direct Signin
+### Direct Sign-in
 
 In `v0.9.x`, `signin` returned a cookie-backed session and did not take arguments.
 
@@ -184,7 +184,7 @@ In v0.10, use `signin_cookie` to keep cookie auth.
 let session = signer.signin_cookie().await?;
 ```
 
-For blocking signin:
+For blocking sign-in:
 
 ```rust
 // v0.9.x
