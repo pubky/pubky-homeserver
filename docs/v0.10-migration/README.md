@@ -12,6 +12,28 @@ You will need to consider whether each of the breaking changes listed below will
 Migrate to the new, secure [grant authentication system](./grant-auth.md), or keep the [cookie authentication system](./cookie-auth.md).
 
 
+## Homeserver Resolution Errors
+
+`Pubky::get_homeserver_of` and `Pkdns::get_homeserver_of` now return `Result<Option<PublicKey>>` instead of hiding PKARR errors as `None`.
+
+```rust
+use pubky::Error;
+
+match pubky.get_homeserver_of(&user).await {
+    Ok(Some(homeserver)) => println!("Homeserver: {homeserver}"),
+    Ok(None) => println!("User has no homeserver"),
+    Err(Error::Pkarr(error)) if error.is_retryable() => {
+        eprintln!("Temporary PKARR failure: {error}");
+    }
+    Err(error) => return Err(error),
+}
+```
+
+`Ok(None)` means that no record or `_pubky` target exists. Resolution failures and malformed targets return `Error::Pkarr`; use `PkarrError::is_retryable()` to identify retryable failures.
+
+JavaScript's `getHomeserverOf()` return type is unchanged, but its promise now rejects with `PkarrError` for these failures. The same errors may surface from sign-in, grant exchange, and event-stream subscriptions that resolve a homeserver internally.
+
+
 ## Deep Link Parsing
 
 If your Rust app parses sign-in or sign-up deep links directly, the parameter accessors changed.
