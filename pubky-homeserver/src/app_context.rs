@@ -9,6 +9,7 @@ use crate::services::user_service::UserService;
 #[cfg(any(test, feature = "testing"))]
 use crate::MockDataDir;
 use crate::{
+    client_server::auth::RevocationListener,
     observability::{Metrics, MetricsInitError},
     persistence::{
         files::{events::EventsService, FileIoError, FileService},
@@ -47,6 +48,9 @@ pub enum AppContextConversionError {
     /// Failed to start the Postgres event listener.
     #[error("Failed to start Postgres event listener: {0}")]
     PgEventListener(sqlx::Error),
+    /// Failed to start the auth revocation listener.
+    #[error("Failed to start the auth revocation listener: {0}")]
+    RevocationListener(sqlx::Error),
     /// Failed to initialize metrics.
     #[error("Failed to initialize metrics: {0}")]
     Metrics(MetricsInitError),
@@ -81,6 +85,9 @@ pub struct AppContext {
     /// Enables cross-instance event propagation for /events-stream's SSE functionality.
     /// Kept alive for the background task, not for direct access.
     _pg_event_listener: Arc<PgEventListener>,
+    /// Auth revocations are forwarded to private SSE streams on this instance.
+    /// Its Postgres listener stops once the last clone is dropped.
+    pub(crate) revocation_listener: RevocationListener,
     /// User service for quota resolution and user creation with defaults.
     pub(crate) user_service: UserService,
 }
@@ -119,6 +126,9 @@ impl AppContext {
         let pg_event_listener = PgEventListener::start(sql_db.pool(), events_service.clone())
             .await
             .map_err(AppContextConversionError::PgEventListener)?;
+        let revocation_listener = RevocationListener::start(sql_db.pool())
+            .await
+            .map_err(AppContextConversionError::RevocationListener)?;
 
         let user_service = UserService::new(sql_db.clone());
 
@@ -146,6 +156,7 @@ impl AppContext {
             events_service,
             metrics: Metrics::new().map_err(AppContextConversionError::Metrics)?,
             _pg_event_listener: Arc::new(pg_event_listener),
+            revocation_listener,
             user_service,
         })
     }
@@ -157,7 +168,12 @@ impl AppContext {
         let mut builder = pkarr::ClientBuilder::default();
         #[cfg(any(test, feature = "testing"))]
         if config_toml.general.database_url.is_test_db() {
-            builder.dht_report_policy(pkarr::dht::ReportPolicy::testnet());
+            builder
+                .no_default_network()
+                // Keep the client buildable without contacting the public DHT.
+                // Explicit testnet bootstrap nodes below replace this sentinel.
+                .bootstrap(&["127.0.0.1:9"])
+                .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
         }
         if let Some(bootstrap_nodes) = &config_toml.pkdns.dht_bootstrap_nodes {
             let nodes = bootstrap_nodes
@@ -211,5 +227,23 @@ impl AppContext {
                 .await
                 .map_err(AppContextConversionError::SqlDb);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pkarr_builder_does_not_use_default_network() {
+        let builder =
+            AppContext::build_pkarr_builder_from_config(&ConfigToml::default_test_config());
+        let builder_debug = format!("{builder:?}");
+
+        assert!(builder_debug.contains("127.0.0.1:9"));
+        for relay in pkarr::DEFAULT_RELAYS {
+            assert!(!builder_debug.contains(relay));
+        }
+        builder.build().expect("isolated pkarr client should build");
     }
 }

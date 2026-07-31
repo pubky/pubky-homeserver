@@ -16,7 +16,7 @@ use axum::{
     },
 };
 use futures_util::stream::Stream;
-use pubky_common::{crypto::PublicKey, storage};
+use pubky_common::crypto::PublicKey;
 use serde::Deserialize;
 use std::{collections::HashMap, convert::Infallible, time::Instant};
 use tower_cookies::Cookies;
@@ -24,11 +24,14 @@ use url::form_urlencoded;
 
 use crate::{
     client_server::{
-        auth::{grant::bearer::extract_bearer_token, has_read_permission, AuthSession},
+        auth::{
+            grant::bearer::extract_bearer_token, has_read_permission, AuthSession,
+            PendingStreamAuth,
+        },
         query_params::ListQueryParams,
         AppState,
     },
-    constants::PUBLIC_ROOT,
+    constants::{PRIVATE_ROOT, PUBLIC_ROOT},
     observability::ConnectionGuard,
     persistence::{
         files::events::{
@@ -36,7 +39,7 @@ use crate::{
         },
         sql::SqlDb,
     },
-    shared::{webdav::WebDavPath, HttpError, HttpResult},
+    shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -80,7 +83,7 @@ pub struct EventStreamQueryParams {
     pub user_cursors: Vec<(PublicKey, Option<String>)>,
     /// Repeatable path filters. Each value is a path WITHOUT the `pubky://`
     /// scheme or user pubkey, e.g. `/pub/files/`, `pub/files/`, `/priv/app/`..
-    pub paths: Vec<WebDavPath>,
+    pub paths: Vec<StoragePath>,
 }
 
 #[derive(Clone, Copy)]
@@ -91,10 +94,10 @@ enum EventStreamTenantScope<'a> {
 }
 
 impl<'a> EventStreamTenantScope<'a> {
-    fn from_query(paths: &[WebDavPath], user_cursors: &'a [(PublicKey, Option<String>)]) -> Self {
+    fn from_query(paths: &[StoragePath], user_cursors: &'a [(PublicKey, Option<String>)]) -> Self {
         if !paths
             .iter()
-            .any(|path| storage::is_private_path(path.as_str()))
+            .any(|path| path.as_str().starts_with(PRIVATE_ROOT))
         {
             return Self::PublicOnly;
         }
@@ -231,7 +234,7 @@ impl TryFrom<RawEventStreamQueryParams> for EventStreamQueryParams {
                 format!("/{}", p)
             };
 
-            let path = WebDavPath::new(&normalized_path).map_err(|_| {
+            let path = StoragePath::normalize(&normalized_path).map_err(|_| {
                 EventStreamError::InvalidParameter(format!("Invalid path: {}", normalized_path))
             })?;
             paths.push(path);
@@ -327,6 +330,14 @@ pub async fn feed(
 /// If a client cannot consume events fast enough in live mode, the broadcast channel will lag and the connection will be closed.
 /// It is recommended that low memory clients poll this endpoint: Ie `live=true` with a low `limit`
 ///
+/// ## Revocation Behavior
+/// A stream that includes a private path is bound to the cookie or grant that
+/// authorized it. It closes promptly when that credential is revoked. A mixed
+/// public/private subscription closes as a whole; public-only streams are not
+/// tied to authentication and remain unaffected. Credential expiry and bearer
+/// token rotation are enforced when opening a stream and do not terminate an
+/// already-open stream.
+///
 /// ## Response Format
 /// Each event is sent as an SSE message with the event type and multiline data:
 /// ```text
@@ -357,6 +368,25 @@ pub async fn feed_stream(
 
     let allowed_paths = authorized_paths(&params.paths, tenant_scope, session.as_ref())?;
 
+    // Subscribe after path authorization but before the final DB validation.
+    // The validation catches revocations committed before this subscription;
+    // the receiver catches anything committed after it.
+    let pending_stream_auth = PendingStreamAuth::subscribe(
+        matches!(tenant_scope, EventStreamTenantScope::PrivateSingleTenant(_)),
+        &state.auth_state,
+    )
+    .await
+    .map_err(|_| {
+        HttpError::new_with_message(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Private event streams are temporarily unavailable",
+        )
+    })?;
+
+    let mut stream_auth = pending_stream_auth
+        .authorize(session, &state.auth_state)
+        .await?;
+
     let mut user_cursor_map =
         resolve_user_cursors(&params.user_cursors, &state.events_service, &state.sql_db)
             .await
@@ -373,6 +403,10 @@ pub async fn feed_stream(
 
         // Phase 1: Batch Mode
         loop {
+            if !stream_auth.is_valid(&state.auth_state).await {
+                return;
+            }
+
             // Drain any buffered events before querying as they'll be included in this or a future database query
             while rx.try_recv().is_ok() {}
 
@@ -402,6 +436,10 @@ pub async fn feed_stream(
 
             // Stream each historical event
             for event in events {
+                if !stream_auth.is_valid(&state.auth_state).await {
+                    return;
+                }
+
                 // Update the cursor for this specific user
                 user_cursor_map.insert(event.user_id, Some(event.cursor()));
 
@@ -439,8 +477,15 @@ pub async fn feed_stream(
             let half_capacity = state.events_service.channel_capacity() / 2;
 
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
+                tokio::select! {
+                    biased;
+                    check = stream_auth.next_check(&state.auth_state) => {
+                        if !check.await {
+                            return;
+                        }
+                    }
+                    event = rx.recv() => match event {
+                        Ok(event) => {
                         // Check if receiver queue is at half capacity (early warning of slow clients)
                         if rx.len() >= half_capacity {
                             state.metrics.record_broadcast_half_full();
@@ -466,15 +511,16 @@ pub async fn feed_stream(
                             }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        state.metrics.record_broadcast_lagged();
-                        tracing::warn!(
-                            "Slow client detected: broadcast channel lagged by {} events. Closing connection.",
-                            skipped
-                        );
-                        return;
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            state.metrics.record_broadcast_lagged();
+                            tracing::warn!(
+                                "Slow client detected: broadcast channel lagged by {} events. Closing connection.",
+                                skipped
+                            );
+                            return;
+                        }
+                        Err(_) => break, // Channel closed
                     }
-                    Err(_) => break, // Channel closed
                 }
             }
         }
@@ -545,14 +591,14 @@ async fn resolve_tenant_cookie_session(
 }
 
 fn authorized_paths(
-    paths: &[WebDavPath],
+    paths: &[StoragePath],
     scope: EventStreamTenantScope<'_>,
     session: Option<&AuthSession>,
 ) -> Result<Vec<PathFilter>, HttpError> {
     if paths.is_empty() {
-        return Ok(vec![
-            WebDavPath::new_unchecked(PUBLIC_ROOT.to_string()).into()
-        ]);
+        return Ok(vec![StoragePath::new(PUBLIC_ROOT)
+            .expect("public root is canonical")
+            .into()]);
     }
 
     let mut allowed = Vec::with_capacity(paths.len());
@@ -600,8 +646,8 @@ mod tests {
         Keypair::random().public_key()
     }
 
-    fn wd(s: &str) -> WebDavPath {
-        WebDavPath::new(s).expect("valid test path")
+    fn wd(s: &str) -> StoragePath {
+        StoragePath::new(s).expect("valid test path")
     }
 
     fn pf(s: &str) -> PathFilter {
@@ -609,12 +655,12 @@ mod tests {
     }
 
     fn grant_session(user_key: PublicKey, capabilities: Capabilities) -> AuthSession {
-        AuthSession::Grant(GrantSession {
+        AuthSession::Grant(GrantSession::test(
             user_key,
             capabilities,
-            grant_id: GrantId::generate(),
-            token_expires_at: 9999999999,
-        })
+            GrantId::generate(),
+            9999999999,
+        ))
     }
 
     fn cookie_session(user_key: PublicKey, capabilities: Capabilities) -> AuthSession {
@@ -642,7 +688,7 @@ mod tests {
     }
 
     fn authorize(
-        paths: &[WebDavPath],
+        paths: &[StoragePath],
         user_cursors: &[(PublicKey, Option<String>)],
         session: Option<&AuthSession>,
     ) -> Result<Vec<PathFilter>, HttpError> {
@@ -762,7 +808,7 @@ mod tests {
         let owner = pk();
         let session = grant_session(
             owner.clone(),
-            Capabilities::from(vec![Capability::read("/priv/app/")]),
+            Capabilities::from(vec![Capability::read("/priv/app/").unwrap()]),
         );
         let status = reject_status(authorize(
             &[wd("/priv/other/")],
@@ -777,7 +823,7 @@ mod tests {
         let owner = pk();
         let session = grant_session(
             owner.clone(),
-            Capabilities::from(vec![Capability::read("/priv/app/")]),
+            Capabilities::from(vec![Capability::read("/priv/app/").unwrap()]),
         );
         let filters = authorize(
             &[wd("/pub/"), wd("/priv/app/")],

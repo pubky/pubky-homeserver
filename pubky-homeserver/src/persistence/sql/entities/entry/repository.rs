@@ -5,7 +5,7 @@ use crate::{
         entities::user::{UserIden, USER_TABLE},
         UnifiedExecutor,
     },
-    shared::webdav::{EntryPath, WebDavPath},
+    shared::webdav::{EntryPath, StoragePath},
 };
 use sea_query::{Alias, Expr, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
 use sea_query_binder::SqlxBinder;
@@ -21,7 +21,7 @@ impl EntryRepository {
     /// The executor can either be db.pool() or a transaction.
     pub async fn create<'a>(
         user_id: i32,
-        path: &WebDavPath,
+        path: &StoragePath,
         content_hash: &pubky_common::crypto::Hash,
         content_length: u64,
         content_type: &str,
@@ -53,37 +53,6 @@ impl EntryRepository {
         let ret_row: PgRow = sqlx::query_with(&query, values).fetch_one(con).await?;
         let entry_id: i64 = ret_row.try_get(EntryIden::Id.to_string().as_str())?;
         Ok(entry_id)
-    }
-
-    /// Get an entry by its id.
-    /// The executor can either be db.pool() or a transaction.
-    pub async fn get<'a>(
-        id: i64,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<EntryEntity, sqlx::Error> {
-        let statement = Query::select()
-            .from(ENTRY_TABLE)
-            .columns([
-                (ENTRY_TABLE, EntryIden::Id),
-                (ENTRY_TABLE, EntryIden::User),
-                (ENTRY_TABLE, EntryIden::Path),
-                (ENTRY_TABLE, EntryIden::ContentHash),
-                (ENTRY_TABLE, EntryIden::ContentLength),
-                (ENTRY_TABLE, EntryIden::ContentType),
-                (ENTRY_TABLE, EntryIden::ModifiedAt),
-                (ENTRY_TABLE, EntryIden::CreatedAt),
-            ])
-            .column((USER_TABLE, UserIden::PublicKey))
-            .left_join(
-                USER_TABLE,
-                Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
-            )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).eq(id))
-            .to_owned();
-        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
-        let con = executor.get_con().await?;
-        let entry: EntryEntity = sqlx::query_as_with(&query, values).fetch_one(con).await?;
-        Ok(entry)
     }
 
     /// Get an entry by its path.
@@ -375,9 +344,9 @@ impl EntryRepository {
             .map(|row| {
                 let user_pubkey = path.pubkey().clone();
                 let regpath: String = row.try_get("regpath")?;
-                let webdav_path =
-                    WebDavPath::new(&regpath).map_err(|e| sqlx::Error::Decode(e.into()))?;
-                let entry_path = EntryPath::new(user_pubkey, webdav_path);
+                let storage_path =
+                    StoragePath::new(&regpath).map_err(|e| sqlx::Error::Decode(e.into()))?;
+                let entry_path = EntryPath::new(user_pubkey, storage_path);
                 Ok(entry_path)
             })
             .collect::<Result<Vec<EntryPath>, sqlx::Error>>()?;
@@ -455,9 +424,9 @@ impl EntryRepository {
             .map(|row| {
                 let user_pubkey = path.pubkey().clone();
                 let path: String = row.try_get(EntryIden::Path.to_string().as_str())?;
-                let webdav_path =
-                    WebDavPath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
-                let entry_path = EntryPath::new(user_pubkey, webdav_path);
+                let storage_path =
+                    StoragePath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
+                let entry_path = EntryPath::new(user_pubkey, storage_path);
                 Ok(entry_path)
             })
             .collect::<Result<Vec<EntryPath>, sqlx::Error>>()?;
@@ -487,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_create_get_entry() {
+    async fn test_create_get_and_delete_entry_by_path() {
         let db = SqlDb::test().await;
         let user_pubkey = Keypair::random().public_key();
 
@@ -499,7 +468,7 @@ mod tests {
         // Test create entry
         let entry_id = EntryRepository::create(
             user.id,
-            &WebDavPath::new("/test").unwrap(),
+            &StoragePath::new("/test").unwrap(),
             &pubky_common::crypto::Hash::from_bytes([0; 32]),
             100,
             "text/plain",
@@ -508,25 +477,17 @@ mod tests {
         .await
         .unwrap();
 
-        // Test get entry
-        let entry = EntryRepository::get(entry_id, &mut db.pool().into())
+        // Test get entry by path
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test").unwrap());
+        let entry = EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
             .await
             .unwrap();
         assert_eq!(entry.id, entry_id);
         assert_eq!(entry.user_id, user.id);
-        assert_eq!(
-            entry.path,
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap())
-        );
+        assert_eq!(entry.path, entry_path);
         assert_eq!(entry.content_hash, [0; 32]);
         assert_eq!(entry.content_length, 100);
         assert_eq!(entry.content_type, "text/plain");
-
-        // test get by path
-        let entry_by_path = EntryRepository::get_by_path(&entry.path, &mut db.pool().into())
-            .await
-            .unwrap();
-        assert_eq!(entry_by_path.id, entry_id);
 
         // test delete
         EntryRepository::delete_by_path(&entry.path, &mut db.pool().into())
@@ -540,7 +501,7 @@ mod tests {
     async fn create_entry_for_path(db: &SqlDb, user_id: i32, path: &str) {
         EntryRepository::create(
             user_id,
-            &WebDavPath::new(path).unwrap(),
+            &StoragePath::new(path).unwrap(),
             &pubky_common::crypto::Hash::from_bytes([0; 32]),
             100,
             "text/plain",
@@ -560,7 +521,7 @@ mod tests {
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub1/1.txt").await;
 
-        let target = EntryPath::new(user_pubkey, WebDavPath::new("/test/sub1").unwrap());
+        let target = EntryPath::new(user_pubkey, StoragePath::new("/test/sub1").unwrap());
         let has_collision =
             EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
                 .await
@@ -579,7 +540,7 @@ mod tests {
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub1").await;
 
-        let target = EntryPath::new(user_pubkey, WebDavPath::new("/test/sub1/1.txt").unwrap());
+        let target = EntryPath::new(user_pubkey, StoragePath::new("/test/sub1/1.txt").unwrap());
         let has_collision =
             EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
                 .await
@@ -599,7 +560,7 @@ mod tests {
         create_entry_for_path(&db, user.id, "/test/sub1").await;
 
         // Directory-style target (trailing slash) over an existing exact file.
-        let target = EntryPath::new(user_pubkey, WebDavPath::new("/test/sub1/").unwrap());
+        let target = EntryPath::new(user_pubkey, StoragePath::new("/test/sub1/").unwrap());
         let has_collision =
             EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
                 .await
@@ -618,7 +579,7 @@ mod tests {
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub1").await;
 
-        let target = EntryPath::new(user_pubkey, WebDavPath::new("/test/sub1").unwrap());
+        let target = EntryPath::new(user_pubkey, StoragePath::new("/test/sub1").unwrap());
         let has_collision =
             EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
                 .await
@@ -637,7 +598,7 @@ mod tests {
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub11/file.txt").await;
 
-        let target = EntryPath::new(user_pubkey, WebDavPath::new("/test/sub1").unwrap());
+        let target = EntryPath::new(user_pubkey, StoragePath::new("/test/sub1").unwrap());
         let has_collision =
             EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
                 .await
@@ -660,7 +621,7 @@ mod tests {
             .unwrap();
         create_entry_for_path(&db, user_a.id, "/test/sub1").await;
 
-        let target = EntryPath::new(user_b_pubkey, WebDavPath::new("/test/sub1/1.txt").unwrap());
+        let target = EntryPath::new(user_b_pubkey, StoragePath::new("/test/sub1/1.txt").unwrap());
         let has_collision =
             EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
                 .await
@@ -693,7 +654,7 @@ mod tests {
         for path in paths {
             EntryRepository::create(
                 user.id,
-                &WebDavPath::new(path).unwrap(),
+                &StoragePath::new(path).unwrap(),
                 &pubky_common::crypto::Hash::from_bytes([0; 32]),
                 100,
                 "text/plain",
@@ -704,7 +665,7 @@ mod tests {
         }
 
         // Test list shallow basic
-        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap());
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap());
         let entries =
             EntryRepository::list_shallow(&entry_path, None, None, false, &mut db.pool().into())
                 .await
@@ -712,27 +673,42 @@ mod tests {
         assert_eq!(entries.len(), 6);
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[2],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/3.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/3.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[3],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1").unwrap())
+            EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/sub1").unwrap())
         );
         assert_eq!(
             entries[4],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub1/").unwrap()
+            )
         );
         assert_eq!(
             entries[5],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub2/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub2/").unwrap()
+            )
         );
 
         // Test list shallow with limit
@@ -743,11 +719,17 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
 
         // Test list shallow with cursor
@@ -756,7 +738,7 @@ mod tests {
             None,
             Some(EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/3.txt").unwrap(),
+                StoragePath::new("/test/3.txt").unwrap(),
             )),
             false,
             &mut db.pool().into(),
@@ -766,15 +748,21 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1").unwrap())
+            EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/sub1").unwrap())
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub1/").unwrap()
+            )
         );
         assert_eq!(
             entries[2],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub2/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub2/").unwrap()
+            )
         );
 
         // Test list shallow with limit and cursor
@@ -783,7 +771,7 @@ mod tests {
             Some(2),
             Some(EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/3.txt").unwrap(),
+                StoragePath::new("/test/3.txt").unwrap(),
             )),
             false,
             &mut db.pool().into(),
@@ -793,11 +781,14 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1").unwrap())
+            EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/sub1").unwrap())
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub1/").unwrap()
+            )
         );
 
         // Test list shallow with limit. Pull all entries.
@@ -854,7 +845,7 @@ mod tests {
         for path in paths {
             EntryRepository::create(
                 user.id,
-                &WebDavPath::new(path).unwrap(),
+                &StoragePath::new(path).unwrap(),
                 &pubky_common::crypto::Hash::from_bytes([0; 32]),
                 100,
                 "text/plain",
@@ -865,7 +856,7 @@ mod tests {
         }
 
         // Regular order aka reverse false
-        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap());
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap());
         let entries =
             EntryRepository::list_shallow(&entry_path, None, None, false, &mut db.pool().into())
                 .await
@@ -873,31 +864,46 @@ mod tests {
         assert_eq!(entries.len(), 6);
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[2],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/3.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/3.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[3],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1").unwrap())
+            EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/sub1").unwrap())
         );
         assert_eq!(
             entries[4],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub1/").unwrap()
+            )
         );
         assert_eq!(
             entries[5],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub2/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub2/").unwrap()
+            )
         );
 
         // Reverse order aka reverse true
-        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap());
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap());
         let entries =
             EntryRepository::list_shallow(&entry_path, None, None, true, &mut db.pool().into())
                 .await
@@ -905,32 +911,50 @@ mod tests {
         assert_eq!(entries.len(), 6);
         assert_eq!(
             entries[5],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[4],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[3],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/3.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/3.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[2],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1").unwrap())
+            EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/sub1").unwrap())
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub1/").unwrap()
+            )
         );
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub2/").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/sub2/").unwrap()
+            )
         );
 
         // Reverse order aka reverse true with cursor
-        let cursor = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/3.txt").unwrap());
-        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap());
+        let cursor = EntryPath::new(
+            user_pubkey.clone(),
+            StoragePath::new("/test/3.txt").unwrap(),
+        );
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap());
         let entries = EntryRepository::list_shallow(
             &entry_path,
             None,
@@ -943,11 +967,17 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
     }
 
@@ -974,7 +1004,7 @@ mod tests {
         for path in paths {
             EntryRepository::create(
                 user.id,
-                &WebDavPath::new(path).unwrap(),
+                &StoragePath::new(path).unwrap(),
                 &pubky_common::crypto::Hash::from_bytes([0; 32]),
                 100,
                 "text/plain",
@@ -985,7 +1015,7 @@ mod tests {
         }
 
         // Test basic
-        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap());
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap());
         let entries =
             EntryRepository::list_deep(&entry_path, None, None, false, &mut db.pool().into())
                 .await
@@ -1000,11 +1030,17 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
 
         // Test with cursor
@@ -1013,7 +1049,7 @@ mod tests {
             None,
             Some(EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/3.txt").unwrap(),
+                StoragePath::new("/test/3.txt").unwrap(),
             )),
             false,
             &mut db.pool().into(),
@@ -1025,28 +1061,28 @@ mod tests {
             entries[0],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub1/1/1.txt").unwrap()
+                StoragePath::new("/test/sub1/1/1.txt").unwrap()
             )
         );
         assert_eq!(
             entries[1],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub1/2.txt").unwrap()
+                StoragePath::new("/test/sub1/2.txt").unwrap()
             )
         );
         assert_eq!(
             entries[2],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub2/1.txt").unwrap()
+                StoragePath::new("/test/sub2/1.txt").unwrap()
             )
         );
         assert_eq!(
             entries[3],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub2/2.txt").unwrap()
+                StoragePath::new("/test/sub2/2.txt").unwrap()
             )
         );
 
@@ -1056,7 +1092,7 @@ mod tests {
             Some(2),
             Some(EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/3.txt").unwrap(),
+                StoragePath::new("/test/3.txt").unwrap(),
             )),
             false,
             &mut db.pool().into(),
@@ -1068,14 +1104,14 @@ mod tests {
             entries[0],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub1/1/1.txt").unwrap()
+                StoragePath::new("/test/sub1/1/1.txt").unwrap()
             )
         );
         assert_eq!(
             entries[1],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub1/2.txt").unwrap()
+                StoragePath::new("/test/sub1/2.txt").unwrap()
             )
         );
 
@@ -1127,7 +1163,7 @@ mod tests {
         for path in paths {
             EntryRepository::create(
                 user.id,
-                &WebDavPath::new(path).unwrap(),
+                &StoragePath::new(path).unwrap(),
                 &pubky_common::crypto::Hash::from_bytes([0; 32]),
                 100,
                 "text/plain",
@@ -1138,7 +1174,7 @@ mod tests {
         }
 
         // Reverse order aka reverse true
-        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap());
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap());
         let entries =
             EntryRepository::list_deep(&entry_path, None, None, true, &mut db.pool().into())
                 .await
@@ -1148,46 +1184,58 @@ mod tests {
             entries[0],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub2/2.txt").unwrap()
+                StoragePath::new("/test/sub2/2.txt").unwrap()
             )
         );
         assert_eq!(
             entries[1],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub2/1.txt").unwrap()
+                StoragePath::new("/test/sub2/1.txt").unwrap()
             )
         );
         assert_eq!(
             entries[2],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub1/2.txt").unwrap()
+                StoragePath::new("/test/sub1/2.txt").unwrap()
             )
         );
         assert_eq!(
             entries[3],
             EntryPath::new(
                 user_pubkey.clone(),
-                WebDavPath::new("/test/sub1/1/1.txt").unwrap()
+                StoragePath::new("/test/sub1/1/1.txt").unwrap()
             )
         );
         assert_eq!(
             entries[4],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/3.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/3.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[5],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[6],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
 
         // Reverse order aka reverse true with cursor
-        let entry_path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap());
-        let cursor = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/3.txt").unwrap());
+        let entry_path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap());
+        let cursor = EntryPath::new(
+            user_pubkey.clone(),
+            StoragePath::new("/test/3.txt").unwrap(),
+        );
         let entries = EntryRepository::list_deep(
             &entry_path,
             None,
@@ -1200,11 +1248,17 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/2.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/2.txt").unwrap()
+            )
         );
         assert_eq!(
             entries[1],
-            EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/1.txt").unwrap())
+            EntryPath::new(
+                user_pubkey.clone(),
+                StoragePath::new("/test/1.txt").unwrap()
+            )
         );
     }
 
@@ -1221,7 +1275,7 @@ mod tests {
 
         // Test directory that doesn't exist
         let exists = EntryRepository::contains_directory(
-            &EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap()),
+            &EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap()),
             &mut db.pool().into(),
         )
         .await
@@ -1231,7 +1285,7 @@ mod tests {
         // Test if directory exists
         EntryRepository::create(
             user.id,
-            &WebDavPath::new("/test/file.txt").unwrap(),
+            &StoragePath::new("/test/file.txt").unwrap(),
             &pubky_common::crypto::Hash::from_bytes([0; 32]),
             100,
             "text/plain",
@@ -1240,7 +1294,7 @@ mod tests {
         .await
         .unwrap();
         let exists = EntryRepository::contains_directory(
-            &EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/").unwrap()),
+            &EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/").unwrap()),
             &mut db.pool().into(),
         )
         .await
@@ -1250,7 +1304,7 @@ mod tests {
         // Test if directory doesn't exist but file does
         EntryRepository::create(
             user.id,
-            &WebDavPath::new("/test/sub1").unwrap(),
+            &StoragePath::new("/test/sub1").unwrap(),
             &pubky_common::crypto::Hash::from_bytes([0; 32]),
             100,
             "text/plain",
@@ -1259,7 +1313,7 @@ mod tests {
         .await
         .unwrap();
         let exists = EntryRepository::contains_directory(
-            &EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test/sub1").unwrap()),
+            &EntryPath::new(user_pubkey.clone(), StoragePath::new("/test/sub1").unwrap()),
             &mut db.pool().into(),
         )
         .await

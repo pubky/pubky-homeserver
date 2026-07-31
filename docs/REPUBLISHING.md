@@ -10,6 +10,10 @@ directly from the cache is disabled because a successful publish cannot reveal
 whether a minority of queried nodes holds a newer packet. See
 [mainline#113](https://github.com/pubky/mainline/issues/113).
 
+The user-key republisher accepts a packet only when its `_pubky` HTTPS or SVCB
+target is this homeserver's public key. Users whose records point elsewhere are
+reported as skipped; their stored data is not removed.
+
 ## Single Attempt
 
 ```mermaid

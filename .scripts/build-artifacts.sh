@@ -38,7 +38,7 @@ TARGETS=(
 "aarch64-unknown-linux-musl,linux-arm64"
 "x86_64-unknown-linux-musl,linux-amd64"
 "x86_64-pc-windows-gnu,windows-amd64"
-"aarch64-apple-darwin,osx-arm64" 
+"aarch64-apple-darwin,osx-arm64"
 "x86_64-apple-darwin,osx-amd64"
 )
 

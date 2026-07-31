@@ -324,12 +324,12 @@ mod tests {
     }
 
     fn auth_session(public_key: PublicKey) -> AuthSession {
-        AuthSession::Grant(GrantSession {
-            user_key: public_key,
-            capabilities: Capabilities::builder().cap(Capability::root()).finish(),
-            grant_id: GrantId::generate(),
-            token_expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
-        })
+        AuthSession::Grant(GrantSession::test(
+            public_key,
+            Capabilities::builder().cap(Capability::root()).finish(),
+            GrantId::generate(),
+            chrono::Utc::now().timestamp() as u64 + 3600,
+        ))
     }
 
     #[tokio::test]

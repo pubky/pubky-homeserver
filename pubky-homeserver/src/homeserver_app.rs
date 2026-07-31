@@ -92,6 +92,7 @@ impl HomeserverApp {
         let user_keys_republisher_job = UserKeysRepublisherJob::start(
             context.sql_db.clone(),
             pkarr_builder,
+            context.keypair.public_key(),
             republish_interval,
         );
 

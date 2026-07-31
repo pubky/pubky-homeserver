@@ -1,14 +1,11 @@
-# Migrating to v0.10
+# Not Recommended: Keep Cookie Authentication
 
-This guide is for applications upgrading from `v0.9.x` that already use cookie-based SDK authentication and want that behavior to keep working.
+Cookie authentication is deprecated and insecure. Prefer the new [grant authentication system](./grant-auth.md). This guide shows how to keep using cookie authentication while migrating from `v0.9` to `v0.10`.
 
-Cookie auth still exists in v0.10, but the SDK now names the cookie-compatible APIs explicitly. The main migration is to replace the old generic signer methods with the new `*Cookie` methods where your app expects a cookie-backed session.
 
-Some cookie-specific APIs are documented or marked as deprecated because cookie auth is now the compatibility path. That is expected for this migration.
+## TLDR
 
-## Summary
-
-For cookie-auth applications:
+For the cookie-auth compatibility path:
 
 - JS: replace `signer.signup(...)` with `signer.signupCookie(...)` when you need the returned `Session`.
 - JS: replace `signer.signin()` with `signer.signinCookie()`.
@@ -28,7 +25,7 @@ For cookie-auth applications:
 
 ## JavaScript SDK
 
-### Direct Signup
+### Direct Sign-up
 
 In `v0.9.x`, `signup` created the account and returned a cookie-backed session.
 
@@ -37,7 +34,7 @@ In `v0.9.x`, `signup` created the account and returned a cookie-backed session.
 const session = await signer.signup(homeserver, signupToken);
 ```
 
-In v0.10, `signup` no longer returns a session, it only signs up. To keep the old cookie behavior, use `signupCookie`.
+In v0.10, `signup` no longer returns a session; it only signs up the user. To keep the old cookie behavior, use `signupCookie`.
 
 ```js
 // v0.10 cookie-compatible
@@ -50,7 +47,7 @@ If the signup token is optional in your code, keep passing `null` or `undefined`
 const session = await signer.signupCookie(homeserver, null);
 ```
 
-### Direct Signin
+### Direct Sign-in
 
 In `v0.9.x`, `signin` returned a cookie-backed session and did not take arguments.
 
@@ -66,7 +63,7 @@ In v0.10, use `signinCookie` to keep cookie auth.
 const session = await signer.signinCookie();
 ```
 
-For blocking signin:
+For blocking sign-in:
 
 ```js
 // v0.9.x
@@ -147,7 +144,7 @@ Browsers cannot export HTTP-only cookie secrets. In browser apps, keep using the
 
 ## Rust SDK
 
-### Direct Signup
+### Direct Sign-up
 
 In `v0.9.x`, `signup` created the account and returned a cookie-backed `PubkySession`.
 
@@ -171,7 +168,7 @@ let session = signer
     .await?;
 ```
 
-### Direct Signin
+### Direct Sign-in
 
 In `v0.9.x`, `signin` returned a cookie-backed session and did not take arguments.
 
@@ -187,7 +184,7 @@ In v0.10, use `signin_cookie` to keep cookie auth.
 let session = signer.signin_cookie().await?;
 ```
 
-For blocking signin:
+For blocking sign-in:
 
 ```rust
 // v0.9.x
@@ -204,6 +201,7 @@ If your app starts auth flows through the `Pubky` facade, rename `start_auth_flo
 ```rust
 let caps = Capabilities::builder()
     .read_write("/pub/my-cool-app/")
+    .unwrap()
     .finish();
 
 let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
@@ -328,77 +326,3 @@ let bytes = cookie_record.serialize();
 ```
 
 The old common type was `pubky_common::session::SessionInfo`. The cookie-specific replacement is `pubky_common::session::CookieSessionRecord`, re-exported by the SDK as `pubky::CookieSessionRecord`.
-
-### Deep Link Parsing
-
-If your Rust app implements an authenticator and parses legacy signin or signup deep links directly, the parameter accessors changed.
-
-Use `params()` instead of the old direct methods.
-
-```rust
-let params = deep_link.params();
-
-let caps = &params.capabilities;
-let relay = &params.relay;
-let secret = &params.secret;
-```
-
-For signup deep links:
-
-```rust
-let params = signup_deep_link.params();
-
-let homeserver = &params.homeserver;
-let signup_token = params.signup_token.as_deref();
-```
-
-If your code matches on `DeepLink`, make sure it has a fallback or handles all variants. v0.10 adds extra variants, so exhaustive matches written against `v0.9.x` may fail to compile.
-
-### Rust Checklist
-
-- If your code expects `signup` to return `PubkySession`, change it to `signup_cookie`.
-- If your code calls `signin()` with no arguments, change it to `signin_cookie()`.
-- If your code calls `signin_blocking()` with no arguments, change it to `signin_cookie_blocking()`.
-- If your code imports `PubkyAuthFlow`, change it to `PubkyCookieAuthFlow`.
-- If your code uses `PubkyAuthFlow::builder`, change it to `PubkyCookieAuthFlow::builder`.
-- If your code uses `start_auth_flow`, change it to `start_cookie_auth_flow`.
-- If your code uses `resume_auth_flow`, change it to `resume_cookie_auth_flow`.
-- If your code uses `session.export_secret()`, change it to `session.as_cookie().and_then(|cookie| cookie.export_secret())`.
-- If your code uses `session.write_secret_file(...)`, change it to `session.as_cookie().unwrap().write_secret_file(...)`.
-- If your code needs cookie metadata fields, use `session.as_cookie().unwrap().session_info()`.
-
-## Capability Path Matching
-
-v0.10 tightens capability path matching. A trailing slash is significant.
-
-Directory scopes should end with `/`.
-
-```text
-/pub/app/:rw covers /pub/app/file.txt
-/pub/app:rw only covers /pub/app
-```
-
-If your app intends to grant access to everything under an app directory, use a trailing slash.
-
-```rust
-let caps = Capabilities::builder()
-    .read_write("/pub/my-cool-app/")
-    .finish();
-```
-
-```js
-const caps = "/pub/my-cool-app/:rw";
-```
-
-## What Changed But Is Not Required For Cookie Auth
-
-v0.10 introduces additional auth APIs and session views, but cookie-auth applications do not need to adopt them to keep working.
-
-For a cookie-auth migration, avoid changing working code to:
-
-- JS `startGrantAuthFlow(...)`.
-- Rust `start_grant_auth_flow(...)`.
-- Grant session management APIs.
-- Grant secret export/import APIs.
-
-Use those only when you intentionally migrate away from cookie auth.

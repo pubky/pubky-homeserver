@@ -11,11 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up MSRV toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
           toolchain: "1.89"
-          override: true
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Verify MSRV
@@ -26,12 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
+          toolchain: "1.89"
           components: rustfmt
-          override: true
       - name: Check formatting
         run: cargo fmt --check
 
@@ -40,12 +36,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
+          toolchain: "1.89"
           components: clippy
-          override: true
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
@@ -63,12 +57,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
+          toolchain: "1.89"
           components: rustfmt, clippy
-          override: true
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Check excluded helper crates
@@ -117,11 +109,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
-          override: true
+          toolchain: "1.89"
       - name: Install Nextest
         uses: taiki-e/install-action@nextest
       - name: Cache
@@ -137,7 +127,7 @@ jobs:
         run: |
           set -e
           # nextest does not support doctests yet.
-          cargo test --doc -p ${{ matrix.crate }} --all-features 
+          cargo test --doc -p ${{ matrix.crate }} --all-features
 
           if cargo nextest run \
             -p ${{ matrix.crate }} \
@@ -165,11 +155,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
-          override: true
+          toolchain: "1.89"
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Build docs
@@ -180,11 +168,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
-          override: true
+          toolchain: "1.89"
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Cargo check examples
@@ -214,12 +200,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
+          toolchain: "1.89"
           target: wasm32-unknown-unknown
-          override: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -327,11 +311,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: 1.89
-          override: true
+          toolchain: "1.89"
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
       - name: Run docker postgres tests

@@ -1,14 +1,14 @@
-use pubky_common::crypto::PublicKey;
+use pubky_common::{crypto::PublicKey, StoragePathError};
 use std::str::FromStr;
 
-use super::WebDavPath;
+use super::StoragePath;
 
 #[derive(thiserror::Error, Debug)]
 pub enum EntryPathError {
     #[error("{0}")]
     Invalid(String),
-    #[error("Failed to parse webdav path: {0}")]
-    InvalidWebdavPath(anyhow::Error),
+    #[error("Failed to parse storage path: {0}")]
+    InvalidStoragePath(StoragePathError),
     #[error("Failed to parse pubkey: {0}")]
     InvalidPubkey(pkarr::errors::PublicKeyError),
 }
@@ -20,7 +20,7 @@ pub enum EntryPathError {
 pub struct EntryPath {
     #[allow(dead_code)]
     pubkey: PublicKey,
-    path: WebDavPath,
+    path: StoragePath,
     /// The key of the entry represented as a string.
     /// The key is the pubkey and the path concatenated.
     /// Example: `8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/folder/file.txt`
@@ -29,7 +29,7 @@ pub struct EntryPath {
 }
 
 impl EntryPath {
-    pub fn new(pubkey: PublicKey, path: WebDavPath) -> Self {
+    pub fn new(pubkey: PublicKey, path: StoragePath) -> Self {
         let key = format!("{}{}", pubkey.z32(), path);
         Self { pubkey, path, key }
     }
@@ -39,7 +39,7 @@ impl EntryPath {
         &self.pubkey
     }
 
-    pub fn path(&self) -> &WebDavPath {
+    pub fn path(&self) -> &StoragePath {
         &self.path
     }
 
@@ -85,8 +85,8 @@ impl FromStr for EntryPath {
             ));
         }
         let pubkey = PublicKey::try_from_z32(pubkey).map_err(EntryPathError::InvalidPubkey)?;
-        let webdav_path = WebDavPath::new(path).map_err(EntryPathError::InvalidWebdavPath)?;
-        Ok(Self::new(pubkey, webdav_path))
+        let storage_path = StoragePath::new(path).map_err(EntryPathError::InvalidStoragePath)?;
+        Ok(Self::new(pubkey, storage_path))
     }
 }
 
@@ -118,12 +118,13 @@ impl<'de> serde::Deserialize<'de> for EntryPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH;
 
     #[test]
     fn test_entry_path_from_str() {
         let pubkey =
             PublicKey::from_str("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo").unwrap();
-        let path = WebDavPath::new("/pub/folder/file.txt").unwrap();
+        let path = StoragePath::new("/pub/folder/file.txt").unwrap();
         let key = format!("{}{path}", pubkey.z32());
         let entry_path = EntryPath::new(pubkey, path);
         assert_eq!(entry_path.as_ref(), key);
@@ -134,5 +135,15 @@ mod tests {
         let string = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/pub/folder/file.txt";
         let entry_path = EntryPath::from_str(string).unwrap();
         assert_eq!(entry_path.to_string(), string);
+    }
+
+    #[test]
+    fn maximum_storage_path_fits_storage_object_key_limit() {
+        let pubkey =
+            PublicKey::from_str("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo").unwrap();
+        let path = StoragePath::new(&"/a".repeat(MAX_STORAGE_PATH_TOTAL_LENGTH / 2)).unwrap();
+        let entry_path = EntryPath::new(pubkey, path);
+
+        assert_eq!(entry_path.as_str().len(), 1024);
     }
 }

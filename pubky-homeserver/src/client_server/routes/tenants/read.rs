@@ -353,6 +353,51 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
+    async fn invalid_path_aliases_cannot_modify_canonical_file() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        server
+            .put("/pub/report")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .text("original")
+            .expect_success()
+            .await;
+
+        for alias in [
+            "/pub/report%20",
+            "/pub/report%C2%A0",
+            "/pub/report%E3%80%80",
+            "/pub/scope/%5C..%5Creport",
+        ] {
+            server
+                .put(alias)
+                .add_header("host", public_key.z32())
+                .add_header(header::COOKIE, cookie.clone())
+                .text("overwritten")
+                .expect_failure()
+                .await
+                .assert_status(StatusCode::BAD_REQUEST);
+
+            server
+                .delete(alias)
+                .add_header("host", public_key.z32())
+                .add_header(header::COOKIE, cookie.clone())
+                .expect_failure()
+                .await
+                .assert_status(StatusCode::BAD_REQUEST);
+        }
+
+        let response = server
+            .get("/pub/report")
+            .add_header("host", public_key.z32())
+            .expect_success()
+            .await;
+        assert_eq!(response.text(), "original");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
     async fn if_last_modified() {
         let (_context, _router, server, public_key, cookie) = create_environment().await.unwrap();
 
@@ -784,10 +829,13 @@ mod tests {
         assert_private_cache_policy(unauthorized.headers());
         assert_no_validators(unauthorized.headers());
 
-        let write_only_cookie =
-            sign_in_with_capabilities(&server, &keypair, vec![Capability::write("/priv/")])
-                .await
-                .unwrap();
+        let write_only_cookie = sign_in_with_capabilities(
+            &server,
+            &keypair,
+            vec![Capability::write("/priv/").unwrap()],
+        )
+        .await
+        .unwrap();
         let forbidden = server
             .get("/priv/secret.txt")
             .add_header("host", public_key.z32())

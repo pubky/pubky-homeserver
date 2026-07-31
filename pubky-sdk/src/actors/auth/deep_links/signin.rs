@@ -79,7 +79,9 @@ mod tests {
     fn creates_signin_deep_link_from_params() {
         let capabilities = Capabilities::builder()
             .read_write("/")
+            .unwrap()
             .read("/test")
+            .unwrap()
             .finish();
         let relay = Url::parse("https://httprelay.pubky.app/inbox/").unwrap();
         let secret = [123; 32];
@@ -106,6 +108,18 @@ mod tests {
             error,
             DeepLinkParseError::MissingQueryParameter("secret")
         ));
+    }
+
+    #[test]
+    fn rejects_invalid_capability_with_context() {
+        let error = "pubkyauth://signin?caps=/:rw,invalid:w&relay=https://httprelay.pubky.app/inbox/&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8"
+            .parse::<SigninDeepLink>()
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Invalid query parameter caps: invalid capability at position 2 (`invalid:w`): invalid capability scope: path must be absolute"
+        );
     }
 
     #[test]

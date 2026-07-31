@@ -4,12 +4,12 @@ use pubky_common::{
     auth::AuthToken, capabilities::Capabilities, crypto::PublicKey, session::CookieSessionRecord,
 };
 
-use crate::persistence::sql::{signup_code::SignupCode, user::UserRepository, SqlDb};
+use crate::persistence::sql::{signup_code::SignupCode, uexecutor, user::UserRepository, SqlDb};
 use crate::shared::{HttpError, HttpResult};
 
 use super::persistence::{SessionEntity, SessionRepository, SessionSecret};
 use super::verifier::CookieAuthVerifier;
-use crate::client_server::auth::{AuthSession, SignupService};
+use crate::client_server::auth::{AuthRevocation, AuthSession, SignupService};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CookieAuthService {
@@ -74,22 +74,39 @@ impl CookieAuthService {
         public_key: &PublicKey,
     ) -> Option<AuthSession> {
         let session_secret = SessionSecret::new(cookie_value?).ok()?;
-        let session = self.get_session(&session_secret).await.ok()?;
-
-        if &session.user_pubkey != public_key {
-            return None;
-        }
+        let session = self
+            .resolve_active_session_for_user(&session_secret, public_key)
+            .await
+            .ok()
+            .flatten()?;
 
         Some(AuthSession::Cookie(session))
     }
 
     pub(crate) async fn signout(&self, auth: Option<AuthSession>) -> HttpResult<()> {
         if let Some(AuthSession::Cookie(cookie_session)) = auth {
-            SessionRepository::delete(&cookie_session.secret, &mut self.sql_db.pool().into())
+            let mut tx = self.sql_db.pool().begin().await?;
+            SessionRepository::delete(&cookie_session.secret, uexecutor!(tx)).await?;
+            AuthRevocation::notify_cookie_session_in_transaction(cookie_session.id, uexecutor!(tx))
                 .await?;
+            tx.commit().await?;
         }
 
         Ok(())
+    }
+
+    /// Recheck that this exact session row still exists before opening a
+    /// private long-lived stream.
+    pub(crate) async fn validate_active_session(&self, session: &SessionEntity) -> HttpResult<()> {
+        match self
+            .resolve_active_session_for_user(&session.secret, &session.user_pubkey)
+            .await
+        {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(HttpError::unauthorized()),
+            Err(sqlx::Error::RowNotFound) => Err(HttpError::unauthorized()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn verify(&self, body: &[u8]) -> Result<AuthToken, pubky_common::auth::Error> {
@@ -106,6 +123,17 @@ impl CookieAuthService {
 
     async fn get_session(&self, secret: &SessionSecret) -> Result<SessionEntity, sqlx::Error> {
         SessionRepository::get_by_secret(secret, &mut self.sql_db.pool().into()).await
+    }
+
+    /// Resolve a cookie session through the same active-row and tenant checks
+    /// used by both normal cookie authentication and private stream setup.
+    async fn resolve_active_session_for_user(
+        &self,
+        secret: &SessionSecret,
+        public_key: &PublicKey,
+    ) -> Result<Option<SessionEntity>, sqlx::Error> {
+        let session = self.get_session(secret).await?;
+        Ok((&session.user_pubkey == public_key).then_some(session))
     }
 }
 

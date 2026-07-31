@@ -11,11 +11,11 @@ publish = false
 
 [[bin]]
 name = "testnet"
-path = "./9-testnet/main.rs"
+path = "./8-testnet/main.rs"
 
 [[bin]]
 name = "logging"
-path = "./8-logging/main.rs"
+path = "./7-logging/main.rs"
 
 [[bin]]
 name = "signup"
@@ -38,16 +38,12 @@ name = "request"
 path = "./4-request/main.rs"
 
 [[bin]]
-name = "authenticator_signup"
-path = "./5-auth_flow_signup/authenticator.rs"
-
-[[bin]]
 name = "events_stream"
-path = "./6-events_stream/main.rs"
+path = "./5-events_stream/main.rs"
 
 [[bin]]
 name = "sessions"
-path = "./7-session_management/main.rs"
+path = "./6-session_management/main.rs"
 
 [[bin]]
 name = "keygen"

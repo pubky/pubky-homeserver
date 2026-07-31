@@ -12,7 +12,7 @@ use wasm_bindgen::prelude::*;
 use pkarr::errors::PublicKeyError;
 use pubky::errors::{BuildError, RequestError};
 use pubky_common::auth::Error as AuthTokenError;
-use pubky_common::capabilities::Error as CapabilitiesError;
+use pubky_common::capabilities::{CapabilitiesParseError, CapabilityParseError};
 use pubky_common::recovery_file::Error as RecoveryFileError;
 
 /// A convenient `Result` type alias for fallible functions exposed to WebAssembly.
@@ -209,10 +209,19 @@ impl From<RecoveryFileError> for PubkyError {
     }
 }
 
-/// Converts a `pubky_common::capabilities::Error` into a `PubkyError`.
-impl From<CapabilitiesError> for PubkyError {
-    fn from(err: CapabilitiesError) -> Self {
+/// Converts a capability parsing error into a `PubkyError`.
+impl From<CapabilityParseError> for PubkyError {
+    fn from(err: CapabilityParseError) -> Self {
         Self::new(PubkyErrorName::InvalidInput, err.to_string())
+    }
+}
+
+/// Converts a capability-list parsing error into a `PubkyError`.
+impl From<CapabilitiesParseError> for PubkyError {
+    fn from(error: CapabilitiesParseError) -> Self {
+        let data = json!({ "invalidEntries": [error.entry.clone()] });
+
+        Self::new(PubkyErrorName::InvalidInput, error).with_data(data)
     }
 }
 

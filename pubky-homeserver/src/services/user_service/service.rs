@@ -52,6 +52,15 @@ impl UserService {
         UserRepository::get_for_update(pubkey, executor).await
     }
 
+    /// Fetch a user with a `FOR NO KEY UPDATE` row lock within an existing transaction.
+    pub async fn get_for_no_key_update<'a>(
+        &self,
+        pubkey: &PublicKey,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<UserEntity, sqlx::Error> {
+        UserRepository::get_for_no_key_update(pubkey, executor).await
+    }
+
     /// Persist an updated user entity within an existing transaction.
     pub async fn update<'a>(
         &self,

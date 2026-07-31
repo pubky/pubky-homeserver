@@ -2,8 +2,9 @@ use super::republish_summary::{RepublishResult, RepublishSummary};
 use super::republisher::{RepublishOutcome, Republisher, RepublisherSettings};
 use super::retrying_republisher::{RetrySettings, RetryingRepublisher};
 use futures_util::{stream::FuturesUnordered, TryStreamExt};
-use pkarr::{errors::BuildError, ClientBuilder, PublicKey};
-use std::{num::NonZeroUsize, sync::Mutex};
+use pkarr::{errors::BuildError, ClientBuilder, PublicKey, SignedPacket};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
 type PublicKeyQueue = Mutex<Vec<PublicKey>>;
@@ -23,6 +24,18 @@ impl Default for BatchRepublisherSettings {
             retry: RetrySettings::default(),
             max_concurrent_workers: NonZeroUsize::new(12).expect("worker count should be non-zero"),
         }
+    }
+}
+
+impl BatchRepublisherSettings {
+    /// Set a condition that packets must satisfy before they are republished.
+    #[must_use]
+    pub(crate) fn with_republish_condition<F>(mut self, condition: F) -> Self
+    where
+        F: Fn(&SignedPacket) -> bool + Send + Sync + 'static,
+    {
+        self.republisher.republish_condition = Some(Arc::new(condition));
+        self
     }
 }
 

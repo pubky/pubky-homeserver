@@ -3,6 +3,10 @@
 You can use these examples to test signup to a provided homeserver using a keypair.
 
 
+## Prerequisites
+
+Examples using `--testnet` require a running local testnet. See the [examples README](../README.md#quick-start) for setup.
+
 ## Usage
 
 This example defaults to `../../sample_recovery.key`, which has an empty passphrase.

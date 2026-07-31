@@ -2,6 +2,10 @@
 
 Subscribe to Server-Sent Events (SSE) from one or more Pubky users' homeserver `/events-stream` endpoint.
 
+## Prerequisites
+
+Examples using `--testnet` require a running local testnet. See the [examples README](../README.md#quick-start) for setup.
+
 ## Usage
 
 ```bash

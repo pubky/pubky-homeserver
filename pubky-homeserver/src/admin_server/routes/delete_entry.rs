@@ -25,7 +25,7 @@ mod tests {
     };
     use crate::persistence::sql::entry::EntryRepository;
     use crate::persistence::sql::user::UserRepository;
-    use crate::shared::webdav::{EntryPath, WebDavPath};
+    use crate::shared::webdav::{EntryPath, StoragePath};
     use crate::AppContext;
     use axum::{routing::delete, Router};
     use opendal::Buffer;
@@ -59,11 +59,11 @@ mod tests {
             .with_state(app_state);
 
         // Write a test file
-        let webdav_path = WebDavPath::new(format!("/pub/{}", file_path).as_str()).unwrap();
+        let storage_path = StoragePath::new(format!("/pub/{}", file_path).as_str()).unwrap();
         UserRepository::create(&pubkey, &mut db.pool().into())
             .await
             .unwrap();
-        let entry_path = EntryPath::new(pubkey.clone(), webdav_path);
+        let entry_path = EntryPath::new(pubkey.clone(), storage_path);
 
         write_test_file(&file_service, &entry_path).await;
 

@@ -3,7 +3,11 @@
 //! guarantee that private events never leak to unauthorized callers
 
 use super::*;
+use eventsource_stream::Event;
+use futures::{Stream, StreamExt};
 use pubky_testnet::pubky::ClientId;
+use std::{fmt::Debug, future::Future, time::Duration};
+use tokio::time::{sleep, timeout};
 
 /// Sign up a fresh user and return an authenticated grant session plus the
 /// bearer the homeserver minted for it (for raw, credentialed requests).
@@ -25,6 +29,43 @@ async fn signed_in_user(
         .unwrap();
     let bearer = session.as_grant().unwrap().current_bearer().await;
     (signer.public_key(), session, bearer)
+}
+
+async fn assert_revocation_closes_private_stream<StreamError, Revoke, RevokeError>(
+    stream: &mut (impl Stream<Item = Result<Event, StreamError>> + Unpin),
+    writer: &pubky_testnet::pubky::PubkySession,
+    before_path: &str,
+    revoke: Revoke,
+    after_path: &str,
+) where
+    StreamError: Debug,
+    Revoke: Future<Output = Result<(), RevokeError>>,
+    RevokeError: Debug,
+{
+    sleep(Duration::from_millis(300)).await;
+    writer.storage().put(before_path, vec![1]).await.unwrap();
+    let before = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("private stream should receive a live event")
+        .expect("private stream should not close before revocation")
+        .expect("private stream should decode its live event");
+    assert!(before.data.contains(before_path));
+
+    revoke.await.unwrap();
+
+    let closed = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("revocation should promptly close the private stream");
+    assert!(closed.is_none(), "revoked private stream should close");
+
+    writer.storage().put(after_path, vec![2]).await.unwrap();
+    assert!(
+        timeout(Duration::from_millis(500), stream.next())
+            .await
+            .expect("closed stream should stay closed")
+            .is_none(),
+        "revoked stream must not receive later private events"
+    );
 }
 
 /// Anonymous, unfiltered stream is public-only: a `/priv/` write must never
@@ -520,4 +561,172 @@ async fn events_stream_cookie_not_used_when_bearer_present() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A private stream is tied to the bearer grant that opened it. Revoking that
+/// grant from a second root session must close the SSE connection before a
+/// later private write can be observed.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_live_closes_when_grant_is_revoked() {
+    use eventsource_stream::Eventsource;
+    use pubky_testnet::pubky::GrantManager;
+
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let server_host = server.public_key().z32();
+
+    let signer = pubky.signer(Keypair::random());
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let user = signer.public_key();
+    let root = signer
+        .signin(ClientId::new("stream-revoker.test").unwrap())
+        .await
+        .unwrap();
+    let streamed_session = signer
+        .signin(ClientId::new("stream-revoked.test").unwrap())
+        .await
+        .unwrap();
+    let streamed_bearer = streamed_session.as_grant().unwrap().current_bearer().await;
+
+    let url = format!(
+        "https://{}/events-stream?user={}&path=/priv/app/&live=true",
+        server_host,
+        user.z32()
+    );
+    let response = pubky
+        .client()
+        .request(Method::GET, &url)
+        .header("Authorization", format!("Bearer {streamed_bearer}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.bytes_stream().eventsource();
+
+    let grant_id = streamed_session.as_grant().unwrap().grant_id().await;
+    assert_revocation_closes_private_stream(
+        &mut stream,
+        &root,
+        "/priv/app/before-revoke.txt",
+        GrantManager::new(&root).revoke(&grant_id),
+        "/priv/app/after-revoke.txt",
+    )
+    .await;
+}
+
+/// Cookie signout invalidates only the cookie session used by the stream; a
+/// second session for the same user remains able to write the post-revocation
+/// event that the closed stream must not receive.
+#[tokio::test]
+#[pubky_testnet::test]
+#[allow(deprecated, reason = "Test exercises the deprecated cookie auth flow")]
+async fn events_stream_live_closes_when_cookie_session_is_revoked() {
+    use eventsource_stream::Eventsource;
+
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let server_host = server.public_key().z32();
+
+    let signer = pubky.signer(Keypair::random());
+    let streamed_session = signer
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    let user = signer.public_key();
+    let token = streamed_session
+        .as_cookie()
+        .unwrap()
+        .export_secret()
+        .unwrap();
+    let (cookie_name, cookie_secret) = token.split_once(':').unwrap();
+    let streamed_cookie = format!("{cookie_name}={cookie_secret}");
+    let writer_session = signer.signin_cookie().await.unwrap();
+
+    let url = format!(
+        "https://{}/events-stream?user={}&path=/priv/app/&live=true",
+        server_host,
+        user.z32()
+    );
+    let response = pubky
+        .client()
+        .request(Method::GET, &url)
+        .header("Cookie", streamed_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.bytes_stream().eventsource();
+
+    assert_revocation_closes_private_stream(
+        &mut stream,
+        &writer_session,
+        "/priv/app/before-cookie-revoke.txt",
+        streamed_session.signout(),
+        "/priv/app/after-cookie-revoke.txt",
+    )
+    .await;
+}
+
+/// Public-only subscriptions remain anonymous and continue receiving public
+/// events even when an unrelated authenticated session is revoked.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_live_public_remains_open_after_auth_revocation() {
+    use eventsource_stream::Eventsource;
+    use futures::StreamExt;
+    use pubky_testnet::pubky::GrantManager;
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let server_host = server.public_key().z32();
+
+    let signer = pubky.signer(Keypair::random());
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let user = signer.public_key();
+    let root = signer
+        .signin(ClientId::new("public-stream-root.test").unwrap())
+        .await
+        .unwrap();
+    let revoked_session = signer
+        .signin(ClientId::new("public-stream-revoked.test").unwrap())
+        .await
+        .unwrap();
+
+    let url = format!(
+        "https://{}/events-stream?user={}&live=true",
+        server_host,
+        user.z32()
+    );
+    let response = pubky
+        .client()
+        .request(Method::GET, &url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.bytes_stream().eventsource();
+
+    sleep(Duration::from_millis(300)).await;
+    let revoked_grant = revoked_session.as_grant().unwrap().grant_id().await;
+    GrantManager::new(&root)
+        .revoke(&revoked_grant)
+        .await
+        .unwrap();
+    root.storage()
+        .put("/pub/after-auth-revoke.txt", vec![1])
+        .await
+        .unwrap();
+
+    let event = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("public stream should stay open")
+        .expect("public stream should emit an event")
+        .expect("public stream event should decode");
+    assert!(event.data.contains("/pub/after-auth-revoke.txt"));
 }

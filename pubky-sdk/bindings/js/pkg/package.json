@@ -16,6 +16,7 @@
     "test-browser": "npm run build:test && browserify dist/tests/setup.js dist/tests/*.js -p esmify | npx tape-run",
     "test-browser:ci": "npm run build:test && browserify dist/tests/setup.js dist/tests/*.js -p esmify | tape-run --browser electron --electron-arg=--no-sandbox --electron-arg=--disable-gpu",
     "build": "cargo run --bin bundle_npm",
+    "docs": "typedoc",
     "prepublishOnly": "npm run build"
   },
   "files": [
@@ -42,6 +43,7 @@
     "esmify": "^2.1.1",
     "tape": "^5.8.1",
     "tape-run": "^11.0.0",
+    "typedoc": "^0.28.20",
     "typescript": "^5.4.5"
   },
   "dependencies": {

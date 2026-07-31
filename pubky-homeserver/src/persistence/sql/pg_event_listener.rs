@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use crate::persistence::files::events::{EventRepository, EventType, EventsService};
     use crate::persistence::sql::SqlDb;
-    use crate::shared::webdav::{EntryPath, WebDavPath};
+    use crate::shared::webdav::{EntryPath, StoragePath};
     use pubky_common::crypto::{Hash, Keypair};
     use std::time::Duration;
     use tokio::sync::broadcast;
@@ -299,7 +299,7 @@ mod tests {
         path: &str,
         pubkey: &pubky_common::crypto::PublicKey,
     ) -> u64 {
-        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new(path).unwrap());
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
         let mut tx = db.pool().begin().await.unwrap();
         let event = EventRepository::create(
             user_id,
@@ -369,7 +369,7 @@ mod tests {
         path: &str,
         pubkey: &pubky_common::crypto::PublicKey,
     ) -> u64 {
-        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new(path).unwrap());
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
         let mut tx = db.pool().begin().await.unwrap();
         let event = EventRepository::create(
             user_id,
@@ -718,7 +718,7 @@ mod tests {
                 barrier.wait().await;
                 let entry_path = EntryPath::new(
                     pubkey,
-                    WebDavPath::new(&format!("/pub/race{}.txt", i)).unwrap(),
+                    StoragePath::new(&format!("/pub/race{}.txt", i)).unwrap(),
                 );
                 let mut tx = db.pool().begin().await.unwrap();
                 let event = EventRepository::create(

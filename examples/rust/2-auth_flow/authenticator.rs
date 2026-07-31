@@ -28,7 +28,6 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let homeserver = &PublicKey::try_from(testnet::TESTNET_HOMESERVER).unwrap();
     let recovery_file = cli
         .recovery_file
         .unwrap_or_else(|| recovery::sample_recovery_file(cli.testnet));
@@ -39,13 +38,30 @@ async fn main() -> Result<()> {
         .parse::<DeepLink>()
         .map_err(|e| anyhow::anyhow!("Failed to parse Pubky Auth deep link: {e}"))?;
 
-    let (caps, client_id) = match &deep_link {
-        DeepLink::Signin(deep_link) => (&deep_link.params().capabilities, None),
+    let (caps, client_id, signup) = match &deep_link {
+        DeepLink::Signin(deep_link) => (&deep_link.params().capabilities, None, None),
         DeepLink::SigninGrant(deep_link) => (
             &deep_link.params().capabilities,
             Some(deep_link.params().client_id.to_string()),
+            None,
         ),
-        _ => anyhow::bail!("Expected a signin or signin_grant Pubky Auth deep link"),
+        DeepLink::Signup(deep_link) => (
+            &deep_link.params().capabilities,
+            None,
+            Some((
+                &deep_link.params().homeserver,
+                deep_link.params().signup_token.as_deref(),
+            )),
+        ),
+        DeepLink::SignupGrant(deep_link) => (
+            &deep_link.params().capabilities,
+            Some(deep_link.params().client_id.to_string()),
+            Some((
+                &deep_link.params().homeserver,
+                deep_link.params().signup_token.as_deref(),
+            )),
+        ),
+        _ => anyhow::bail!("Expected a signin or signup Pubky Auth deep link"),
     };
 
     if let Some(client_id) = client_id {
@@ -67,16 +83,19 @@ async fn main() -> Result<()> {
     println!("PublicKey: {}", keypair.public_key());
 
     let signer = if cli.testnet {
-        let signer = Pubky::testnet()?.signer(keypair);
-
-        // For the purposes of this demo, we need to make sure
-        // the user has an account on the local homeserver.
-        testnet::ensure_signup(&signer, homeserver).await?;
-
-        signer
+        Pubky::testnet()?.signer(keypair)
     } else {
         Pubky::new()?.signer(keypair)
     };
+
+    if let Some((homeserver, signup_token)) = signup {
+        println!("Signing up to homeserver: {homeserver}");
+        signer.signup(homeserver, signup_token).await?;
+        println!("Successfully signed up and published the homeserver record.");
+    } else if cli.testnet {
+        let homeserver = PublicKey::try_from(testnet::TESTNET_HOMESERVER)?;
+        testnet::ensure_signup(&signer, &homeserver).await?;
+    }
 
     println!("Sending approval to the 3rd party app...");
 

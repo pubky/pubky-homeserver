@@ -14,7 +14,10 @@
 //! # async fn run() -> pubky::Result<()> {
 //! let pubky = Pubky::new()?; // or Pubky::testnet() / Pubky::with_client(...)
 //!
-//! let caps = Capabilities::builder().write("/pub/demoapp/").finish();
+//! let caps = Capabilities::builder()
+//!     .write("/pub/demoapp/")
+//!     .expect("static scope is canonical")
+//!     .finish();
 //! let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
 //! println!("Scan to sign in: {}", flow.authorization_url());
 //!

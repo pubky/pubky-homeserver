@@ -3,15 +3,9 @@ use std::path::Path;
 #[cfg(test)]
 use crate::AppContext;
 use crate::{
-    persistence::{
-        files::{
-            entry::entry_layer::EntryLayer,
-            events::{EventsLayer, EventsService},
-            path_collision_layer::PathCollisionLayer,
-            user_quota_layer::UserQuotaLayer,
-            write_path_layer::WritePathLayer,
-        },
-        sql::SqlDb,
+    persistence::files::{
+        events::EventsService, write_finalization_layer::WriteFinalizationLayer,
+        write_path_layer::WritePathLayer,
     },
     services::user_service::UserService,
     shared::webdav::EntryPath,
@@ -25,8 +19,8 @@ use opendal::Operator;
 
 use super::super::{FileIoError, FileMetadata, FileMetadataBuilder, FileStream, WriteStreamError};
 
-/// Build the base storage operator (with quota, entry, and events layers)
-/// and a second operator that additionally includes the `WritePathLayer`.
+/// Build storage operators with one transactional finalization layer and an
+/// app-facing operator that additionally enforces write paths and collisions.
 ///
 /// Both operators share the same underlying storage backend, which is
 /// important for backends like `InMemory` where separate instances would
@@ -34,20 +28,10 @@ use super::super::{FileIoError, FileMetadata, FileMetadataBuilder, FileStream, W
 pub fn build_storage_operators(
     storage_config: &StorageToml,
     data_directory: &Path,
-    db: &SqlDb,
     events_service: EventsService,
     user_service: UserService,
 ) -> Result<(Operator, Operator), FileIoError> {
-    let user_quota_layer =
-        UserQuotaLayer::new(user_service.clone(), storage_config.default_quota_mb);
-    let entry_layer = EntryLayer::new(db.clone());
-    let events_layer = EventsLayer::new(db.clone(), events_service);
-    // Note: Layers ordering is important:
-    // Layers are applied last-to-first: write_path_layer (outermost) runs first,
-    // then path_collision_layer rejects file/folder collisions
-    // before they reach storage. events_layer runs after entry_layer.close()
-    // completes, guaranteeing the file is written before the Event is created.
-    let admin_operator = match &storage_config.backend {
+    let backend_operator = match &storage_config.backend {
         StorageConfigToml::FileSystem => {
             let files_dir = match data_directory.join("data/files").to_str() {
                 Some(path) => path.to_string(),
@@ -59,11 +43,7 @@ pub fn build_storage_operators(
                 }
             };
             let builder = opendal::services::Fs::default().root(files_dir.as_str());
-            opendal::Operator::new(builder)?
-                .layer(user_quota_layer)
-                .layer(entry_layer)
-                .layer(events_layer)
-                .finish()
+            opendal::Operator::new(builder)?.finish()
         }
         #[cfg(feature = "storage-gcs")]
         StorageConfigToml::GoogleBucket(config) => {
@@ -72,27 +52,31 @@ pub fn build_storage_operators(
                 config.bucket_name
             );
             let builder = config.to_builder()?;
-            opendal::Operator::new(builder)?
-                .layer(user_quota_layer)
-                .layer(entry_layer)
-                .layer(events_layer)
-                .finish()
+            opendal::Operator::new(builder)?.finish()
         }
         #[cfg(any(feature = "storage-memory", test))]
         StorageConfigToml::InMemory => {
             tracing::info!("Store files in memory");
             let builder = opendal::services::Memory::default();
-            opendal::Operator::new(builder)?
-                .layer(user_quota_layer)
-                .layer(entry_layer)
-                .layer(events_layer)
-                .finish()
+            opendal::Operator::new(builder)?.finish()
         }
     };
 
-    let operator = admin_operator
-        .clone()
-        .layer(PathCollisionLayer::new(db.clone()))
+    // Collision checks apply only to app-facing mutations, so each operator
+    // needs its own finalization layer.
+    let admin_operator = backend_operator.clone().layer(WriteFinalizationLayer::new(
+        user_service.clone(),
+        events_service.clone(),
+        storage_config.default_quota_mb,
+        false,
+    ));
+    let operator = backend_operator
+        .layer(WriteFinalizationLayer::new(
+            user_service.clone(),
+            events_service,
+            storage_config.default_quota_mb,
+            true,
+        ))
         .layer(WritePathLayer::new(user_service));
     Ok((operator, admin_operator))
 }
@@ -105,7 +89,6 @@ pub fn build_storage_operators_from_context(
     build_storage_operators(
         &context.config_toml.storage,
         context.data_dir.path(),
-        &context.sql_db,
         context.events_service.clone(),
         context.user_service.clone(),
     )
@@ -131,17 +114,11 @@ impl OpendalService {
     pub fn new_from_config(
         storage_config: &StorageToml,
         data_directory: &Path,
-        db: &SqlDb,
         events_service: EventsService,
         user_service: UserService,
     ) -> Result<Self, FileIoError> {
-        let (operator, admin_operator) = build_storage_operators(
-            storage_config,
-            data_directory,
-            db,
-            events_service,
-            user_service,
-        )?;
+        let (operator, admin_operator) =
+            build_storage_operators(storage_config, data_directory, events_service, user_service)?;
         Ok(Self {
             operator,
             admin_operator,
@@ -272,7 +249,7 @@ mod tests {
     use super::*;
     use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
     use crate::persistence::sql::user::UserRepository;
-    use crate::shared::webdav::WebDavPath;
+    use crate::shared::webdav::StoragePath;
 
     #[tokio::test]
     #[pubky_test_utils::test]
@@ -286,12 +263,12 @@ mod tests {
         UserRepository::create(&pubky, &mut context.sql_db.pool().into())
             .await
             .unwrap();
-        let path = EntryPath::new(pubky, WebDavPath::new("/test.txt").unwrap());
+        let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
         assert!(!service.exists(&path).await.unwrap());
     }
 
     /// Make sure that the OpendalService returns a DiskSpaceQuotaExceeded error if the user has exceeded the quota.
-    /// This is important because the UserQuotaLayer will return a RateLimited error if the user has exceeded the quota.
+    /// This is important because write finalization returns a RateLimited error if the user has exceeded the quota.
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_quota_exceeded_error() {
@@ -300,7 +277,7 @@ mod tests {
             OpendalService::new(&context).expect("Failed to create OpenDAL service for testing");
         let pubky = pubky_common::crypto::Keypair::random().public_key();
         UserRepository::create_with_quota_mb(&context.sql_db, &pubky, 1).await;
-        let path = EntryPath::new(pubky, WebDavPath::new("/test.txt").unwrap());
+        let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
         let write_result = service.write(&path, vec![42u8; 1024 * 1024]).await;
         assert!(write_result.is_err());
         assert!(matches!(
@@ -318,7 +295,7 @@ mod tests {
             let file_service = OpendalService::new_from_operator(operator);
 
             let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, WebDavPath::new("/test.txt").unwrap());
+            let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
 
             // Write a 10KB file filled with test data
             let should_chunk_count = 5;
@@ -380,7 +357,7 @@ mod tests {
             let file_service = OpendalService::new_from_operator(operator);
 
             let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, WebDavPath::new("/test_stream.txt").unwrap());
+            let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
 
             // Create test data - multiple chunks to test streaming
             let chunk_count = 3;

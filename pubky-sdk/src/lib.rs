@@ -86,6 +86,7 @@ pub use pkarr;
 // Re-exports
 #[doc(inline)]
 pub use pubky_common::{
+    StoragePath, StoragePathError,
     auth::{
         AuthToken,
         grant::GrantClaims,

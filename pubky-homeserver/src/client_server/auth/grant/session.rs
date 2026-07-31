@@ -4,6 +4,10 @@ use pubky_common::auth::jws::GrantId;
 use pubky_common::capabilities::Capabilities;
 use pubky_common::crypto::PublicKey;
 
+#[cfg(test)]
+use super::crypto::session_token::SessionBearer;
+use super::crypto::session_token::SessionTokenHash;
+
 /// Grant-based session data.
 ///
 /// Constructed by [`AuthService::resolve_grant_session_by_bearer`](super::service::AuthService::resolve_grant_session_by_bearer)
@@ -19,4 +23,24 @@ pub struct GrantSession {
     pub grant_id: GrantId,
     /// When the bearer expires (Unix seconds).
     pub token_expires_at: u64,
+    /// Hash identifying the exact persisted bearer session.
+    pub(super) token_hash: SessionTokenHash,
+}
+
+#[cfg(test)]
+impl GrantSession {
+    pub(crate) fn test(
+        user_key: PublicKey,
+        capabilities: Capabilities,
+        grant_id: GrantId,
+        token_expires_at: u64,
+    ) -> Self {
+        Self {
+            user_key,
+            capabilities,
+            grant_id,
+            token_expires_at,
+            token_hash: SessionBearer::generate().hash(),
+        }
+    }
 }

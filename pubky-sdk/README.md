@@ -50,7 +50,10 @@ let txt = pubky
 assert_eq!(txt, "hello");
 
 // 5) Keyless app flow (QR/deeplink)
-let caps = Capabilities::builder().write("/pub/example.com/").finish();
+let caps = Capabilities::builder()
+    .write("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
 let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
 println!("Scan to sign in: {}", flow.authorization_url());
 let app_session = flow.await_approval().await?;
@@ -208,7 +211,10 @@ Request an authorization URL and await approval.
 
 let pubky = Pubky::new()?;
 // Read/Write capabilities for acme.app route
-let caps = Capabilities::builder().read_write("pub/example.com/").finish();
+let caps = Capabilities::builder()
+    .read_write("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
 
 // Start the flow using the default relay (see “Relay & reliability” below)
 let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
@@ -242,7 +248,10 @@ See the fully functional [**Auth Flow Example**](https://github.com/pubky/pubky-
 # use pubky::{Pubky, PubkyGrantAuthFlow, Capabilities, AuthFlowKind, ClientId};
 # async fn custom_relay() -> pubky::Result<()> {
 let pubky = Pubky::new()?;
-let caps = Capabilities::builder().read("pub/example.com/").finish();
+let caps = Capabilities::builder()
+    .read("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
 let client_id = ClientId::new("my.app").unwrap();
 let auth_flow = PubkyGrantAuthFlow::builder(&caps, AuthFlowKind::signin(), client_id)
     .client(pubky.client().clone())

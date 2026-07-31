@@ -91,7 +91,7 @@ use crate::PublicKey;
 use base64::Engine;
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
-use pubky_common::{crypto::Hash, storage};
+use pubky_common::{StoragePath, constants::storage::PRIVATE_ROOT, crypto::Hash};
 use reqwest::Method;
 use url::Url;
 
@@ -135,6 +135,18 @@ enum EventStreamAuthScope<'a> {
     PublicOnly,
     PrivateSingleUser(&'a PublicKey),
     PrivateUnsupported,
+}
+
+fn is_private_path_filter(path: &str) -> bool {
+    let absolute;
+    let path = if path.starts_with('/') {
+        path
+    } else {
+        absolute = format!("/{path}");
+        &absolute
+    };
+
+    StoragePath::normalize(path).is_ok_and(|path| path.as_str().starts_with(PRIVATE_ROOT))
 }
 
 impl EventStreamBuilder {
@@ -385,9 +397,7 @@ impl EventStreamBuilder {
     }
 
     fn has_private_path_filter(&self) -> bool {
-        self.paths
-            .iter()
-            .any(|path| storage::is_private_path_filter(path))
+        self.paths.iter().any(|path| is_private_path_filter(path))
     }
 
     fn auth_scope(&self) -> EventStreamAuthScope<'_> {
@@ -1019,6 +1029,7 @@ mod tests {
 
         let cases = [
             (vec![], false),
+            (vec![""], false),
             (vec!["/pub/"], false),
             (vec!["/privstuff/x"], false),
             (vec!["/priv"], false),
@@ -1027,6 +1038,7 @@ mod tests {
             (vec!["priv/x"], true),
             (vec!["/pub/", "/priv/app/"], true),
             (vec!["/pub/../priv/secret/"], true),
+            (vec!["/../../priv/secret/"], false),
         ];
 
         for (paths, expected) in cases {

@@ -118,7 +118,7 @@ async fn anonymous_priv_access_is_unauthorized() {
     let covering = grant_session(
         &testnet,
         &signer,
-        Capabilities::builder().read_write(DIR).finish(),
+        Capabilities::builder().read_write(DIR).unwrap().finish(),
     )
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
@@ -140,7 +140,7 @@ async fn under_scoped_owner_priv_access_is_forbidden() {
     let covering = grant_session(
         &testnet,
         &signer,
-        Capabilities::builder().read_write(DIR).finish(),
+        Capabilities::builder().read_write(DIR).unwrap().finish(),
     )
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
@@ -149,7 +149,10 @@ async fn under_scoped_owner_priv_access_is_forbidden() {
     let under = grant_session(
         &testnet,
         &signer,
-        Capabilities::builder().read_write("/priv/other/").finish(),
+        Capabilities::builder()
+            .read_write("/priv/other/")
+            .unwrap()
+            .finish(),
     )
     .await;
     let token = under.as_grant().unwrap().current_bearer().await;
@@ -173,7 +176,7 @@ async fn cross_tenant_priv_access_is_forbidden() {
     let covering = grant_session(
         &testnet,
         &owner_signer,
-        Capabilities::builder().read_write(DIR).finish(),
+        Capabilities::builder().read_write(DIR).unwrap().finish(),
     )
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
@@ -187,7 +190,7 @@ async fn cross_tenant_priv_access_is_forbidden() {
     let tenant = grant_session(
         &testnet,
         &tenant_signer,
-        Capabilities::builder().read_write(DIR).finish(),
+        Capabilities::builder().read_write(DIR).unwrap().finish(),
     )
     .await;
     let token = tenant.as_grant().unwrap().current_bearer().await;
