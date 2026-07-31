@@ -1,6 +1,6 @@
 # Pubky Testnet
 
-A local test network for developing Pubky Core or applications depending on it.
+A local test network for developing Pubky homeserver or applications depending on it.
 
 ## Quick start
 

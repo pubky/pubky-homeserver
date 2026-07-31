@@ -1,6 +1,6 @@
 [package]
 name = "pubky-homeserver"
-description = "Pubky core's homeserver."
+description = "A Pubky homeserver implementation."
 default-run = "pubky-homeserver"
 version.workspace = true
 edition.workspace = true

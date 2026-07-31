@@ -1,6 +1,6 @@
 [package]
 name = "pubky-testnet"
-description = "A local test network for Pubky Core development."
+description = "A local test network for developing Pubky homeserver or applications depending on it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -14,7 +14,7 @@ use pubky_homeserver::{
 use std::{str::FromStr, time::Duration};
 use url::Url;
 
-/// A local test network for Pubky Core development.
+/// A local test network for developing Pubky homeserver or applications depending on it.
 /// Can create a flexible amount of pkarr relays, http relays and homeservers.
 ///
 /// Keeps track of the components and can create new ones.
