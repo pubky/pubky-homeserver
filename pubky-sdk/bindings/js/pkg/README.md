@@ -255,7 +255,16 @@ const relay = "https://httprelay.pubky.app/inbox/"; // optional (defaults to thi
 const flow = await pubky.startGrantAuthFlow(
   caps,
   AuthFlowKind.signin(),
-  { clientId: "my-cool-app.example", relay },
+  {
+    clientId: "my-cool-app.example",
+    relay,
+    xCallback: {
+      xSource: "My Cool App",
+      xSuccess: "my-cool-app://auth/success?nonce=unique",
+      xError: "my-cool-app://auth/error?nonce=unique",
+      xCancel: "my-cool-app://auth/cancel?nonce=unique",
+    },
+  },
 );
 
 renderQr(flow.authorizationUrl); // show to user
@@ -263,6 +272,12 @@ renderQr(flow.authorizationUrl); // show to user
 // Blocks until the signer approves; returns a ready Session
 const session = await flow.awaitApproval();
 ```
+
+The same callback object can be passed as the fourth argument to legacy cookie
+auth: `startCookieAuthFlow(caps, kind, relay, xCallback)`. The SDK emits
+`x-source`, `x-success`, `x-error`, and `x-cancel` using the encoding expected
+by Pubky Ring. Parsed deep-link objects expose them through `xCallback`; the
+legacy `callback` parameter is accepted as an `xSuccess` fallback.
 
 #### Resume an auth flow after page refresh
 

@@ -25,17 +25,43 @@ const CLIENT_PUBLICKEY = PublicKey.from(
 const TESTNET_HTTP_RELAY = "http://localhost:15412/inbox";
 
 test("signin deep link valid", async (t) => {
-  let url = "pubkyauth://signin?caps=/pub/pubky.app/:rw&relay=http://localhost:15412/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8";
+  const xSuccess = "bitkit://auth/success?nonce=abc%2F123&state=ready";
+  const xError = "bitkit://auth/error?nonce=abc&reason=denied";
+  const xCancel = "bitkit://auth/cancel?nonce=abc";
+  const url = "pubkyauth://signin?caps=/pub/pubky.app/:rw&relay=http://localhost:15412/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8" +
+    `&x-source=${encodeURIComponent("Bitkit Wallet")}` +
+    `&x-success=${encodeURIComponent(xSuccess)}` +
+    `&x-error=${encodeURIComponent(xError)}` +
+    `&x-cancel=${encodeURIComponent(xCancel)}`;
   const deepLink = SigninDeepLink.parse(url);
   t.equal(deepLink.capabilities, "/pub/pubky.app/:rw");
   t.equal(deepLink.baseRelayUrl, TESTNET_HTTP_RELAY);
   t.deepEqual(deepLink.secret, new Uint8Array([146, 169, 220, 120, 67, 32, 172, 212, 12, 255, 24, 180, 234, 132, 23, 140, 13, 220, 36, 117, 255, 69, 9, 176, 212, 22, 58, 36, 77, 91, 177, 239]));
+  t.deepEqual(deepLink.xCallback, {
+    xSource: "Bitkit Wallet",
+    xSuccess,
+    xError,
+    xCancel,
+  });
 
   t.equal(SigninDeepLink.parse(deepLink.toString()).toString(), deepLink.toString());
 
   t.end();
 });
 
+test("signin deep link accepts legacy callback and emits canonical x-success", (t) => {
+  const callback = "bitkit://auth/success?nonce=legacy";
+  const url = "pubkyauth://signin?caps=&relay=http://localhost:15412/inbox" +
+    "&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8" +
+    `&callback=${encodeURIComponent(callback)}`;
+
+  const deepLink = SigninDeepLink.parse(url);
+
+  t.equal(deepLink.xCallback.xSuccess, callback);
+  t.ok(deepLink.toString().includes("x-success="));
+  t.notOk(deepLink.toString().includes("callback="));
+  t.end();
+});
 
 test("signup deep link valid", async (t) => {
   let url = "pubkyauth://signup?caps=/pub/pubky.app/:rw&relay=http://localhost:15412/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&hs=8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo&st=1234567890";

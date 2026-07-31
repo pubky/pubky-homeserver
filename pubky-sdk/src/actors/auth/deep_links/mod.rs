@@ -24,6 +24,7 @@ mod signin_grant;
 mod signup;
 mod signup_grant;
 mod typed_deep_link;
+mod x_callback;
 
 /// Supported deep link schemes.
 pub const DEEP_LINK_SCHEMES: [&str; 2] = ["pubkyauth", "pubkyring"];
@@ -38,3 +39,4 @@ pub use signin_grant::{SigninGrantDeepLink, SigninGrantIntent, SigninGrantParams
 pub use signup::{SignupDeepLink, SignupIntent, SignupParams};
 pub use signup_grant::{SignupGrantDeepLink, SignupGrantIntent, SignupGrantParams};
 pub use typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink};
+pub use x_callback::XCallbackParams;

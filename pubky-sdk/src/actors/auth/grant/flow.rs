@@ -422,6 +422,7 @@ mod tests {
     use super::*;
     use crate::actors::auth::deep_links::{
         DeepLinkScheme, SigninDeepLink, SigninGrantDeepLink, SigninGrantParams, SigninParams,
+        XCallbackParams,
     };
 
     #[tokio::test]
@@ -434,6 +435,10 @@ mod tests {
         let relay_url = relay.local_url().join("inbox").unwrap();
         let client = PubkyHttpClient::new().unwrap();
         let client_id = ClientId::new("save-restore.test").unwrap();
+        let x_callback = XCallbackParams {
+            x_success: Some("bitkit://auth/success?nonce=resume-grant".into()),
+            ..XCallbackParams::default()
+        };
         let flow = PubkyGrantAuthFlow::builder(
             &Capabilities::default(),
             AuthFlowKind::signin(),
@@ -441,12 +446,19 @@ mod tests {
         )
         .relay(relay_url)
         .client(client.clone())
+        .x_callback(x_callback.clone())
         .start()
         .unwrap();
 
         let restored = PubkyGrantAuthFlow::restore(flow.save_local().unwrap(), client).unwrap();
 
         assert_eq!(restored.authorization_url(), flow.authorization_url());
+        assert_eq!(
+            DeepLink::from_str(restored.authorization_url().as_str())
+                .unwrap()
+                .x_callback(),
+            &x_callback
+        );
     }
 
     #[tokio::test]
@@ -486,6 +498,75 @@ mod tests {
         );
         assert!(delegated_flow.save_local().is_none());
         assert!(delegated_flow.save_delegated().is_some());
+    }
+
+    #[tokio::test]
+    async fn signup_builder_attaches_x_callback_metadata() {
+        let relay = http_relay::HttpRelay::builder()
+            .http_port(0)
+            .run()
+            .await
+            .unwrap();
+        let x_callback = XCallbackParams {
+            x_success: Some("bitkit://signup/success?nonce=grant-signup".into()),
+            ..XCallbackParams::default()
+        };
+        let flow = PubkyGrantAuthFlow::builder(
+            &Capabilities::default(),
+            AuthFlowKind::signup(Keypair::random().public_key(), Some("signup-token".into())),
+            ClientId::new("grant-signup-callback.test").unwrap(),
+        )
+        .relay(relay.local_url().join("inbox").unwrap())
+        .x_callback(x_callback.clone())
+        .start()
+        .unwrap();
+
+        let deep_link = DeepLink::from_str(flow.authorization_url().as_str()).unwrap();
+        assert!(matches!(&deep_link, DeepLink::SignupGrant(_)));
+        assert_eq!(deep_link.x_callback(), &x_callback);
+    }
+
+    #[tokio::test]
+    async fn delegated_save_restore_preserves_x_callback_metadata() {
+        let relay = http_relay::HttpRelay::builder()
+            .http_port(0)
+            .run()
+            .await
+            .unwrap();
+        let client = PubkyHttpClient::new().unwrap();
+        let keypair = Keypair::random();
+        let sign: DelegatedSignFn =
+            std::sync::Arc::new(|_| Box::pin(async { Ok(vec![0_u8; 64]) }) as _);
+        let x_callback = XCallbackParams {
+            x_success: Some("bitkit://auth/success?nonce=delegated".into()),
+            ..XCallbackParams::default()
+        };
+        let flow = PubkyGrantAuthFlow::builder(
+            &Capabilities::default(),
+            AuthFlowKind::signin(),
+            ClientId::new("delegated-callback.test").unwrap(),
+        )
+        .relay(relay.local_url().join("inbox").unwrap())
+        .delegated_client_signer(
+            "key-1".into(),
+            keypair.public_key(),
+            std::sync::Arc::clone(&sign),
+        )
+        .x_callback(x_callback.clone())
+        .start()
+        .unwrap();
+
+        let restored =
+            PubkyGrantAuthFlow::restore_delegated(flow.save_delegated().unwrap(), client, sign)
+                .unwrap();
+
+        assert_eq!(restored.authorization_url(), flow.authorization_url());
+        assert_eq!(
+            DeepLink::from_str(restored.authorization_url().as_str())
+                .unwrap()
+                .x_callback(),
+            &x_callback
+        );
     }
 
     #[test]

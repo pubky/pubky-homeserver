@@ -4003,6 +4003,7 @@ dependencies = [
  "httpdate",
  "httpmock",
  "log",
+ "percent-encoding",
  "pkarr",
  "pubky-common",
  "pubky-testnet",

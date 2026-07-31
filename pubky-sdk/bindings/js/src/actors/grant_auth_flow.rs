@@ -11,7 +11,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::{
     auth_flow::AuthFlowKind, browser_grant_key_store::BrowserGrantKeyStore,
-    in_flight::InFlightGuard, session::Session,
+    deep_links::XCallbackParams, in_flight::InFlightGuard, session::Session,
 };
 use crate::{
     js_error::{JsResult, PubkyError, PubkyErrorName},
@@ -29,6 +29,9 @@ pub struct GrantAuthFlowOptions {
     /// Defaults to the default Synonym-hosted relay when omitted.
     #[tsify(optional, type = "string | null")]
     pub(crate) relay: Option<String>,
+    /// Optional return destinations for success, error, and cancellation.
+    #[tsify(optional, type = "XCallbackParams | null")]
+    pub(crate) x_callback: Option<XCallbackParams>,
 }
 
 /// Start and control a grant-backed pubkyauth authorization flow.
@@ -67,7 +70,7 @@ impl GrantAuthFlow {
     /// The kind of authentication flow to perform.
     ///
     /// @param {GrantAuthFlowOptions} options
-    /// Options for the grant flow: `{ clientId, relay? }`.
+    /// Options for the grant flow: `{ clientId, relay?, xCallback? }`.
     ///
     /// @returns {GrantAuthFlow}
     /// A running grant auth flow. Call `authorizationUrl()` to show the deep link,
@@ -89,7 +92,12 @@ impl GrantAuthFlow {
         client: Option<pubky::PubkyHttpClient>,
     ) -> JsResult<GrantAuthFlow> {
         let caps = parse_capabilities(&capabilities)?;
-        let client_id = ClientId::new(&options.client_id).map_err(|e| {
+        let GrantAuthFlowOptions {
+            client_id,
+            relay,
+            x_callback,
+        } = options;
+        let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;
 
@@ -98,8 +106,12 @@ impl GrantAuthFlow {
             builder = builder.client(c);
         }
 
-        if let Some(r) = options.relay {
+        if let Some(r) = relay {
             builder = builder.relay(Url::parse(&r)?);
+        }
+
+        if let Some(x_callback) = x_callback {
+            builder = builder.x_callback(x_callback.into());
         }
 
         let flow = builder.start()?;
@@ -130,7 +142,12 @@ impl GrantAuthFlow {
         client: Option<pubky::PubkyHttpClient>,
     ) -> JsResult<GrantAuthFlow> {
         let caps = parse_capabilities(&capabilities)?;
-        let client_id = ClientId::new(&options.client_id).map_err(|e| {
+        let GrantAuthFlowOptions {
+            client_id,
+            relay,
+            x_callback,
+        } = options;
+        let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;
         let (key_id, public_key) = BrowserGrantKeyStore::ensure_key(None).await?;
@@ -142,8 +159,12 @@ impl GrantAuthFlow {
             builder = builder.client(c);
         }
 
-        if let Some(r) = options.relay {
+        if let Some(r) = relay {
             builder = builder.relay(Url::parse(&r)?);
+        }
+
+        if let Some(x_callback) = x_callback {
+            builder = builder.x_callback(x_callback.into());
         }
 
         let flow = builder.start()?;

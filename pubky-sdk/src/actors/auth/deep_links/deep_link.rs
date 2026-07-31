@@ -5,7 +5,7 @@ use url::Url;
 use crate::actors::auth::deep_links::{
     DEEP_LINK_SCHEMES, direct_signup::DirectSignupDeepLink, error::DeepLinkParseError,
     seed_export::SeedExportDeepLink, signin::SigninDeepLink, signin_grant::SigninGrantDeepLink,
-    signup::SignupDeepLink, signup_grant::SignupGrantDeepLink,
+    signup::SignupDeepLink, signup_grant::SignupGrantDeepLink, x_callback::XCallbackParams,
 };
 
 /// A parsed Pubky deep link.
@@ -30,6 +30,32 @@ pub enum DeepLink {
 }
 
 impl DeepLink {
+    /// Return the optional x-callback-url metadata carried by this deep link.
+    #[must_use]
+    pub const fn x_callback(&self) -> &XCallbackParams {
+        match self {
+            DeepLink::Signin(link) => link.x_callback(),
+            DeepLink::Signup(link) => link.x_callback(),
+            DeepLink::DirectSignup(link) => link.x_callback(),
+            DeepLink::SigninGrant(link) => link.x_callback(),
+            DeepLink::SignupGrant(link) => link.x_callback(),
+            DeepLink::SeedExport(link) => link.x_callback(),
+        }
+    }
+
+    /// Attach x-callback-url metadata to this deep link.
+    #[must_use]
+    pub(crate) fn with_x_callback(self, x_callback: XCallbackParams) -> Self {
+        match self {
+            Self::Signin(link) => Self::Signin(link.with_x_callback(x_callback)),
+            Self::Signup(link) => Self::Signup(link.with_x_callback(x_callback)),
+            Self::DirectSignup(link) => Self::DirectSignup(link.with_x_callback(x_callback)),
+            Self::SigninGrant(link) => Self::SigninGrant(link.with_x_callback(x_callback)),
+            Self::SignupGrant(link) => Self::SignupGrant(link.with_x_callback(x_callback)),
+            Self::SeedExport(link) => Self::SeedExport(link.with_x_callback(x_callback)),
+        }
+    }
+
     /// Convert the deep link to a simple URL.
     #[must_use]
     pub fn to_url(self) -> Url {

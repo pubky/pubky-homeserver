@@ -62,7 +62,10 @@ use crate::PubkyCookieAuthFlow;
 use crate::{
     Capabilities, ClientId, DelegatedGrantCredentialState, EventCursor, EventStreamBuilder,
     GrantCredential, Pkdns, PubkyGrantAuthFlow, PubkyHttpClient, PubkySession, PubkySigner,
-    PublicStorage, Result, actors::AuthFlowKind, deep_links::DeepLink, errors::AuthError,
+    PublicStorage, Result,
+    actors::AuthFlowKind,
+    deep_links::{DeepLink, XCallbackParams},
+    errors::AuthError,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -180,11 +183,12 @@ impl Pubky {
         reason = "Cookie flow is intentionally exposed via this facade while deprecated"
     )]
     pub fn resume_cookie_auth_flow(&self, authorization_url: &str) -> Result<PubkyCookieAuthFlow> {
-        let (caps, relay, secret, auth_kind) = parse_auth_deep_link(authorization_url)?;
+        let (caps, relay, secret, auth_kind, x_callback) = parse_auth_deep_link(authorization_url)?;
 
         PubkyCookieAuthFlow::builder(&caps, auth_kind)
             .client_secret(secret)
             .relay(relay)
+            .x_callback(x_callback)
             .client(self.client.clone())
             .start()
     }
@@ -388,7 +392,15 @@ impl Pubky {
 /// Parse a `pubkyauth://` URL into the components needed to rebuild an auth flow.
 ///
 /// Rejects `SeedExport` deep links since they cannot be resumed as auth flows.
-fn parse_auth_deep_link(url: &str) -> Result<(Capabilities, url::Url, [u8; 32], AuthFlowKind)> {
+fn parse_auth_deep_link(
+    url: &str,
+) -> Result<(
+    Capabilities,
+    url::Url,
+    [u8; 32],
+    AuthFlowKind,
+    XCallbackParams,
+)> {
     let deep_link = DeepLink::from_str(url)
         .map_err(|e| AuthError::Validation(format!("Failed to parse authorization URL: {e}")))?;
 
@@ -398,6 +410,7 @@ fn parse_auth_deep_link(url: &str) -> Result<(Capabilities, url::Url, [u8; 32], 
             s.params().relay.clone(),
             s.params().secret,
             AuthFlowKind::signin(),
+            s.x_callback().clone(),
         )),
         DeepLink::Signup(s) => Ok((
             s.params().capabilities.clone(),
@@ -407,6 +420,7 @@ fn parse_auth_deep_link(url: &str) -> Result<(Capabilities, url::Url, [u8; 32], 
                 s.params().homeserver.clone(),
                 s.params().signup_token.clone(),
             ),
+            s.x_callback().clone(),
         )),
         DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) => Err(AuthError::Validation(
             "grant auth flows cannot be resumed from the authorization URL alone; the PoP client private key is required and is not encoded in the deep link."

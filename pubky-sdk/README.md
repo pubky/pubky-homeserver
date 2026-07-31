@@ -228,6 +228,36 @@ let session = flow.await_approval().await?;
 # Ok(()) }
 ```
 
+Optional x-callback parameters let the authenticator return control to the
+requesting app after it has handled the deep link. They work with both cookie
+and grant flows:
+
+```rust
+# use pubky::{AuthFlowKind, Capabilities, ClientId, PubkyGrantAuthFlow};
+# use pubky::deep_links::XCallbackParams;
+# fn callback_flow() -> pubky::Result<()> {
+let caps = Capabilities::builder()
+    .read_write("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
+let callbacks = XCallbackParams {
+    x_source: Some("Example App".into()),
+    x_success: Some("example://auth/success?nonce=unique".into()),
+    x_error: Some("example://auth/error?nonce=unique".into()),
+    x_cancel: Some("example://auth/cancel?nonce=unique".into()),
+};
+
+let flow = PubkyGrantAuthFlow::builder(
+    &caps,
+    AuthFlowKind::signin(),
+    ClientId::new("example.com").expect("static client id is valid"),
+)
+.x_callback(callbacks)
+.start()?;
+# drop(flow);
+# Ok(()) }
+```
+
 Approve an auth request
 
 ```rust ignore

@@ -8,7 +8,7 @@ use pubky_common::{
 use crate::actors::DEFAULT_HTTP_RELAY_INBOX;
 use crate::actors::auth::deep_links::{
     DeepLink, DeepLinkScheme, SigninGrantDeepLink, SigninGrantParams, SignupGrantDeepLink,
-    SignupGrantParams,
+    SignupGrantParams, XCallbackParams,
 };
 use crate::actors::auth::grant::flow::PubkyGrantAuthFlow;
 use crate::actors::auth::grant::pop_signer::{DelegatedSignFn, GrantPopSigner};
@@ -32,6 +32,7 @@ pub struct GrantAuthFlowBuilder {
     client_secret: [u8; 32],
     client_id: ClientId,
     client_signer: GrantPopSigner,
+    x_callback: XCallbackParams,
 }
 
 impl GrantAuthFlowBuilder {
@@ -45,6 +46,7 @@ impl GrantAuthFlowBuilder {
             client_secret: random_bytes::<32>(),
             client_id,
             client_signer: GrantPopSigner::local(Keypair::random()),
+            x_callback: XCallbackParams::default(),
         }
     }
 
@@ -77,6 +79,13 @@ impl GrantAuthFlowBuilder {
         self
     }
 
+    /// Attach optional x-callback-url metadata to the authorization deep link.
+    #[must_use]
+    pub fn x_callback(mut self, x_callback: XCallbackParams) -> Self {
+        self.x_callback = x_callback;
+        self
+    }
+
     /// Use a delegated PoP signer, for example in a browser environment.
     #[must_use]
     #[doc(hidden)]
@@ -105,6 +114,7 @@ impl GrantAuthFlowBuilder {
             client_secret,
             client_id,
             client_signer,
+            x_callback,
         } = self;
 
         let client = match client {
@@ -143,7 +153,8 @@ impl GrantAuthFlowBuilder {
                     },
                 ))
             }
-        };
+        }
+        .with_x_callback(x_callback);
 
         let relay_listener = AuthRelayListener::builder(client_secret)
             .relay_base_url(base_relay)

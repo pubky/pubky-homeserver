@@ -8,6 +8,8 @@ use crate::{
     wrappers::keys::PublicKey,
 };
 
+use super::XCallbackParams;
+
 /// Parsed grant-based signin deeplink.
 ///
 /// This is useful for tools, tests, and signer UIs that need to inspect a
@@ -74,6 +76,12 @@ impl SigninGrantDeepLink {
     #[wasm_bindgen(js_name = "clientPublicKey", getter)]
     pub fn client_public_key(&self) -> PublicKey {
         PublicKey(self.0.params().client_pk.clone())
+    }
+
+    /// Optional x-callback-url metadata carried by this deep link.
+    #[wasm_bindgen(js_name = "xCallback", getter)]
+    pub fn x_callback(&self) -> XCallbackParams {
+        self.0.x_callback().into()
     }
 
     #[allow(

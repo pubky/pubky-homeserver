@@ -3,6 +3,7 @@ use wasm_bindgen::prelude::*;
 use crate::actors::{
     auth_flow::{AuthFlow, AuthFlowKind},
     browser_grant_key_store::BrowserGrantKeyStore,
+    deep_links::XCallbackParams,
     event_stream::EventStreamBuilder,
     grant_auth_flow::{GrantAuthFlow, GrantAuthFlowOptions},
     session::Session,
@@ -86,6 +87,7 @@ impl Pubky {
     /// - `AuthFlowKind.signin()` - Sign in to an existing account.
     /// - `AuthFlowKind.signup(homeserverPublicKey, signupToken)` - Sign up for a new account.
     /// @param {string=} relay Optional HTTP relay base (e.g. `"https://…/inbox/"`).
+    /// @param {XCallbackParams=} xCallback Optional app return destinations.
     /// @returns {AuthFlow}
     /// A running auth flow. Show `authorizationUrl` as QR/deeplink,
     /// then `awaitApproval()` to obtain a `Session`.
@@ -105,9 +107,15 @@ impl Pubky {
         #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
         kind: AuthFlowKind,
         relay: Option<String>,
+        x_callback: Option<XCallbackParams>,
     ) -> JsResult<AuthFlow> {
-        let flow =
-            AuthFlow::start_with_client(capabilities, kind, relay, Some(self.0.client().clone()))?;
+        let flow = AuthFlow::start_with_client(
+            capabilities,
+            kind,
+            relay,
+            x_callback,
+            Some(self.0.client().clone()),
+        )?;
         Ok(flow)
     }
 
@@ -118,7 +126,8 @@ impl Pubky {
     ///
     /// @param {string} capabilities Comma-separated caps, e.g. `"/pub/app/:rw,/pub/foo/file:r"`.
     /// @param {AuthFlowKind} kind The kind of authentication flow to perform.
-    /// @param {GrantAuthFlowOptions} options Options for the grant flow: `{ clientId, relay? }`.
+    /// @param {GrantAuthFlowOptions} options Options for the grant flow:
+    /// `{ clientId, relay?, xCallback? }`.
     /// @returns {Promise<GrantAuthFlow>}
     /// A running grant auth flow. Show `authorizationUrl` as QR/deeplink,
     /// then `awaitApproval()` to obtain a grant-backed `Session`.

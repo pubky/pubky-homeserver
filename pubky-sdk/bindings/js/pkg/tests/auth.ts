@@ -1,5 +1,6 @@
 import test from "tape";
 import {
+  SigninDeepLink,
   SigninGrantDeepLink,
   SignupGrantDeepLink,
   GrantAuthFlow,
@@ -241,6 +242,41 @@ test("startCookieAuthFlow validates capabilities", (t) => {
   const emptyUrl = new URL(emptyFlow.authorizationUrl);
   t.equal(emptyUrl.searchParams.get("caps"), "", "allows empty capabilities");
 
+  t.end();
+});
+
+test("auth flow builders add Ring-compatible x-callback parameters", async (t) => {
+  const sdk = Pubky.testnet();
+  const xCallback = {
+    xSource: "Bitkit Wallet",
+    xSuccess: "bitkit://auth/success?nonce=builder&state=ready",
+    xError: "bitkit://auth/error?nonce=builder",
+    xCancel: "bitkit://auth/cancel?nonce=builder",
+  };
+
+  const cookieFlow = sdk.startCookieAuthFlow(
+    "/pub/example/:rw",
+    AuthFlowKind.signin(),
+    TESTNET_HTTP_RELAY,
+    xCallback,
+  );
+  const cookieLink = SigninDeepLink.parse(cookieFlow.authorizationUrl);
+  t.deepEqual(cookieLink.xCallback, xCallback, "cookie flow carries callbacks");
+
+  const grantFlow = await sdk.startGrantAuthFlow(
+    "/pub/example/:rw",
+    AuthFlowKind.signin(),
+    {
+      clientId: "grant-x-callback-js.test",
+      relay: TESTNET_HTTP_RELAY,
+      xCallback,
+    },
+  );
+  const grantLink = SigninGrantDeepLink.parse(grantFlow.authorizationUrl);
+  t.deepEqual(grantLink.xCallback, xCallback, "grant flow carries callbacks");
+
+  cookieFlow.free();
+  grantFlow.free();
   t.end();
 });
 

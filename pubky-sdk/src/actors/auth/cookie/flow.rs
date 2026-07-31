@@ -270,7 +270,7 @@ impl PubkyCookieAuthFlow {
 mod tests {
     use super::*;
     use crate::actors::auth::relay::http_relay_inbox_channel::EncryptedHttpRelayInboxChannel;
-    use crate::{Keypair, Pubky};
+    use crate::{Keypair, Pubky, deep_links::XCallbackParams};
     use std::str::FromStr;
 
     async fn build_flow(auth_kind: AuthFlowKind) -> PubkyCookieAuthFlow {
@@ -298,15 +298,21 @@ mod tests {
         let pubky = Pubky::with_client(client.clone());
 
         let caps = Capabilities::default();
+        let x_callback = XCallbackParams {
+            x_success: Some("bitkit://auth/success?nonce=resume-cookie".into()),
+            ..XCallbackParams::default()
+        };
         let flow = PubkyCookieAuthFlow::builder(&caps, auth_kind)
             .client(client.clone())
             .relay(inbox_base)
+            .x_callback(x_callback.clone())
             .start()
             .unwrap();
 
         let auth_url_str = flow.authorization_url().as_str().to_string();
 
         let deep_link = DeepLink::from_str(&auth_url_str).unwrap();
+        assert_eq!(deep_link.x_callback(), &x_callback);
         let secret = match &deep_link {
             DeepLink::Signin(s) => s.params().secret,
             DeepLink::Signup(s) => s.params().secret,
@@ -335,6 +341,13 @@ mod tests {
             resumed.authorization_url().as_str(),
             auth_url_str,
             "resumed flow produces the same authorization URL"
+        );
+        assert_eq!(
+            DeepLink::from_str(resumed.authorization_url().as_str())
+                .unwrap()
+                .x_callback(),
+            &x_callback,
+            "resumed flow preserves x-callback metadata"
         );
 
         let received_token = resumed.await_token().await.unwrap();
