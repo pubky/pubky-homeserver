@@ -7,7 +7,7 @@ use crate::{
     },
     shared::webdav::{EntryPath, StoragePath},
 };
-use sea_query::{Alias, Expr, Iden, LikeExpr, Order, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query::{Alias, Expr, Func, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
 use sea_query_binder::SqlxBinder;
 use sqlx::{postgres::PgRow, Row};
 
@@ -182,8 +182,10 @@ impl EntryRepository {
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
             .and_where(
-                Expr::col((ENTRY_TABLE, EntryIden::Path))
-                    .like(LikeExpr::new(Self::escaped_like_prefix(&full_path)).escape('\\')),
+                Func::cust(Alias::new("starts_with"))
+                    .arg(Expr::col((ENTRY_TABLE, EntryIden::Path)))
+                    .arg(&full_path)
+                    .into(),
             )
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .limit(1)
@@ -266,15 +268,6 @@ impl EntryRepository {
         paths
     }
 
-    /// Escape a literal prefix and append the only intentional `LIKE` wildcard.
-    fn escaped_like_prefix(prefix: &str) -> String {
-        let escaped = prefix
-            .replace('\\', "\\\\")
-            .replace('_', "\\_")
-            .replace('%', "\\%");
-        format!("{escaped}%")
-    }
-
     /// List shallow files + folders.
     /// Path is the path to the folder.
     /// Limit is the maximum number of entries to return.
@@ -305,9 +298,10 @@ impl EntryRepository {
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
             .and_where(
-                Expr::col((ENTRY_TABLE, EntryIden::Path)).like(
-                    LikeExpr::new(Self::escaped_like_prefix(&dir_path)).escape('\\'),
-                ),
+                Func::cust(Alias::new("starts_with"))
+                    .arg(Expr::col((ENTRY_TABLE, EntryIden::Path)))
+                    .arg(&dir_path)
+                    .into(),
             )
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .to_owned();
@@ -396,8 +390,10 @@ impl EntryRepository {
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
             .and_where(
-                Expr::col((ENTRY_TABLE, EntryIden::Path))
-                    .like(LikeExpr::new(Self::escaped_like_prefix(&full_path)).escape('\\')),
+                Func::cust(Alias::new("starts_with"))
+                    .arg(Expr::col((ENTRY_TABLE, EntryIden::Path)))
+                    .arg(&full_path)
+                    .into(),
             )
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .to_owned();
@@ -839,7 +835,7 @@ mod tests {
         }
         assert_eq!(set.len(), 6);
 
-        // Escape `_` so a lookalike sibling is not included.
+        // Treat `_` literally so a lookalike sibling is not included.
         create_entry_for_path(&db, user.id, "/test/myXfolder/secret.txt").await;
         let entries = EntryRepository::list_shallow(
             &EntryPath::new(user_pubkey, StoragePath::new("/test/my_folder/").unwrap()),
@@ -1171,7 +1167,7 @@ mod tests {
         }
         assert_eq!(set.len(), 7);
 
-        // Escape `%` so a lookalike sibling is not included.
+        // Treat `%` literally so a lookalike sibling is not included.
         create_entry_for_path(&db, user.id, "/test/myANYfolder/secret.txt").await;
         let entries = EntryRepository::list_deep(
             &EntryPath::new(user_pubkey, StoragePath::new("/test/my%folder/").unwrap()),
@@ -1365,7 +1361,7 @@ mod tests {
         .unwrap();
         assert!(!exists);
 
-        // Escape `_` so a lookalike sibling does not make the directory exist.
+        // Treat `_` literally so a lookalike sibling does not make the directory exist.
         create_entry_for_path(&db, user.id, "/test/ghostX/secret.txt").await;
         let exists = EntryRepository::contains_directory(
             &EntryPath::new(user_pubkey, StoragePath::new("/test/ghost_/").unwrap()),
