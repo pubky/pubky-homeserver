@@ -21,7 +21,7 @@ This example defaults to `../../sample_recovery.key`. You may supply a custom re
 
 ## Usage
 
-### 1a) Signin in
+### 1a) Signing in
 
 Run the third-party auth client in one terminal:
 
@@ -38,7 +38,7 @@ Copy the Pubky Auth URL from the client output. It should use the `signin_grant`
 
 ### 1b) Signing up + Signing in
 
-If you do not have signed up to the homeserver yet you can sign up and sign in at the same time with the auth flow. Start the client with `--signup`:
+If you have not signed up to the homeserver yet you can sign up and sign in at the same time with the auth flow. Start the client with `--signup`:
 
 ```bash
 cargo run --bin auth_client -- --testnet --signup
