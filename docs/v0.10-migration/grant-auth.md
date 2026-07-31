@@ -162,4 +162,4 @@ Use the save/resume pair matching the flow mode.
 - [JavaScript grant auth flow](../../examples/javascript/2-auth-flow/README.md)
 - [Rust grant auth flow](../../examples/rust/2-auth_flow/README.md)
 - [JavaScript browser session persistence](../../examples/javascript/5-browser-session-persistence/README.md)
-- [Rust grant session management](../../examples/rust/7-session_management/README.md)
+- [Rust grant session management](../../examples/rust/6-session_management/README.md)

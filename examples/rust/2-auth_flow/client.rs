@@ -72,7 +72,7 @@ fn start_flow(cli: &Cli) -> Result<PubkyGrantAuthFlow> {
     let caps = Capabilities::try_from(cli.capabilities.as_str())?.normalize();
     let client_id = ClientId::new(&cli.client_id)?;
     let relay = auth_relay(cli)?;
-    let flow_kind = auth_flow_kind(cli)?;
+    let flow_kind = determine_auth_flow_kind(cli)?;
 
     let mut builder =
         PubkyGrantAuthFlow::builder(&caps, flow_kind, client_id).client(pubky.client().clone());
@@ -84,7 +84,7 @@ fn start_flow(cli: &Cli) -> Result<PubkyGrantAuthFlow> {
     Ok(builder.start()?)
 }
 
-fn auth_flow_kind(cli: &Cli) -> Result<AuthFlowKind> {
+fn determine_auth_flow_kind(cli: &Cli) -> Result<AuthFlowKind> {
     if !cli.signup {
         return Ok(AuthFlowKind::signin());
     }

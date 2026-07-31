@@ -21,6 +21,8 @@ This example defaults to `../../sample_recovery.key`. You may supply a custom re
 
 ## Usage
 
+### 1a) Signin in
+
 Run the third-party auth client in one terminal:
 
 ```bash
@@ -34,7 +36,9 @@ cargo run --bin auth_client -- --testnet \
 
 Copy the Pubky Auth URL from the client output. It should use the `signin_grant` intent and include `cid` and `cpk` query parameters.
 
-To create an account on the local testnet and authorize the app in one flow, start the client with `--signup`:
+### 1b) Signing up + Signing in
+
+If you do not have signed up to the homeserver yet you can sign up and sign in at the same time with the auth flow. Start the client with `--signup`:
 
 ```bash
 cargo run --bin auth_client -- --testnet --signup
@@ -50,7 +54,9 @@ cargo run --bin auth_client -- --signup \
 
 The signup URL uses the `signup_grant` intent. The authenticator first creates the account on the homeserver embedded in the URL and then approves the app grant. Use a recovery file for a key that does not already have an account on that homeserver.
 
-Finally, run the authenticator in another terminal to approve the request:
+### 2) Approve Authorization Request
+
+Finally, run the authenticator in another terminal to approve the request. To create an account on the local testnet and authorize the app in one flow, start the client with `--signup`.
 
 ```bash
 cargo run --bin authenticator -- "<Auth_URL>" --testnet

@@ -34,11 +34,11 @@ cargo run --bin signup -- --testnet
 
 For more options (persistent mode, custom config, etc.) see the [Pubky Testnet README](../../pubky-testnet/README.md).
 
-The logging and testnet examples (8 and 9) start their own ephemeral testnet and do not need the steps above.
+The logging and testnet examples (7 and 8) start their own ephemeral testnet and do not need the steps above.
 
 ## Utilities
 
-- [**sample_recovery.key**](../sample_recovery.key): Sample recovery file with an empty passphrase, used by default in examples 1, 2, 3, and 7.
+- [**sample_recovery.key**](../sample_recovery.key): Sample recovery file with an empty passphrase, used by default in examples 1, 2, 3, and 6.
 - [**keygen**](./keygen.rs): Generate a keypair and save a passphrase-encrypted recovery file when you want to use your own key.
 
 ## Examples
@@ -47,7 +47,7 @@ The logging and testnet examples (8 and 9) start their own ephemeral testnet and
 2. [**Auth Flow**](./2-auth_flow/README.md): shows how to sign in or sign up through Pubky grant auth with a headless third-party client and an authenticator CLI.
 3. [**Storage**](./3-storage/README.md): authenticated write, read, and delete lifecycle on homeserver storage.
 4. [**Request**](./4-request/README.md): shows how to make direct HTTP requests to Pubky URLs.
-6. [**Events Stream**](./6-events_stream/README.md): subscribe to Server-Sent Events from a user's homeserver.
-7. [**Session Management**](./7-session_management/README.md): create, list, and delete grant-backed sessions from the command line.
-8. [**Logging**](./8-logging/README.md): configure tracing and watch the SDK emit debug output during a storage roundtrip.
-9. [**Testnet**](./9-testnet/README.md): spin up an embedded `EphemeralTestnet` programmatically for integration tests or self-contained demos.
+5. [**Events Stream**](./5-events_stream/README.md): subscribe to Server-Sent Events from a user's homeserver.
+6. [**Session Management**](./6-session_management/README.md): create, list, and delete grant-backed sessions from the command line.
+7. [**Logging**](./7-logging/README.md): configure tracing and watch the SDK emit debug output during a storage roundtrip.
+8. [**Testnet**](./8-testnet/README.md): spin up an embedded `EphemeralTestnet` programmatically for integration tests or self-contained demos.

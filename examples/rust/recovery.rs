@@ -6,7 +6,7 @@ pub const SAMPLE_RECOVERY_FILE: &str = "sample_recovery.key";
 
 pub fn sample_recovery_file(is_testnet: bool) -> PathBuf {
     if !is_testnet {
-        panic!("Sample recovery file is only available for testnet");
+        panic!("Sample recovery file is only available for testnet. Supply a custom recovery file for mainnet.");
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
