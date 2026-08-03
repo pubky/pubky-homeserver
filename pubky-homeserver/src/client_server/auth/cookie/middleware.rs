@@ -10,7 +10,7 @@
 
 use crate::client_server::auth::AuthSession;
 use crate::client_server::auth::AuthState;
-use crate::client_server::middleware::pubky_host::PubkyHost;
+use crate::client_server::middleware::request_tenant::RequestTenant;
 use axum::{body::Body, http::Request};
 use futures_util::future::BoxFuture;
 use pubky_common::crypto::PublicKey;
@@ -102,18 +102,18 @@ where
                     return inner.call(req).await.map_err(|e| match e {});
                 }
             };
-            let pubky = match req.extensions().get::<PubkyHost>().cloned() {
-                Some(pubky) => pubky,
+            let tenant = match req.extensions().get::<RequestTenant>().cloned() {
+                Some(tenant) => tenant,
                 None => {
                     tracing::trace!(
-                        "No pubky host found in request extensions. Skip cookie authentication."
+                        "No request tenant found in request extensions. Skip cookie authentication."
                     );
                     return inner.call(req).await.map_err(|e| match e {});
                 }
             };
 
             if let Some(session) =
-                extract_session_from_cookie(&state, &cookies, pubky.public_key()).await
+                extract_session_from_cookie(&state, &cookies, tenant.public_key()).await
             {
                 req.extensions_mut().insert(session);
             }
@@ -205,7 +205,8 @@ mod tests {
             .uri("/session")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(PubkyHost(pk.clone()));
+        req.extensions_mut()
+            .insert(RequestTenant::legacy(pk.clone()));
         let cookies = tower_cookies::Cookies::default();
         cookies.add(tower_cookies::Cookie::new(
             pk.z32(),

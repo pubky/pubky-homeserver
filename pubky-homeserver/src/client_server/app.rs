@@ -27,8 +27,8 @@ use tower_http::cors::CorsLayer;
 use super::auth::{self, AuthenticationLayer};
 use super::cache_policy;
 use super::middleware::{
-    pubky_host::PubkyHostLayer,
     rate_limiter::{BandwidthQuotaLimitLayer, RequestRateLimitLayer},
+    request_tenant::RequestTenantLayer,
     trace::with_trace_layer,
 };
 use super::routes::{events, root, signup_tokens, tenants};
@@ -232,17 +232,16 @@ pub fn create_app(
             .map_err(ClientServerBuildError::RequestRateLimits)?;
 
     let middleware = ServiceBuilder::new()
-        // Request order matters: auth needs PubkyHost and CookieManager, and
-        // bandwidth limits need AuthSession from authentication.
-        .layer(PubkyHostLayer)
+        // Request order matters: auth needs CookieManager, and bandwidth limits
+        // need AuthSession from authentication. RequestTenant runs outside this
+        // stack so tracing and all of these layers see the resolved target.
         .layer(CookieManagerLayer::new())
         .layer(request_rate_limit_layer)
         .layer(AuthenticationLayer::new(auth_state.clone()))
         .layer(BandwidthQuotaLimitLayer::new(
             context.user_service.clone(),
             context.config_toml.default_quotas.clone(),
-        ))
-        .layer(CorsLayer::very_permissive());
+        ));
 
     let app = base()
         .merge(tenants::router())
@@ -251,8 +250,12 @@ pub fn create_app(
         .merge(auth::tenant_router(auth_state))
         .layer(middleware);
 
-    // Apply tracing to the complete router.
-    Ok(with_trace_layer(app))
+    // Resolve the target before tracing and authentication. Valid canonical
+    // storage requests are therefore logged using their logical Pubky URI.
+    // Keep CORS outermost so tenant-resolution errors are usable by browsers.
+    Ok(with_trace_layer(app)
+        .layer(RequestTenantLayer)
+        .layer(CorsLayer::very_permissive()))
 }
 
 #[cfg(test)]

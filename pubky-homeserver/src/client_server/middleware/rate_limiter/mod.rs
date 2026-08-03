@@ -28,7 +28,7 @@ mod tests {
     use tokio::time::Instant;
     use tower_cookies::CookieManagerLayer;
 
-    use crate::client_server::middleware::pubky_host::PubkyHostLayer;
+    use crate::client_server::middleware::request_tenant::RequestTenantLayer;
     use crate::data_directory::quota_config::BandwidthQuota;
     use crate::persistence::sql::SqlDb;
     use crate::quota_config::{GlobPattern, HttpMethod, LimitKeyType, PathLimit};
@@ -67,7 +67,7 @@ mod tests {
                     .expect("valid test request-count rate limit"),
             )
             .layer(CookieManagerLayer::new())
-            .layer(PubkyHostLayer);
+            .layer(RequestTenantLayer);
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),

@@ -1,6 +1,7 @@
 //! Request middleware for the client server.
 //!
-//! - [`pubky_host`]: Extracts the tenant public key from the request Host header (TLS SNI).
+//! - [`request_tenant`]: Resolves path-addressed and legacy request tenants.
+//! - [`pubky_host`]: Compatibility resolver for legacy tenant addressing.
 //! - [`rate_limiter`]: Configurable per-path request rate limiting, keyed by IP or user,
 //!   with optional per-user speed overrides resolved from DB.
 //! - [`trace`]: Request/response logging via `tracing`.
@@ -9,4 +10,5 @@
 
 pub mod pubky_host;
 pub mod rate_limiter;
+pub mod request_tenant;
 pub mod trace;

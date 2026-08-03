@@ -6,18 +6,30 @@ use axum::{
 };
 use percent_encoding::percent_decode_str;
 
+use crate::client_server::middleware::request_tenant::{AddressingMode, RequestTenant};
 use crate::{constants::PRIVATE_ROOT, shared::webdav::StoragePath};
 
 pub(crate) const CACHE_CONTROL_NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
-pub(crate) const VARY_PRIVATE: HeaderValue =
+pub(crate) const VARY_PRIVATE_LEGACY: HeaderValue =
     HeaderValue::from_static("pubky-host, Authorization, Cookie");
+pub(crate) const VARY_PRIVATE_PATH: HeaderValue = HeaderValue::from_static("Authorization, Cookie");
 
 pub(crate) async fn private_cache_policy(request: Request, next: Next) -> Response {
-    let is_private = is_private_tenant_request_path(request.uri().path());
+    let tenant = request.extensions().get::<RequestTenant>().cloned();
+    let request_path = request.uri().path();
+    let logical_path = tenant
+        .as_ref()
+        .map(|tenant| tenant.logical_path(request_path))
+        .unwrap_or(request_path);
+    let is_private = is_private_tenant_request_path(logical_path);
+    let addressing = tenant
+        .as_ref()
+        .map(RequestTenant::addressing)
+        .unwrap_or(AddressingMode::Legacy);
     let mut response = next.run(request).await;
 
     if is_private {
-        apply_private_cache_headers(&mut response);
+        apply_private_cache_headers(&mut response, addressing);
         if response.status().as_u16() >= 400 {
             remove_validators(&mut response);
         }
@@ -28,14 +40,20 @@ pub(crate) async fn private_cache_policy(request: Request, next: Next) -> Respon
 
 pub(crate) async fn sse_cache_policy(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
-    apply_private_cache_headers(&mut response);
+    apply_private_cache_headers(&mut response, AddressingMode::Legacy);
     response
 }
 
-fn apply_private_cache_headers(response: &mut Response) {
+fn apply_private_cache_headers(response: &mut Response, addressing: AddressingMode) {
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE);
-    headers.insert(header::VARY, VARY_PRIVATE);
+    headers.insert(
+        header::VARY,
+        match addressing {
+            AddressingMode::Path => VARY_PRIVATE_PATH,
+            AddressingMode::Legacy => VARY_PRIVATE_LEGACY,
+        },
+    );
 }
 
 fn remove_validators(response: &mut Response) {

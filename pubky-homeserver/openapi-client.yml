@@ -8,12 +8,11 @@ info:
 
     ## Tenant Identification
 
-    Per-tenant (user) routes resolve the target user from these sources (highest priority first):
-    1. `pubky-host` header (explicit override; takes precedence over `Host`)
-    2. `Host` header (e.g. from TLS SNI on the Pubky socket)
-    3. `?pubky-host=` query parameter (fallback when no key is found in headers)
+    Canonical reads use `/storage/{user_z32}/{path}`; the path owner is authoritative
+    and `Host` remains the HTTP authority.
 
-    The value must be a z-base-32 encoded Ed25519 public key.
+    Deprecated owner-relative routes resolve the owner from `pubky-host`, then
+    `Host`, then `?pubky-host=`.
 
     ## Authentication
 
@@ -341,6 +340,168 @@ paths:
               description: Cookie removal header
               schema:
                 type: string
+  "/storage/{user_z32}/{path}":
+    parameters:
+    - name: user_z32
+      in: path
+      required: true
+      description: Raw 52-character z-base-32 public key of the storage owner.
+        The human-readable `pubky` prefix is not accepted.
+      schema:
+        type: string
+        minLength: 52
+        maxLength: 52
+        pattern: "^[ybndrfg8ejkmcpqxot1uwisza345h769]{52}$"
+    - name: path
+      in: path
+      required: true
+      description: Owner-relative storage path. Must start with `pub/` or `priv/`
+        and may contain slashes.
+      schema:
+        type: string
+      examples:
+        file:
+          value: pub/documents/notes.txt
+        directory:
+          value: pub/documents/
+    get:
+      tags:
+      - Data
+      summary: Get a path-addressed file or list a directory
+      description: |
+        Canonical storage read route. The owner in the path is authoritative.
+        Any `pubky-host` header or query parameter is accepted for compatibility
+        but ignored.
+
+        A directory path ending in `/` returns a newline-separated list of
+        `pubky://` URLs. Conditional requests are supported for files.
+      operationId: getPathAddressedEntry
+      security:
+      - {}
+      - bearerAuth: []
+      - cookieAuth: []
+      parameters:
+      - name: limit
+        in: query
+        description: Items per page for directory listings.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      - name: cursor
+        in: query
+        description: Directory-listing cursor, as a bare entry path or `pubky://` URL.
+        schema:
+          type: string
+      - name: shallow
+        in: query
+        description: List immediate children instead of a deep recursive listing.
+        schema:
+          type: boolean
+          default: false
+      - name: reverse
+        in: query
+        description: Reverse listing order.
+        schema:
+          type: boolean
+          default: false
+      - name: If-None-Match
+        in: header
+        schema:
+          type: string
+      - name: If-Modified-Since
+        in: header
+        schema:
+          type: string
+      responses:
+        '200':
+          description: File content or directory listing.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+            ETag:
+              schema:
+                type: string
+            Last-Modified:
+              schema:
+                type: string
+            Cache-Control:
+              description: Files use `private, must-revalidate`; private paths
+                and private directory listings use `no-store`.
+              schema:
+                type: string
+            Vary:
+              description: Public responses do not vary by `pubky-host`. Private
+                responses vary by `Authorization, Cookie`; neither includes the
+                ignored `pubky-host`. Other middleware, such as CORS, may add values.
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+                description: Newline-separated `pubky://` URLs for directory listings.
+        '304':
+          description: Not modified.
+        '400':
+          description: Invalid owner public key, storage path, or pagination cursor.
+        '401':
+          description: Authentication is required to read a `/priv/` path.
+        '403':
+          description: The session does not authorize the owner-relative storage path.
+        '404':
+          description: File, directory, or storage owner not found.
+    head:
+      tags:
+      - Data
+      summary: Get path-addressed file metadata
+      description: Returns the same metadata headers as GET without a response body.
+        The path owner is authoritative and `pubky-host` is ignored.
+      operationId: headPathAddressedEntry
+      security:
+      - {}
+      - bearerAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          description: File metadata.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+            ETag:
+              schema:
+                type: string
+            Last-Modified:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+            Vary:
+              description: Does not include `pubky-host`; private paths include
+                `Authorization, Cookie`. Other middleware may add values.
+              schema:
+                type: string
+        '400':
+          description: Invalid owner public key or storage path.
+        '401':
+          description: Authentication is required to read a `/priv/` path.
+        '403':
+          description: The session does not authorize the owner-relative storage path.
+        '404':
+          description: File or storage owner not found.
   "/{path}":
     parameters:
     - name: path
@@ -362,7 +523,10 @@ paths:
       tags:
       - Data
       summary: Get file or list directory
+      deprecated: true
       description: |
+        Deprecated: use `GET /storage/{user_z32}/{path}`.
+
         If the path points to a file, returns the file content with caching headers.
         If the path points to a directory (trailing `/`), returns a newline-separated
         list of `pubky://` URLs.
@@ -505,7 +669,10 @@ paths:
       tags:
       - Data
       summary: Get file metadata
-      description: Returns the same headers as GET but without the response body.
+      deprecated: true
+      description: >-
+        Deprecated: use `HEAD /storage/{user_z32}/{path}`. Returns the same
+        headers as GET but without the response body.
       operationId: headEntry
       security:
       - {}
@@ -765,8 +932,10 @@ components:
       name: pubky-host
       in: header
       required: false
+      deprecated: true
       description: |
-        Target tenant's z-base-32 encoded public key.
+        Deprecated tenant-addressing override for owner-relative routes.
+        Ignored by canonical `/storage/{user_z32}/...` routes.
         On the Pubky TLS socket, this is derived from the `Host` header / SNI.
       schema:
         type: string
@@ -774,9 +943,11 @@ components:
       name: pubky-host
       in: query
       required: false
+      deprecated: true
       description: |
-        Fallback for tenant identification when the `pubky-host` header and
-        `Host` header do not contain a valid public key.
+        Deprecated fallback for owner-relative routes when the `pubky-host`
+        header and `Host` header do not contain a valid public key. Ignored by
+        canonical `/storage/{user_z32}/...` routes.
       schema:
         type: string
   schemas:

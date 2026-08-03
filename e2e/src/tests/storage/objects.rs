@@ -53,6 +53,36 @@ async fn put_get_delete() {
     let byte_value = response.bytes().await.unwrap();
     assert_eq!(byte_value, bytes::Bytes::from(vec![0, 1, 2, 3, 4]));
 
+    // The canonical HTTP route carries the storage owner in the path. Legacy
+    // tenant headers are ignored even when they point at a different user.
+    let path_addressed_url = format!(
+        "{}storage/{}/pub/foo.txt",
+        server.icann_http_url(),
+        session.public_key().z32()
+    );
+    let unrelated_user = Keypair::random().public_key();
+    let response = session
+        .client()
+        .request(Method::GET, &path_addressed_url)
+        .header("pubky-host", unrelated_user.z32())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let varies_on_pubky_host = response
+        .headers()
+        .get("vary")
+        .and_then(|value| value.to_str().ok())
+        .into_iter()
+        .flat_map(|vary| vary.split(','))
+        .any(|name| name.trim().eq_ignore_ascii_case("pubky-host"));
+    assert!(!varies_on_pubky_host);
+    assert_eq!(
+        response.bytes().await.unwrap(),
+        bytes::Bytes::from(vec![0, 1, 2, 3, 4])
+    );
+
     // Use regular web method to get data from homeserver (with query pubky-host)
     let regular_url = format!(
         "{}pub/foo.txt?pubky-host={}",
