@@ -28,7 +28,7 @@ use super::auth::{self, AuthenticationLayer};
 use super::cache_policy;
 use super::middleware::{
     rate_limiter::{BandwidthQuotaLimitLayer, RequestRateLimitLayer},
-    request_tenant::RequestTenantLayer,
+    request_tenant::RequestTenant,
     trace::with_trace_layer,
 };
 use super::routes::{events, root, signup_tokens, tenants};
@@ -254,7 +254,7 @@ pub fn create_app(
     // storage requests are therefore logged using their logical Pubky URI.
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
     Ok(with_trace_layer(app)
-        .layer(RequestTenantLayer)
+        .layer(axum_middleware::from_fn(RequestTenant::resolve))
         .layer(CorsLayer::very_permissive()))
 }
 

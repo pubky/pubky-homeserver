@@ -143,6 +143,7 @@ mod tests {
 
     use axum::http::Method;
     use axum::{
+        middleware,
         routing::{get, post},
         Router,
     };
@@ -152,7 +153,7 @@ mod tests {
     use tokio::task::JoinHandle;
     use tower_cookies::CookieManagerLayer;
 
-    use crate::client_server::middleware::request_tenant::RequestTenantLayer;
+    use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::quota_config::{GlobPattern, HttpMethod, LimitKeyType};
     use crate::shared::HttpResult;
 
@@ -177,7 +178,7 @@ mod tests {
                     .expect("valid test request-count rate limit"),
             )
             .layer(CookieManagerLayer::new())
-            .layer(RequestTenantLayer);
+            .layer(middleware::from_fn(RequestTenant::resolve));
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),

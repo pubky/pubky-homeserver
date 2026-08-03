@@ -3,18 +3,14 @@
 //! Canonical storage requests carry their owner in `/storage/{owner}/...`.
 //! Other requests retain the legacy Host / `pubky-host` compatibility lookup.
 
-use std::{convert::Infallible, task::Poll};
-
 use axum::{
-    body::Body,
-    extract::FromRequestParts,
-    http::{request::Parts, Request, StatusCode, Uri},
+    extract::{FromRequestParts, Request},
+    http::{request::Parts, StatusCode, Uri},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
-use futures_util::future::BoxFuture;
 use percent_encoding::percent_decode_str;
 use pubky_common::crypto::PublicKey;
-use tower::{Layer, Service};
 
 use crate::shared::webdav::StoragePath;
 
@@ -23,29 +19,16 @@ use super::pubky_host::extract_legacy_pubky;
 const STORAGE_ROUTE_PREFIX: &str = "/storage/";
 const RAW_PUBLIC_KEY_LENGTH: usize = 52;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddressingMode {
-    /// Canonical `/storage/{owner}/...` addressing.
-    Path,
-    /// Compatibility addressing through Host, `pubky-host`, or its query fallback.
-    Legacy,
-}
-
 /// Tenant and optional owner-relative storage path resolved before auth runs.
 #[derive(Debug, Clone)]
 pub struct RequestTenant {
     public_key: PublicKey,
-    addressing: AddressingMode,
     storage_path: Option<StoragePath>,
 }
 
 impl RequestTenant {
     pub fn public_key(&self) -> &PublicKey {
         &self.public_key
-    }
-
-    pub fn addressing(&self) -> AddressingMode {
-        self.addressing
     }
 
     pub fn storage_path(&self) -> Option<&StoragePath> {
@@ -73,14 +56,13 @@ impl RequestTenant {
         logical
     }
 
-    fn resolve(req: &Request<Body>) -> Result<Option<Self>, String> {
+    fn from_request(req: &Request) -> Result<Option<Self>, String> {
         if let Some(tenant) = Self::from_storage_route(req.uri().path())? {
             return Ok(Some(tenant));
         }
 
         Ok(extract_legacy_pubky(req).map(|public_key| Self {
             public_key,
-            addressing: AddressingMode::Legacy,
             storage_path: None,
         }))
     }
@@ -97,6 +79,9 @@ impl RequestTenant {
         let (raw_public_key, raw_storage_path) = remainder
             .split_once('/')
             .ok_or_else(|| "Missing storage path".to_string())?;
+        if raw_storage_path.is_empty() {
+            return Err("Missing storage path".to_string());
+        }
 
         if PublicKey::is_pubky_prefixed(raw_public_key) {
             return Err("Storage owner must be a raw z32 public key".to_string());
@@ -115,16 +100,33 @@ impl RequestTenant {
 
         Ok(Some(Self {
             public_key,
-            addressing: AddressingMode::Path,
             storage_path: Some(storage_path),
         }))
+    }
+
+    pub(crate) async fn resolve(mut request: Request, next: Next) -> Response {
+        match Self::from_request(&request) {
+            Ok(Some(tenant)) => {
+                request.extensions_mut().insert(tenant);
+                next.run(request).await
+            }
+            Ok(None) => next.run(request).await,
+            Err(message) => {
+                tracing::warn!(
+                    method = %request.method(),
+                    path = request.uri().path(),
+                    error = %message,
+                    "Failed to resolve request tenant"
+                );
+                (StatusCode::BAD_REQUEST, message).into_response()
+            }
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn legacy(public_key: PublicKey) -> Self {
         Self {
             public_key,
-            addressing: AddressingMode::Legacy,
             storage_path: None,
         }
     }
@@ -146,52 +148,6 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RequestTenantLayer;
-
-impl<S> Layer<S> for RequestTenantLayer {
-    type Service = RequestTenantMiddleware<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        RequestTenantMiddleware { inner }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RequestTenantMiddleware<S> {
-    inner: S,
-}
-
-impl<S> Service<Request<Body>> for RequestTenantMiddleware<S>
-where
-    S: Service<Request<Body>, Response = Response, Error = Infallible> + Send + Clone + 'static,
-    S::Future: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = Infallible;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(|_| unreachable!())
-    }
-
-    fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-        let resolved = RequestTenant::resolve(&req);
-        let mut inner = self.inner.clone();
-
-        Box::pin(async move {
-            match resolved {
-                Ok(Some(tenant)) => {
-                    req.extensions_mut().insert(tenant);
-                    inner.call(req).await.map_err(|_| unreachable!())
-                }
-                Ok(None) => inner.call(req).await.map_err(|_| unreachable!()),
-                Err(message) => Ok((StatusCode::BAD_REQUEST, message).into_response()),
-            }
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use axum::{body::Body, http::Request};
@@ -206,7 +162,6 @@ mod tests {
         let tenant = RequestTenant::from_storage_route(&path).unwrap().unwrap();
 
         assert_eq!(tenant.public_key(), &owner);
-        assert_eq!(tenant.addressing(), AddressingMode::Path);
         assert_eq!(tenant.storage_path().unwrap().as_str(), "/pub/example.txt");
         assert_eq!(
             tenant.logical_uri(&format!("{path}?limit=10").parse().unwrap()),
@@ -223,6 +178,7 @@ mod tests {
         ))
         .is_err());
         assert!(RequestTenant::from_storage_route("/storage/short/pub/example.txt").is_err());
+        assert!(RequestTenant::from_storage_route(&format!("/storage/{}/", owner.z32())).is_err());
         assert!(RequestTenant::from_storage_route(&format!(
             "/storage/{}/pub/example.txt",
             "0".repeat(RAW_PUBLIC_KEY_LENGTH)
@@ -245,9 +201,9 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let tenant = RequestTenant::resolve(&req).unwrap().unwrap();
+        let tenant = RequestTenant::from_request(&req).unwrap().unwrap();
         assert_eq!(tenant.public_key(), &path_owner);
-        assert_eq!(tenant.addressing(), AddressingMode::Path);
+        assert!(tenant.storage_path().is_some());
     }
 
     #[test]
@@ -259,9 +215,8 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let tenant = RequestTenant::resolve(&req).unwrap().unwrap();
+        let tenant = RequestTenant::from_request(&req).unwrap().unwrap();
         assert_eq!(tenant.public_key(), &owner);
-        assert_eq!(tenant.addressing(), AddressingMode::Legacy);
         assert!(tenant.storage_path().is_none());
     }
 }

@@ -1099,6 +1099,7 @@ mod tests {
             "/storage/".to_string(),
             "/storage/short/pub/file.txt".to_string(),
             format!("/storage/pubky{}/pub/file.txt", public_key.z32()),
+            format!("/storage/{}/", public_key.z32()),
         ];
         for path in malformed {
             let response = server

@@ -35,7 +35,7 @@ use super::CLEANUP_INTERVAL_SECS;
 /// - Unauthenticated requests: IP-keyed read rate from
 ///   `unauthenticated_ip_rate_read`.
 ///
-/// Requires a `RequestTenantLayer` to be applied first.
+/// Requires `RequestTenant::resolve` middleware to run first.
 #[derive(Debug, Clone)]
 pub struct BandwidthQuotaLimitLayer {
     user_service: UserService,
@@ -256,7 +256,7 @@ mod tests {
 
     use crate::client_server::auth::grant::session::GrantSession;
     use crate::client_server::auth::AuthSession;
-    use crate::client_server::middleware::request_tenant::{RequestTenant, RequestTenantLayer};
+    use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::data_directory::quota_config::BandwidthQuota;
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
@@ -301,7 +301,7 @@ mod tests {
                 }
             }))
             .layer(CookieManagerLayer::new())
-            .layer(RequestTenantLayer);
+            .layer(from_fn(RequestTenant::resolve));
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
