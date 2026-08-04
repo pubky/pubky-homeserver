@@ -88,7 +88,6 @@ where
     }
 
     /// Return the optional x-callback-url metadata carried by this deep link.
-    #[must_use]
     pub const fn x_callback(&self) -> &XCallbackParams {
         &self.x_callback
     }

@@ -115,27 +115,13 @@ impl XCallbackParams {
     }
 
     fn has_valid_percent_triplets(value: &str) -> bool {
-        let bytes = value.as_bytes();
-        let mut index = 0;
-
-        while index < bytes.len() {
-            if bytes[index] == b'%' {
-                let Some(first) = bytes.get(index + 1) else {
-                    return false;
-                };
-                let Some(second) = bytes.get(index + 2) else {
-                    return false;
-                };
-                if !first.is_ascii_hexdigit() || !second.is_ascii_hexdigit() {
-                    return false;
-                }
-                index += 3;
-            } else {
-                index += 1;
-            }
-        }
-
-        true
+        value.split('%').skip(1).all(|escape| {
+            matches!(
+                escape.as_bytes(),
+                [first, second, ..]
+                    if first.is_ascii_hexdigit() && second.is_ascii_hexdigit()
+            )
+        })
     }
 }
 
