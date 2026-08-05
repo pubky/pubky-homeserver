@@ -123,14 +123,18 @@ impl SessionStorage {
 //
 
 impl PublicStorage {
-    /// HTTP `GET` for an **addressed resource** (`pubky<pk>/<abs-path>`, `<pk>/<abs-path>`, or `pubky://…`).
+    /// HTTP `GET` for an **addressed resource** (`pubky://<pk>/<path>`, `pubky<pk>/<path>`, or `(PublicKey, path)` tuple).
     ///
     /// # Examples
     /// ```no_run
-    /// # async fn ex() -> pubky::Result<()> {
+    /// # async fn ex(user: pubky::PublicKey) -> pubky::Result<()> {
     /// let storage = pubky::PublicStorage::new()?;
-    /// let resp = storage.get("{other_pk}/pub/my-cool-app/file.txt").await?;
+    /// let addr = format!("pubky://{}/pub/my-cool-app/file.txt", user.z32());
+    /// let resp = storage.get(addr).await?;
     /// let bytes = resp.bytes().await?;
+    ///
+    /// // Or use a tuple:
+    /// let resp2 = storage.get((&user, "/pub/my-cool-app/file.txt")).await?;
     /// # Ok(()) }
     /// ```
     ///

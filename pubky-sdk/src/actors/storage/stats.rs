@@ -1,7 +1,23 @@
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, LAST_MODIFIED};
 use std::time::SystemTime;
 
-/// Typed metadata for a stored object (from a `HEAD` request).
+/// Typed metadata for a stored resource, extracted from `HEAD` response headers.
+///
+/// Returned by [`SessionStorage::stats`](crate::SessionStorage::stats) and
+/// [`PublicStorage::stats`](crate::PublicStorage::stats).
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example(session: pubky::PubkySession) -> pubky::Result<()> {
+/// if let Some(stats) = session.storage().stats("/pub/my.app/photo.jpg").await? {
+///     println!("Content-Type: {:?}", stats.content_type);
+///     println!("Size: {:?} bytes", stats.content_length);
+///     println!("ETag: {:?}", stats.etag);
+///     println!("Last-Modified: {:?}", stats.last_modified);
+/// }
+/// # Ok(()) }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceStats {
     /// `Content-Length` parsed as `u64`.

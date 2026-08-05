@@ -25,20 +25,20 @@ use crate::{
 use super::PubkySigner;
 
 impl PubkySigner {
-    /// Produces sessions for an app (e.g. Pubky Ring -> App). Sends a signed
-    /// `AuthToken` (legacy flow) or a signed `pubky-grant` JWS (grant
-    /// flow) to the relay channel encoded in a `pubkyauth://` URL.
+    /// Approve an auth request from another app (wallet / signer side).
     ///
-    /// Typical usage:
-    /// - App constructs `PubkyCookieAuthFlow` or `PubkyGrantAuthFlow` and subscribes, shows QR/deeplink.
-    /// - Signer calls `send_auth_token` with that URL.
+    /// Sends a signed `AuthToken` (legacy flow) or a signed `pubky-grant` JWS
+    /// (grant flow) to the relay channel encoded in the `pubkyauth://` URL.
     ///
-    /// Requirements:
-    /// - URL parses as a [`DeepLink::Signin`], [`DeepLink::Signup`],
-    ///   [`DeepLink::SigninGrant`], or [`DeepLink::SignupGrant`].
-    /// - Channel is derived as `<relay>/<base64url(hash(secret))>`.
+    /// # Typical usage
     ///
-    /// Use [`Self::handle_deeplink`] for direct signup links.
+    /// 1. The **requesting app** constructs a [`PubkyGrantAuthFlow`](crate::PubkyGrantAuthFlow)
+    ///    and displays `authorization_url()` as a QR code or deep link.
+    /// 2. The **signer app** (e.g. Pubky Ring) scans the QR and calls `approve_auth`
+    ///    with the scanned URL.
+    /// 3. The requesting app receives the approval and obtains a session.
+    ///
+    /// Use [`Self::handle_deeplink`] instead if the URL might be a `direct_signup` link.
     ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Authentication`] if the `pubkyauth://`

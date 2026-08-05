@@ -73,10 +73,54 @@ use crate::errors::RequestError;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
-/// High-level facade. Owns a `PubkyHttpClient` and constructs the main actors.
-/// Prefer to instantiate only once and use trough your application a single shared `Pubky`
-/// instead of constructing one per request. This avoids reinitializing transports and keeps
-/// the same client available for repeated usage.
+/// High-level facade — your entry point to the Pubky SDK.
+///
+/// Create one at startup and share it across your app. It holds the HTTP client
+/// and connection pool, and provides access to everything else: signers, sessions,
+/// public storage, event streams, and PKDNS resolution.
+///
+/// Prefer to instantiate only once and reuse a single shared `Pubky` instead of
+/// constructing one per request. This avoids reinitializing transports and keeps
+/// the same connection pool available for repeated usage.
+///
+/// # Actor overview
+///
+/// ```text
+///   Pubky::new()
+///     ├── .signer(keypair)          → PubkySigner        (signup / signin / approve auth)
+///     │     └── .signin(cid)        → PubkySession        (authenticated handle)
+///     │           └── .storage()    → SessionStorage       (put / get / delete / list)
+///     ├── .public_storage()         → PublicStorage        (read anyone's data, no keys)
+///     ├── .pkdns()                  → Pkdns                (resolve / publish homeserver records)
+///     ├── .event_stream_for_user()  → EventStreamBuilder   (real-time SSE subscriptions)
+///     └── .start_grant_auth_flow()  → PubkyGrantAuthFlow   (QR / deeplink auth)
+/// ```
+///
+/// # Examples
+///
+/// **Sign in with a local key and write data:**
+/// ```no_run
+/// use pubky::{ClientId, Pubky, Keypair};
+///
+/// # async fn run() -> pubky::Result<()> {
+/// let pubky = Pubky::new()?;
+/// let signer = pubky.signer(Keypair::random());
+///
+/// let session = signer.signin(ClientId::new("demo.app").unwrap()).await?;
+/// session.storage().put("/pub/demo.app/hello.txt", "hi").await?;
+/// # Ok(()) }
+/// ```
+///
+/// **Read public data (no identity needed):**
+/// ```no_run
+/// use pubky::Pubky;
+///
+/// # async fn run(user: pubky::PublicKey) -> pubky::Result<()> {
+/// let pubky = Pubky::new()?;
+/// let addr = format!("pubky://{}/pub/pubky.app/profile.json", user.z32());
+/// let body = pubky.public_storage().get(addr).await?.text().await?;
+/// # Ok(()) }
+/// ```
 #[derive(Clone, Debug)]
 pub struct Pubky {
     client: PubkyHttpClient,

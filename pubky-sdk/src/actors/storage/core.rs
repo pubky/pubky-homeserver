@@ -9,12 +9,44 @@ use crate::{
     errors::{RequestError, Result},
 };
 
-/// Storage that acts **as the signed-in user** (authenticated).
+/// Read and write **your own data** with simple path-based operations (authenticated).
 ///
-/// Accepts **absolute paths** (`ResourcePath`) only; the user is implied by the session.
-/// Writes are allowed.
+/// Obtained via [`PubkySession::storage()`]. The user is implied by the session —
+/// you only supply **absolute paths** (e.g. `"/pub/my.app/file.txt"`).
+/// The SDK resolves the homeserver and attaches credentials automatically.
 ///
-/// Returned by [`PubkySession::storage()`].
+/// # Path conventions
+///
+/// - Paths under `/pub/` are **publicly readable** by anyone via [`PublicStorage`].
+/// - Paths under `/priv/` are **private** to the signed-in user.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example(session: pubky::PubkySession) -> pubky::Result<()> {
+/// let storage = session.storage();
+///
+/// // Write
+/// storage.put("/pub/my.app/hello.txt", "world").await?;
+///
+/// // Read
+/// let body = storage.get("/pub/my.app/hello.txt").await?.text().await?;
+///
+/// // Check existence
+/// let exists = storage.exists("/pub/my.app/hello.txt").await?;
+///
+/// // Metadata (content-length, content-type, etag, last-modified)
+/// if let Some(stats) = storage.stats("/pub/my.app/hello.txt").await? {
+///     println!("size: {:?}", stats.content_length);
+/// }
+///
+/// // List a directory (path must end with `/`)
+/// let entries = storage.list("/pub/my.app/")?.limit(50).send().await?;
+///
+/// // Delete
+/// storage.delete("/pub/my.app/hello.txt").await?;
+/// # Ok(()) }
+/// ```
 #[derive(Debug, Clone)]
 pub struct SessionStorage {
     pub(crate) client: PubkyHttpClient,
@@ -70,10 +102,44 @@ impl SessionStorage {
     }
 }
 
-/// Storage that reads **public data for any user** (unauthenticated).
+/// Read **anyone's public data** without signing in (unauthenticated).
 ///
-/// Accepts **addressed resources** (`PubkyResource`: user + absolute path).
-/// Writes are not available.
+/// No keys or session needed. Accepts **addressed resources** that pair a user's
+/// public key with an absolute path. Supported address formats:
+/// - `"pubky://<z32-pubkey>/pub/..."` (canonical)
+/// - `"pubky<z32-pubkey>/pub/..."` (compact)
+/// - `(PublicKey, "/pub/...")` tuple
+///
+/// Writes are not available — use [`SessionStorage`] for that.
+///
+/// # Example
+///
+/// ```no_run
+/// use pubky::{Pubky, PublicKey};
+///
+/// # async fn example() -> pubky::Result<()> {
+/// let pubky = Pubky::new()?;
+/// let user: PublicKey = "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo"
+///     .parse().unwrap();
+///
+/// let public = pubky.public_storage();
+///
+/// // Read a file
+/// let body = public
+///     .get(format!("pubky://{}/pub/pubky.app/profile.json", user.z32()))
+///     .await?
+///     .text().await?;
+///
+/// // Or use a tuple
+/// let exists = public.exists((&user, "/pub/pubky.app/profile.json")).await?;
+///
+/// // List a directory
+/// let entries = public
+///     .list(format!("pubky://{}/pub/pubky.app/", user.z32()))?
+///     .shallow(true)
+///     .send().await?;
+/// # Ok(()) }
+/// ```
 #[derive(Debug, Clone)]
 pub struct PublicStorage {
     pub(crate) client: PubkyHttpClient,

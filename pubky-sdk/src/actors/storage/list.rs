@@ -136,7 +136,10 @@ impl<'a> ListBuilder<'a> {
         self
     }
 
-    /// Resume listing from a previous `cursor` token.
+    /// Resume listing from a previous cursor.
+    ///
+    /// The cursor value comes from the last entry's path in a previous
+    /// listing response. Use it to paginate through large directories.
     pub fn cursor(mut self, cursor: &str) -> Self {
         self.cursor = Some(cursor.to_string());
         self

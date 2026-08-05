@@ -14,6 +14,8 @@ impl SessionStorage {
     ///
     /// Sets `Accept: application/json` and returns `T` via `resp.json()`.
     ///
+    /// *Requires the **`json`** crate feature.*
+    ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource path.
     /// - Propagates transport failures or JSON deserialization errors from the underlying HTTP request.
@@ -35,6 +37,8 @@ impl SessionStorage {
     /// PUT JSON to an **absolute path** and return the raw `Response`.
     ///
     /// Serializes `body` as JSON.
+    ///
+    /// *Requires the **`json`** crate feature.*
     ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource path.
@@ -60,6 +64,8 @@ impl SessionStorage {
 
 impl PublicStorage {
     /// GET and deserialize JSON from an **addressed resource**.
+    ///
+    /// *Requires the **`json`** crate feature.*
     ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Parse`] if `addr` cannot be converted into a valid addressed resource.

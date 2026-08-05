@@ -16,8 +16,31 @@ use crate::util::check_http_status;
 use crate::{PubkyHttpClient, PubkySession};
 
 /// Account-level grant management for a signed-in user.
-/// Requires a session with the root capability; non-root sessions get `403
-/// Forbidden` from the homeserver.
+///
+/// Use this to list and revoke grants (app permissions) for your account.
+/// Requires a session with the **root capability**; non-root sessions get
+/// `403 Forbidden` from the homeserver.
+///
+/// # Example
+///
+/// ```no_run
+/// use pubky::GrantManager;
+///
+/// # async fn example(session: pubky::PubkySession) -> pubky::Result<()> {
+/// let manager = GrantManager::new(&session);
+///
+/// // List all active grants
+/// let grants = manager.list().await?;
+/// for grant in &grants {
+///     println!("grant {} from client {}", grant.grant_id, grant.client_id);
+/// }
+///
+/// // Revoke a specific grant
+/// if let Some(grant) = grants.first() {
+///     manager.revoke(&grant.grant_id).await?;
+/// }
+/// # Ok(()) }
+/// ```
 #[derive(Debug, Clone)]
 pub struct GrantManager {
     client: PubkyHttpClient,
