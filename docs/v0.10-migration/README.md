@@ -87,7 +87,9 @@ const caps = "/pub/my-cool-app/:rw";
 
 ## Event Stream Path Filters
 
-Event streams without a `path` filter now return only public (`/pub/`) events.
+Event streams without a `path` filter return only public (`/pub/`) events.
+
+> **Note:** Private events are silently excluded unless you request an explicit `/priv/...` path and attach the matching user's session.
 
 Path filters now distinguish files from directories. A path without a trailing slash matches one exact file; a path with a trailing slash matches that directory and its descendants.
 
