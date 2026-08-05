@@ -138,8 +138,9 @@ impl<'a> ListBuilder<'a> {
 
     /// Resume listing from a previous cursor.
     ///
-    /// The cursor value comes from the last entry's path in a previous
-    /// listing response. Use it to paginate through large directories.
+    /// Pass the last entry's [`to_pubky_url()`](crate::PubkyResource::to_pubky_url)
+    /// from a previous listing response. Use it to paginate through large
+    /// directories.
     pub fn cursor(mut self, cursor: &str) -> Self {
         self.cursor = Some(cursor.to_string());
         self
