@@ -8,11 +8,11 @@ use crate::PublicKey;
 ///
 /// # When to use which
 ///
-/// - **`SignIn`** — the user already signed up on a homeserver. The flow
-///   authenticates against the existing account.
 /// - **`SignUp`** — the user does not yet have an account. The flow creates
 ///   the account on the specified homeserver as part of the auth handshake.
 ///   Some homeservers require a `signup_token` (invite code).
+/// - **`SignIn`** — the user already signed up on a homeserver. The flow
+///   authenticates against the existing account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthFlowKind {
     /// Sign in to an existing account.

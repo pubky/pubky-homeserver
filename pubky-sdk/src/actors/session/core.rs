@@ -26,9 +26,8 @@ use crate::{PubkyHttpClient, Result, SessionStorage, cross_log};
 ///
 /// # Concurrency
 ///
-/// `PubkySession` is **cheap to clone** and **thread-safe**. It shares the
-/// underlying [`PubkyHttpClient`] and credential state via `Arc`. Pass clones
-/// freely to async tasks or threads.
+/// `PubkySession` is **cheap to clone** and **thread-safe**. Pass clones freely to
+/// async tasks or threads.
 ///
 /// # Persistence
 ///

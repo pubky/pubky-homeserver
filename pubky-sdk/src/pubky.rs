@@ -91,7 +91,7 @@ use std::path::Path;
 ///     │     └── .signin(cid)        → PubkySession        (authenticated handle)
 ///     │           └── .storage()    → SessionStorage       (put / get / delete / list)
 ///     ├── .public_storage()         → PublicStorage        (read anyone's data, no keys)
-///     ├── .pkdns()                  → Pkdns                (resolve / publish homeserver records)
+///     ├── .pkdns()                  → Pkdns                (resolve homeserver records)
 ///     ├── .event_stream_for_user()  → EventStreamBuilder   (real-time SSE subscriptions)
 ///     └── .start_grant_auth_flow()  → PubkyGrantAuthFlow   (QR / deeplink auth)
 /// ```
