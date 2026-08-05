@@ -83,3 +83,55 @@ let caps = Capabilities::builder()
 ```js
 const caps = "/pub/my-cool-app/:rw";
 ```
+
+
+## Event Stream Path Filters
+
+Event streams without a `path` filter now return only public (`/pub/`) events.
+
+Path filters now distinguish files from directories. A path without a trailing slash matches one exact file; a path with a trailing slash matches that directory and its descendants.
+
+If you previously used a file-like path as a prefix, add the trailing slash.
+
+```text
+/pub/my-app/profile matches only /pub/my-app/profile
+/pub/my-app/ matches everything under /pub/my-app/
+```
+
+To subscribe to multiple paths, call `path()` once per path. The stream returns the union of matching events.
+
+```rust
+let stream = pubky
+    .event_stream_for_user(&user, None)
+    .path("/pub/my-app/")
+    .path("/pub/profile")
+    .subscribe()
+    .await?;
+```
+
+```js
+const stream = await pubky
+  .eventStreamForUser(user, null)
+  .path("/pub/my-app/")
+  .path("/pub/profile")
+  .subscribe();
+```
+
+Private event streams must target exactly one user. Attach that user's session, and make sure it has read access to every requested private path.
+
+```rust
+let stream = pubky
+    .event_stream_for_user(&user, None)
+    .session(&session)
+    .path("/priv/my-app/")
+    .subscribe()
+    .await?;
+```
+
+```js
+const stream = await pubky
+  .eventStreamForUser(user, null)
+  .session(session)
+  .path("/priv/my-app/")
+  .subscribe();
+```
