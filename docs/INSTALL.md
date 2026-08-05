@@ -24,11 +24,11 @@ Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), 
 
 ## Install the Homeserver
 
-Pick a version and platform from the [Pubky Core releases page](https://github.com/pubky/pubky-core/releases). The commands below use these variables, so set them first:
+Pick a version and platform from the [releases page](https://github.com/pubky/pubky-homeserver/releases). The commands below use these variables, so set them first:
 
 ```bash
-PUBKY_CORE_VERSION=0.x
-PUBKY_CORE_PLATFORM=linux-amd64  # or linux-arm64. Alternatively: osx-arm64, osx-amd64, windows-amd64
+PUBKY_VERSION=0.x
+PUBKY_PLATFORM=linux-amd64  # or linux-arm64. Alternatively: osx-arm64, osx-amd64, windows-amd64
 ```
 
 ### Release Binary
@@ -36,14 +36,14 @@ PUBKY_CORE_PLATFORM=linux-amd64  # or linux-arm64. Alternatively: osx-arm64, osx
 Download and extract the archive (requires `curl`; `sudo apt install curl`):
 
 ```bash
-curl -LO https://github.com/pubky/pubky-core/releases/download/v${PUBKY_CORE_VERSION}/pubky-core-v${PUBKY_CORE_VERSION}-${PUBKY_CORE_PLATFORM}.tar.gz
-tar -xf pubky-core-v${PUBKY_CORE_VERSION}-${PUBKY_CORE_PLATFORM}.tar.gz
+curl -LO https://github.com/pubky/pubky-homeserver/releases/download/v${PUBKY_VERSION}/pubky-homeserver-v${PUBKY_VERSION}-${PUBKY_PLATFORM}.tar.gz
+tar -xf pubky-homeserver-v${PUBKY_VERSION}-${PUBKY_PLATFORM}.tar.gz
 ```
 
 Place the binary on your `PATH`:
 
 ```bash
-cp pubky-core-v${PUBKY_CORE_VERSION}-${PUBKY_CORE_PLATFORM}/pubky-homeserver /usr/local/bin
+cp pubky-homeserver-v${PUBKY_VERSION}-${PUBKY_PLATFORM}/pubky-homeserver /usr/local/bin
 ```
 
 Verify the install:
@@ -63,9 +63,9 @@ sudo apt update && sudo apt install -y build-essential pkg-config libssl-dev git
 Clone the repository:
 
 ```bash
-git clone https://github.com/pubky/pubky-core.git
-cd pubky-core
-git checkout v${PUBKY_CORE_VERSION}
+git clone https://github.com/pubky/pubky-homeserver.git
+cd pubky-homeserver
+git checkout v${PUBKY_VERSION}
 ```
 
 #### Build a binary with Cargo

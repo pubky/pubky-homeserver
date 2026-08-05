@@ -1,5 +1,5 @@
 [package]
-name = "pubky-core-examples"
+name = "pubky-homeserver-examples"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

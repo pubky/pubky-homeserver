@@ -4125,6 +4125,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "pubky-homeserver-examples"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "futures-util",
+ "pubky",
+ "pubky-common",
+ "pubky-testnet",
+ "reqwest 0.13.4",
+ "rpassword",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "pubky-testnet"
 version = "0.10.0"
 dependencies = [

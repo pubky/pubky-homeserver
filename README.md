@@ -12,13 +12,13 @@
     <span> | </span>
     <a href="https://www.npmjs.com/package/@synonymdev/pubky">JavaScript SDK</a>
   </h3>
-  <a href="https://github.com/pubky/pubky-core/blob/main/LICENSE"><img src="https://img.shields.io/github/license/pubky/pubky-core" alt="GitHub License" /></a>
-  <a href="https://github.com/pubky/pubky-core/releases/latest/"><img src="https://img.shields.io/github/v/release/pubky/pubky-core" alt="GitHub Release" /></a>
+  <a href="https://github.com/pubky/pubky-homeserver/blob/main/LICENSE"><img src="https://img.shields.io/github/license/pubky/pubky-homeserver" alt="GitHub License" /></a>
+  <a href="https://github.com/pubky/pubky-homeserver/releases/latest/"><img src="https://img.shields.io/github/v/release/pubky/pubky-homeserver" alt="GitHub Release" /></a>
   <a href="https://crates.io/crates/pubky"><img src="https://img.shields.io/crates/v/pubky" alt="Crates.io Version" /></a>
   <a href="https://www.npmjs.com/package/@synonymdev/pubky"><img src="https://img.shields.io/npm/v/@synonymdev/pubky" alt="npm Version" /></a>
   <br/>
   <a href="https://t.me/pubkycore"><img src="https://img.shields.io/badge/Chat-Telegram-violet" alt="Telegram Chat Group" /></a>
-  <a href="https://deepwiki.com/pubky/pubky-core"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
+  <a href="https://deepwiki.com/pubky/pubky-homeserver"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
 </div>
 
 <br/>

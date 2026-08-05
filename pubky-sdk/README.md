@@ -2,7 +2,7 @@
 
 Ergonomic building blocks for Pubky apps: one facade (`Pubky`) plus focused actors for sessions, storage API, signer helpers, and QR auth flow for keyless apps.
 
-Rust implementation of [Pubky](https://github.com/pubky/pubky-core) SDK.
+Rust implementation of [Pubky](https://github.com/pubky/pubky-homeserver) SDK.
 
 ## Install
 
@@ -144,7 +144,7 @@ for entry in entries {
 # Ok(()) }
 ```
 
-See the [Public Storage example](https://github.com/pubky/pubky-core/tree/main/examples/rust/3-storage).
+See the [Public Storage example](https://github.com/pubky/pubky-homeserver/tree/main/examples/rust/3-storage).
 
 Path rules:
 
@@ -266,7 +266,7 @@ Approve an auth request
 signer.approve_auth(authorization_url).await?;
 ```
 
-See the fully functional [**Auth Flow Example**](https://github.com/pubky/pubky-core/tree/main/examples/rust/2-auth_flow).
+See the fully functional [**Auth Flow Example**](https://github.com/pubky/pubky-homeserver/tree/main/examples/rust/2-auth_flow).
 
 #### Relay & reliability
 
@@ -364,7 +364,7 @@ let restored = pubky.session_from_file("alice.sess").await?;
 
 ## Example code
 
-Check more [examples](https://github.com/pubky/pubky-core/tree/main/examples) using the Pubky SDK.
+Check more [examples](https://github.com/pubky/pubky-homeserver/tree/main/examples) using the Pubky SDK.
 
 ## JS bindings
 

@@ -57,7 +57,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pubky-core-artifacts.tar.gz
+          name: pubky-homeserver-artifacts.tar.gz
           path: target/github-release.tar.gz
           if-no-files-found: error
           overwrite: true

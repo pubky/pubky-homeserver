@@ -5,11 +5,11 @@
 # The end result will be a target/github-release directory with the following structure:
 #
 # target/github-release/
-# ├── pubky-core-v0.5.0-rc.0-linux-arm64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-linux-amd64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-windows-amd64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-osx-arm64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-osx-amd64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-linux-arm64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-linux-amd64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-windows-amd64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-osx-arm64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-osx-amd64.tar.gz
 # └── ...
 #
 # Make sure you installed https://github.com/cross-rs/cross for cross-compilation.
@@ -55,7 +55,7 @@ build_target() {
     local NICKNAME=$2
     echo "Build $NICKNAME with $TARGET"
 
-    FOLDER="pubky-core-v$VERSION-$NICKNAME"
+    FOLDER="pubky-homeserver-v$VERSION-$NICKNAME"
     DICT="target/github-release/$FOLDER"
     mkdir -p $DICT
 
