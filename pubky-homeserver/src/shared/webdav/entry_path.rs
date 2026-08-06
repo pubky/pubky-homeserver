@@ -34,7 +34,6 @@ impl EntryPath {
         Self { pubkey, path, key }
     }
 
-    #[allow(dead_code)]
     pub fn pubkey(&self) -> &PublicKey {
         &self.pubkey
     }

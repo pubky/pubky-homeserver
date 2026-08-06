@@ -145,6 +145,26 @@ async fn under_scoped_owner_priv_access_is_forbidden() {
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
 
+    // Positive control: the covering bearer also authorizes the canonical route.
+    let covering_bearer = covering.as_grant().unwrap().current_bearer().await;
+    let canonical_url = format!(
+        "{}storage/{}/{}",
+        server.icann_http_url(),
+        owner.z32(),
+        SECRET.trim_start_matches('/')
+    );
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::GET,
+            &canonical_url,
+            Some(&covering_bearer),
+            None,
+        )
+        .await,
+        StatusCode::OK
+    );
+
     // Same owner, session scoped to a sibling subtree that does not cover `/priv/app/`.
     let under = grant_session(
         &testnet,

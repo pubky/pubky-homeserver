@@ -17,14 +17,15 @@ pub mod read;
 pub mod write;
 
 pub fn router() -> Router<AppState> {
-    // Data routes — `/pub/` reads need no auth; `/priv/` reads gate on
-    // `has_read_permission` and writes gate on `has_write_permission`, each
-    // after extracting the session.
     Router::new()
         .route(
+            "/storage/{user_z32}/{*path}",
+            get(read::path_get).head(read::path_head),
+        )
+        .route(
             "/{*path}",
-            get(read::get)
-                .head(read::head)
+            get(read::legacy_get)
+                .head(read::legacy_head)
                 .put(write::put)
                 .delete(write::delete),
         )

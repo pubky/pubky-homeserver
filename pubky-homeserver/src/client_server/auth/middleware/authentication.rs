@@ -58,7 +58,7 @@ mod tests {
     use crate::app_context::AppContext;
     use crate::client_server::auth::cookie::persistence::SessionRepository;
     use crate::client_server::auth::AuthSession;
-    use crate::client_server::middleware::pubky_host::PubkyHost;
+    use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::persistence::sql::user::UserRepository;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -141,7 +141,7 @@ mod tests {
             .header("Cookie", format!("{}=fakesecret", pk.z32()))
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(PubkyHost(pk));
+        req.extensions_mut().insert(RequestTenant::legacy(pk));
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -160,7 +160,8 @@ mod tests {
             .header("Authorization", "Bearer not-a-valid-jws")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(PubkyHost(keypair.public_key()));
+        req.extensions_mut()
+            .insert(RequestTenant::legacy(keypair.public_key()));
         let cookies = Cookies::default();
         cookies.add(cookie_for_user(&context, &keypair).await);
         req.extensions_mut().insert(cookies);

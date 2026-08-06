@@ -3,7 +3,7 @@ use crate::shared::{HttpError, HttpResult};
 use crate::{
     client_server::{
         auth::{has_read_permission, AuthSession},
-        middleware::pubky_host::PubkyHost,
+        middleware::request_tenant::RequestTenant,
         query_params::ListQueryParams,
         AppState,
     },
@@ -20,20 +20,51 @@ use sqlx::types::chrono::{DateTime, Utc};
 use std::str::FromStr;
 use std::time::SystemTime;
 
-pub async fn head(
+fn path_entry_path(tenant: &RequestTenant) -> HttpResult<EntryPath> {
+    let path = tenant
+        .storage_path()
+        .cloned()
+        .ok_or_else(|| HttpError::bad_request("Missing path-addressed storage target"))?;
+    Ok(EntryPath::new(tenant.public_key().clone(), path))
+}
+
+pub async fn legacy_head(
     State(state): State<AppState>,
     session: Option<AuthSession>,
-    pubky: PubkyHost,
+    tenant: RequestTenant,
     Path(path): Path<WebDavPathAxum>,
 ) -> HttpResult<impl IntoResponse> {
-    has_read_permission(session.as_ref(), Some(pubky.public_key()), path.inner())?;
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
+    let mut response = head(state, session, entry_path).await?;
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("pubky-host"));
+    Ok(response)
+}
+
+pub async fn path_head(
+    State(state): State<AppState>,
+    session: Option<AuthSession>,
+    tenant: RequestTenant,
+) -> HttpResult<impl IntoResponse> {
+    head(state, session, path_entry_path(&tenant)?).await
+}
+
+async fn head(
+    state: AppState,
+    session: Option<AuthSession>,
+    entry_path: EntryPath,
+) -> HttpResult<Response<Body>> {
+    has_read_permission(
+        session.as_ref(),
+        Some(entry_path.pubkey()),
+        entry_path.path(),
+    )?;
 
     state
         .user_service
-        .get_or_http_error(pubky.public_key(), false)
+        .get_or_http_error(entry_path.pubkey(), false)
         .await?;
-
-    let entry_path = EntryPath::new(pubky.public_key().clone(), path.inner().clone());
 
     let entry = state
         .file_service
@@ -44,18 +75,46 @@ pub async fn head(
 }
 
 #[axum::debug_handler]
-pub async fn get(
+pub async fn legacy_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     session: Option<AuthSession>,
-    pubky: PubkyHost,
+    tenant: RequestTenant,
     Path(path): Path<WebDavPathAxum>,
     params: ListQueryParams,
 ) -> HttpResult<impl IntoResponse> {
-    has_read_permission(session.as_ref(), Some(pubky.public_key()), path.inner())?;
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
+    let mut response = get(state, headers, session, entry_path, params).await?;
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("pubky-host"));
+    Ok(response)
+}
 
-    let public_key = pubky.public_key().clone();
-    let entry_path = EntryPath::new(public_key.clone(), path.inner().clone());
+#[axum::debug_handler]
+pub async fn path_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    session: Option<AuthSession>,
+    tenant: RequestTenant,
+    params: ListQueryParams,
+) -> HttpResult<impl IntoResponse> {
+    get(state, headers, session, path_entry_path(&tenant)?, params).await
+}
+
+async fn get(
+    state: AppState,
+    headers: HeaderMap,
+    session: Option<AuthSession>,
+    entry_path: EntryPath,
+    params: ListQueryParams,
+) -> HttpResult<Response<Body>> {
+    has_read_permission(
+        session.as_ref(),
+        Some(entry_path.pubkey()),
+        entry_path.path(),
+    )?;
+
     if entry_path.path().is_directory() {
         return list(state, &entry_path, params).await;
     }
@@ -189,7 +248,6 @@ fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<Body>> {
             header::LAST_MODIFIED,
             to_http_date(&entry.modified_at).to_string().as_str(),
         )
-        .header(header::VARY, "pubky-host")
         .header(header::CACHE_CONTROL, "private, must-revalidate")
         .body(Body::empty())?)
 }
@@ -229,8 +287,6 @@ impl EntryEntity {
             .try_into()
             .expect("base64 string is valid"),
         );
-        // tenant-aware caching
-        headers.insert(header::VARY, HeaderValue::from_static("pubky-host"));
         headers.insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("private, must-revalidate"),
@@ -328,6 +384,17 @@ mod tests {
 
     fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
         headers.get(name).and_then(|value| value.to_str().ok())
+    }
+
+    fn assert_does_not_vary_on(headers: &HeaderMap, ignored_header: &str) {
+        let varies_on_ignored_header = header_value(headers, header::VARY)
+            .into_iter()
+            .flat_map(|vary| vary.split(','))
+            .any(|name| name.trim().eq_ignore_ascii_case(ignored_header));
+        assert!(
+            !varies_on_ignored_header,
+            "response must not vary on {ignored_header}"
+        );
     }
 
     fn assert_private_cache_policy(headers: &HeaderMap) {
@@ -912,5 +979,142 @@ mod tests {
             .expect_success()
             .await;
         assert!(header_value(listing.headers(), header::CACHE_CONTROL).is_none());
+        assert_eq!(
+            header_value(listing.headers(), header::VARY),
+            Some("pubky-host")
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn path_addressed_get_and_head_ignore_legacy_tenant_headers() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+        let other = Keypair::random().public_key();
+
+        server
+            .put("/pub/file.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie)
+            .text("path addressed")
+            .expect_success()
+            .await;
+
+        let url = format!(
+            "/storage/{}/pub/file.txt?pubky-host={}",
+            public_key.z32(),
+            other.z32()
+        );
+        let response = server
+            .get(&url)
+            .add_header("pubky-host", other.z32())
+            .expect_success()
+            .await;
+        assert_eq!(response.text(), "path addressed");
+        assert_does_not_vary_on(response.headers(), "pubky-host");
+
+        let head = server
+            .method(Method::HEAD, &url)
+            .add_header("pubky-host", "invalid")
+            .await;
+        head.assert_status(StatusCode::OK);
+        assert_does_not_vary_on(head.headers(), "pubky-host");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn path_addressed_listing_preserves_pagination() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        for name in ["a.txt", "b.txt"] {
+            server
+                .put(&format!("/pub/app/{name}"))
+                .add_header("host", public_key.z32())
+                .add_header(header::COOKIE, cookie.clone())
+                .text(name)
+                .expect_success()
+                .await;
+        }
+
+        let base = format!("/storage/{}/pub/app/", public_key.z32());
+        let first = server
+            .get(&format!("{base}?limit=1"))
+            .expect_success()
+            .await;
+        let first_entry = first.text();
+        assert_eq!(first_entry.lines().count(), 1);
+        assert_does_not_vary_on(first.headers(), "pubky-host");
+
+        let cursor = first_entry.trim_start_matches("pubky://");
+        let second = server
+            .get(&format!("{base}?limit=1&cursor={cursor}"))
+            .expect_success()
+            .await;
+        let second_entry = second.text();
+        assert_eq!(second_entry.lines().count(), 1);
+        assert_ne!(first_entry, second_entry);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn path_addressed_private_reads_use_path_owner_cookie_and_cache_policy() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        server
+            .put("/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .text("private")
+            .expect_success()
+            .await;
+
+        let url = format!("/storage/{}/priv/secret.txt", public_key.z32());
+        server
+            .get(&url)
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+
+        let response = server
+            .get(&url)
+            .add_header(header::COOKIE, cookie)
+            .expect_success()
+            .await;
+        assert_eq!(response.text(), "private");
+        assert_eq!(
+            header_value(response.headers(), header::CACHE_CONTROL),
+            Some("no-store")
+        );
+        assert_eq!(
+            header_value(response.headers(), header::VARY),
+            Some("Authorization, Cookie")
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn malformed_path_addressing_is_a_client_error_and_writes_are_not_enabled() {
+        let (_, _, server, public_key, _) = create_environment().await.unwrap();
+
+        let malformed = [
+            "/storage".to_string(),
+            "/storage/".to_string(),
+            "/storage/short/pub/file.txt".to_string(),
+            format!("/storage/pubky{}/pub/file.txt", public_key.z32()),
+            format!("/storage/{}/", public_key.z32()),
+        ];
+        for path in malformed {
+            let response = server
+                .get(&path)
+                .add_header(header::ORIGIN, "https://app.example")
+                .await;
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert!(response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        }
+
+        server
+            .put(&format!("/storage/{}/pub/file.txt", public_key.z32()))
+            .await
+            .assert_status(StatusCode::METHOD_NOT_ALLOWED);
     }
 }

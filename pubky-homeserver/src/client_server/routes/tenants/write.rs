@@ -10,7 +10,7 @@ use futures_util::stream::StreamExt;
 use crate::{
     client_server::{
         auth::{has_write_permission, AuthSession},
-        middleware::pubky_host::PubkyHost,
+        middleware::request_tenant::RequestTenant,
         AppState,
     },
     persistence::{
@@ -30,12 +30,12 @@ use crate::{
 pub async fn delete(
     State(state): State<AppState>,
     session: AuthSession,
-    pubky: PubkyHost,
+    tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
 ) -> HttpResult<impl IntoResponse> {
-    has_write_permission(&session, pubky.public_key(), path.inner())?;
+    has_write_permission(&session, tenant.public_key(), path.inner())?;
 
-    let public_key = pubky.public_key();
+    let public_key = tenant.public_key();
     state
         .user_service
         .get_or_http_error(public_key, false)
@@ -49,14 +49,14 @@ pub async fn delete(
 pub async fn put(
     State(state): State<AppState>,
     session: AuthSession,
-    pubky: PubkyHost,
+    tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
     headers: HeaderMap,
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
-    has_write_permission(&session, pubky.public_key(), path.inner())?;
+    has_write_permission(&session, tenant.public_key(), path.inner())?;
 
-    let public_key = pubky.public_key();
+    let public_key = tenant.public_key();
     let user = state
         .user_service
         .get_or_http_error(public_key, true)
