@@ -17,11 +17,11 @@ pub(crate) const VARY_PRIVATE_PATH: HeaderValue = HeaderValue::from_static("Auth
 pub(crate) async fn private_cache_policy(request: Request, next: Next) -> Response {
     let tenant = request.extensions().get::<RequestTenant>().cloned();
     let request_path = request.uri().path();
-    let logical_path = tenant
+    let storage_path = tenant
         .as_ref()
-        .map(|tenant| tenant.logical_path(request_path))
-        .unwrap_or(request_path);
-    let is_private = is_private_tenant_request_path(logical_path);
+        .and_then(RequestTenant::storage_path)
+        .map_or(request_path, StoragePath::as_str);
+    let is_private = is_private_tenant_request_path(storage_path);
     let vary_on_pubky_host = tenant
         .as_ref()
         .is_none_or(|tenant| tenant.storage_path().is_none());

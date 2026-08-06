@@ -17,7 +17,6 @@ use crate::shared::webdav::StoragePath;
 use super::pubky_host::extract_legacy_pubky;
 
 const STORAGE_ROUTE_PREFIX: &str = "/storage/";
-const RAW_PUBLIC_KEY_LENGTH: usize = 52;
 
 /// Tenant and optional owner-relative storage path resolved before auth runs.
 #[derive(Debug, Clone)]
@@ -35,25 +34,17 @@ impl RequestTenant {
         self.storage_path.as_ref()
     }
 
-    /// The path used for storage policy, independent of its HTTP route shape.
-    pub fn logical_path<'a>(&'a self, request_path: &'a str) -> &'a str {
-        self.storage_path
+    pub fn pubky_url(&self, request_uri: &Uri) -> String {
+        let storage_path = self
+            .storage_path
             .as_ref()
-            .map(StoragePath::as_str)
-            .unwrap_or(request_path)
-    }
-
-    pub fn logical_uri(&self, uri: &Uri) -> String {
-        let mut logical = format!(
-            "pubky://{}{}",
-            self.public_key.z32(),
-            self.logical_path(uri.path())
-        );
-        if let Some(query) = uri.query() {
-            logical.push('?');
-            logical.push_str(query);
+            .map_or(request_uri.path(), StoragePath::as_str);
+        let mut pubky_url = format!("pubky://{}{}", self.public_key.z32(), storage_path);
+        if let Some(query) = request_uri.query() {
+            pubky_url.push('?');
+            pubky_url.push_str(query);
         }
-        logical
+        pubky_url
     }
 
     fn from_request(req: &Request) -> Result<Option<Self>, String> {
@@ -61,10 +52,7 @@ impl RequestTenant {
             return Ok(Some(tenant));
         }
 
-        Ok(extract_legacy_pubky(req).map(|public_key| Self {
-            public_key,
-            storage_path: None,
-        }))
+        Ok(extract_legacy_pubky(req).map(Self::legacy))
     }
 
     /// Returns `Ok(None)` when the URL is not in the `/storage` namespace.
@@ -81,13 +69,6 @@ impl RequestTenant {
             .ok_or_else(|| "Missing storage path".to_string())?;
         if raw_storage_path.is_empty() {
             return Err("Missing storage path".to_string());
-        }
-
-        if PublicKey::is_pubky_prefixed(raw_public_key) {
-            return Err("Storage owner must be a raw z32 public key".to_string());
-        }
-        if raw_public_key.len() != RAW_PUBLIC_KEY_LENGTH {
-            return Err("Storage owner must be a 52-character z32 public key".to_string());
         }
 
         let public_key = PublicKey::try_from_z32(raw_public_key)
@@ -112,6 +93,8 @@ impl RequestTenant {
             }
             Ok(None) => next.run(request).await,
             Err(message) => {
+                // Tenant-aware limits require a resolved owner; malformed requests are
+                // rejected before authentication and storage access.
                 tracing::warn!(
                     method = %request.method(),
                     path = request.uri().path(),
@@ -123,7 +106,6 @@ impl RequestTenant {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn legacy(public_key: PublicKey) -> Self {
         Self {
             public_key,
@@ -164,7 +146,7 @@ mod tests {
         assert_eq!(tenant.public_key(), &owner);
         assert_eq!(tenant.storage_path().unwrap().as_str(), "/pub/example.txt");
         assert_eq!(
-            tenant.logical_uri(&format!("{path}?limit=10").parse().unwrap()),
+            tenant.pubky_url(&format!("{path}?limit=10").parse().unwrap()),
             format!("pubky://{}/pub/example.txt?limit=10", owner.z32())
         );
     }
@@ -181,7 +163,7 @@ mod tests {
         assert!(RequestTenant::from_storage_route(&format!("/storage/{}/", owner.z32())).is_err());
         assert!(RequestTenant::from_storage_route(&format!(
             "/storage/{}/pub/example.txt",
-            "0".repeat(RAW_PUBLIC_KEY_LENGTH)
+            "0".repeat(52)
         ))
         .is_err());
     }

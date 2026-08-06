@@ -251,7 +251,7 @@ pub fn create_app(
         .layer(middleware);
 
     // Resolve the target before tracing and authentication. Valid canonical
-    // storage requests are therefore logged using their logical Pubky URI.
+    // storage requests are therefore logged using their canonical Pubky URL.
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
     Ok(with_trace_layer(app)
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
