@@ -1,22 +1,18 @@
 # Deploy with a Cloudflare Tunnel
 
-This guide is for users who **cannot open ports** on their network or **don't have a static IP** — for example behind NAT, CGNAT, or a home router without port-forwarding access. Cloudflare proxies incoming HTTPS traffic through an outbound tunnel from your machine, so no inbound ports are needed.
+How to deploy a Pubky homeserver behind a Cloudflare Tunnel — no open ports or static IP needed.
 
-If you can open ports and have a static IP, consider [deploying with a domain](domain.md) or [deploying with an IP address](ip-only.md) instead — both support full Pubky TLS connectivity.
+> **Important limitation:** Cloudflare Tunnels only proxy HTTP/HTTPS traffic. **Pubky TLS (the native protocol on port 6287) will not work with this setup.** Your homeserver will be reachable by browsers and the browser-based SDK over HTTPS, but not by native Pubky protocol clients. If you can open ports, consider [deploying with a domain](domain.md) or [deploying with an IP address](ip-only.md) instead — both support full Pubky TLS connectivity.
 
-This guide assumes you have already [installed the homeserver](../INSTALL.md).
+This guide assumes you have already [installed the homeserver](../INSTALL.md) and have it running.
 
 Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), adapt as needed for other distributions.
 
 ## Requirements
 
 - A free [Cloudflare account](https://dash.cloudflare.com/sign-up)
-- A **domain name** with its DNS managed by Cloudflare (free plan is fine)
+- A **domain name** with its DNS managed by Cloudflare (free plan is fine) — you can [buy one from Cloudflare](https://developers.cloudflare.com/registrar/get-started/register-domain/) for under $10/year or [transfer an existing domain](https://developers.cloudflare.com/fundamentals/setup/manage-domains/add-site/)
 - `cloudflared` installed on the server
-
-## Limitations
-
-Cloudflare Tunnels only proxy HTTP/HTTPS traffic. **Pubky TLS (native protocol on port 6287) will not work with this setup.** Your homeserver will be reachable by browsers and the browser-based SDK over HTTPS, but not by native Pubky protocol clients.
 
 ## Install cloudflared
 
@@ -24,44 +20,31 @@ Install the `cloudflared` daemon following [Cloudflare's official instructions](
 
 ## Authenticate with Cloudflare
 
-Log in to your Cloudflare account:
-
 ```bash
 cloudflared login
 ```
 
-This opens a browser window. Select the domain you want to use and authorize `cloudflared`. A certificate is saved to `~/.cloudflared/cert.pem`.
+Select the domain you want to use in the browser window that opens and authorize `cloudflared`. A certificate is saved to `~/.cloudflared/cert.pem`.
 
 ## Create the Tunnel
-
-Create a named tunnel:
 
 ```bash
 cloudflared tunnel create pubky-homeserver
 ```
 
-This outputs a **Tunnel ID** (a UUID) and creates a credentials file at `~/.cloudflared/<TUNNEL_ID>.json`. You'll need the Tunnel ID for the next steps.
+Note the **Tunnel ID** (a UUID) from the output — you'll need it for the next steps. A credentials file is created at `~/.cloudflared/<TUNNEL_ID>.json`.
 
 ## Route DNS
-
-Point your domain at the tunnel:
 
 ```bash
 cloudflared tunnel route dns pubky-homeserver YOUR_DOMAIN
 ```
 
-Replace `YOUR_DOMAIN` with the domain (or subdomain) you want to use, e.g. `homeserver.example.com`. This creates a CNAME record in your Cloudflare DNS that routes traffic to the tunnel.
+Replace `YOUR_DOMAIN` with your domain or subdomain (e.g. `homeserver.example.com`). This creates a CNAME record in Cloudflare DNS pointing to the tunnel.
 
 ## Configure the Tunnel
 
-Create the cloudflared config file:
-
-```bash
-mkdir -p ~/.cloudflared
-nano ~/.cloudflared/config.yml
-```
-
-Add the following:
+Create `~/.cloudflared/config.yml`:
 
 ```yaml
 tunnel: <TUNNEL_ID>
@@ -73,7 +56,7 @@ ingress:
   - service: http_status:404
 ```
 
-Replace `<TUNNEL_ID>` with your Tunnel ID, `<YOUR_USER>` with your system username, and `YOUR_DOMAIN` with the domain you configured in the previous step.
+Replace `<TUNNEL_ID>`, `<YOUR_USER>`, and `YOUR_DOMAIN` with your values.
 
 The ingress rule sends traffic for your domain to the homeserver's internal HTTP port (6286). The catch-all rule at the bottom returns 404 for anything else.
 
@@ -83,15 +66,19 @@ Edit `~/.pubky/config.toml`:
 
 ```toml
 [pkdns]
-# Your domain name — the tunnel makes this reachable via Cloudflare.
-icann_domain = "YOUR_DOMAIN"
-
 # Set to 443 since Cloudflare terminates TLS and browsers connect
 # on the standard HTTPS port.
 public_icann_http_port = 443
-```
 
-Replace `YOUR_DOMAIN` with the domain you routed to the tunnel.
+# Your domain name — the tunnel makes this reachable via Cloudflare.
+icann_domain = "YOUR_DOMAIN"
+
+# public_ip is not needed — Cloudflare proxies all traffic, so there is
+# no direct IP for Pubky TLS clients to connect to.
+
+# pubky_listen_socket can stay at the default (127.0.0.1:6287) since
+# Pubky TLS is not used with this setup.
+```
 
 Restart the homeserver after editing `config.toml`. See [Run](../INSTALL.md#run) in the install guide.
 
@@ -109,10 +96,10 @@ Verify that `https://YOUR_DOMAIN` responds (see [Verify](#verify-the-deployment)
 
 ### Install as a system service
 
-Once the manual test passes, install `cloudflared` as a systemd service so it starts on boot:
+Once the manual test passes, install `cloudflared` as a systemd service so it starts on boot. You must pass the config path explicitly because `sudo` changes the home directory to `/root`:
 
 ```bash
-sudo cloudflared service install
+sudo cloudflared --config ~/.cloudflared/config.yml service install
 sudo systemctl enable cloudflared
 sudo systemctl start cloudflared
 ```
@@ -135,7 +122,7 @@ From your local machine:
 curl -I https://YOUR_DOMAIN
 ```
 
-Then follow the [common verification steps](post-setup.md): find your public key and check your PKARR record. (The Pubky TLS check does not apply to this setup.)
+Then follow the [common verification steps](post-setup.md) to find your public key and check your PKARR record. (The Pubky TLS check does not apply to this setup.)
 
 ## Production Notes
 

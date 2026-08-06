@@ -15,19 +15,20 @@ Ideally your deployment supports both, but some setups only provide HTTPS. The c
 
 ## Choose Your Setup
 
+There are three deployment guides depending on your requirements and network limitations. Compare them below and follow the one that fits your situation.
+
+- **[With a Domain](deploy/domain.md)** — standard setup with a domain name and static IP. Long-lived certificates, full protocol support. The recommended production option.
+- **[IP Address Only](deploy/ip-only.md)** — no domain registration needed. Uses short-lived certificates that auto-renew, so the server must stay healthy. Full protocol support.
+- **[Cloudflare Tunnel](deploy/cloudflare-tunnel.md)** — no static IP or open ports needed. Cloudflare proxies HTTPS traffic through an outbound tunnel. Ideal for home servers behind NAT/CGNAT. **Does not support Pubky TLS.**
+
 | | [Domain](deploy/domain.md) | [IP Address Only](deploy/ip-only.md) | [Cloudflare Tunnel](deploy/cloudflare-tunnel.md) |
 | --- | --- | --- | --- |
 | Static IP required | Yes | Yes | No |
-| Domain required | Yes | No | Yes (on Cloudflare) |
-| Open ports required | 80, 443, 6287 | 80, 443, 6287 | 6287 only (if reachable) |
-| Pubky TLS (native) | Yes | Yes | Only if port 6287 is reachable |
+| Domain required | Yes | No | Yes (Cloudflare-managed, from ~$5/year) |
+| Open ports required | 80, 443, 6287 | 80, 443, 6287 | None |
+| Pubky TLS (native) | Yes | Yes | No |
 | HTTPS (browsers) | Yes | Yes | Yes |
 | Certificate lifetime | 90 days (auto-renewed) | ~6 days (auto-renewed) | Managed by Cloudflare |
 | Extra software | Caddy | Caddy (v2.10.1+) | cloudflared |
 | Best for | Production servers | Quick setup, no domain | Home networks, no static IP |
 
-Pick an option and follow the linked guide:
-
-- **[With a Domain](deploy/domain.md)** — standard setup with a domain name and static IP. Long-lived certificates, full protocol support. The recommended production option.
-- **[IP Address Only](deploy/ip-only.md)** — no domain registration needed. Uses short-lived certificates that auto-renew, so the server must stay healthy. Full protocol support.
-- **[Cloudflare Tunnel](deploy/cloudflare-tunnel.md)** — no static IP or open ports needed for HTTPS. Cloudflare proxies traffic through an outbound tunnel. Ideal for home servers behind NAT/CGNAT. Pubky TLS requires port 6287 to be separately reachable.

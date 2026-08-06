@@ -25,7 +25,7 @@ For a more thorough check, resolve the record from the DHT directly using the `r
 cargo run --example resolve <homeserver-public-key>
 ```
 
-This performs a cold lookup, a cached lookup, and a network-only lookup, printing the resolved DNS records and timings for each.
+This performs a cold lookup, a cached lookup, and a network-only lookup, printing the resolved DNS records and timings for each. If your deployment sets `public_ip`, verify that the output contains an `A` record with your server's public IP. You should also see `HTTPS` (SVCB) records — one for the Pubky TLS port (if applicable) and one pointing to your domain or IP address.
 
 ### Check Pubky TLS
 
