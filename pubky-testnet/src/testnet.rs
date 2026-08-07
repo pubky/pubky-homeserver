@@ -20,7 +20,7 @@ use url::Url;
 /// Keeps track of the components and can create new ones.
 /// Cleans up all resources when dropped.
 pub struct Testnet {
-    pub(crate) dht: pkarr::mainline::Testnet,
+    pub(crate) dht: mainline::Testnet,
     pub(crate) pkarr_relays: Vec<pkarr_relay::Relay>,
     pub(crate) http_relays: Vec<HttpRelay>,
     pub(crate) homeservers: Vec<HomeserverApp>,
@@ -31,9 +31,7 @@ pub struct Testnet {
 
 impl Testnet {
     fn new_inner(seeded: bool) -> Result<Self> {
-        let dht = pkarr::mainline::Testnet::builder(2)
-            .seeded(seeded)
-            .build()?;
+        let dht = mainline::Testnet::builder(2).seeded(seeded).build()?;
 
         let testnet = Self {
             dht,
@@ -64,7 +62,7 @@ impl Testnet {
     pub async fn new_with_custom_postgres(
         postgres_connection_string: ConnectionString,
     ) -> Result<Self> {
-        let dht = pkarr::mainline::Testnet::builder(2).build()?;
+        let dht = mainline::Testnet::builder(2).build()?;
         let testnet: Testnet = Self {
             dht,
             pkarr_relays: vec![],

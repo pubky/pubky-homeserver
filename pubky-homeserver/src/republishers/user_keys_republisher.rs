@@ -189,7 +189,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_republish_keys_once() {
         let db = init_db_with_users(10).await;
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let worker = UserKeysRepublisher {
             db,
@@ -207,7 +207,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn user_pointing_to_another_homeserver_is_skipped() {
         let db = SqlDb::test().await;
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.clone().build().unwrap();
         let user = Keypair::random();

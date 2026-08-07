@@ -95,6 +95,7 @@ rand.workspace = true
 async-dropper = { version = "0.3", features = ["tokio", "simple"] }
 axum-test = "17"
 hex = "0.4"
+mainline.workspace = true
 
 [features]
 default = ["storage-gcs"]

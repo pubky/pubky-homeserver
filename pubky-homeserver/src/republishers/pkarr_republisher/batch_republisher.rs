@@ -157,10 +157,7 @@ mod tests {
         max_concurrent_workers: NonZeroUsize,
         min_sufficient_node_publish_count: NonZeroU8,
     ) -> RepublishSummary {
-        let dht = pkarr::mainline::Testnet::builder(3)
-            .seeded(false)
-            .build()
-            .unwrap();
+        let dht = mainline::Testnet::builder(3).seeded(false).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.clone().build().unwrap();
         let public_keys = publish_sample_packets(&pkarr_client, key_count).await;

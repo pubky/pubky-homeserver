@@ -173,8 +173,8 @@ mod tests {
     use super::*;
     use crate::republishers::pkarr_republisher::test_client_builder;
 
-    async fn test_context() -> (AppContext, pkarr::mainline::Testnet) {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+    async fn test_context() -> (AppContext, mainline::Testnet) {
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let mut context = AppContext::test().await;
         context.pkarr_client = pkarr_builder.clone().build().unwrap();

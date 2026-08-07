@@ -19,6 +19,7 @@ clap.workspace = true
 # External http-relay: server + link-compat, no persist/cli (in-memory storage for tests)
 http-relay = { workspace = true, features = ["server", "link-compat"] }
 libc = { version = "0.2", optional = true }
+mainline.workspace = true
 pkarr = { workspace = true }
 pkarr-relay = { workspace = true }
 pubky = { workspace = true, features = ["json"] }

@@ -151,7 +151,7 @@ pub struct StaticTestnet {
     /// Whether the homeserver is using persistent on-disk storage.
     is_persistent: bool,
     #[allow(dead_code)]
-    fixed_bootstrap_node: Option<pkarr::mainline::Dht>, // Keep alive
+    fixed_bootstrap_node: Option<mainline::Dht>, // Keep alive
     #[allow(dead_code)]
     temp_dirs: Vec<tempfile::TempDir>, // Keep temp dirs alive for the pkarr relay
 }
@@ -292,7 +292,7 @@ impl StaticTestnet {
     /// If it's already running, return None.
     fn run_fixed_bootsrap_node(
         other_bootstrap_nodes: &[String],
-    ) -> anyhow::Result<Option<pkarr::mainline::Dht>> {
+    ) -> anyhow::Result<Option<mainline::Dht>> {
         let port_suffix = format!(":{}", testnet_ports::BOOTSTRAP);
         if other_bootstrap_nodes
             .iter()
@@ -301,7 +301,7 @@ impl StaticTestnet {
             return Ok(None);
         }
 
-        let mut builder = pkarr::mainline::Dht::builder();
+        let mut builder = mainline::Dht::builder();
         let dht = builder
             .port(testnet_ports::BOOTSTRAP)
             .bootstrap(other_bootstrap_nodes)

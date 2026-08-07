@@ -254,12 +254,8 @@ mod tests {
             .unwrap()
     }
 
-    async fn publish_invalid_signed_packet(
-        testnet: &pkarr::mainline::Testnet,
-        key: &Keypair,
-        seq: i64,
-    ) {
-        let item = pkarr::mainline::MutableItem::new(
+    async fn publish_invalid_signed_packet(testnet: &mainline::Testnet, key: &Keypair, seq: i64) {
+        let item = mainline::MutableItem::new(
             key.secret_key().into(),
             b"invalid signed packet",
             seq,
@@ -293,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn republish_returns_published_for_resolved_packet() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.build().unwrap();
         let public_key = publish_sample_packet(&pkarr_client).await;
@@ -307,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_miss_resolves_and_publishes_packet_from_network() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let publishing_client = pkarr_builder.clone().build().unwrap();
         let public_key = publish_sample_packet(&publishing_client).await;
@@ -322,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn relay_cache_failure_falls_back_to_dht() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let publishing_client = pkarr_builder.clone().build().unwrap();
         let public_key = publish_sample_packet(&publishing_client).await;
@@ -349,7 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn republish_returns_missing_for_unknown_key() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.build().unwrap();
         let public_key = Keypair::random().public_key();
@@ -363,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn republish_returns_skipped_when_condition_rejects_packet() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.build().unwrap();
         let public_key = publish_sample_packet(&pkarr_client).await;
@@ -387,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_fallback_does_not_resolve_cached_packet_again() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let mut pkarr_builder = test_client_builder(&dht);
         let publishing_client = pkarr_builder.clone().build().unwrap();
         let key = Keypair::random();
@@ -412,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn latest_resolution_prefers_newer_cached_packet_over_network_packet() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let mut pkarr_builder = test_client_builder(&dht);
         let publishing_client = pkarr_builder.clone().build().unwrap();
         let key = Keypair::random();
@@ -440,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn latest_resolution_prefers_cached_packet_over_covered_invalid_sequence() {
-        let dht = pkarr::mainline::Testnet::builder(3).build().unwrap();
+        let dht = mainline::Testnet::builder(3).build().unwrap();
         let mut pkarr_builder = test_client_builder(&dht);
         let key = Keypair::random();
         let cached_packet = sample_packet(&key, Timestamp::from(10));
@@ -464,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn latest_resolution_reports_invalid_sequence_newer_than_cached_packet() {
-        let dht = pkarr::mainline::Testnet::builder(3).build().unwrap();
+        let dht = mainline::Testnet::builder(3).build().unwrap();
         let mut pkarr_builder = test_client_builder(&dht);
         let key = Keypair::random();
         let cached_packet = sample_packet(&key, Timestamp::from(10));
@@ -488,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_publish_conflict_resolves_and_publishes_newer_packet() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let mut pkarr_builder = test_client_builder(&dht);
         let publishing_client = pkarr_builder.clone().build().unwrap();
         let key = Keypair::random();
@@ -513,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn republish_returns_published_when_condition_accepts_packet() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.build().unwrap();
         let public_key = publish_sample_packet(&pkarr_client).await;
@@ -531,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn republish_returns_publish_error_when_insufficiently_published() {
-        let dht = pkarr::mainline::Testnet::builder(1).build().unwrap();
+        let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.build().unwrap();
         let public_key = publish_sample_packet(&pkarr_client).await;

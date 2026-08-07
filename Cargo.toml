@@ -52,8 +52,9 @@ http-relay = "0.7"
 httpdate = "1"
 js-sys = "0.3"
 log = "0.4"
-pkarr = { version = "7", default-features = false }
-pkarr-relay = { version = "1" }
+mainline = "8"
+pkarr = { version = "8", default-features = false }
+pkarr-relay = { version = "2", default-features = false }
 percent-encoding = "2"
 pubky = { path = "pubky-sdk", version = "0.10", default-features = false }
 pubky-common = { path = "pubky-common", version = "0.10" }
