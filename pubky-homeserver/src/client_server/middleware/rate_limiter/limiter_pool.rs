@@ -133,8 +133,8 @@ impl LimitTuple {
         let path = req
             .extensions()
             .get::<RequestTenant>()
-            .map(|tenant| tenant.logical_path(req.uri().path()))
-            .unwrap_or_else(|| req.uri().path());
+            .and_then(RequestTenant::storage_path)
+            .map_or(req.uri().path(), |path| path.as_str());
         let glob_match = self.limit.path.is_match(path);
         let method_match = self.limit.method.0 == req.method();
         glob_match && method_match

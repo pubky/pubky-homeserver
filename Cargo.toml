@@ -28,8 +28,8 @@ authors = [
   "Nuh <nuh@nuh.dev>",
 ]
 license = "MIT"
-homepage = "https://github.com/pubky/pubky-core"
-repository = "https://github.com/pubky/pubky-core"
+homepage = "https://github.com/pubky/pubky-homeserver"
+repository = "https://github.com/pubky/pubky-homeserver"
 
 
 [profile.release]

@@ -279,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn path_addressed_storage_uses_logical_path_and_owner_for_limits() {
+    async fn path_addressed_storage_uses_storage_path_and_owner_for_limits() {
         let path_limit = PathLimit {
             path: GlobPattern::new("/pub/*"),
             method: HttpMethod(Method::GET),

@@ -1,6 +1,6 @@
 # JS Pubky SDK bindings
 
-Wasm-pack wrap of [Pubky](https://github.com/pubky/pubky-core) SDK, published on
+Wasm-pack wrap of [Pubky](https://github.com/pubky/pubky-homeserver) SDK, published on
 [npm as `@synonymdev/pubky`](https://www.npmjs.com/package/@synonymdev/pubky).
 
 Works in modern browsers and Node v20+.

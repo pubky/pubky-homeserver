@@ -1,6 +1,6 @@
 # Pubky
 
-JS/WASM SDK for [Pubky](https://github.com/pubky/pubky-core).
+JS/WASM SDK for [Pubky](https://github.com/pubky/pubky-homeserver).
 
 Works in browsers and Node 20+.
 
@@ -56,7 +56,7 @@ const addr = `${userPk}/pub/my-cool-app/hello.json`;
 const json = await pubky.publicStorage.getJson(addr); // -> { hello: "world" }
 ```
 
-Find here [**ready-to-run examples**](https://github.com/pubky/pubky-core/tree/main/examples).
+Find here [**ready-to-run examples**](https://github.com/pubky/pubky-homeserver/tree/main/examples).
 
 ### Key formats (display vs transport)
 

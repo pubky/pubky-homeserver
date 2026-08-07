@@ -23,7 +23,7 @@
 ///
 /// ## Get rid of `/pub` requirement
 /// This needs more research especially in consideration with Cryptrees. I see a future where "permissions" are set on an individual folder level and not forced on top level folders. TBD though.
-/// via: <https://github.com/pubky/pubky-core/pull/145#discussion_r2149297326>
+/// via: <https://github.com/pubky/pubky-homeserver/pull/145#discussion_r2149297326>
 ///
 mod entry_path;
 mod entry_path_pub;
