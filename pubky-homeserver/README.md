@@ -86,9 +86,9 @@ capability. See [Private Storage](../docs/PRIVATE_STORAGE.md) for the full contr
 
 ## Caching and Proxies
 
-Tenant-private responses must never be stored by shared caches. `/priv/...`
-data responses and `/events-stream` use `Cache-Control: no-store` and vary on
-`pubky-host`, `Authorization`, and `Cookie`; `/pub/...` file validators keep
+Tenant-private responses must never be stored by shared caches. Private
+`/storage/{user_z32}/priv/...` responses use `Cache-Control: no-store` and vary
+on `Authorization` and `Cookie`; `/pub/...` file validators keep
 their existing tenant-aware caching behavior.
 
 Note: CORS preflight `OPTIONS` is

@@ -8,8 +8,8 @@ info:
 
     ## Tenant Identification
 
-    Reads at `/storage/{user_z32}/{path}` use the owner in the path
-    and `Host` remains the HTTP authority.
+    Storage requests at `/storage/{user_z32}/{path}` use the owner in the path,
+    while `Host` remains the HTTP authority.
 
     Deprecated owner-relative routes resolve the owner from `pubky-host`, then
     `Host`, then `?pubky-host=`.

@@ -42,6 +42,9 @@ pub async fn delete(
     session: AuthSession,
     entry_path: EntryPath,
 ) -> HttpResult<impl IntoResponse> {
+    if !entry_path.path().is_file() {
+        return Err(HttpError::bad_request("Target path must be a file"));
+    }
     has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
 
     state
@@ -72,6 +75,9 @@ pub async fn put(
     headers: HeaderMap,
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
+    if !entry_path.path().is_file() {
+        return Err(HttpError::bad_request("Target path must be a file"));
+    }
     has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
 
     let user = state

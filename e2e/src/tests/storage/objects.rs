@@ -35,7 +35,32 @@ async fn put_get_delete() {
         server.icann_http_url(),
         public_key.z32()
     );
+    let directory_url = format!(
+        "{}storage/{}/pub/directory/",
+        server.icann_http_url(),
+        public_key.z32()
+    );
     let unrelated_user = Keypair::random().public_key();
+
+    // PUT and DELETE only operate on file-shaped `/storage` paths.
+    let response = session
+        .client()
+        .request(Method::PUT, &directory_url)
+        .header("Cookie", &cookie)
+        .body(vec![0])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = session
+        .client()
+        .request(Method::DELETE, &directory_url)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let response = session
         .client()
