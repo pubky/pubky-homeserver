@@ -72,6 +72,51 @@ async fn unauthorized_put_delete() {
 
 #[tokio::test]
 #[pubky_testnet::test]
+async fn path_addressed_cross_tenant_cookie_is_unauthorized() {
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+
+    let owner = pubky.signer(Keypair::random());
+    owner.signup(&server.public_key(), None).await.unwrap();
+
+    let other = pubky.signer(Keypair::random());
+    let other_session = other
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    let cookie_secret = other_session.as_cookie().unwrap().export_secret().unwrap();
+    let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
+    let cookie = format!("{cookie_name}={cookie_value}");
+    let url = format!(
+        "{}storage/{}/pub/foo.txt",
+        server.icann_http_url(),
+        owner.public_key().z32()
+    );
+
+    // A cookie for another tenant is not selected for the path owner.
+    let response = pubky
+        .client()
+        .request(Method::PUT, &url)
+        .header("Cookie", &cookie)
+        .body(vec![0, 1, 2, 3, 4])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = pubky
+        .client()
+        .request(Method::DELETE, &url)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
 async fn priv_owner_with_cap_is_authorized() {
     // The owner exercises the full read/write surface on their own `/priv/` data,
     // and gets a real 404 (not 401/403) for an absent private path. Denial for the

@@ -536,7 +536,10 @@ paths:
         '403':
           description: |
             Session user does not match `user_z32`, the session lacks write
-            capability for the path, or the path is outside `pub/` and `priv/`.
+            capability for the path, the path is outside `pub/` and `priv/`,
+            or the user account is disabled.
+        '409':
+          description: File/folder path collision.
         '507':
           description: Storage quota exceeded.
     delete:
@@ -805,6 +808,8 @@ paths:
           description: |
             Session user does not match target tenant, path is outside `/pub/` and
             `/priv/`, session lacks write capability for path, or user account is disabled.
+        '409':
+          description: File/folder path collision
         '507':
           description: Storage quota exceeded
     delete:

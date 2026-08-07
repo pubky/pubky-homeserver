@@ -12,7 +12,10 @@ use axum::{
 use percent_encoding::percent_decode_str;
 use pubky_common::crypto::PublicKey;
 
-use crate::shared::webdav::{EntryPath, StoragePath};
+use crate::shared::{
+    webdav::{EntryPath, StoragePath},
+    HttpError,
+};
 
 use super::pubky_host::extract_legacy_pubky;
 
@@ -125,8 +128,7 @@ where
             .extensions
             .get::<RequestTenant>()
             .cloned()
-            .ok_or((StatusCode::BAD_REQUEST, "Missing request tenant"))
-            .map_err(IntoResponse::into_response)
+            .ok_or_else(|| HttpError::bad_request("Missing request tenant").into_response())
     }
 }
 
@@ -140,13 +142,11 @@ where
         let tenant = parts
             .extensions
             .get::<RequestTenant>()
-            .ok_or((StatusCode::BAD_REQUEST, "Missing request tenant"))
-            .map_err(IntoResponse::into_response)?;
+            .ok_or_else(|| HttpError::bad_request("Missing request tenant").into_response())?;
         let path = tenant
             .storage_path()
             .cloned()
-            .ok_or((StatusCode::BAD_REQUEST, "Missing storage path"))
-            .map_err(IntoResponse::into_response)?;
+            .ok_or_else(|| HttpError::bad_request("Missing storage path").into_response())?;
 
         Ok(EntryPath::new(tenant.public_key().clone(), path))
     }
