@@ -11,8 +11,9 @@
 //! and [`has_read_permission`] decides authentication too: 401 for an anonymous
 //! `/priv/` read, 403 for a wrong-tenant or under-scoped one.
 //!
-//! Both predicates take the tenant as a [`PublicKey`]: storage handlers pass the
-//! key from the `Host` header, the event stream passes the `user=` query key.
+//! Both predicates take the tenant as a [`PublicKey`]: `/storage` handlers pass
+//! the path owner, deprecated owner-relative handlers pass the legacy-resolved
+//! owner, and the event stream passes the `user=` query key.
 //!
 //! [`AuthenticationLayer`]: super::AuthenticationLayer
 

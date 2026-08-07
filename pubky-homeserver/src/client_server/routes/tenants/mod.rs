@@ -1,7 +1,7 @@
 //! Per Tenant (user / Pubky) routes.
 //!
-//! Every route here is relative to a tenant's Pubky host,
-//! as opposed to routes relative to the Homeserver's owner.
+//! `/storage/{user_z32}/...` identifies the tenant in the URL. Deprecated
+//! owner-relative routes retain the legacy Host / `pubky-host` lookup.
 //!
 //! Session management routes are provided by the auth module via
 //! [`crate::client_server::auth::tenant_router`].

@@ -122,6 +122,25 @@ async fn put_get_delete() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // `/storage` writes and deletes emit the same public events as legacy routes.
+    let response = pubky
+        .client()
+        .request(Method::GET, &format!("{}events/", server.icann_http_url()))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let events = response.text().await.unwrap();
+    assert!(
+        events.starts_with(&format!(
+            "PUT pubky://{}/pub/foo.txt\nDEL pubky://{}/pub/foo.txt\n",
+            public_key.z32(),
+            public_key.z32()
+        )),
+        "unexpected event feed: {events}"
+    );
 }
 
 #[tokio::test]
