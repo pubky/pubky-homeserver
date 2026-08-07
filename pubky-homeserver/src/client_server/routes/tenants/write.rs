@@ -27,26 +27,33 @@ use crate::{
     },
 };
 
-pub async fn delete(
+pub async fn legacy_delete(
     State(state): State<AppState>,
     session: AuthSession,
     tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
 ) -> HttpResult<impl IntoResponse> {
-    has_write_permission(&session, tenant.public_key(), path.inner())?;
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
+    delete(State(state), session, entry_path).await
+}
 
-    let public_key = tenant.public_key();
+pub async fn delete(
+    State(state): State<AppState>,
+    session: AuthSession,
+    entry_path: EntryPath,
+) -> HttpResult<impl IntoResponse> {
+    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
+
     state
         .user_service
-        .get_or_http_error(public_key, false)
+        .get_or_http_error(entry_path.pubkey(), false)
         .await?;
-    let entry_path = EntryPath::new(public_key.clone(), path.inner().to_owned());
 
     state.file_service.delete(&entry_path).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
-pub async fn put(
+pub async fn legacy_put(
     State(state): State<AppState>,
     session: AuthSession,
     tenant: RequestTenant,
@@ -54,14 +61,23 @@ pub async fn put(
     headers: HeaderMap,
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
-    has_write_permission(&session, tenant.public_key(), path.inner())?;
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
+    put(State(state), session, entry_path, headers, body).await
+}
 
-    let public_key = tenant.public_key();
+pub async fn put(
+    State(state): State<AppState>,
+    session: AuthSession,
+    entry_path: EntryPath,
+    headers: HeaderMap,
+    body: Body,
+) -> HttpResult<impl IntoResponse> {
+    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
+
     let user = state
         .user_service
-        .get_or_http_error(public_key, true)
+        .get_or_http_error(entry_path.pubkey(), true)
         .await?;
-    let entry_path = EntryPath::new(public_key.clone(), path.inner().to_owned());
 
     // Early fail: check Content-Length header against the user's storage quota
     // so we can reject before streaming the entire body.

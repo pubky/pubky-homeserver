@@ -123,6 +123,29 @@ async fn anonymous_priv_access_is_unauthorized() {
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
 
+    let storage_url = format!(
+        "{}storage/{}/{}",
+        server.icann_http_url(),
+        owner.z32(),
+        SECRET.trim_start_matches('/')
+    );
+
+    // Anonymous users cannot write or delete private data through `/storage`.
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::PUT,
+            &storage_url,
+            None,
+            Some(vec![0]),
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        req_status(pubky.client(), Method::DELETE, &storage_url, None, None).await,
+        StatusCode::UNAUTHORIZED
+    );
     assert_all_verbs_denied(pubky.client(), &owner, None, StatusCode::UNAUTHORIZED).await;
 }
 
@@ -145,24 +168,46 @@ async fn under_scoped_owner_priv_access_is_forbidden() {
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
 
-    // Positive control: the covering bearer also authorizes the canonical route.
+    // Positive control: the covering bearer authorizes the owner and path in the URL.
     let covering_bearer = covering.as_grant().unwrap().current_bearer().await;
-    let canonical_url = format!(
+    let storage_url = format!(
         "{}storage/{}/{}",
         server.icann_http_url(),
         owner.z32(),
-        SECRET.trim_start_matches('/')
+        "/priv/app/storage-route.txt".trim_start_matches('/')
+    );
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::PUT,
+            &storage_url,
+            Some(&covering_bearer),
+            Some(vec![4, 5, 6]),
+        )
+        .await,
+        StatusCode::CREATED
     );
     assert_eq!(
         req_status(
             pubky.client(),
             Method::GET,
-            &canonical_url,
+            &storage_url,
             Some(&covering_bearer),
             None,
         )
         .await,
         StatusCode::OK
+    );
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::DELETE,
+            &storage_url,
+            Some(&covering_bearer),
+            None,
+        )
+        .await,
+        StatusCode::NO_CONTENT
     );
 
     // Same owner, session scoped to a sibling subtree that does not cover `/priv/app/`.
@@ -177,6 +222,36 @@ async fn under_scoped_owner_priv_access_is_forbidden() {
     .await;
     let token = under.as_grant().unwrap().current_bearer().await;
 
+    let storage_url = format!(
+        "{}storage/{}/{}",
+        server.icann_http_url(),
+        owner.z32(),
+        SECRET.trim_start_matches('/')
+    );
+
+    // The owner in the URL does not bypass the bearer's capability scope.
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::PUT,
+            &storage_url,
+            Some(&token),
+            Some(vec![0]),
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::DELETE,
+            &storage_url,
+            Some(&token),
+            None,
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
     assert_all_verbs_denied(pubky.client(), &owner, Some(&token), StatusCode::FORBIDDEN).await;
 }
 
@@ -215,5 +290,35 @@ async fn cross_tenant_priv_access_is_forbidden() {
     .await;
     let token = tenant.as_grant().unwrap().current_bearer().await;
 
+    let storage_url = format!(
+        "{}storage/{}/{}",
+        server.icann_http_url(),
+        owner.z32(),
+        SECRET.trim_start_matches('/')
+    );
+
+    // A bearer for another tenant cannot modify the path owner's private data.
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::PUT,
+            &storage_url,
+            Some(&token),
+            Some(vec![0]),
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        req_status(
+            pubky.client(),
+            Method::DELETE,
+            &storage_url,
+            Some(&token),
+            None,
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
     assert_all_verbs_denied(pubky.client(), &owner, Some(&token), StatusCode::FORBIDDEN).await;
 }

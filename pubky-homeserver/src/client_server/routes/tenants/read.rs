@@ -20,14 +20,6 @@ use sqlx::types::chrono::{DateTime, Utc};
 use std::str::FromStr;
 use std::time::SystemTime;
 
-fn path_entry_path(tenant: &RequestTenant) -> HttpResult<EntryPath> {
-    let path = tenant
-        .storage_path()
-        .cloned()
-        .ok_or_else(|| HttpError::bad_request("Missing path-addressed storage target"))?;
-    Ok(EntryPath::new(tenant.public_key().clone(), path))
-}
-
 pub async fn legacy_head(
     State(state): State<AppState>,
     session: Option<AuthSession>,
@@ -35,23 +27,15 @@ pub async fn legacy_head(
     Path(path): Path<WebDavPathAxum>,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
-    let mut response = head(state, session, entry_path).await?;
+    let mut response = head(State(state), session, entry_path).await?;
     response
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("pubky-host"));
     Ok(response)
 }
 
-pub async fn path_head(
+pub async fn head(
     State(state): State<AppState>,
-    session: Option<AuthSession>,
-    tenant: RequestTenant,
-) -> HttpResult<impl IntoResponse> {
-    head(state, session, path_entry_path(&tenant)?).await
-}
-
-async fn head(
-    state: AppState,
     session: Option<AuthSession>,
     entry_path: EntryPath,
 ) -> HttpResult<Response<Body>> {
@@ -84,7 +68,7 @@ pub async fn legacy_get(
     params: ListQueryParams,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
-    let mut response = get(state, headers, session, entry_path, params).await?;
+    let mut response = get(State(state), headers, session, entry_path, params).await?;
     response
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("pubky-host"));
@@ -92,18 +76,8 @@ pub async fn legacy_get(
 }
 
 #[axum::debug_handler]
-pub async fn path_get(
+pub async fn get(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    session: Option<AuthSession>,
-    tenant: RequestTenant,
-    params: ListQueryParams,
-) -> HttpResult<impl IntoResponse> {
-    get(state, headers, session, path_entry_path(&tenant)?, params).await
-}
-
-async fn get(
-    state: AppState,
     headers: HeaderMap,
     session: Option<AuthSession>,
     entry_path: EntryPath,
@@ -420,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn invalid_path_aliases_cannot_modify_canonical_file() {
+    async fn invalid_path_aliases_cannot_modify_target_file() {
         let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
 
         server
@@ -1091,7 +1065,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn malformed_path_addressing_is_a_client_error_and_writes_are_not_enabled() {
+    async fn malformed_path_addressing_is_a_client_error_and_writes_require_authentication() {
         let (_, _, server, public_key, _) = create_environment().await.unwrap();
 
         let malformed = [
@@ -1115,6 +1089,6 @@ mod tests {
         server
             .put(&format!("/storage/{}/pub/file.txt", public_key.z32()))
             .await
-            .assert_status(StatusCode::METHOD_NOT_ALLOWED);
+            .assert_status(StatusCode::UNAUTHORIZED);
     }
 }

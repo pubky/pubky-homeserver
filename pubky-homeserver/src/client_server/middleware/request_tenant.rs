@@ -1,6 +1,6 @@
 //! Resolve the tenant targeted by a client-server request.
 //!
-//! Canonical storage requests carry their owner in `/storage/{owner}/...`.
+//! Storage requests carry their owner in `/storage/{owner}/...`.
 //! Other requests retain the legacy Host / `pubky-host` compatibility lookup.
 
 use axum::{
@@ -12,7 +12,7 @@ use axum::{
 use percent_encoding::percent_decode_str;
 use pubky_common::crypto::PublicKey;
 
-use crate::shared::webdav::StoragePath;
+use crate::shared::webdav::{EntryPath, StoragePath};
 
 use super::pubky_host::extract_legacy_pubky;
 
@@ -130,6 +130,28 @@ where
     }
 }
 
+impl<S> FromRequestParts<S> for EntryPath
+where
+    S: Sync + Send,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let tenant = parts
+            .extensions
+            .get::<RequestTenant>()
+            .ok_or((StatusCode::BAD_REQUEST, "Missing request tenant"))
+            .map_err(IntoResponse::into_response)?;
+        let path = tenant
+            .storage_path()
+            .cloned()
+            .ok_or((StatusCode::BAD_REQUEST, "Missing storage path"))
+            .map_err(IntoResponse::into_response)?;
+
+        Ok(EntryPath::new(tenant.public_key().clone(), path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{body::Body, http::Request};
@@ -169,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_path_ignores_legacy_tenant_inputs() {
+    fn storage_path_ignores_legacy_tenant_inputs() {
         let path_owner = Keypair::random().public_key();
         let header_owner = Keypair::random().public_key();
         let req = Request::builder()

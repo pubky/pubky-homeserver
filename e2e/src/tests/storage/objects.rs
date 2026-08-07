@@ -27,97 +27,76 @@ async fn put_get_delete() {
         .await
         .unwrap();
     let public_key = session.public_key();
-
-    // relative URL is always based over own user homeserver
-    let path = "/pub/foo.txt";
-
-    session
-        .storage()
-        .put(path, vec![0, 1, 2, 3, 4])
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-
-    // Use Pubky native method to get data from homeserver
-    let response = pubky
-        .public_storage()
-        .get(format!("{public_key}/{path}"))
-        .await
-        .unwrap();
-
-    let content_header = response.headers().get("content-type").unwrap();
-    // Tests if MIME type was inferred correctly from the file path (magic bytes do not work)
-    assert_eq!(content_header, "text/plain");
-
-    let byte_value = response.bytes().await.unwrap();
-    assert_eq!(byte_value, bytes::Bytes::from(vec![0, 1, 2, 3, 4]));
-
-    // The canonical HTTP route carries the storage owner in the path. Legacy
-    // tenant headers are ignored even when they point at a different user.
-    let path_addressed_url = format!(
+    let cookie_secret = session.as_cookie().unwrap().export_secret().unwrap();
+    let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
+    let cookie = format!("{cookie_name}={cookie_value}");
+    let storage_url = format!(
         "{}storage/{}/pub/foo.txt",
         server.icann_http_url(),
-        session.public_key().z32()
+        public_key.z32()
     );
     let unrelated_user = Keypair::random().public_key();
+
     let response = session
         .client()
-        .request(Method::GET, &path_addressed_url)
+        .request(
+            Method::PUT,
+            &format!("{storage_url}?pubky-host={}", unrelated_user.z32()),
+        )
         .header("pubky-host", unrelated_user.z32())
+        .header("Cookie", &cookie)
+        .body(vec![0, 1, 2, 3, 4])
         .send()
         .await
-        .unwrap()
-        .error_for_status()
         .unwrap();
-    let varies_on_pubky_host = response
-        .headers()
-        .get("vary")
-        .and_then(|value| value.to_str().ok())
-        .into_iter()
-        .flat_map(|vary| vary.split(','))
-        .any(|name| name.trim().eq_ignore_ascii_case("pubky-host"));
-    assert!(!varies_on_pubky_host);
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = session
+        .client()
+        .request(Method::GET, &storage_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain"
+    );
     assert_eq!(
         response.bytes().await.unwrap(),
         bytes::Bytes::from(vec![0, 1, 2, 3, 4])
     );
 
-    // Use regular web method to get data from homeserver (with query pubky-host)
-    let regular_url = format!(
-        "{}pub/foo.txt?pubky-host={}",
-        server.icann_http_url(),
-        session.public_key().z32()
-    );
-
-    // We set `non.pubky.host` header as otherwise he client will use by default
-    // the homeserver pubky as host and this request will resolve the `/pub/foo.txt` of
-    // the wrong tenant user
     let response = session
         .client()
-        .request(Method::GET, &regular_url)
-        .header("Host", "non.pubky.host")
+        .request(Method::HEAD, &storage_url)
         .send()
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("content-length").unwrap(), "5");
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain"
+    );
+    assert!(response.headers().contains_key("etag"));
 
-    let content_header = response.headers().get("content-type").unwrap();
-    // Tests if MIME type was inferred correctly from the file path (magic bytes do not work)
-    assert_eq!(content_header, "text/plain");
-
-    let byte_value = response.bytes().await.unwrap();
-    assert_eq!(byte_value, bytes::Bytes::from(vec![0, 1, 2, 3, 4]));
-
-    session
-        .storage()
-        .delete(path)
+    let response = session
+        .client()
+        .request(Method::DELETE, &storage_url)
+        .header("Cookie", &cookie)
+        .send()
         .await
-        .unwrap()
-        .error_for_status()
         .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-    // Should not exist, PubkyError of 404 type
-    assert!(session.storage().get(path).await.is_err());
+    let response = session
+        .client()
+        .request(Method::GET, &storage_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -8,7 +8,7 @@ info:
 
     ## Tenant Identification
 
-    Canonical reads use `/storage/{user_z32}/{path}`; the path owner is authoritative
+    Reads at `/storage/{user_z32}/{path}` use the owner in the path
     and `Host` remains the HTTP authority.
 
     Deprecated owner-relative routes resolve the owner from `pubky-host`, then
@@ -369,7 +369,7 @@ paths:
       - Data
       summary: Get a path-addressed file or list a directory
       description: |
-        Canonical storage read route. The owner in the path is authoritative.
+        The owner in `/storage/{user_z32}/{path}` is authoritative.
         Any `pubky-host` header or query parameter is accepted for compatibility
         but ignored.
 
@@ -500,6 +500,69 @@ paths:
           description: Authentication is required to read a `/priv/` path.
         '403':
           description: The session does not authorize the owner-relative storage path.
+        '404':
+          description: File or storage owner not found.
+    put:
+      tags:
+      - Data
+      summary: Create or update a path-addressed file
+      description: |
+        The owner in `/storage/{user_z32}/{path}` is authoritative;
+        any `pubky-host` header or query parameter is accepted for compatibility
+        but ignored.
+
+        The path must be under `pub/` or `priv/`. The authenticated user must
+        match `user_z32` and have write capability covering the storage path.
+        If `Content-Length` is provided, the user's quota is checked before the
+        request body is streamed.
+      operationId: putPathAddressedEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: File created or updated.
+        '400':
+          description: Invalid owner public key or storage path.
+        '401':
+          description: No valid session.
+        '403':
+          description: |
+            Session user does not match `user_z32`, the session lacks write
+            capability for the path, or the path is outside `pub/` and `priv/`.
+        '507':
+          description: Storage quota exceeded.
+    delete:
+      tags:
+      - Data
+      summary: Delete a path-addressed file
+      description: |
+        The owner in `/storage/{user_z32}/{path}` is authoritative;
+        any `pubky-host` header or query parameter is accepted for compatibility
+        but ignored.
+
+        The authenticated user must match `user_z32` and have write capability
+        covering the storage path.
+      operationId: deletePathAddressedEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      responses:
+        '204':
+          description: File deleted.
+        '400':
+          description: Invalid owner public key or storage path.
+        '401':
+          description: No valid session.
+        '403':
+          description: Insufficient permissions or path outside `pub/` and `priv/`.
         '404':
           description: File or storage owner not found.
   "/{path}":
@@ -713,7 +776,10 @@ paths:
       tags:
       - Data
       summary: Create or update file
+      deprecated: true
       description: |
+        Deprecated: use `PUT /storage/{user_z32}/{path}`.
+
         Writes a file at the given path. Path must be under `/pub/` or `/priv/`.
         The authenticated user must match the target tenant and have write capability
         covering the path.
@@ -745,7 +811,10 @@ paths:
       tags:
       - Data
       summary: Delete file
+      deprecated: true
       description: |
+        Deprecated: use `DELETE /storage/{user_z32}/{path}`.
+
         Deletes a file at the given path. Path must be under `/pub/` or `/priv/`.
         The authenticated user must match the target tenant and have write capability.
       operationId: deleteEntry
@@ -935,7 +1004,7 @@ components:
       deprecated: true
       description: |
         Deprecated tenant-addressing override for owner-relative routes.
-        Ignored by canonical `/storage/{user_z32}/...` routes.
+        Ignored by `/storage/{user_z32}/...` routes.
         On the Pubky TLS socket, this is derived from the `Host` header / SNI.
       schema:
         type: string
@@ -947,7 +1016,7 @@ components:
       description: |
         Deprecated fallback for owner-relative routes when the `pubky-host`
         header and `Host` header do not contain a valid public key. Ignored by
-        canonical `/storage/{user_z32}/...` routes.
+        `/storage/{user_z32}/...` routes.
       schema:
         type: string
   schemas:

@@ -20,14 +20,17 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route(
             "/storage/{user_z32}/{*path}",
-            get(read::path_get).head(read::path_head),
+            get(read::get)
+                .head(read::head)
+                .put(write::put)
+                .delete(write::delete),
         )
         .route(
             "/{*path}",
             get(read::legacy_get)
                 .head(read::legacy_head)
-                .put(write::put)
-                .delete(write::delete),
+                .put(write::legacy_put)
+                .delete(write::legacy_delete),
         )
         // TODO: different max size for sessions and other routes?
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
