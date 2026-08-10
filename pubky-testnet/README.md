@@ -133,7 +133,16 @@ async fn main() {
 }
 ```
 
-Each call to `.with_docker_postgres()` starts a **separate** container. To share **one** container across all tests, use `DockerPostgres::shared()`:
+This uses [testcontainers](https://docs.rs/testcontainers) to run PostgreSQL in a Docker container.
+Docker must be running on the host. The container is automatically cleaned up on drop and on Ctrl+C/SIGTERM.
+
+> **Important**: If you have multiple tests, see [Sharing Docker Postgres Across Tests](#sharing-docker-postgres-across-tests) below.
+
+### Sharing Docker Postgres Across Tests
+
+Each `.with_docker_postgres()` starts a **separate** container. To avoid that overhead,
+use `DockerPostgres::shared()` to start one container and reuse it. Tests remain isolated
+— each testnet gets its own ephemeral database.
 
 ```rust
 # #[cfg(feature = "docker-postgres")]
