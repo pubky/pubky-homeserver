@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use super::homeserver_url;
+use super::{homeserver_url, is_path_addressed_storage};
 use futures_util::StreamExt;
 use tokio::net::TcpStream;
 
@@ -201,10 +201,14 @@ impl PubkyHttpClient {
         let transport = self.transport.resolve(&homeserver_z32, &self.pkarr).await;
 
         match transport {
-            ResolvedTransport::PubkyTls => Ok(self
-                .http
-                .request(method, url.as_str())
-                .header("pubky-host", pubky_host_z32)),
+            ResolvedTransport::PubkyTls => {
+                let request = self.http.request(method, url.as_str());
+                if is_path_addressed_storage(&url) {
+                    Ok(request)
+                } else {
+                    Ok(request.header("pubky-host", pubky_host_z32))
+                }
+            }
             ResolvedTransport::Icann { .. } => {
                 self.build_pubky_request(method, &url, &pubky_host_z32, &transport)
             }
@@ -230,10 +234,12 @@ impl PubkyHttpClient {
                         .map_err(|_err| url::ParseError::InvalidPort)?;
                 }
                 cross_log!(debug, "ICANN fallback for {pk} via {domain}");
-                Ok(self
-                    .icann_http
-                    .request(method, icann_url.as_str())
-                    .header("pubky-host", pk))
+                let request = self.icann_http.request(method, icann_url.as_str());
+                if is_path_addressed_storage(url) {
+                    Ok(request)
+                } else {
+                    Ok(request.header("pubky-host", pk))
+                }
             }
         }
     }
@@ -381,6 +387,35 @@ mod tests {
         assert_eq!(req.url().port(), Some(8443));
         assert_eq!(req.url().path(), "/pub/app/file.txt");
         assert_eq!(req.headers().get("pubky-host").unwrap(), z32);
+    }
+
+    #[test]
+    fn build_pubky_storage_request_icann_retains_owner_path_without_header() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let z32 = "o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy";
+        let url = Url::parse(&format!(
+            "https://_pubky.{z32}/storage/{z32}/pub/app/file.txt?cursor=hello%20world"
+        ))
+        .unwrap();
+        let transport = ResolvedTransport::Icann {
+            domain: "example.com".to_string(),
+            port: Some(8443),
+        };
+
+        let req = client
+            .build_pubky_request(Method::GET, &url, z32, &transport)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(req.url().host_str(), Some("example.com"));
+        assert_eq!(req.url().port(), Some(8443));
+        assert_eq!(req.url().path(), format!("/storage/{z32}/pub/app/file.txt"));
+        assert_eq!(req.url().query(), Some("cursor=hello%20world"));
+        assert!(!req.headers().contains_key("pubky-host"));
     }
 
     #[tokio::test]

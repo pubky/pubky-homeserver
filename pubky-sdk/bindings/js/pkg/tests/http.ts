@@ -138,6 +138,40 @@ test("fetch merges plain object headers", async (t) => {
   t.end();
 });
 
+test("path-addressed storage omits pubky-host", async (t) => {
+  const client = Client.testnet();
+  const originalFetch = globalThis.fetch;
+  let seenRequest: Request | undefined;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+
+    if (new URL(request.url).pathname.startsWith("/storage/")) {
+      seenRequest = request;
+    }
+
+    return originalFetch(input as RequestInfo | URL, init);
+  }) as typeof fetch;
+
+  try {
+    await client.fetch(
+      `https://${TLD}/storage/${TLD}/pub/missing.txt?cursor=hello%20world`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  t.ok(seenRequest, "fetch preserved the path-addressed storage request");
+  t.equal(seenRequest!.headers.get("pubky-host"), null, "pubky-host omitted");
+  t.equal(seenRequest!.credentials, "include", "cookie credentials preserved");
+  t.equal(
+    new URL(seenRequest!.url).search,
+    "?cursor=hello%20world",
+    "query parameters preserved",
+  );
+  t.end();
+});
+
 test("fetch failed", async (t) => {
   const client = Client.testnet();
 

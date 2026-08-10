@@ -406,14 +406,14 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 /// let client = PubkyHttpClient::new()?;
 /// // Pubky App profile of user Pubky https://pubky.app/profile/ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y
 /// let user = "ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y";
-/// let url = format!("https://_pubky.{user}/pub/pubky.app/profile.json");
+/// let url = format!("https://_pubky.{user}/storage/{user}/pub/pubky.app/profile.json");
 /// let resp = client.request(Method::GET, &url).send().await?;
 /// let info = resp.text().await?;
 /// # Ok(()) }
 /// ```
 ///
 /// > Tip: For authenticated reads/writes, prefer `session.storage().get(...)`, which
-/// > automatically scopes paths and attaches the right session cookie.
+/// > automatically scopes paths and attaches the right session credential.
 #[derive(Clone, Debug)]
 pub struct PubkyHttpClient {
     pub(crate) http: reqwest::Client,

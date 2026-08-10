@@ -38,7 +38,7 @@ test("resolvePubky helper", (t) => {
   const pk = HOMESERVER_PUBLICKEY.z32();
   const preferred = `pubky${pk}/pub/example.com/data.txt`;
   const deeplink = `pubky://${pk}/pub/example.com/data.txt`;
-  const expected = `https://_pubky.${pk}/pub/example.com/data.txt`;
+  const expected = `https://_pubky.${pk}/storage/${pk}/pub/example.com/data.txt`;
 
   t.equal(resolvePubky(preferred), expected, "preferred format resolves");
   t.equal(resolvePubky(deeplink), expected, "deeplink format resolves");
@@ -496,7 +496,7 @@ test("unauthorized (no cookie) PUT returns 401", async (t) => {
   const session = await signer.signin("storage.test");
 
   const userPk = session.info.publicKey.z32();
-  const url = `https://_pubky.${userPk}/pub/example.com/unauth.json`;
+  const url = `https://_pubky.${userPk}/storage/${userPk}/pub/example.com/unauth.json`;
 
   await session.signout();
 

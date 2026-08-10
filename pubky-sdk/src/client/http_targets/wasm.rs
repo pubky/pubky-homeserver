@@ -1,6 +1,6 @@
 //! HTTP methods that support `https://` with Pkarr domains, including `_pubky.<pk>` URLs
 
-use super::homeserver_url;
+use super::{homeserver_url, is_path_addressed_storage};
 use crate::PublicKey;
 use crate::errors::{PkarrError, RequestError, Result};
 use crate::{PubkyHttpClient, cross_log};
@@ -17,6 +17,20 @@ enum AmbientCredentials {
 }
 
 impl PubkyHttpClient {
+    fn attach_pubky_host(
+        request: RequestBuilder,
+        url: &Url,
+        pubky_host: Option<String>,
+    ) -> RequestBuilder {
+        if let Some(pubky_host) = pubky_host
+            && !is_path_addressed_storage(url)
+        {
+            request.header("pubky-host", pubky_host)
+        } else {
+            request
+        }
+    }
+
     /// A wrapper around [`PubkyHttpClient::request`], with the same signature between native and WASM.
     pub(crate) async fn cross_request<T: IntoUrl>(
         &self,
@@ -48,11 +62,15 @@ impl PubkyHttpClient {
         let mut url = homeserver_url(homeserver, path)?;
         self.prepare_request(&mut url).await?;
 
-        Ok(self
+        let request = self
             .http
-            .request(method, url)
-            .fetch_credentials_include()
-            .header("pubky-host", pubky_host.z32()))
+            .request(method, url.clone())
+            .fetch_credentials_include();
+        Ok(Self::attach_pubky_host(
+            request,
+            &url,
+            Some(pubky_host.z32()),
+        ))
     }
 
     async fn cross_request_with_credentials<T: IntoUrl>(
@@ -72,13 +90,7 @@ impl PubkyHttpClient {
             AmbientCredentials::Omit => request.fetch_credentials_omit(),
         };
 
-        let builder = if let Some(pubky_host) = pubky_host {
-            builder.header("pubky-host", pubky_host)
-        } else {
-            builder
-        };
-
-        Ok(builder)
+        Ok(Self::attach_pubky_host(builder, &url, pubky_host))
     }
 
     /// - Resolves a clearnet host to call with fetch
@@ -230,6 +242,43 @@ mod tests {
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn storage_request_preserves_path_and_query_without_pubky_host() {
+        let client = PubkyHttpClient::new().unwrap();
+        let owner = Keypair::random().public_key().z32();
+        let url = Url::parse(&format!(
+            "https://example.com/storage/{owner}/pub/file.txt?cursor=hello%20world"
+        ))
+        .unwrap();
+        let request = PubkyHttpClient::attach_pubky_host(
+            client.http.request(Method::GET, url.clone()),
+            &url,
+            Some(owner),
+        )
+        .build()
+        .unwrap();
+
+        assert!(request.headers().get("pubky-host").is_none());
+        assert!(request.url().path().starts_with("/storage/"));
+        assert_eq!(request.url().query(), Some("cursor=hello%20world"));
+    }
+
+    #[wasm_bindgen_test]
+    fn cookie_session_request_keeps_pubky_host() {
+        let client = PubkyHttpClient::new().unwrap();
+        let owner = Keypair::random().public_key().z32();
+        let url = Url::parse("https://example.com/session").unwrap();
+        let request = PubkyHttpClient::attach_pubky_host(
+            client.http.request(Method::POST, url.clone()),
+            &url,
+            Some(owner.clone()),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(request.headers().get("pubky-host").unwrap(), &owner);
+    }
 
     #[wasm_bindgen_test(async)]
     async fn transform_url_errors_when_no_domain_is_found() {

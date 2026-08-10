@@ -2,6 +2,10 @@ use super::*;
 
 #[tokio::test]
 #[pubky_testnet::test]
+#[allow(
+    deprecated,
+    reason = "This test covers legacy cookie and routing compatibility"
+)]
 async fn legacy_and_storage_routes_interoperate() {
     let testnet = build_full_testnet().await;
     let server = testnet.homeserver_app();
@@ -14,22 +18,16 @@ async fn legacy_and_storage_routes_interoperate() {
     let cookie_secret = session.as_cookie().unwrap().export_secret().unwrap();
     let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
     let cookie = format!("{cookie_name}={cookie_value}");
-    let legacy_url = format!(
-        "{}pub/foo.txt?pubky-host={}",
-        server.icann_http_url(),
-        session.public_key().z32()
-    );
-    let storage_url = format!(
-        "{}storage/{}/pub/foo.txt",
-        server.icann_http_url(),
-        session.public_key().z32()
-    );
+    let owner = session.public_key().z32();
+    let legacy_url = format!("{}pub/foo.txt", server.icann_http_url());
+    let storage_url = format!("{}storage/{}/pub/foo.txt", server.icann_http_url(), owner);
 
     // A legacy write can be read and deleted through `/storage`.
     let response = session
         .client()
         .request(Method::PUT, &legacy_url)
         .header("Host", "non.pubky.host")
+        .header("pubky-host", &owner)
         .header("Cookie", &cookie)
         .body(vec![0, 1, 2, 3, 4])
         .send()
@@ -66,6 +64,7 @@ async fn legacy_and_storage_routes_interoperate() {
         .client()
         .request(Method::GET, &legacy_url)
         .header("Host", "non.pubky.host")
+        .header("pubky-host", &owner)
         .send()
         .await
         .unwrap();
@@ -86,6 +85,7 @@ async fn legacy_and_storage_routes_interoperate() {
         .client()
         .request(Method::GET, &legacy_url)
         .header("Host", "non.pubky.host")
+        .header("pubky-host", &owner)
         .send()
         .await
         .unwrap();
@@ -99,6 +99,7 @@ async fn legacy_and_storage_routes_interoperate() {
         .client()
         .request(Method::DELETE, &legacy_url)
         .header("Host", "non.pubky.host")
+        .header("pubky-host", &owner)
         .header("Cookie", &cookie)
         .send()
         .await

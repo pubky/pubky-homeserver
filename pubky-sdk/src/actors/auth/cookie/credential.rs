@@ -34,7 +34,7 @@ use crate::actors::session::credential::{SessionCredential, credential_session_m
 use crate::{
     Error, PubkyHttpClient,
     actors::session::SessionInfo,
-    actors::storage::resource::resolve_pubky,
+    client::user_endpoint_url,
     cross_log,
     errors::{PkarrError, Result},
     util::check_http_status,
@@ -52,6 +52,7 @@ const SESSION_PATH: &str = "/session";
 /// inaccessible (the fetch spec hides `Set-Cookie`) and the browser cookie
 /// jar handles attachment automatically — `cookie` is `None`.
 #[derive(Clone, Debug)]
+#[deprecated(note = "Use GrantCredential instead.")]
 pub struct CookieCredential {
     /// User public key — used to name the `Cookie` header.
     user: PublicKey,
@@ -207,10 +208,6 @@ impl CookieCredential {
     }
 }
 
-fn session_resource(user: &PublicKey) -> String {
-    format!("pubky{}{}", user.z32(), SESSION_PATH)
-}
-
 async fn session_request(
     client: &PubkyHttpClient,
     method: Method,
@@ -223,8 +220,9 @@ async fn session_request(
             .await;
     }
 
-    let resolved = resolve_pubky(session_resource(user))?;
-    client.cross_request(method, resolved).await
+    client
+        .cross_request(method, user_endpoint_url(user, SESSION_PATH)?)
+        .await
 }
 
 /// Cross-target reader for `Set-Cookie` response header values.
@@ -337,6 +335,7 @@ impl PubkySession {
     /// returns a credential you want to hold separately, this lifts it into
     /// a full session bound to the given HTTP client.
     #[must_use]
+    #[deprecated(note = "Use PubkySession::from_grant_credential instead.")]
     pub fn from_cookie_credential(client: PubkyHttpClient, credential: CookieCredential) -> Self {
         Self::from_credential(client, Arc::new(credential))
     }

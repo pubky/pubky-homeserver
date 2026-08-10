@@ -1,3 +1,8 @@
+#![allow(
+    deprecated,
+    reason = "JS bindings preserve deprecated cookie compatibility APIs"
+)]
+
 use wasm_bindgen::prelude::*;
 
 use crate::actors::{
@@ -101,6 +106,7 @@ impl Pubky {
     /// renderQr(flow.authorizationUrl);
     /// const session = await flow.awaitApproval();
     ///
+    /// @deprecated Use `startGrantAuthFlow(...)` instead.
     #[wasm_bindgen(js_name = "startCookieAuthFlow")]
     pub fn start_cookie_auth_flow(
         &self,
@@ -198,6 +204,8 @@ impl Pubky {
     ///     sessionStorage.removeItem("pubky-auth-url");
     ///   }
     /// }
+    ///
+    /// @deprecated Use `resumeGrantAuthFlow(...)` instead.
     #[wasm_bindgen(js_name = "resumeCookieAuthFlow")]
     pub fn resume_cookie_auth_flow(&self, authorization_url: String) -> JsResult<AuthFlow> {
         AuthFlow::resume_with_client(authorization_url, Some(self.0.client().clone()))

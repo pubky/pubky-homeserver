@@ -1,4 +1,9 @@
 // js/src/wrappers/session.rs
+#![allow(
+    deprecated,
+    reason = "JS bindings preserve deprecated cookie compatibility APIs"
+)]
+
 use wasm_bindgen::prelude::*;
 
 use super::{cookie_session::CookieSession, grant_session::GrantSession, storage::SessionStorage};
@@ -45,6 +50,7 @@ impl Session {
     /// Grant-backed sessions return `undefined`.
     ///
     /// @returns {CookieSession|undefined}
+    /// @deprecated Use `session.grant` and `GrantSession` instead.
     #[wasm_bindgen(getter)]
     pub fn cookie(&self) -> Option<CookieSession> {
         self.0.as_cookie().map(|_| CookieSession(self.0.clone()))
@@ -70,7 +76,7 @@ impl Session {
     /// @returns {string}
     /// A base64 string to store (e.g. in `localStorage`).
     ///
-    /// @deprecated Prefer `exportLocalSecret()` for grant sessions.
+    /// @deprecated Use `GrantSession.exportLocalSecret()` instead.
     #[wasm_bindgen]
     pub fn export(&self) -> String {
         self.0
@@ -128,7 +134,7 @@ impl Session {
     /// Optional client to reuse transport configuration.
     /// @returns {Promise<Session>}
     ///
-    /// @deprecated Prefer `Pubky.restoreSession(...)`.
+    /// @deprecated Use `Pubky.restoreSession(...)` with a grant secret.
     #[wasm_bindgen(js_name = "restore")]
     pub async fn restore(exported: String, client: Option<Client>) -> JsResult<Session> {
         let session = match client {

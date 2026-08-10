@@ -9,7 +9,7 @@
 //! ## Quick starts
 //! ### 1) App sign-in via QR/deeplink (auth flow)
 //! ```no_run
-//! use pubky::{Pubky, Capabilities, AuthFlowKind};
+//! use pubky::{AuthFlowKind, Capabilities, ClientId, Pubky};
 //!
 //! # async fn run() -> pubky::Result<()> {
 //! let pubky = Pubky::new()?; // or Pubky::testnet() / Pubky::with_client(...)
@@ -18,7 +18,11 @@
 //!     .write("/pub/demoapp/")
 //!     .expect("static scope is canonical")
 //!     .finish();
-//! let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
+//! let flow = pubky.start_grant_auth_flow(
+//!     &caps,
+//!     AuthFlowKind::signin(),
+//!     ClientId::new("demo.app").unwrap(),
+//! )?;
 //! println!("Scan to sign in: {}", flow.authorization_url());
 //!
 //! let session = flow.await_approval().await?;
@@ -56,6 +60,10 @@
 use std::str::FromStr;
 
 use crate::PublicKey;
+use crate::actors::auth::cookie::secret::import_session_secret;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::actors::auth::cookie::secret::session_from_secret_file;
 
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
 use crate::PubkyCookieAuthFlow;
@@ -173,6 +181,7 @@ impl Pubky {
         deprecated,
         reason = "Cookie flow is intentionally exposed via this facade while deprecated"
     )]
+    #[deprecated(note = "Use Pubky::start_grant_auth_flow instead.")]
     pub fn start_cookie_auth_flow(
         &self,
         caps: &Capabilities,
@@ -226,6 +235,7 @@ impl Pubky {
         deprecated,
         reason = "Cookie flow is intentionally exposed via this facade while deprecated"
     )]
+    #[deprecated(note = "Use PubkyGrantAuthFlow::restore with GrantAuthFlowState instead.")]
     pub fn resume_cookie_auth_flow(&self, authorization_url: &str) -> Result<PubkyCookieAuthFlow> {
         let (caps, relay, secret, auth_kind, x_callback) = parse_auth_deep_link(authorization_url)?;
 
@@ -359,8 +369,9 @@ impl Pubky {
     /// - Propagates transport errors from [`PubkySession::from_secret_file`] if the client
     ///   cannot be prepared.
     #[cfg(not(target_arch = "wasm32"))]
+    #[deprecated(note = "Read the grant secret and pass it to Pubky::restore_session instead.")]
     pub async fn session_from_file<P: AsRef<Path>>(&self, path: P) -> Result<PubkySession> {
-        PubkySession::from_secret_file(path.as_ref(), Some(self.client.clone())).await
+        session_from_secret_file(path.as_ref(), Some(self.client.clone())).await
     }
 
     /// Restore a session from an exported session secret token.
@@ -384,7 +395,7 @@ impl Pubky {
             return PubkySession::import_grant_secret(token, Some(self.client.clone())).await;
         }
 
-        PubkySession::import_secret(token, Some(self.client.clone())).await
+        import_session_secret(token, Some(self.client.clone())).await
     }
 
     /// Restore an origin-bound delegated browser grant session.

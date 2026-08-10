@@ -121,6 +121,8 @@ impl AuthFlow {
     /// @returns {AuthFlow} A flow reconnected to the original relay channel.
     /// @throws {PubkyError}
     /// - `{ name: "AuthenticationError" }` if the URL is invalid or not a signin/signup link
+    ///
+    /// @deprecated Use `GrantAuthFlow.resume(...)` instead.
     #[wasm_bindgen(js_name = "resume")]
     pub fn resume(authorization_url: String) -> JsResult<AuthFlow> {
         Self::resume_with_client(authorization_url, None)

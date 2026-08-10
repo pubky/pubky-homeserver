@@ -467,7 +467,7 @@ import { resolvePubky } from "@synonymdev/pubky";
 const identifier =
   "pubkyoperrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG";
 const url = resolvePubky(identifier);
-// -> "https://_pubky.operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG"
+// -> "https://_pubky.operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/storage/operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG"
 ```
 
 Both `pubky<pk>/…` (preferred) and `pubky://<pk>/…` resolve to the same HTTPS endpoint.

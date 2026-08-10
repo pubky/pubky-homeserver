@@ -21,7 +21,7 @@ impl Client {
     ///
     /// @example
     /// const client = pubky.client;
-    /// const res = await client.fetch(`https://_pubky.${user}/pub/app/file.txt`, { method: "PUT", body: "hi", credentials: "include" });
+    /// const res = await client.fetch(`https://_pubky.${user}/storage/${user}/pub/app/file.txt`, { method: "PUT", body: "hi", credentials: "include" });
     pub async fn fetch(&self, url: &str, init: Option<RequestInitArg>) -> JsResult<Response> {
         // 1) Parse URL
         let mut url = Url::parse(url)?;
@@ -43,7 +43,9 @@ impl Client {
             .unwrap_or_default();
 
         // 3a) If needed, ensure `pubky-host` is present in *init.headers* BEFORE Request creation.
-        if let Some(host) = pubky_host.as_deref() {
+        if let Some(host) = pubky_host.as_deref()
+            && !url.path().starts_with("/storage/")
+        {
             // Try to read any existing headers off RequestInit via reflection.
             // This value can be: undefined/null (no headers), a real `Headers`, or
             // a plain object/array. We handle those cases explicitly.

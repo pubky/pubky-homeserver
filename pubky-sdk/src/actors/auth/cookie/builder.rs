@@ -20,6 +20,7 @@ use crate::{Capabilities, PubkyHttpClient};
 /// exchanges for a session cookie. For long-lived, mirror-friendly
 /// sessions, prefer [`crate::PubkyGrantAuthFlow`].
 #[derive(Debug, Clone)]
+#[deprecated(note = "Use PubkyGrantAuthFlow::builder instead.")]
 pub struct CookieAuthFlowBuilder {
     caps: Capabilities,
     base_relay: Url,
