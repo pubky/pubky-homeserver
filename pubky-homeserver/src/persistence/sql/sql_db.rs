@@ -155,6 +155,7 @@ impl SqlDb {
     /// Create a test database without running migrations
     /// If the DB_CONNECTION_STRING environment variable is not set, a temporary directory is used for the sqlite database
     /// If the DB_CONNECTION_STRING environment variable is set, the test database is created on the existing database
+    #[allow(dead_code)]
     pub async fn test_without_migrations() -> Self {
         Self::test_postgres_db(None)
             .await
@@ -164,6 +165,7 @@ impl SqlDb {
     /// Create a test database and run migrations
     /// If the DB_CONNECTION_STRING environment variable is not set, a temporary directory is used for the sqlite database
     /// If the DB_CONNECTION_STRING environment variable is set, the migrations are run on the existing database
+    #[allow(dead_code)]
     pub async fn test() -> Self {
         use crate::persistence::sql::migrator::Migrator;
         let db = Self::test_without_migrations().await;
