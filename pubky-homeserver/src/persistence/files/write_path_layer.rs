@@ -183,7 +183,6 @@ mod tests {
     use crate::persistence::files::{
         events::EventsService, write_finalization_layer::WriteFinalizationLayer,
     };
-    use crate::persistence::sql::user::UserRepository;
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
     use crate::shared::user_quota::UserQuota;
@@ -201,14 +200,14 @@ mod tests {
         allowed_write_paths: Option<Vec<StoragePath>>,
     ) -> pubky_common::crypto::PublicKey {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user_service = UserService::new(db.clone());
+        let user = user_service.create(&pubkey).await.unwrap();
         let config = UserQuota {
             allowed_write_paths,
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &config, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &config, &mut db.pool().into())
             .await
             .unwrap();
         pubkey
@@ -228,8 +227,13 @@ mod tests {
 
     fn build_test_operator_with(db: &SqlDb, base: opendal::Operator) -> opendal::Operator {
         let user_service = UserService::new(db.clone());
-        let write_finalization_layer =
-            WriteFinalizationLayer::new(user_service.clone(), EventsService::new(100), None, true);
+        let write_finalization_layer = WriteFinalizationLayer::new(
+            user_service.clone(),
+            db.clone(),
+            EventsService::new(100),
+            None,
+            true,
+        );
         let write_path_layer = WritePathLayer::new(user_service);
         base.layer(write_finalization_layer).layer(write_path_layer)
     }
@@ -309,9 +313,8 @@ mod tests {
 
         // Create with no restrictions, write a file, then restrict.
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user_service = UserService::new(db.clone());
+        let user = user_service.create(&pubkey).await.unwrap();
         let raw = pubkey.z32();
 
         operator
@@ -324,7 +327,8 @@ mod tests {
             allowed_write_paths: Some(vec![wdp("/pub/tokens/")]),
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &config, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &config, &mut db.pool().into())
             .await
             .unwrap();
         // Invalidate cache by creating a fresh operator.
@@ -391,9 +395,8 @@ mod tests {
 
         // Create unrestricted, write a file, then restrict.
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user_service = UserService::new(db.clone());
+        let user = user_service.create(&pubkey).await.unwrap();
         let raw = pubkey.z32();
 
         let operator = build_test_operator(&db);
@@ -406,7 +409,8 @@ mod tests {
             allowed_write_paths: Some(vec![wdp("/pub/tokens/")]),
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &config, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &config, &mut db.pool().into())
             .await
             .unwrap();
         let operator = build_test_operator(&db);

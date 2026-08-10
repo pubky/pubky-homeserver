@@ -1,6 +1,5 @@
 use super::super::app_state::AppState;
 use crate::persistence::sql::signup_code::SignupCodeRepository;
-use crate::persistence::sql::user::UserRepository;
 use crate::shared::HttpResult;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
@@ -20,7 +19,7 @@ pub(crate) struct InfoResponse {
 
 /// Return summary statistics about the homeserver.
 pub async fn info(State(state): State<AppState>) -> HttpResult<(StatusCode, Json<InfoResponse>)> {
-    let user_overview = UserRepository::get_overview(&mut state.sql_db.pool().into()).await?;
+    let user_overview = state.user_service.get_overview().await?;
     let signup_code_overview =
         SignupCodeRepository::get_overview(&mut state.sql_db.pool().into()).await?;
 

@@ -18,10 +18,7 @@ use url::form_urlencoded;
 
 use super::super::app_state::AppState;
 use crate::{
-    persistence::{
-        files::events::{AllEventsFilter, Mode, PathFilter, MAX_EVENT_STREAM_USERS},
-        sql::user::UserRepository,
-    },
+    persistence::files::events::{AllEventsFilter, Mode, PathFilter, MAX_EVENT_STREAM_USERS},
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
@@ -144,12 +141,10 @@ async fn resolve_filter(
     } else {
         let mut ids = Vec::with_capacity(params.users.len());
         for pk in &params.users {
-            let id = UserRepository::get_id(pk, &mut state.sql_db.pool().into())
-                .await
-                .map_err(|e| match e {
-                    sqlx::Error::RowNotFound => HttpError::not_found(),
-                    e => HttpError::from(e),
-                })?;
+            let id = state.user_service.get_id(pk).await.map_err(|e| match e {
+                sqlx::Error::RowNotFound => HttpError::not_found(),
+                e => HttpError::from(e),
+            })?;
             ids.push(id);
         }
         Some(ids)

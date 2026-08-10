@@ -3,9 +3,12 @@ use std::path::Path;
 #[cfg(test)]
 use crate::AppContext;
 use crate::{
-    persistence::files::{
-        events::EventsService, write_finalization_layer::WriteFinalizationLayer,
-        write_path_layer::WritePathLayer,
+    persistence::{
+        files::{
+            events::EventsService, write_finalization_layer::WriteFinalizationLayer,
+            write_path_layer::WritePathLayer,
+        },
+        sql::SqlDb,
     },
     services::user_service::UserService,
     shared::webdav::EntryPath,
@@ -28,6 +31,7 @@ use super::super::{FileIoError, FileMetadata, FileMetadataBuilder, FileStream, W
 pub fn build_storage_operators(
     storage_config: &StorageToml,
     data_directory: &Path,
+    sql_db: SqlDb,
     events_service: EventsService,
     user_service: UserService,
 ) -> Result<(Operator, Operator), FileIoError> {
@@ -66,6 +70,7 @@ pub fn build_storage_operators(
     // needs its own finalization layer.
     let admin_operator = backend_operator.clone().layer(WriteFinalizationLayer::new(
         user_service.clone(),
+        sql_db.clone(),
         events_service.clone(),
         storage_config.default_quota_mb,
         false,
@@ -73,6 +78,7 @@ pub fn build_storage_operators(
     let operator = backend_operator
         .layer(WriteFinalizationLayer::new(
             user_service.clone(),
+            sql_db,
             events_service,
             storage_config.default_quota_mb,
             true,
@@ -89,6 +95,7 @@ pub fn build_storage_operators_from_context(
     build_storage_operators(
         &context.config_toml.storage,
         context.data_dir.path(),
+        context.sql_db.clone(),
         context.events_service.clone(),
         context.user_service.clone(),
     )
@@ -114,11 +121,17 @@ impl OpendalService {
     pub fn new_from_config(
         storage_config: &StorageToml,
         data_directory: &Path,
+        sql_db: SqlDb,
         events_service: EventsService,
         user_service: UserService,
     ) -> Result<Self, FileIoError> {
-        let (operator, admin_operator) =
-            build_storage_operators(storage_config, data_directory, events_service, user_service)?;
+        let (operator, admin_operator) = build_storage_operators(
+            storage_config,
+            data_directory,
+            sql_db,
+            events_service,
+            user_service,
+        )?;
         Ok(Self {
             operator,
             admin_operator,
@@ -248,7 +261,6 @@ impl OpendalService {
 mod tests {
     use super::*;
     use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
-    use crate::persistence::sql::user::UserRepository;
     use crate::shared::webdav::StoragePath;
 
     #[tokio::test]
@@ -260,9 +272,7 @@ mod tests {
         let service =
             OpendalService::new(&context).expect("Failed to create OpenDAL service for testing");
         let pubky = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create(&pubky, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubky).await.unwrap();
         let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
         assert!(!service.exists(&path).await.unwrap());
     }
@@ -276,7 +286,7 @@ mod tests {
         let service =
             OpendalService::new(&context).expect("Failed to create OpenDAL service for testing");
         let pubky = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create_with_quota_mb(&context.sql_db, &pubky, 1).await;
+        context.user_service.create_with_quota_mb(&pubky, 1).await;
         let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
         let write_result = service.write(&path, vec![42u8; 1024 * 1024]).await;
         assert!(write_result.is_err());

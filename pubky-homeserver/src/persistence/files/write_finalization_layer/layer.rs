@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::persistence::files::{events::EventsService, layer_domain_error::LayerDomainError};
-use crate::persistence::sql::{entry::EntryRepository, UnifiedExecutor};
+use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::*;
@@ -47,6 +47,7 @@ impl CollisionPolicy {
 #[derive(Debug)]
 pub(super) struct Finalizer {
     pub(super) user_service: UserService,
+    pub(super) sql_db: SqlDb,
     pub(super) events_service: EventsService,
     pub(super) default_storage_mb: Option<u64>,
     pub(super) collision_policy: CollisionPolicy,
@@ -55,6 +56,7 @@ pub(super) struct Finalizer {
 impl WriteFinalizationLayer {
     pub fn new(
         user_service: UserService,
+        sql_db: SqlDb,
         events_service: EventsService,
         default_storage_mb: Option<u64>,
         enforce_path_collisions: bool,
@@ -62,6 +64,7 @@ impl WriteFinalizationLayer {
         Self {
             finalizer: Arc::new(Finalizer::new(
                 user_service,
+                sql_db,
                 events_service,
                 default_storage_mb,
                 CollisionPolicy::from_enforcement(enforce_path_collisions),
@@ -195,12 +198,14 @@ impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A> {
 impl Finalizer {
     fn new(
         user_service: UserService,
+        sql_db: SqlDb,
         events_service: EventsService,
         default_storage_mb: Option<u64>,
         collision_policy: CollisionPolicy,
     ) -> Self {
         Self {
             user_service,
+            sql_db,
             events_service,
             default_storage_mb,
             collision_policy,
@@ -212,11 +217,11 @@ impl Finalizer {
             return Ok(());
         }
 
-        check_no_path_collision(entry_path, &mut self.user_service.pool().into()).await
+        check_no_path_collision(entry_path, &mut self.sql_db.pool().into()).await
     }
 
     pub(super) fn notify_event(&self) {
-        let pool = self.user_service.pool().clone();
+        let pool = self.sql_db.pool().clone();
         drop(tokio::spawn(async move {
             EventsService::notify_event(&pool).await;
         }));
@@ -231,13 +236,14 @@ pub(super) mod test_support {
         events::{EventEntity, EventRepository, EventVisibility},
         opendal::opendal_test_operators::get_memory_operator,
     };
-    use crate::persistence::sql::{user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
 
     use super::*;
 
     pub(in super::super) fn test_finalizer(db: &SqlDb) -> Finalizer {
         Finalizer::new(
             UserService::new(db.clone()),
+            db.clone(),
             EventsService::new(100),
             None,
             CollisionPolicy::Enforce,
@@ -247,17 +253,21 @@ pub(super) mod test_support {
     pub(in super::super) fn test_operator(db: &SqlDb) -> opendal::Operator {
         get_memory_operator().layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
+            db.clone(),
             EventsService::new(100),
             None,
             true,
         ))
     }
 
+    pub(in super::super) fn test_user_service(db: &SqlDb) -> UserService {
+        UserService::new(db.clone())
+    }
+
     pub(in super::super) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
         let pubkey = Keypair::random().public_key();
-        UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user_service = test_user_service(db);
+        user_service.create(&pubkey).await.unwrap();
         pubkey
     }
 
@@ -265,10 +275,8 @@ pub(super) mod test_support {
         db: &SqlDb,
         pubkey: &pubky_common::crypto::PublicKey,
     ) -> u64 {
-        UserRepository::get(pubkey, &mut db.pool().into())
-            .await
-            .unwrap()
-            .used_bytes
+        let user_service = test_user_service(db);
+        user_service.get(pubkey).await.unwrap().used_bytes
     }
 
     pub(in super::super) async fn all_events(db: &SqlDb) -> Vec<EventEntity> {

@@ -104,7 +104,7 @@ impl Finalizer {
         file_metadata: &FileMetadata,
     ) -> Result<opendal::Metadata> {
         let mut tx =
-            self.user_service.pool().begin().await.map_err(|error| {
+            self.sql_db.pool().begin().await.map_err(|error| {
                 unexpected("Failed to begin write finalization transaction", error)
             })?;
 
@@ -248,7 +248,7 @@ impl Finalizer {
             })?;
         user.used_bytes = user.used_bytes.saturating_add_signed(bytes_delta);
         self.user_service
-            .update(&user, executor)
+            .update_in_tx(&user, executor)
             .await
             .map_err(|error| {
                 unexpected(

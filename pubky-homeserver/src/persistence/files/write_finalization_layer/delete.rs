@@ -139,7 +139,7 @@ impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
 
 impl Finalizer {
     async fn finalize_delete(&self, entry_path: &EntryPath) -> Result<DeleteOutcome> {
-        let mut tx = self.user_service.pool().begin().await.map_err(|error| {
+        let mut tx = self.sql_db.pool().begin().await.map_err(|error| {
             unexpected("Failed to begin delete finalization transaction", error)
         })?;
 
@@ -252,7 +252,7 @@ impl Finalizer {
             .saturating_add(FILE_METADATA_SIZE);
         user.used_bytes = user.used_bytes.saturating_sub(bytes_delta);
         self.user_service
-            .update(&user, executor)
+            .update_in_tx(&user, executor)
             .await
             .map_err(|error| {
                 unexpected(

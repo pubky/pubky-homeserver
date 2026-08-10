@@ -401,8 +401,7 @@ mod tests {
     use pubky_common::crypto::{Hash, Keypair};
 
     use crate::{
-        persistence::sql::{user::UserRepository, SqlDb},
-        shared::webdav::StoragePath,
+        persistence::sql::SqlDb, services::user_service::UserService, shared::webdav::StoragePath,
     };
 
     use super::*;
@@ -416,12 +415,11 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_create_list_event() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
 
         // Create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Create events
         for _ in 0..10 {
@@ -461,10 +459,9 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_cursor_public_visibility_excludes_private() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Interleave public, private, and look-alike roots that must NOT match
         // the `/pub/` prefix (`/public/...` and `/pub` without a trailing slash).
@@ -538,12 +535,11 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_transform_legacy_cursor() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
 
         // Create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         let mut timestamp_events = Vec::new();
         // Create events with specific timestamps
@@ -579,12 +575,11 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_parse_cursor_backwards_compatibility() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
 
         // Create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Create test events with specific timestamps
         let mut events = Vec::new();
@@ -666,10 +661,9 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_user_cursors_multi_path_union_and_boundaries() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // ids 1..=6
         let paths = [
@@ -740,10 +734,9 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_user_cursors_escapes_like_metacharacters() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         for p in ["/priv/a_b/x", "/priv/axb/y", "/priv/a%/m", "/priv/apct/n"] {
             let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
@@ -790,14 +783,11 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_user_cursors_multi_user_public_filter_excludes_private() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let ka = Keypair::random().public_key();
         let kb = Keypair::random().public_key();
-        let ua = UserRepository::create(&ka, &mut db.pool().into())
-            .await
-            .unwrap();
-        let ub = UserRepository::create(&kb, &mut db.pool().into())
-            .await
-            .unwrap();
+        let ua = user_service.create(&ka).await.unwrap();
+        let ub = user_service.create(&kb).await.unwrap();
 
         for (k, uid) in [(&ka, ua.id), (&kb, ub.id)] {
             for p in ["/pub/x", "/priv/secret"] {

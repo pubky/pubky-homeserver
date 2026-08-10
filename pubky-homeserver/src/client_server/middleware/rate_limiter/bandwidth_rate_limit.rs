@@ -442,21 +442,18 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_authenticated_user_gets_per_user_rate_from_db() {
-        use crate::persistence::sql::user::UserRepository;
-
         let db = SqlDb::test().await;
         let user_service = UserService::new(db.clone());
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&pubkey).await.unwrap();
         let quota = UserQuota {
             rate_read: QuotaOverride::Value("100mb/s".parse().unwrap()),
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &quota, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &quota, &mut db.pool().into())
             .await
             .unwrap();
 

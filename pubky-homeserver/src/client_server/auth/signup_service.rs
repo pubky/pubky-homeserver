@@ -3,10 +3,10 @@
 use crate::persistence::sql::{
     signup_code::{SignupCode, SignupCodeRepository},
     uexecutor,
-    user::{UserEntity, UserRepository},
+    user::UserRepository,
     SqlDb,
 };
-use crate::services::user_service::UserService;
+use crate::services::user_service::{UserEntity, UserService};
 use crate::shared::user_quota::UserQuota;
 use crate::SignupMode;
 use pubky_common::crypto::PublicKey;
@@ -90,8 +90,14 @@ impl SignupService {
         } else {
             UserQuota::default()
         };
-        let user = UserRepository::create(public_key, uexecutor!(*tx)).await?;
-        let user = UserRepository::set_quota(user.id, &quota, uexecutor!(*tx)).await?;
+        let user = self
+            .user_service
+            .create_in_tx(public_key, uexecutor!(*tx))
+            .await?;
+        let user = self
+            .user_service
+            .set_quota_in_tx(user.id, &quota, uexecutor!(*tx))
+            .await?;
         Ok(user)
     }
 

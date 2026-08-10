@@ -8,7 +8,7 @@ use tokio::{
 };
 
 use super::pkarr_republisher::{BatchRepublisher, BatchRepublisherSettings, RepublishSummary};
-use crate::persistence::sql::{user::UserRepository, SqlDb};
+use crate::services::user_service::UserService;
 
 const MIN_REPUBLISH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
@@ -30,7 +30,7 @@ impl UserKeysRepublisherJob {
 
     /// Run the user keys republisher with an initial delay.
     pub fn start(
-        db: SqlDb,
+        user_service: UserService,
         pkarr_builder: pkarr::ClientBuilder,
         homeserver_public_key: PublicKey,
         mut republish_interval: Duration,
@@ -60,7 +60,7 @@ impl UserKeysRepublisherJob {
         }
 
         let republisher = UserKeysRepublisher {
-            db,
+            user_service,
             pkarr_builder,
             homeserver_public_key,
         };
@@ -83,7 +83,7 @@ impl Drop for UserKeysRepublisherJob {
 }
 
 struct UserKeysRepublisher {
-    db: SqlDb,
+    user_service: UserService,
     pkarr_builder: pkarr::ClientBuilder,
     homeserver_public_key: PublicKey,
 }
@@ -125,7 +125,7 @@ impl UserKeysRepublisher {
     }
 
     async fn get_all_user_keys(&self) -> Result<Vec<PublicKey>, sqlx::Error> {
-        let users = UserRepository::get_all(&mut self.db.pool().into()).await?;
+        let users = self.user_service.get_all().await?;
         Ok(users.into_iter().map(|user| user.public_key).collect())
     }
 }
@@ -145,9 +145,9 @@ fn packet_points_to_homeserver(packet: &SignedPacket, homeserver_public_key: &Pu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::sql::user::UserRepository;
     use crate::persistence::sql::SqlDb;
     use crate::republishers::pkarr_republisher::test_client_builder;
+    use crate::services::user_service::UserService;
     use pkarr::dns::rdata::SVCB;
     use pubky_common::crypto::Keypair;
 
@@ -173,26 +173,25 @@ mod tests {
             .unwrap()
     }
 
-    async fn init_db_with_users(count: usize) -> SqlDb {
+    async fn init_db_with_users(count: usize) -> (SqlDb, UserService) {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         for _ in 0..count {
             let public_key = Keypair::random().public_key();
-            UserRepository::create(&public_key, &mut db.pool().into())
-                .await
-                .unwrap();
+            user_service.create(&public_key).await.unwrap();
         }
-        db
+        (db, user_service)
     }
 
     /// Test that the republisher tries to republish all keys passed.
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_republish_keys_once() {
-        let db = init_db_with_users(10).await;
+        let (_db, user_service) = init_db_with_users(10).await;
         let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let worker = UserKeysRepublisher {
-            db,
+            user_service,
             pkarr_builder,
             homeserver_public_key: Keypair::random().public_key(),
         };
@@ -207,13 +206,12 @@ mod tests {
     #[pubky_test_utils::test]
     async fn user_pointing_to_another_homeserver_is_skipped() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
         let pkarr_client = pkarr_builder.clone().build().unwrap();
         let user = Keypair::random();
-        UserRepository::create(&user.public_key(), &mut db.pool().into())
-            .await
-            .unwrap();
+        user_service.create(&user.public_key()).await.unwrap();
 
         let current_homeserver = Keypair::random().public_key();
         let other_homeserver = Keypair::random().public_key();
@@ -221,7 +219,7 @@ mod tests {
         pkarr_client.publish(&packet).await.unwrap();
 
         let worker = UserKeysRepublisher {
-            db,
+            user_service,
             pkarr_builder,
             homeserver_public_key: current_homeserver,
         };

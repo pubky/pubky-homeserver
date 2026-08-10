@@ -389,10 +389,14 @@ pub async fn feed_stream(
         .authorize(session, &state.auth_state)
         .await?;
 
-    let mut user_cursor_map =
-        resolve_user_cursors(&params.user_cursors, &state.events_service, &state.sql_db)
-            .await
-            .map_err(HttpError::from)?;
+    let mut user_cursor_map = resolve_user_cursors(
+        &params.user_cursors,
+        &state.events_service,
+        &state.sql_db,
+        &state.user_service,
+    )
+    .await
+    .map_err(HttpError::from)?;
 
     let mut total_sent: usize = 0;
     let stream = async_stream::stream! {
@@ -537,13 +541,13 @@ async fn resolve_user_cursors(
     user_cursors: &[(PublicKey, Option<String>)],
     events_service: &EventsService,
     sql_db: &SqlDb,
+    user_service: &crate::services::user_service::UserService,
 ) -> Result<HashMap<i32, Option<EventCursor>>, EventStreamError> {
-    use crate::persistence::sql::user::UserRepository;
-
     let mut user_cursor_map: HashMap<i32, Option<EventCursor>> = HashMap::new();
 
     for (user_pubkey, cursor_str_opt) in user_cursors {
-        let user_id = UserRepository::get_id(user_pubkey, &mut sql_db.pool().into())
+        let user_id = user_service
+            .get_id(user_pubkey)
             .await
             .map_err(|e| match e {
                 sqlx::Error::RowNotFound => EventStreamError::UserNotFound,

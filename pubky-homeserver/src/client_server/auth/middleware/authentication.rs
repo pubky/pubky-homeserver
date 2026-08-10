@@ -59,7 +59,6 @@ mod tests {
     use crate::client_server::auth::cookie::persistence::SessionRepository;
     use crate::client_server::auth::AuthSession;
     use crate::client_server::middleware::request_tenant::RequestTenant;
-    use crate::persistence::sql::user::UserRepository;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
@@ -100,7 +99,9 @@ mod tests {
     }
 
     async fn cookie_for_user(context: &AppContext, keypair: &Keypair) -> Cookie<'static> {
-        let user = UserRepository::create(&keypair.public_key(), &mut context.sql_db.pool().into())
+        let user = context
+            .user_service
+            .create(&keypair.public_key())
             .await
             .unwrap();
         let secret = SessionRepository::create(
