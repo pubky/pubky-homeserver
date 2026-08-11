@@ -218,7 +218,7 @@ impl PubkyResource {
 
     /// Render as the canonical path-addressed transport URL:
     /// `https://_pubky.<owner>/storage/<owner>/<abs-path>`.
-    /// 
+    ///
     /// It is the same mapping performed by [`resolve_pubky`].
     ///
     /// # Errors
