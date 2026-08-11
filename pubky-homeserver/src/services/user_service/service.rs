@@ -85,7 +85,16 @@ impl UserService {
         UserRepository::get_overview(&mut self.sql_db.pool().into()).await
     }
 
-    // ── Reads with row lock (caller-owned transaction) ─────────────
+    // ── Reads (caller-owned transaction) ──────────────────────────
+
+    /// Get a user by public key inside an existing transaction (no row lock).
+    pub async fn get_in_tx<'a>(
+        &self,
+        pubkey: &PublicKey,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<UserEntity, sqlx::Error> {
+        UserRepository::get(pubkey, executor).await
+    }
 
     /// Fetch a user with a `FOR NO KEY UPDATE` row lock within an existing transaction.
     pub async fn get_for_no_key_update<'a>(

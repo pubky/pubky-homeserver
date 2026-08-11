@@ -2,9 +2,7 @@
 
 use crate::persistence::sql::{
     signup_code::{SignupCode, SignupCodeRepository},
-    uexecutor,
-    user::UserRepository,
-    SqlDb,
+    uexecutor, SqlDb,
 };
 use crate::services::user_service::{UserEntity, UserService};
 use crate::shared::user_quota::UserQuota;
@@ -84,7 +82,7 @@ impl SignupService {
         signup_token: Option<&SignupCode>,
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
     ) -> Result<UserEntity, SignupServiceError> {
-        Self::ensure_user_not_exists(public_key, tx).await?;
+        self.ensure_user_not_exists(public_key, tx).await?;
         let quota = if self.signup_mode == SignupMode::TokenRequired {
             Self::validate_and_consume_signup_token(signup_token, public_key, tx).await?
         } else {
@@ -103,10 +101,15 @@ impl SignupService {
 
     /// Fails if a user row already exists for `public_key`.
     async fn ensure_user_not_exists(
+        &self,
         public_key: &PublicKey,
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
     ) -> Result<(), SignupServiceError> {
-        match UserRepository::get(public_key, uexecutor!(*tx)).await {
+        match self
+            .user_service
+            .get_in_tx(public_key, uexecutor!(*tx))
+            .await
+        {
             Ok(_) => Err(SignupServiceError::UserAlreadyExists),
             Err(sqlx::Error::RowNotFound) => Ok(()),
             Err(e) => Err(e.into()),
