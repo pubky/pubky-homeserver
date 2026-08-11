@@ -134,6 +134,11 @@ impl ResourcePath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[inline]
+    fn as_root_relative_str(&self) -> &str {
+        self.as_str().trim_start_matches('/')
+    }
 }
 
 impl FromStr for ResourcePath {
@@ -207,22 +212,21 @@ impl PubkyResource {
     /// is always normalized.
     #[must_use]
     pub fn to_pubky_url(&self) -> String {
-        let rel = self.path.as_str().trim_start_matches('/');
-        format!("pubky://{}/{}", self.owner.z32(), rel)
+        let path = self.path.as_root_relative_str();
+        format!("pubky://{}/{path}", self.owner.z32())
     }
 
-    /// Render as `https://_pubky.<owner>/storage/<owner>/<abs-path>` for transport.
-    ///
-    /// This converts the addressed resource into the actual homeserver URL used
-    /// by the transport layer. It is the same mapping performed by
-    /// [`resolve_pubky`].
+    /// Render as the canonical path-addressed transport URL:
+    /// `https://_pubky.<owner>/storage/<owner>/<abs-path>`.
+    /// 
+    /// It is the same mapping performed by [`resolve_pubky`].
     ///
     /// # Errors
     /// - Returns [`Error::Request`] if the constructed transport URL is invalid.
     pub fn to_transport_url(&self) -> Result<Url, Error> {
-        let rel = self.path.as_str().trim_start_matches('/');
         let owner = self.owner.z32();
-        let https = format!("https://_pubky.{owner}/storage/{owner}/{rel}");
+        let path = self.path.as_root_relative_str();
+        let https = format!("https://_pubky.{owner}/storage/{owner}/{path}");
         Ok(Url::parse(&https)?)
     }
 
@@ -254,8 +258,8 @@ impl PubkyResource {
 
     /// Render as the identifier form `pubky<owner>/<abs-path>`.
     pub(crate) fn to_identifier(&self) -> String {
-        let rel = self.path.as_str().trim_start_matches('/');
-        format!("{}/{}", self.owner, rel)
+        let path = self.path.as_root_relative_str();
+        format!("{}/{path}", self.owner)
     }
 }
 
