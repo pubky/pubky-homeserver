@@ -151,7 +151,6 @@ mod tests {
     async fn test_write_get_delete_db_and_opendal() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
 
@@ -256,7 +255,6 @@ mod tests {
     async fn test_write_get_basic() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -282,7 +280,6 @@ mod tests {
     async fn test_data_usage_update_basic() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -308,7 +305,6 @@ mod tests {
     async fn test_data_usage_override_existing_entry() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -410,7 +406,6 @@ mod tests {
     async fn test_data_usage_exactly_to_quota() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -433,7 +428,6 @@ mod tests {
     async fn test_data_usage_above_quota() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -460,7 +454,6 @@ mod tests {
     async fn test_data_usage_override_existing_above_quota() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();

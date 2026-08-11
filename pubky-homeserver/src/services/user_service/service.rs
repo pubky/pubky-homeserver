@@ -48,6 +48,7 @@ impl UserService {
     /// Look up a user by public key, returning HTTP-appropriate errors.
     /// - User not found → 404
     /// - User disabled (when `err_if_disabled` is true) → 403
+    // TODO: Replace HttpError return with a domain error enum and map to HTTP in route handlers.
     pub async fn get_or_http_error(
         &self,
         pubkey: &PublicKey,
@@ -239,6 +240,9 @@ impl UserService {
 #[cfg(test)]
 impl UserService {
     /// Create a new user using the internal pool.
+    ///
+    /// Test-only: production signup must go through [`SignupService::create_new_user`]
+    /// to enforce token validation and assign initial quota from the signup code.
     pub async fn create(&self, pubkey: &PublicKey) -> Result<UserEntity, sqlx::Error> {
         UserRepository::create(pubkey, &mut self.sql_db.pool().into()).await
     }
@@ -401,5 +405,30 @@ mod tests {
         // Second call should hit cache and still return Some
         let quota2 = svc.resolve_quota(&pubkey).await.unwrap();
         assert!(quota2.is_some());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_patch_quota_invalidates_cache() {
+        use crate::shared::user_quota::{QuotaOverride, UserQuotaPatch};
+
+        let svc = service().await;
+        let pubkey = Keypair::random().public_key();
+        svc.create(&pubkey).await.unwrap();
+
+        // Populate cache
+        let before = svc.resolve_quota(&pubkey).await.unwrap().unwrap();
+        assert!(before.storage_quota_mb.is_default());
+
+        // Patch quota
+        let patch = UserQuotaPatch {
+            storage_quota_mb: Some(QuotaOverride::Value(42)),
+            ..Default::default()
+        };
+        svc.patch_quota(&pubkey, &patch).await.unwrap();
+
+        // Cache should be invalidated — next resolve must return the new value
+        let after = svc.resolve_quota(&pubkey).await.unwrap().unwrap();
+        assert_eq!(after.storage_quota_mb, QuotaOverride::Value(42));
     }
 }
