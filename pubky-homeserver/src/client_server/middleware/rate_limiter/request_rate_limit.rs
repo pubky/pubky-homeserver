@@ -97,14 +97,8 @@ where
 }
 
 /// Check request-count path limits. Returns an error response if any limit is exceeded.
-///
-/// Several limits may match a single request (overlapping path globs + method). When more than one
-/// is violated at once, the `Retry-After` header must reflect the *furthest* wait among the violated rules.
 #[allow(clippy::result_large_err)]
 fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Result<(), Response> {
-    // The longest wait among every limit that is exceeded for this request, if any.
-    let mut max_retry_after: Option<Duration> = None;
-
     for limit in limits {
         if !limit.is_match(req) {
             continue;
@@ -134,15 +128,10 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
                 "Rate limit of {} exceeded for {key}: {e}. Retry after {retry_after:?}",
                 limit.limit.quota,
             );
-            max_retry_after = Some(max_retry_after.map_or(retry_after, |val| val.max(retry_after)));
+            return Err(rate_limited_response(retry_after));
         }
     }
-
-    // If at least one matching limit was exceeded, reject with the furthest-in-the-future wait
-    match max_retry_after {
-        Some(retry_after) => Err(rate_limited_response(retry_after)),
-        None => Ok(()),
-    }
+    Ok(())
 }
 
 /// Build a `429 Too Many Requests` response carrying a `Retry-After: <seconds>` header.
@@ -379,61 +368,6 @@ mod tests {
 
         assert!(delay_secs >= 1, "Retry-After must be at least one second");
         assert!(delay_secs <= 60, "Retry-After should not exceed the quota");
-    }
-
-    /// When several configured limits match the same request (overlapping path globs) and are *all*
-    /// exceeded at once, `Retry-After` must report the furthest wait among them. Otherwise a client
-    /// that waits the advertised duration is still blocked by another, longer-exceeded rule on its
-    /// next attempt.
-    ///
-    /// We configure two overlapping `POST /upload` limits keyed by IP with identical burst (1) but very
-    /// different windows: `~1s` (`1r/s`) and `~3600s` (`1r/h`). After the first request consumes each
-    /// limiter's single burst token, a second request violates both simultaneously; `Retry-After` must
-    /// be in the ~hour range (the slow limit).
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn retry_after_reflects_furthest_violated_limit_when_multiple_overlap() {
-        let fast = PathLimit {
-            path: GlobPattern::new("/upload"),
-            method: HttpMethod(Method::POST),
-            quota: "1r/s".parse().unwrap(), // burst 1, ~1s window
-            key: LimitKeyType::Ip,
-            burst: None,
-            whitelist: Vec::new(),
-        };
-        let slow = PathLimit {
-            path: GlobPattern::new("/upload"),
-            method: HttpMethod(Method::POST),
-            quota: "1r/h".parse().unwrap(), // burst 1, ~3600s window
-            key: LimitKeyType::Ip,
-            burst: None,
-            whitelist: Vec::new(),
-        };
-        let socket = start_server(vec![fast, slow]).await;
-        let path = format!("http://{}/upload", socket);
-
-        let first_req = Client::new().post(&path).send().await.unwrap();
-        assert_eq!(first_req.status(), StatusCode::CREATED);
-
-        // Second request violates BOTH limits simultaneously (~1s AND ~3600s). Retry-After must reflect
-        // the furthest wait (the slow limit), not merely the first limit encountered in iteration order.
-        let second_req = Client::new().post(&path).send().await.unwrap();
-        assert_eq!(second_req.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        let retry_after = second_req
-            .headers()
-            .get(RETRY_AFTER_HEADER)
-            .expect("429 response must include a Retry-After header");
-        let delay_secs: u64 = String::from_utf8_lossy(retry_after.as_bytes())
-            .parse()
-            .expect("Retry-After should be an integer number of seconds");
-
-        // We expect delay_secs to be ~3600. Due to jitter and test variance, we cannot exactly match it,
-        // but checking for > 60s essentially proves the smaller ~1s limit was not the one in the header.
-        assert!(
-            delay_secs > 60,
-            "Retry-After should reflect the furthest violated limit (~3600s), not the fast one (~1s); got {delay_secs}s"
-        );
     }
 
     #[test]
