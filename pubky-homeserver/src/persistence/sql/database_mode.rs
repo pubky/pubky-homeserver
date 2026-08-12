@@ -55,21 +55,15 @@ impl DatabaseMode {
         explicit: Option<ConnectionString>,
         env_val: Option<String>,
     ) -> anyhow::Result<Self> {
-        if let Some(url) = explicit {
-            return Ok(Self::EphemeralTest(url));
-        }
-
-        if let Some(raw) = env_val {
-            let url = ConnectionString::new(&raw).map_err(|e| {
+        let url = match (explicit, env_val) {
+            (Some(url), _) => url,
+            (None, Some(raw)) => ConnectionString::new(&raw).map_err(|e| {
                 anyhow::anyhow!("Invalid TEST_PUBKY_CONNECTION_STRING: {raw}. Error: {e}")
-            })?;
-            return Ok(Self::EphemeralTest(url));
-        }
-
-        Ok(Self::EphemeralTest(
-            ConnectionString::new(DEFAULT_TEST_SERVER)
+            })?,
+            (None, None) => ConnectionString::new(DEFAULT_TEST_SERVER)
                 .expect("Default test connection string is valid"),
-        ))
+        };
+        Ok(Self::EphemeralTest(url))
     }
 }
 
