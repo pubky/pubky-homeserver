@@ -3,10 +3,11 @@
 //! Enforces per-path request-count quotas (`[[drive.rate_limits]]` in config).
 //! Each path+method pattern has a governor rate limiter keyed by IP or user.
 
+use axum::http::header::RETRY_AFTER;
 use axum::response::{IntoResponse, Response};
 use axum::{
     body::Body,
-    http::{HeaderName, Request, StatusCode},
+    http::{Request, StatusCode},
 };
 use futures_util::future::BoxFuture;
 use governor::clock::Clock;
@@ -151,13 +152,11 @@ fn rate_limited_response(retry_after: Duration) -> Response {
 
     (
         StatusCode::TOO_MANY_REQUESTS,
-        [(RETRY_AFTER_HEADER, delay_seconds.to_string())],
+        [(RETRY_AFTER, delay_seconds.to_string())],
         "Rate limit exceeded",
     )
         .into_response()
 }
-
-const RETRY_AFTER_HEADER: HeaderName = HeaderName::from_static("retry-after");
 
 #[cfg(test)]
 mod tests {
@@ -360,7 +359,7 @@ mod tests {
 
         let retry_after = second_req
             .headers()
-            .get(RETRY_AFTER_HEADER)
+            .get(RETRY_AFTER)
             .expect("429 response must include a Retry-After header");
         let delay_secs: u64 = String::from_utf8_lossy(retry_after.as_bytes())
             .parse()
