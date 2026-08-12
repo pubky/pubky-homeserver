@@ -34,10 +34,10 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
   cargo run -p pubky-testnet -- --homeserver-config my-config.toml persist ./my-testnet-data
 ```
 
-If you don't need persistent state, omit the `persist` subcommand and add `?pubky-test=true` to the connection string. The database is auto-created on startup and cleaned up on shutdown:
+If you don't need persistent state, simply omit the `persist` subcommand. An ephemeral database is auto-created on startup and cleaned up on shutdown:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo run -p pubky-testnet
 ```
 
