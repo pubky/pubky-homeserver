@@ -14,7 +14,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use axum::{middleware as axum_middleware, routing::get, Router};
+use axum::{http::header::RETRY_AFTER, middleware as axum_middleware, routing::get, Router};
 use axum_server::{
     tls_rustls::{RustlsAcceptor, RustlsConfig},
     Handle,
@@ -255,7 +255,7 @@ pub fn create_app(
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
     Ok(with_trace_layer(app)
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
-        .layer(CorsLayer::very_permissive()))
+        .layer(CorsLayer::very_permissive().expose_headers([RETRY_AFTER])))
 }
 
 #[cfg(test)]
@@ -303,9 +303,14 @@ mod tests {
             .get("/session")
             .add_header("host", user.public_key().z32())
             .add_header(header::COOKIE, cookie)
+            .add_header(header::ORIGIN, "https://app.example") // Add Origin, to turns this into a CORS request
             .await;
 
         response.assert_status(StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+
+        // Retry-After is not CORS-safelisted, so browsers need it explicitly exposed.
+        response.assert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "retry-after");
     }
 
     async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
