@@ -137,22 +137,22 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
 
 /// Build a `429 Too Many Requests` response carrying a `Retry-After: <seconds>` header.
 ///
-/// The value is delta-seconds ([RFC 6585 §4][rfc]), rounded up to the nearest whole second
-/// with a minimum of one, so retrying after it should no longer yield a `429`.
+/// The value is a wait time in seconds, rounded up to the nearest second with a minimum of 1.
 ///
-/// [rfc]: https://www.rfc-editor.org/info/rfc6585/#section-4
+/// See also:
+/// - https://www.rfc-editor.org/info/rfc6585/#section-4
+/// - https://www.rfc-editor.org/info/rfc9110/#section-10.2.3
 fn rate_limited_response(retry_after: Duration) -> Response {
-    // Round up (ceil) to whole seconds, clamping to a minimum of 1 so the header is always meaningful.
-    let secs = retry_after.as_secs();
-    let delay_seconds = if retry_after.subsec_nanos() > 0 {
-        secs.saturating_add(1)
+    let temp_secs = retry_after.as_secs();
+    let delay_secs = if retry_after.subsec_nanos() > 0 {
+        temp_secs.saturating_add(1)
     } else {
-        secs.max(1)
+        temp_secs.max(1)
     };
 
     (
         StatusCode::TOO_MANY_REQUESTS,
-        [(RETRY_AFTER, delay_seconds.to_string())],
+        [(RETRY_AFTER, delay_secs.to_string())],
         "Rate limit exceeded",
     )
         .into_response()
@@ -163,6 +163,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use axum::http::Method;
+    use axum::response::IntoResponse;
     use axum::{
         middleware,
         routing::{get, post},
@@ -179,7 +180,6 @@ mod tests {
     use crate::shared::HttpResult;
 
     use super::*;
-    use axum::response::IntoResponse;
 
     async fn upload_handler() -> HttpResult<impl IntoResponse> {
         Ok((StatusCode::CREATED, ()))
