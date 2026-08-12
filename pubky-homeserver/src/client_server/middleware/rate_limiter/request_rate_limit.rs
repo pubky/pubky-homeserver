@@ -6,10 +6,11 @@
 use axum::response::{IntoResponse, Response};
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{HeaderName, Request, StatusCode},
 };
 use futures_util::future::BoxFuture;
-use std::{convert::Infallible, task::Poll};
+use governor::clock::Clock;
+use std::{convert::Infallible, task::Poll, time::Duration};
 use tower::{Layer, Service};
 
 use crate::quota_config::PathLimit;
@@ -122,20 +123,41 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
             continue;
         }
         if let Err(e) = limit.limiter.check_key(&key) {
+            let retry_after = e.wait_time_from(limit.limiter.clock().now());
             tracing::debug!(
-                "Rate limit of {} exceeded for {key}: {}",
+                "Rate limit of {} exceeded for {key}: {e}. Retry after {retry_after:?}",
                 limit.limit.quota,
-                e
             );
-            return Err(HttpError::new_with_message(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Rate limit exceeded",
-            )
-            .into_response());
+            return Err(rate_limited_response(retry_after));
         }
     }
     Ok(())
 }
+
+/// Build a `429 Too Many Requests` response carrying a `Retry-After: <seconds>` header.
+///
+/// The value is delta-seconds ([RFC 6585 §4][rfc]), rounded up to the nearest whole second
+/// with a minimum of one, so retrying after it should no longer yield a `429`.
+///
+/// [rfc]: https://www.rfc-editor.org/info/rfc6585/#section-4
+fn rate_limited_response(retry_after: Duration) -> Response {
+    // Round up (ceil) to whole seconds, clamping to a minimum of 1 so the header is always meaningful.
+    let secs = retry_after.as_secs();
+    let delay_seconds = if retry_after.subsec_nanos() > 0 {
+        secs.saturating_add(1)
+    } else {
+        secs.max(1)
+    };
+
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(RETRY_AFTER_HEADER, delay_seconds.to_string())],
+        "Rate limit exceeded",
+    )
+        .into_response()
+}
+
+const RETRY_AFTER_HEADER: HeaderName = HeaderName::from_static("retry-after");
 
 #[cfg(test)]
 mod tests {
@@ -309,6 +331,43 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// A `429 Too Many Requests` response must carry a `Retry-After: <seconds>` header whose value
+    /// reflects the configured quota (here `1r/m`, so callers should wait ~60 seconds) and is at
+    /// least one second.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn rate_limited_response_includes_retry_after_header() {
+        let path_limit = PathLimit {
+            path: GlobPattern::new("/upload"),
+            method: HttpMethod(Method::POST),
+            quota: "1r/m".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let socket = start_server(vec![path_limit]).await;
+        let path = format!("http://{}/upload", socket);
+
+        // First request consumes the only allowed cell for this minute.
+        let first_req = Client::new().post(&path).send().await.unwrap();
+        assert_eq!(first_req.status(), StatusCode::CREATED);
+
+        // Second request is rate-limited and must report how long to wait.
+        let second_req = Client::new().post(&path).send().await.unwrap();
+        assert_eq!(second_req.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let retry_after = second_req
+            .headers()
+            .get(RETRY_AFTER_HEADER)
+            .expect("429 response must include a Retry-After header");
+        let delay_secs: u64 = String::from_utf8_lossy(retry_after.as_bytes())
+            .parse()
+            .expect("Retry-After should be an integer number of seconds");
+
+        assert!(delay_secs >= 1, "Retry-After must be at least one second");
+        assert!(delay_secs <= 60, "Retry-After should not exceed the quota");
     }
 
     #[test]
