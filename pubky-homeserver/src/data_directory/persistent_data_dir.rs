@@ -263,6 +263,37 @@ mod tests {
     }
 
     #[test]
+    fn resolve_database_mode_returns_direct_when_url_set() {
+        use crate::persistence::sql::{ConnectionString, DatabaseMode};
+
+        let mut conf = ConfigToml::default();
+        conf.general.database_url =
+            Some(ConnectionString::new("postgres://localhost:5432/mydb").unwrap());
+
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = PersistentDataDir::new(temp_dir.path().to_path_buf());
+        let mode = data_dir.resolve_database_mode(&conf).unwrap();
+        assert!(
+            matches!(mode, DatabaseMode::Direct(_)),
+            "PersistentDataDir should resolve to Direct"
+        );
+    }
+
+    #[test]
+    fn resolve_database_mode_errors_when_no_url() {
+        let mut conf = ConfigToml::default();
+        conf.general.database_url = None;
+
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = PersistentDataDir::new(temp_dir.path().to_path_buf());
+        let result = data_dir.resolve_database_mode(&conf);
+        assert!(
+            result.is_err(),
+            "PersistentDataDir should error when database_url is None"
+        );
+    }
+
+    #[test]
     pub fn test_trim_secret_file_content() {
         let temp_dir = TempDir::new().unwrap();
         let test_path = temp_dir.path().join(".pubky");

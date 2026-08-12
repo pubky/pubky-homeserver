@@ -98,15 +98,8 @@ impl SqlDb {
     async fn create_ephemeral_test_db(
         admin_con_string: ConnectionString,
     ) -> Result<Self, sqlx::Error> {
-        use uuid::Uuid;
-
-        let admin_con = Self::connect_inner(&admin_con_string).await?;
-        let test_db_name = format!("pubky_test_{}", Uuid::new_v4().as_simple());
-        let query = format!("CREATE DATABASE \"{}\"", test_db_name);
-        sqlx::query(&query).execute(admin_con.pool()).await?;
-
-        let mut test_db_url = admin_con_string.clone();
-        test_db_url.set_database_name(&test_db_name);
+        let (test_db_url, test_db_name) =
+            Self::create_ephemeral_db_on_server(&admin_con_string).await?;
 
         let mut con = Self::connect_inner(&test_db_url).await?;
         con.db_dropper = Some(std::sync::Arc::new(TestDbDropper::new(
@@ -114,6 +107,24 @@ impl SqlDb {
             admin_con_string.to_string(),
         )));
         Ok(con)
+    }
+
+    /// Create an ephemeral `pubky_test_{uuid}` database on the given server.
+    ///
+    /// Returns the connection string to the new database and its name.
+    async fn create_ephemeral_db_on_server(
+        admin_con_string: &ConnectionString,
+    ) -> Result<(ConnectionString, String), sqlx::Error> {
+        use uuid::Uuid;
+
+        let admin_con = Self::connect_inner(admin_con_string).await?;
+        let test_db_name = format!("pubky_test_{}", Uuid::new_v4().as_simple());
+        let query = format!("CREATE DATABASE \"{}\"", test_db_name);
+        sqlx::query(&query).execute(admin_con.pool()).await?;
+
+        let mut test_db_url = admin_con_string.clone();
+        test_db_url.set_database_name(&test_db_name);
+        Ok((test_db_url, test_db_name))
     }
 
     /// Create a test database without running migrations.
@@ -143,25 +154,13 @@ impl SqlDb {
         max_connections: u32,
         acquire_timeout: std::time::Duration,
     ) -> Self {
-        use uuid::Uuid;
-
         let mode = DatabaseMode::resolve_test(None).expect("Failed to resolve test database mode");
         let admin_url = match mode {
-            DatabaseMode::EphemeralTest(url) => url,
-            DatabaseMode::Direct(url) => url,
+            DatabaseMode::EphemeralTest(url) | DatabaseMode::Direct(url) => url,
         };
-        let admin_con = Self::connect_inner(&admin_url)
-            .await
-            .expect("Failed to connect to admin database");
-        let test_db_name = format!("pubky_test_{}", Uuid::new_v4().as_simple());
-        let query = format!("CREATE DATABASE \"{}\"", test_db_name);
-        sqlx::query(&query)
-            .execute(admin_con.pool())
+        let (test_db_url, test_db_name) = Self::create_ephemeral_db_on_server(&admin_url)
             .await
             .expect("Failed to create test database");
-
-        let mut test_db_url = admin_url.clone();
-        test_db_url.set_database_name(&test_db_name);
 
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)

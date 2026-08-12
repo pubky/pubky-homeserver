@@ -39,8 +39,7 @@ impl Testnet {
             http_relays: vec![],
             homeservers: vec![],
             temp_dirs: vec![],
-            postgres_connection_string: Self::extract_postgres_connection_string_from_env_variable(
-            ),
+            postgres_connection_string: None,
         };
 
         Ok(testnet)
@@ -73,20 +72,6 @@ impl Testnet {
         };
 
         Ok(testnet)
-    }
-
-    /// Extract the postgres connection string from the TEST_PUBKY_CONNECTION_STRING environment variable.
-    /// If the environment variable is not set, None is returned.
-    /// If the environment variable is set, but the connection string is invalid, a warning is logged and None is returned.
-    fn extract_postgres_connection_string_from_env_variable() -> Option<ConnectionString> {
-        if let Ok(raw_con_string) = std::env::var("TEST_PUBKY_CONNECTION_STRING") {
-            if let Ok(con_string) = ConnectionString::new(&raw_con_string) {
-                return Some(con_string);
-            } else {
-                tracing::warn!("Invalid database connection string in TEST_PUBKY_CONNECTION_STRING environment variable. Ignoring it.");
-            }
-        }
-        None
     }
 
     /// Run the full homeserver app with core and admin server.
