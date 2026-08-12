@@ -22,7 +22,7 @@ cargo run --bin logging -- --level debug --external-postgres
 You can specify a custom connection via the `TEST_PUBKY_CONNECTION_STRING` environment variable:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING=postgres://user:pass@localhost:5432/mydb?pubky-test=true cargo run --bin logging -- --level debug --external-postgres
+TEST_PUBKY_CONNECTION_STRING=postgres://user:pass@localhost:5432/mydb cargo run --bin logging -- --level debug --external-postgres
 ```
 
-The `?pubky-test=true` parameter indicates that an ephemeral test database should be created.
+Each testnet automatically gets its own ephemeral `pubky_test_{uuid}` database on the configured server.

@@ -95,9 +95,7 @@ impl Testnet {
     /// Automatically listens on ephemeral ports and uses this Testnet's bootstrap nodes and relays.
     pub async fn create_homeserver(&mut self) -> Result<&HomeserverApp> {
         let mut config = ConfigToml::default_test_config();
-        if let Some(connection_string) = self.postgres_connection_string.as_ref() {
-            config.general.database_url = Some(connection_string.clone());
-        }
+        config.general.database_url = self.postgres_connection_string.clone();
         let mock_dir = MockDataDir::new(config, Some(crate::common::testnet_keypair()))?;
         self.create_homeserver_app_with_mock(mock_dir).await
     }
@@ -108,9 +106,7 @@ impl Testnet {
     /// Automatically listens on ephemeral ports and uses this Testnet's bootstrap nodes and relays.
     pub async fn create_random_homeserver(&mut self) -> Result<&HomeserverApp> {
         let mut config = ConfigToml::default_test_config();
-        if let Some(connection_string) = self.postgres_connection_string.as_ref() {
-            config.general.database_url = Some(connection_string.clone());
-        }
+        config.general.database_url = self.postgres_connection_string.clone();
         let mock_dir = MockDataDir::new(config, Some(Keypair::random()))?;
         self.create_homeserver_app_with_mock(mock_dir).await
     }

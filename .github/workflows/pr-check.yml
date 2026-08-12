@@ -93,7 +93,7 @@ jobs:
 
     env:
       # Your code can read these, or just use the defaults above
-      TEST_PUBKY_CONNECTION_STRING: postgres://test_user:test_pass@localhost:5432/postgres?pubky-test=true
+      TEST_PUBKY_CONNECTION_STRING: postgres://test_user:test_pass@localhost:5432/postgres
 
     strategy:
       matrix:
@@ -193,7 +193,7 @@ jobs:
           --health-retries=5
     env:
       # Your code can read these, or just use the defaults above
-      TEST_PUBKY_CONNECTION_STRING: postgres://test_user:test_pass@localhost:5433/postgres?pubky-test=true
+      TEST_PUBKY_CONNECTION_STRING: postgres://test_user:test_pass@localhost:5433/postgres
 
     runs-on: ubuntu-latest
     steps:

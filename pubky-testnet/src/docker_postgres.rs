@@ -106,13 +106,12 @@ impl DockerPostgres {
 
     /// Get the connection string for this Docker PostgreSQL instance.
     ///
-    /// The returned connection string includes `?pubky-test=true` so that
-    /// each homeserver creates its own ephemeral `pubky_test_{uuid}` database.
-    /// This is what makes `DockerPostgres::shared()` safe: multiple testnets
-    /// share the same Postgres **server** but each gets an isolated database.
+    /// The [`DatabaseMode`](pubky_homeserver::DatabaseMode) enum — not the URL
+    /// itself — controls whether the homeserver creates an ephemeral
+    /// `pubky_test_{uuid}` database.
     pub fn connection_string(&self) -> anyhow::Result<ConnectionString> {
         let url = format!(
-            "postgres://postgres:postgres@{}:{}/postgres?pubky-test=true",
+            "postgres://postgres:postgres@{}:{}/postgres",
             self.host, self.port
         );
         ConnectionString::new(&url).map_err(|e| anyhow::anyhow!("Invalid connection string: {e}"))
@@ -286,10 +285,10 @@ mod tests {
     /// Signs up a user on testnet A, then verifies that same keypair can sign up
     /// on testnet B (proving it has a separate, empty database).
     ///
-    /// This also validates that `app_context.rs` correctly passes the configured
-    /// connection string (random Docker port + `?pubky-test=true`) through to
-    /// `create_ephemeral_test_db()`. Without that, it would fall back to `localhost:5432`
-    /// and fail to connect.
+    /// This also validates that the configured connection string (random Docker
+    /// port) flows through `DatabaseMode::resolve_test` → `EphemeralTest` →
+    /// `create_ephemeral_test_db()`. Without that, it would fall back to
+    /// `localhost:5432` and fail to connect.
     #[tokio::test]
     async fn test_shared_docker_postgres_provides_db_isolation() {
         let pg = DockerPostgres::start()

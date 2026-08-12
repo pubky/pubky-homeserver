@@ -31,4 +31,4 @@ pub use client_server::{ClientServer, ClientServerBuildError};
 pub use data_directory::*;
 pub use homeserver_app::{HomeserverApp, HomeserverAppBuildError};
 pub use metrics_server::{MetricsServer, MetricsServerBuildError};
-pub use persistence::sql::ConnectionString;
+pub use persistence::sql::{ConnectionString, DatabaseMode};

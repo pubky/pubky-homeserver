@@ -17,11 +17,11 @@ docker run --name pubky-postgres \
 Then run tests with a test connection string:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo test -p pubky-homeserver --all-features
 ```
 
-The `?pubky-test=true` parameter tells the test helpers to create an ephemeral `pubky_test_*` database inside the configured PostgreSQL instance. Databases are cleaned up after each test.
+In test builds, each test automatically gets its own ephemeral `pubky_test_{uuid}` database on the configured server. Databases are cleaned up after each test.
 
 ## Automatic Database Cleanup
 
@@ -93,7 +93,7 @@ async fn test_one() {
 The [`e2e`](../e2e) crate contains tests that cover cross-crate workflows using `pubky-testnet`. Run them with:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo test -p e2e
 ```
 
@@ -102,7 +102,7 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
 Run the homeserver tests against external PostgreSQL:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo test -p pubky-homeserver --all-features
 ```
 
@@ -115,6 +115,6 @@ cargo test -p pubky-testnet --features docker-postgres
 Run the full workspace test suite:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo test --workspace --all-features
 ```
