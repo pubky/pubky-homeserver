@@ -14,6 +14,13 @@ cargo run -p pubky-homeserver -- --data-dir ~/.pubky
 
 See [config.sample.toml](config.sample.toml) for all configuration options.
 
+### Client compatibility
+
+When an SDK change requires homeserver behavior that older versions do not
+support, such as a new endpoint, add a stable feature identifier to the client
+`GET /info` response. SDKs must check that identifier before using the new
+behavior.
+
 ## API Specifications
 
 - [Client API](openapi-client.yml) — user authentication, tenant storage, and event feeds.

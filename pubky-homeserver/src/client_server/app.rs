@@ -31,7 +31,7 @@ use super::middleware::{
     request_tenant::RequestTenant,
     trace::with_trace_layer,
 };
-use super::routes::{events, root, signup_tokens, tenants};
+use super::routes::{events, info, root, signup_tokens, tenants};
 
 /// Errors that can occur when building a `HomeserverCore`.
 #[derive(Debug, thiserror::Error)]
@@ -248,7 +248,9 @@ pub fn create_app(
         .with_state(state)
         .merge(auth::base_router(auth_state.clone()))
         .merge(auth::tenant_router(auth_state))
-        .layer(middleware);
+        .layer(middleware)
+        // Keep feature discovery independent of authentication and database-backed quotas.
+        .route("/info", get(info::get));
 
     // Resolve the target before tracing and authentication. Valid `/storage/...`
     // requests are therefore logged using their Pubky URL.
@@ -306,6 +308,32 @@ mod tests {
             .await;
 
         response.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn info_is_public_and_reports_no_features() {
+        let mut config = ConfigToml::minimal_test_config();
+        config.drive.rate_limits = vec![PathLimit {
+            path: GlobPattern::new("/info"),
+            method: HttpMethod(Method::GET),
+            quota: "1r/m".parse().unwrap(),
+            key: LimitKeyType::User,
+            burst: None,
+            whitelist: Vec::new(),
+        }];
+
+        let data_dir = MockDataDir::new(config, None).unwrap();
+        let context = AppContext::read_from(data_dir).await.unwrap();
+        let router = ClientServer::create_router(&context).unwrap();
+        let server = TestServer::new(router).unwrap();
+
+        let response = server.get("/info").await;
+
+        response.assert_status(StatusCode::OK);
+        response.assert_header(header::CONTENT_TYPE, "application/json");
+        response.assert_header(header::CACHE_CONTROL, "no-store");
+        response.assert_json(&serde_json::json!({ "features": [] }));
     }
 
     async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
