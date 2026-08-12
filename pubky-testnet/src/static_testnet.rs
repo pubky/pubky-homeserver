@@ -424,6 +424,13 @@ impl DataDir for TestnetDataDir {
         self.inner.path()
     }
 
+    fn resolve_database_mode(
+        &self,
+        conf: &ConfigToml,
+    ) -> anyhow::Result<pubky_homeserver::DatabaseMode> {
+        self.inner.resolve_database_mode(conf)
+    }
+
     fn ensure_data_dir_exists_and_is_writable(&self) -> anyhow::Result<()> {
         self.inner.ensure_data_dir_exists_and_is_writable()
     }

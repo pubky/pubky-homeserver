@@ -100,6 +100,21 @@ impl DataDir for PersistentDataDir {
         &self.expanded_path
     }
 
+    fn resolve_database_mode(
+        &self,
+        conf: &ConfigToml,
+    ) -> anyhow::Result<crate::persistence::sql::DatabaseMode> {
+        conf.general
+            .database_url
+            .clone()
+            .map(crate::persistence::sql::DatabaseMode::Direct)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No database_url configured. Set [general].database_url in config.toml."
+                )
+            })
+    }
+
     /// Makes sure the data directory exists.
     /// Create the directory if it doesn't exist.
     fn ensure_data_dir_exists_and_is_writable(&self) -> anyhow::Result<()> {
