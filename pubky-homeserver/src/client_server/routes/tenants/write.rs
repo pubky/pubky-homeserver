@@ -159,8 +159,8 @@ async fn fail_if_size_hint_exceeds_quota<'a>(
 mod tests {
     use pubky_common::crypto::Keypair;
 
-    use crate::persistence::sql::user::UserRepository;
     use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
     use crate::shared::webdav::StoragePath;
 
     use super::*;
@@ -189,7 +189,9 @@ mod tests {
     async fn test_no_size_hint_always_ok() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         // No size hint → always OK regardless of quota
         check_hint(&db, &user, None, "/test.txt", None)
@@ -202,7 +204,9 @@ mod tests {
     async fn test_small_hint_within_quota() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         // 100 bytes + FILE_METADATA_SIZE is well within 1 MB
         check_hint(&db, &user, None, "/test.txt", Some(100))
@@ -215,7 +219,9 @@ mod tests {
     async fn test_hint_exceeds_quota() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         // 1 MB content + FILE_METADATA_SIZE > 1 MB quota
         check_hint(&db, &user, None, "/test.txt", Some(1024 * 1024))
@@ -228,7 +234,9 @@ mod tests {
     async fn test_new_file_accounts_for_metadata_overhead() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         let one_mb = 1024u64 * 1024;
         let max_content = one_mb - FILE_METADATA_SIZE;
@@ -250,9 +258,7 @@ mod tests {
         let db = SqlDb::test().await;
         // No system default → unlimited for Default users
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create(&pk, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = UserService::new(db.clone()).create(&pk).await.unwrap();
 
         // Even a huge hint should pass with unlimited quota
         check_hint(&db, &user, None, "/test.txt", Some(10 * 1024 * 1024 * 1024))

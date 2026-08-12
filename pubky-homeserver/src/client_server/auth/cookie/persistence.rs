@@ -206,7 +206,8 @@ mod tests {
     use pubky_common::capabilities::Capability;
     use pubky_common::crypto::Keypair;
 
-    use crate::persistence::sql::{entities::user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
 
     use super::*;
 
@@ -225,7 +226,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
 

@@ -4,7 +4,8 @@ use pubky_common::{
     auth::AuthToken, capabilities::Capabilities, crypto::PublicKey, session::CookieSessionRecord,
 };
 
-use crate::persistence::sql::{signup_code::SignupCode, uexecutor, user::UserRepository, SqlDb};
+use crate::persistence::sql::{signup_code::SignupCode, uexecutor, SqlDb};
+use crate::services::user_service::UserService;
 use crate::shared::{HttpError, HttpResult};
 
 use super::persistence::{SessionEntity, SessionRepository, SessionSecret};
@@ -14,6 +15,7 @@ use crate::client_server::auth::{AuthRevocation, AuthSession, SignupService};
 #[derive(Clone, Debug)]
 pub(crate) struct CookieAuthService {
     sql_db: SqlDb,
+    user_service: UserService,
     verifier: CookieAuthVerifier,
     signup_service: SignupService,
 }
@@ -21,11 +23,13 @@ pub(crate) struct CookieAuthService {
 impl CookieAuthService {
     pub(crate) fn new(
         sql_db: SqlDb,
+        user_service: UserService,
         verifier: CookieAuthVerifier,
         signup_service: SignupService,
     ) -> Self {
         Self {
             sql_db,
+            user_service,
             verifier,
             signup_service,
         }
@@ -53,7 +57,9 @@ impl CookieAuthService {
     pub(crate) async fn signin(&self, body: &[u8]) -> HttpResult<CookieSessionCreation> {
         let token = self.verify(body)?;
         let public_key = token.public_key();
-        let user = UserRepository::get(public_key, &mut self.sql_db.pool().into())
+        let user = self
+            .user_service
+            .get(public_key)
             .await
             .map_err(|e| match e {
                 sqlx::Error::RowNotFound => HttpError::not_found(),

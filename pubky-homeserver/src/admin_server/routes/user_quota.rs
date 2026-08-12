@@ -75,6 +75,8 @@ mod tests {
 
     use axum_test::TestServer;
 
+    use pubky_common::crypto::Keypair;
+
     use super::*;
     use crate::admin_server::app::create_app;
     use crate::data_directory::quota_config::BandwidthQuota;
@@ -120,17 +122,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_user_quota_crud() {
-        use crate::persistence::sql::user::UserRepository;
-        use pubky_common::crypto::Keypair;
-
         let context = AppContext::test().await;
         let server = create_test_server(&context);
-        let keypair = Keypair::random();
-        let pubkey = keypair.public_key();
+        let pubkey = Keypair::random().public_key();
 
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let url = format!("/users/{}/quota", pubkey.z32());
 
@@ -202,17 +198,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_get_effective_resolves_defaults() {
-        use crate::persistence::sql::user::UserRepository;
-        use pubky_common::crypto::Keypair;
-
         let context = AppContext::test().await;
         let server = create_test_server_with_defaults(&context);
-        let keypair = Keypair::random();
-        let pubkey = keypair.public_key();
+        let pubkey = Keypair::random().public_key();
 
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let url = format!("/users/{}/quota", pubkey.z32());
 
@@ -280,17 +270,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_user_quota_invalid_rate_rejected() {
-        use crate::persistence::sql::user::UserRepository;
-        use pubky_common::crypto::Keypair;
-
         let context = AppContext::test().await;
         let server = create_test_server(&context);
-        let keypair = Keypair::random();
-        let pubkey = keypair.public_key();
+        let pubkey = Keypair::random().public_key();
 
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let url = format!("/users/{}/quota", pubkey.z32());
 
@@ -328,17 +312,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_default_vs_unlimited_distinguishable() {
-        use crate::persistence::sql::user::UserRepository;
-        use pubky_common::crypto::Keypair;
-
         let context = AppContext::test().await;
         let server = create_test_server(&context);
-        let keypair = Keypair::random();
-        let pubkey = keypair.public_key();
+        let pubkey = Keypair::random().public_key();
 
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let url = format!("/users/{}/quota", pubkey.z32());
 
@@ -371,17 +349,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_patch_user_quota_merges() {
-        use crate::persistence::sql::user::UserRepository;
-        use pubky_common::crypto::Keypair;
-
         let context = AppContext::test().await;
         let server = create_test_server(&context);
-        let keypair = Keypair::random();
-        let pubkey = keypair.public_key();
+        let pubkey = Keypair::random().public_key();
 
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let url = format!("/users/{}/quota", pubkey.z32());
 
@@ -469,17 +441,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_patch_invalid_rate_rejected() {
-        use crate::persistence::sql::user::UserRepository;
-        use pubky_common::crypto::Keypair;
-
         let context = AppContext::test().await;
         let server = create_test_server(&context);
-        let keypair = Keypair::random();
-        let pubkey = keypair.public_key();
+        let pubkey = Keypair::random().public_key();
 
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let url = format!("/users/{}/quota", pubkey.z32());
         let patch = serde_json::json!({

@@ -157,13 +157,12 @@ mod tests {
 
     use crate::client_server::auth::grant::crypto::session_token::SessionBearer;
     use crate::client_server::auth::grant::persistence::grant::{GrantRepository, NewGrant};
-    use crate::persistence::sql::{entities::user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
 
     async fn setup_user_and_grant(db: &SqlDb) -> GrantId {
         let pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
         let now = chrono::Utc::now().timestamp() as u64;
         let grant_id = GrantId::generate();
         let new_grant = NewGrant {
@@ -264,9 +263,7 @@ mod tests {
         let grant_b_id = GrantId::generate();
         let now = chrono::Utc::now().timestamp() as u64;
         let pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
         let new_grant_b = NewGrant {
             id: grant_b_id.clone(),
             user_id: user.id,

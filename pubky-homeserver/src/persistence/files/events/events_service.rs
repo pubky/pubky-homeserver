@@ -342,7 +342,8 @@ fn accept_live_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::sql::{user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
     use crate::shared::webdav::StoragePath;
     use pubky_common::crypto::Keypair;
 
@@ -351,11 +352,10 @@ mod tests {
     async fn test_events_service_create_and_broadcast() {
         let db = SqlDb::test().await;
         let events_service = EventsService::new(100);
+        let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test.txt").unwrap());
 
@@ -392,11 +392,10 @@ mod tests {
     async fn test_events_service_get_public_by_cursor() {
         let db = SqlDb::test().await;
         let events_service = EventsService::new(100);
+        let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Interleave public and private events: ids 1=/pub/a, 2=/priv/x,
         // 3=/pub/b, 4=/priv/y, 5=/pub/c.
@@ -448,11 +447,10 @@ mod tests {
     async fn test_events_service_get_all_events_includes_private() {
         let db = SqlDb::test().await;
         let events_service = EventsService::new(100);
+        let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Same interleaving as the public test: ids 1=/pub/a, 2=/priv/x,
         // 3=/pub/b, 4=/priv/y, 5=/pub/c.

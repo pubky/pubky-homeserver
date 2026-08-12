@@ -90,7 +90,7 @@ impl HomeserverApp {
         let republish_interval =
             Duration::from_secs(context.config_toml.pkdns.user_keys_republisher_interval);
         let user_keys_republisher_job = UserKeysRepublisherJob::start(
-            context.sql_db.clone(),
+            context.user_service.clone(),
             pkarr_builder,
             context.keypair.public_key(),
             republish_interval,

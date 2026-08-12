@@ -1,69 +1,38 @@
 use super::super::app_state::AppState;
-use crate::{
-    persistence::sql::{uexecutor, user::UserRepository},
-    shared::{HttpError, HttpResult, Z32Pubkey},
-};
+use crate::shared::{HttpResult, Z32Pubkey};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
 
-/// Delete a single entry from the database.
+/// Disable a user account.
 ///
 /// # Errors
 ///
 /// - `400` if the pubkey is invalid.
-/// - `404` if the entry does not exist.
+/// - `404` if the user does not exist.
 ///
 pub async fn disable_user(
     State(state): State<AppState>,
     Path(pubkey): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    let mut tx = state.sql_db.pool().begin().await?;
-    let mut user = match UserRepository::get(&pubkey.0, uexecutor!(tx)).await {
-        Ok(user) => user,
-        Err(sqlx::Error::RowNotFound) => {
-            return Err(HttpError::new_with_message(
-                StatusCode::NOT_FOUND,
-                "User not found",
-            ))
-        }
-        Err(e) => return Err(e.into()),
-    };
-    user.disabled = true;
-    UserRepository::update(&user, uexecutor!(tx)).await?;
-    tx.commit().await?;
-
+    state.user_service.admin_disable(&pubkey.0).await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
-/// Delete a single entry from the database.
+/// Enable a user account.
 ///
 /// # Errors
 ///
 /// - `400` if the pubkey is invalid.
-/// - `404` if the entry does not exist.
+/// - `404` if the user does not exist.
 ///
 pub async fn enable_user(
     State(state): State<AppState>,
     Path(pubkey): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    let mut tx = state.sql_db.pool().begin().await?;
-    let mut user = match UserRepository::get(&pubkey.0, uexecutor!(tx)).await {
-        Ok(user) => user,
-        Err(sqlx::Error::RowNotFound) => {
-            return Err(HttpError::new_with_message(
-                StatusCode::NOT_FOUND,
-                "User not found",
-            ))
-        }
-        Err(e) => return Err(e.into()),
-    };
-    user.disabled = false;
-    UserRepository::update(&user, uexecutor!(tx)).await?;
-    tx.commit().await?;
-
+    state.user_service.admin_enable(&pubkey.0).await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
@@ -83,14 +52,10 @@ mod tests {
         let pubkey = Keypair::random().public_key();
 
         // Create new user
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         // Check that the tenant is enabled
-        let user = UserRepository::get(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        let user = context.user_service.get(&pubkey).await.unwrap();
         assert!(!user.disabled);
 
         // Setup server
@@ -116,9 +81,7 @@ mod tests {
         assert_eq!(response.status_code(), StatusCode::OK);
 
         // Check that the tenant is disabled
-        let user = UserRepository::get(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        let user = context.user_service.get(&pubkey).await.unwrap();
         assert!(user.disabled);
 
         // Enable the tenant again
@@ -128,9 +91,7 @@ mod tests {
         assert_eq!(response.status_code(), StatusCode::OK);
 
         // Check that the tenant is enabled
-        let user = UserRepository::get(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        let user = context.user_service.get(&pubkey).await.unwrap();
         assert!(!user.disabled);
     }
 }

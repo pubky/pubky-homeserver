@@ -47,6 +47,7 @@ impl FileService {
         let opendal_service = OpendalService::new_from_config(
             &config.storage,
             data_directory,
+            db.clone(),
             events_service,
             user_service,
         )?;
@@ -140,10 +141,7 @@ impl FileService {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        persistence::sql::user::UserRepository, services::user_service::FILE_METADATA_SIZE,
-        shared::webdav::StoragePath,
-    };
+    use crate::{services::user_service::FILE_METADATA_SIZE, shared::webdav::StoragePath};
     use futures_lite::StreamExt;
 
     use super::*;
@@ -153,12 +151,10 @@ mod tests {
     async fn test_write_get_delete_db_and_opendal() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
 
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&pubkey).await.unwrap();
 
         // User should not have any data usage yet
         assert_eq!(user.used_bytes, 0);
@@ -178,9 +174,7 @@ mod tests {
         let stream = futures_util::stream::iter(chunks);
 
         file_service.write_stream(&path, stream).await.unwrap();
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(
             user.used_bytes,
             test_data.len() as u64 + FILE_METADATA_SIZE,
@@ -207,9 +201,7 @@ mod tests {
         file_service.delete(&path).await.unwrap();
         let result = file_service.get_stream(&path).await;
         assert!(result.is_err(), "Should error for deleted file");
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(
             user.used_bytes, 0,
             "Data usage should be 0 after deleting file"
@@ -223,9 +215,7 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(test_data.as_slice()))];
         let stream = futures_util::stream::iter(chunks);
         file_service.write_stream(&path, stream).await.unwrap();
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(
             user.used_bytes,
             test_data.len() as u64 + FILE_METADATA_SIZE,
@@ -253,9 +243,7 @@ mod tests {
         file_service.delete(&path).await.unwrap();
         let result = file_service.get_stream(&path).await;
         assert!(result.is_err(), "Should error for deleted file");
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(
             user.used_bytes, 0,
             "Data usage should be 0 after deleting file"
@@ -267,12 +255,10 @@ mod tests {
     async fn test_write_get_basic() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        user_service.create(&pubkey).await.unwrap();
 
         let test_data = b"Hello, world!";
         let buffer = Buffer::from(test_data.as_slice());
@@ -294,26 +280,22 @@ mod tests {
     async fn test_data_usage_update_basic() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
+        user_service.create_with_quota_mb(&pubkey, 1).await;
 
         let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024];
         let buffer = Buffer::from(test_data.clone());
 
         file_service.write(&path, buffer).await.unwrap();
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(user.used_bytes, test_data.len() as u64 + FILE_METADATA_SIZE);
 
         // Delete the file and check if the data usage is updated correctly.
         file_service.delete(&path).await.unwrap();
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(user.used_bytes, 0);
     }
 
@@ -323,10 +305,10 @@ mod tests {
     async fn test_data_usage_override_existing_entry() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
+        user_service.create_with_quota_mb(&pubkey, 1).await;
 
         let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024];
@@ -341,10 +323,7 @@ mod tests {
         file_service.write(&path, buffer2).await.unwrap();
 
         assert_eq!(
-            UserRepository::get(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap()
-                .used_bytes,
+            user_service.get(&pubkey).await.unwrap().used_bytes,
             test_data2.len() as u64 + FILE_METADATA_SIZE
         );
     }
@@ -355,11 +334,10 @@ mod tests {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
         let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        user_service.create(&pubkey).await.unwrap();
 
         let exact_path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/foo").unwrap());
         let descendant_path = EntryPath::new(
@@ -393,11 +371,10 @@ mod tests {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
         let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        user_service.create(&pubkey).await.unwrap();
 
         let exact_path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/foo").unwrap());
         let descendant_path =
@@ -429,10 +406,10 @@ mod tests {
     async fn test_data_usage_exactly_to_quota() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
+        user_service.create_with_quota_mb(&pubkey, 1).await;
 
         let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024 * 1024 - FILE_METADATA_SIZE as usize];
@@ -441,10 +418,7 @@ mod tests {
         file_service.write(&path, buffer).await.unwrap();
 
         assert_eq!(
-            UserRepository::get(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap()
-                .used_bytes,
+            user_service.get(&pubkey).await.unwrap().used_bytes,
             test_data.len() as u64 + FILE_METADATA_SIZE
         );
     }
@@ -454,10 +428,10 @@ mod tests {
     async fn test_data_usage_above_quota() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
+        user_service.create_with_quota_mb(&pubkey, 1).await;
 
         let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024 * 1024 + 1];
@@ -471,13 +445,7 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            UserRepository::get(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap()
-                .used_bytes,
-            0
-        );
+        assert_eq!(user_service.get(&pubkey).await.unwrap().used_bytes, 0);
     }
 
     /// Override and existing entry and check if the data usage is updated correctly.
@@ -486,10 +454,10 @@ mod tests {
     async fn test_data_usage_override_existing_above_quota() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
+        let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        UserRepository::create_with_quota_mb(&db, &pubkey, 1).await;
+        user_service.create_with_quota_mb(&pubkey, 1).await;
 
         let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
         let test_data = vec![1u8; 1024];
@@ -510,10 +478,7 @@ mod tests {
         }
 
         assert_eq!(
-            UserRepository::get(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap()
-                .used_bytes,
+            user_service.get(&pubkey).await.unwrap().used_bytes,
             test_data.len() as u64 + FILE_METADATA_SIZE
         );
     }

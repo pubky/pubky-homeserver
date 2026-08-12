@@ -450,7 +450,8 @@ pub enum EntryIden {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::sql::{entities::user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
     use pubky_common::crypto::Keypair;
     use std::collections::HashSet;
 
@@ -461,7 +462,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
 
@@ -516,7 +518,8 @@ mod tests {
     async fn test_file_folder_collision_when_descendant_exists() {
         let db = SqlDb::test().await;
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub1/1.txt").await;
@@ -535,7 +538,8 @@ mod tests {
     async fn test_file_folder_collision_when_ancestor_file_exists() {
         let db = SqlDb::test().await;
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub1").await;
@@ -554,7 +558,8 @@ mod tests {
     async fn test_file_folder_collision_when_writing_directory_over_existing_file() {
         let db = SqlDb::test().await;
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub1").await;
@@ -574,7 +579,8 @@ mod tests {
     async fn test_file_folder_collision_allows_exact_overwrite() {
         let db = SqlDb::test().await;
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub1").await;
@@ -593,7 +599,8 @@ mod tests {
     async fn test_file_folder_collision_does_not_match_siblings() {
         let db = SqlDb::test().await;
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         create_entry_for_path(&db, user.id, "/test/sub11/file.txt").await;
@@ -612,11 +619,13 @@ mod tests {
     async fn test_file_folder_collision_is_scoped_to_user() {
         let db = SqlDb::test().await;
         let user_a_pubkey = Keypair::random().public_key();
-        let user_a = UserRepository::create(&user_a_pubkey, &mut db.pool().into())
+        let user_a = UserService::new(db.clone())
+            .create(&user_a_pubkey)
             .await
             .unwrap();
         let user_b_pubkey = Keypair::random().public_key();
-        UserRepository::create(&user_b_pubkey, &mut db.pool().into())
+        UserService::new(db.clone())
+            .create(&user_b_pubkey)
             .await
             .unwrap();
         create_entry_for_path(&db, user_a.id, "/test/sub1").await;
@@ -637,7 +646,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         // Test create entries
@@ -828,7 +838,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         // Test create entries
@@ -988,7 +999,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         // Test create entries
@@ -1147,7 +1159,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
         // Test create entries
@@ -1269,7 +1282,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
 

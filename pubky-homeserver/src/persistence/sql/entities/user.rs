@@ -25,7 +25,7 @@ const ALL_USER_COLUMNS: [UserIden; 11] = [
 ];
 
 /// Repository that handles all the queries regarding the UserEntity.
-pub struct UserRepository;
+pub(crate) struct UserRepository;
 
 impl UserRepository {
     /// Create a new user.
@@ -281,27 +281,6 @@ impl UserRepository {
         let con = executor.get_con().await?;
         sqlx::query_with(&query, values).execute(con).await?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-impl UserRepository {
-    /// Test helper: create a user with a storage quota in MB.
-    pub async fn create_with_quota_mb(
-        db: &crate::persistence::sql::SqlDb,
-        pubkey: &pubky_common::crypto::PublicKey,
-        quota_mb: u64,
-    ) -> UserEntity {
-        use crate::shared::user_quota::QuotaOverride;
-        let user = Self::create(pubkey, &mut db.pool().into()).await.unwrap();
-        let config = UserQuota {
-            storage_quota_mb: QuotaOverride::Value(quota_mb),
-            ..Default::default()
-        };
-        Self::set_quota(user.id, &config, &mut db.pool().into())
-            .await
-            .unwrap();
-        Self::get(pubkey, &mut db.pool().into()).await.unwrap()
     }
 }
 

@@ -32,9 +32,11 @@ impl AuthState {
                 context.sql_db.clone(),
                 context.keypair.public_key(),
                 signup_service.clone(),
+                context.user_service.clone(),
             ),
             cookie_auth_service: CookieAuthService::new(
                 context.sql_db.clone(),
+                context.user_service.clone(),
                 CookieAuthVerifier::default(),
                 signup_service,
             ),

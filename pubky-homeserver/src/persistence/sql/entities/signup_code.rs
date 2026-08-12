@@ -604,7 +604,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_signup_token_limits_applied_to_user() {
         use crate::data_directory::quota_config::BandwidthQuota;
-        use crate::persistence::sql::user::UserRepository;
+        use crate::services::user_service::UserService;
         use crate::shared::user_quota::QuotaOverride;
         use std::str::FromStr;
 
@@ -629,23 +629,24 @@ mod tests {
         // 2) Simulate the signup flow: create user, mark code used, apply limits
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
+        let user_service = UserService::new(db.clone());
         let mut tx = db.pool().begin().await.unwrap();
-        let user = UserRepository::create(&pubkey, &mut (&mut tx).into())
+        let user = user_service
+            .create_in_tx(&pubkey, &mut (&mut tx).into())
             .await
             .unwrap();
         SignupCodeRepository::mark_as_used(&code_id, &pubkey, &mut (&mut tx).into())
             .await
             .unwrap();
         let token_limits = code.quota();
-        UserRepository::set_quota(user.id, &token_limits, &mut (&mut tx).into())
+        user_service
+            .set_quota_in_tx(user.id, &token_limits, &mut (&mut tx).into())
             .await
             .unwrap();
         tx.commit().await.unwrap();
 
         // 3) Re-read from DB and verify limits were persisted
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         let user_quota = user.quota();
         assert_eq!(user_quota.storage_quota_mb, QuotaOverride::Value(1024));
         assert_eq!(user_quota.rate_read, QuotaOverride::Value(bw("200mb/m")));
@@ -656,7 +657,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_signup_token_write_paths_applied_to_user() {
-        use crate::persistence::sql::user::UserRepository;
+        use crate::services::user_service::UserService;
         use crate::shared::webdav::StoragePath;
 
         let db = SqlDb::test().await;
@@ -687,23 +688,24 @@ mod tests {
         // 2) Simulate signup flow: create user, mark code, apply limits
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
+        let user_service = UserService::new(db.clone());
         let mut tx = db.pool().begin().await.unwrap();
-        let user = UserRepository::create(&pubkey, &mut (&mut tx).into())
+        let user = user_service
+            .create_in_tx(&pubkey, &mut (&mut tx).into())
             .await
             .unwrap();
         SignupCodeRepository::mark_as_used(&code_id, &pubkey, &mut (&mut tx).into())
             .await
             .unwrap();
         let token_quota = code.quota();
-        UserRepository::set_quota(user.id, &token_quota, &mut (&mut tx).into())
+        user_service
+            .set_quota_in_tx(user.id, &token_quota, &mut (&mut tx).into())
             .await
             .unwrap();
         tx.commit().await.unwrap();
 
         // 3) Verify the user inherited the write path restrictions
-        let user = UserRepository::get(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.get(&pubkey).await.unwrap();
         let user_quota = user.quota();
         assert_eq!(
             user_quota.allowed_write_paths,

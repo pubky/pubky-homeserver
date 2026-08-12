@@ -280,7 +280,8 @@ mod tests {
         crypto::Keypair,
     };
 
-    use crate::persistence::sql::{entities::user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
 
     fn make_new_grant(user_id: i32) -> NewGrant {
         let now = chrono::Utc::now().timestamp() as u64;
@@ -300,7 +301,8 @@ mod tests {
     async fn test_create_and_get_grant() {
         let db = SqlDb::test().await;
         let keypair = Keypair::random();
-        let user = UserRepository::create(&keypair.public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&keypair.public_key())
             .await
             .unwrap();
 
@@ -333,7 +335,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_create_grant_is_idempotent() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 
@@ -351,7 +354,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_revoke_and_is_revoked() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 
@@ -387,7 +391,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_list_active_for_user() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 
@@ -428,7 +433,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_list_active_for_user_empty() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 
