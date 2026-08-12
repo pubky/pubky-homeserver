@@ -13,7 +13,7 @@ use crate::{
     observability::{Metrics, MetricsInitError},
     persistence::{
         files::{events::EventsService, FileIoError, FileService},
-        sql::{DatabaseMode, Migrator, PgEventListener, SqlDb},
+        sql::{Migrator, PgEventListener, SqlDb},
     },
     ConfigToml, DataDir,
 };
@@ -36,12 +36,9 @@ pub enum AppContextConversionError {
     /// Failed to open SQL DB.
     #[error("Failed to open SQL DB: {0}")]
     SqlDb(sqlx::Error),
-    /// Failed to resolve the database mode (e.g. invalid TEST_PUBKY_CONNECTION_STRING).
+    /// Failed to resolve the database mode (e.g. missing URL or invalid TEST_PUBKY_CONNECTION_STRING).
     #[error("Failed to resolve database mode: {0}")]
     DatabaseResolution(anyhow::Error),
-    /// No database URL was configured (production builds require an explicit URL).
-    #[error("No database_url configured. Set [general].database_url in config.toml.")]
-    NoDatabaseUrl,
     /// Failed to run migrations.
     #[error("Failed to run migrations: {0}")]
     Migrations(anyhow::Error),
@@ -157,7 +154,9 @@ impl AppContext {
             .read_or_create_keypair()
             .map_err(AppContextConversionError::Keypair)?;
 
-        let db_mode = Self::resolve_database_mode(&conf)?;
+        let db_mode = dir
+            .resolve_database_mode(&conf)
+            .map_err(AppContextConversionError::DatabaseResolution)?;
         let sql_db = SqlDb::connect(db_mode)
             .await
             .map_err(AppContextConversionError::SqlDb)?;
@@ -208,28 +207,6 @@ impl AppContext {
 }
 
 impl AppContext {
-    /// Resolve the [`DatabaseMode`] from config.
-    ///
-    /// - Production: `database_url` must be `Some`; always [`DatabaseMode::Direct`].
-    /// - Test builds: delegates to [`DatabaseMode::resolve_test`] which resolves
-    ///   `None` via env var or default, always returning [`DatabaseMode::EphemeralTest`].
-    fn resolve_database_mode(conf: &ConfigToml) -> Result<DatabaseMode, AppContextConversionError> {
-        #[cfg(any(test, feature = "testing"))]
-        {
-            DatabaseMode::resolve_test(conf.general.database_url.clone())
-                .map_err(AppContextConversionError::DatabaseResolution)
-        }
-
-        #[cfg(not(any(test, feature = "testing")))]
-        {
-            conf.general
-                .database_url
-                .clone()
-                .map(DatabaseMode::Direct)
-                .ok_or(AppContextConversionError::NoDatabaseUrl)
-        }
-    }
-
     /// Build the pkarr client builder based on the config.
     fn build_pkarr_builder_from_config(config_toml: &ConfigToml) -> pkarr::ClientBuilder {
         let mut builder = pkarr::ClientBuilder::default();

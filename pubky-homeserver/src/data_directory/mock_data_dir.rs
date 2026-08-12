@@ -56,6 +56,13 @@ impl DataDir for MockDataDir {
         self.temp_dir.path()
     }
 
+    fn resolve_database_mode(
+        &self,
+        conf: &super::ConfigToml,
+    ) -> anyhow::Result<crate::persistence::sql::DatabaseMode> {
+        crate::persistence::sql::DatabaseMode::resolve_test(conf.general.database_url.clone())
+    }
+
     fn ensure_data_dir_exists_and_is_writable(&self) -> anyhow::Result<()> {
         Ok(()) // Always ok because this is validated by the tempfile crate.
     }
