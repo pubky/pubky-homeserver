@@ -119,7 +119,7 @@ impl SqlDb {
     /// Create a test database without running migrations.
     #[cfg(test)]
     pub async fn test_without_migrations() -> Self {
-        let mode = DatabaseMode::resolve_test(None);
+        let mode = DatabaseMode::resolve_test(None).expect("Failed to resolve test database mode");
         Self::connect(mode)
             .await
             .expect("Failed to create test database")
@@ -145,7 +145,7 @@ impl SqlDb {
     ) -> Self {
         use uuid::Uuid;
 
-        let mode = DatabaseMode::resolve_test(None);
+        let mode = DatabaseMode::resolve_test(None).expect("Failed to resolve test database mode");
         let admin_url = match mode {
             DatabaseMode::EphemeralTest(url) => url,
             DatabaseMode::Direct(url) => url,
@@ -189,7 +189,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn pg_db_available() {
-        let mode = DatabaseMode::resolve_test(None);
+        let mode = DatabaseMode::resolve_test(None).unwrap();
         let _db = SqlDb::connect(mode).await.unwrap();
     }
 }

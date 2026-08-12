@@ -36,6 +36,9 @@ pub enum AppContextConversionError {
     /// Failed to open SQL DB.
     #[error("Failed to open SQL DB: {0}")]
     SqlDb(sqlx::Error),
+    /// Failed to resolve the database mode (e.g. invalid TEST_PUBKY_CONNECTION_STRING).
+    #[error("Failed to resolve database mode: {0}")]
+    DatabaseResolution(anyhow::Error),
     /// No database URL was configured (production builds require an explicit URL).
     #[error("No database_url configured. Set [general].database_url in config.toml.")]
     NoDatabaseUrl,
@@ -177,9 +180,8 @@ impl AppContext {
     fn resolve_database_mode(conf: &ConfigToml) -> Result<DatabaseMode, AppContextConversionError> {
         #[cfg(any(test, feature = "testing"))]
         {
-            Ok(DatabaseMode::resolve_test(
-                conf.general.database_url.clone(),
-            ))
+            DatabaseMode::resolve_test(conf.general.database_url.clone())
+                .map_err(AppContextConversionError::DatabaseResolution)
         }
 
         #[cfg(not(any(test, feature = "testing")))]

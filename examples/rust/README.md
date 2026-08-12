@@ -21,7 +21,7 @@ docker run --name pubky-postgres \
   -d postgres:18
 
 # Start the testnet (keep this terminal open)
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo run -p pubky-testnet
 ```
 
