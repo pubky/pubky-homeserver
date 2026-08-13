@@ -12,6 +12,13 @@ impl PubkyHttpClient {
         let Some(path) = url.path().strip_prefix("/storage/") else {
             return Ok(RequestAddressing::Standard);
         };
+        let Some(host) = url.host_str() else {
+            return Ok(RequestAddressing::Standard);
+        };
+        let transport_host = host.strip_prefix("_pubky.").unwrap_or(host);
+        if PublicKey::try_from_z32(transport_host).is_err() {
+            return Ok(RequestAddressing::Standard);
+        }
         let (owner, path) = path
             .split_once('/')
             .ok_or_else(|| RequestError::Validation {
@@ -96,18 +103,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_storage_owner_and_resource_path() {
+    async fn ignores_storage_paths_on_regular_hosts() {
         let client = PubkyHttpClient::builder()
             .isolated_pkarr_test()
             .build()
             .unwrap();
+        let owner = Keypair::random().public_key();
 
         for url in [
             "https://example.com/storage/not-a-key/pub/file.txt",
-            "https://example.com/storage/missing-path",
+            &format!("https://example.com/storage/{}/pub/file.txt", owner.z32()),
+        ] {
+            let mut url = Url::parse(url).unwrap();
+            let original = url.clone();
+
+            let addressing = client.prepare_request_addressing(&mut url).await.unwrap();
+
+            assert_eq!(addressing, RequestAddressing::Standard);
+            assert_eq!(url, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn validates_storage_owner_and_resource_path_on_pubky_hosts() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let homeserver = Keypair::random().public_key();
+
+        for url in [
+            format!(
+                "https://{}/storage/not-a-key/pub/file.txt",
+                homeserver.z32()
+            ),
+            format!("https://{}/storage/missing-path", homeserver.z32()),
         ] {
             client
-                .prepare_request_addressing(&mut Url::parse(url).unwrap())
+                .prepare_request_addressing(&mut Url::parse(&url).unwrap())
                 .await
                 .unwrap_err();
         }

@@ -138,6 +138,43 @@ test("fetch merges plain object headers", async (t) => {
   t.end();
 });
 
+test("ordinary HTTP storage paths remain untouched", async (t) => {
+  const client = Client.testnet();
+  const owner = Keypair.random().publicKey.z32();
+  const originalFetch = globalThis.fetch;
+  const requests: Request[] = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    requests.push(request);
+    const response = new Response(null, { status: 204 });
+    Object.defineProperty(response, "url", { value: request.url });
+    return response;
+  }) as typeof fetch;
+
+  try {
+    await client.fetch("https://example.com/storage/images/logo.png");
+    await client.fetch(`https://example.com/storage/${owner}/pub/file.txt`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  t.equal(requests.length, 2, "only the requested resources were fetched");
+  t.equal(
+    requests[0].url,
+    "https://example.com/storage/images/logo.png",
+    "ordinary storage path preserved",
+  );
+  t.equal(
+    requests[1].url,
+    `https://example.com/storage/${owner}/pub/file.txt`,
+    "z32 storage segment preserved on an ordinary host",
+  );
+  t.equal(requests[0].headers.get("pubky-host"), null, "pubky-host omitted");
+  t.equal(requests[1].headers.get("pubky-host"), null, "pubky-host omitted for z32 path");
+  t.end();
+});
+
 test("path-addressed storage omits pubky-host", async (t) => {
   const client = Client.testnet();
   const owner = Keypair.random().publicKey.z32();

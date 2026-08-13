@@ -1,16 +1,20 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
+use web_time::Instant;
 
 use crate::{Pkdns, PubkyHttpClient, PublicKey};
 
 const MAX_INFO_BYTES: usize = 16 * 1024;
-type FeatureCell = Arc<OnceCell<Vec<String>>>;
+const INFO_TIMEOUT: Duration = Duration::from_secs(5);
+const FAILED_INFO_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+type FeatureCell = Arc<AsyncMutex<Option<CachedFeatures>>>;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HomeserverFeatures {
@@ -20,6 +24,22 @@ pub(crate) struct HomeserverFeatures {
 #[derive(Deserialize)]
 struct InfoResponse {
     features: Vec<String>,
+}
+
+#[derive(Debug)]
+enum CachedFeatures {
+    Available(Vec<String>),
+    UnavailableUntil(Instant),
+}
+
+impl CachedFeatures {
+    fn current(&self) -> Option<&[String]> {
+        match self {
+            Self::Available(features) => Some(features),
+            Self::UnavailableUntil(retry_at) if Instant::now() < *retry_at => Some(&[]),
+            Self::UnavailableUntil(_) => None,
+        }
+    }
 }
 
 impl HomeserverFeatures {
@@ -41,10 +61,9 @@ impl HomeserverFeatures {
             };
             homeserver
         };
-        let cell = self.cell(&homeserver);
-        let features = cell.get_or_init(|| Self::fetch(client, &homeserver)).await;
 
-        features.iter().any(|candidate| candidate == feature)
+        self.supports_for(&homeserver, feature, || Self::fetch(client, &homeserver))
+            .await
     }
 
     fn cell(&self, homeserver: &PublicKey) -> FeatureCell {
@@ -52,25 +71,47 @@ impl HomeserverFeatures {
         Arc::clone(servers.entry(homeserver.clone()).or_default())
     }
 
-    async fn fetch(client: &PubkyHttpClient, homeserver: &PublicKey) -> Vec<String> {
-        let Ok(request) = client.homeserver_info_request(homeserver).await else {
-            return Vec::new();
+    async fn supports_for<F, Fut>(&self, homeserver: &PublicKey, feature: &str, fetch: F) -> bool
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Option<Vec<String>>>,
+    {
+        let cell = self.cell(homeserver);
+        let mut cached = cell.lock().await;
+        if let Some(features) = cached.as_ref().and_then(CachedFeatures::current) {
+            return features.iter().any(|candidate| candidate == feature);
+        }
+
+        let Some(features) = fetch().await else {
+            *cached = Some(CachedFeatures::UnavailableUntil(
+                Instant::now() + FAILED_INFO_RETRY_INTERVAL,
+            ));
+            return false;
         };
-        let Ok(response) = request.send().await else {
-            return Vec::new();
+        let supports = features.iter().any(|candidate| candidate == feature);
+        *cached = Some(CachedFeatures::Available(features));
+        supports
+    }
+
+    async fn fetch(client: &PubkyHttpClient, homeserver: &PublicKey) -> Option<Vec<String>> {
+        let Ok(request) = client.homeserver_info_request(homeserver).await else {
+            return None;
+        };
+        let Ok(response) = request.timeout(INFO_TIMEOUT).send().await else {
+            return None;
         };
         if !response.status().is_success() {
-            return Vec::new();
+            return None;
         }
 
         let mut body = Vec::new();
         let mut chunks = response.bytes_stream();
         while let Some(chunk) = chunks.next().await {
             let Ok(chunk) = chunk else {
-                return Vec::new();
+                return None;
             };
             if !Self::append_chunk(&mut body, &chunk) {
-                return Vec::new();
+                return None;
             }
         }
 
@@ -86,16 +127,25 @@ impl HomeserverFeatures {
         true
     }
 
-    fn decode(body: &[u8]) -> Vec<String> {
+    fn decode(body: &[u8]) -> Option<Vec<String>> {
         serde_json::from_slice::<InfoResponse>(body)
-            .map_or_else(|_error| Vec::new(), |response| response.features)
+            .map(|response| response.features)
+            .ok()
     }
 
     #[cfg(test)]
     pub(super) fn insert(&self, homeserver: &PublicKey, features: &[&str]) {
-        self.cell(homeserver)
-            .set(features.iter().map(ToString::to_string).collect())
-            .expect("homeserver features were already initialized");
+        let cell = self.cell(homeserver);
+        let mut cached = cell
+            .try_lock()
+            .expect("homeserver features are not being initialized");
+        assert!(
+            cached.is_none(),
+            "homeserver features were already initialized"
+        );
+        *cached = Some(CachedFeatures::Available(
+            features.iter().map(ToString::to_string).collect(),
+        ));
     }
 }
 
@@ -111,20 +161,20 @@ mod tests {
         let cases = [
             (
                 br#"{"features":["path-addressed-storage","unknown"]}"#.as_slice(),
-                true,
+                Some(true),
             ),
-            (br#"{"features":[]}"#, false),
-            (br#"{"features":["unknown"]}"#, false),
-            (br#"{"features":{}}"#, false),
-            (br"{}", false),
-            (b"not json", false),
+            (br#"{"features":[]}"#, Some(false)),
+            (br#"{"features":["unknown"]}"#, Some(false)),
+            (br#"{"features":{}}"#, None),
+            (br"{}", None),
+            (b"not json", None),
         ];
 
         for (body, expected) in cases {
             assert_eq!(
-                HomeserverFeatures::decode(body)
+                HomeserverFeatures::decode(body).map(|features| features
                     .iter()
-                    .any(|candidate| candidate == PATH_ADDRESSED_STORAGE),
+                    .any(|candidate| candidate == PATH_ADDRESSED_STORAGE)),
                 expected,
                 "body={}",
                 String::from_utf8_lossy(body)
@@ -142,37 +192,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stores_negative_results_and_coalesces_feature_fetches() {
+    async fn temporarily_stores_failures_and_coalesces_feature_fetches() {
         let discovery = HomeserverFeatures::default();
         let homeserver = crate::Keypair::random().public_key();
-        let cell = discovery.cell(&homeserver);
         let calls = Arc::new(AtomicUsize::new(0));
 
         let first_calls = Arc::clone(&calls);
-        let first = cell.get_or_init(|| async move {
+        let first = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             first_calls.fetch_add(1, Ordering::Relaxed);
             tokio::task::yield_now().await;
-            Vec::new()
+            None
         });
         let second_calls = Arc::clone(&calls);
-        let second = cell.get_or_init(|| async move {
+        let second = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             second_calls.fetch_add(1, Ordering::Relaxed);
-            vec![PATH_ADDRESSED_STORAGE.to_string()]
+            Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
         });
 
         let (first, second) = tokio::join!(first, second);
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert!(first.is_empty());
-        assert!(second.is_empty());
+        assert!(!first);
+        assert!(!second);
 
-        let cached = cell
-            .get_or_init(|| async {
+        let cached = discovery
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
-                Vec::new()
+                Some(Vec::new())
             })
             .await;
-        assert!(cached.is_empty());
+        assert!(!cached);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_expired_failures() {
+        let discovery = HomeserverFeatures::default();
+        let homeserver = crate::Keypair::random().public_key();
+        let cell = discovery.cell(&homeserver);
+        *cell.lock().await = Some(CachedFeatures::UnavailableUntil(Instant::now()));
+
+        let supported = discovery
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
+            })
+            .await;
+
+        assert!(supported);
     }
 }
