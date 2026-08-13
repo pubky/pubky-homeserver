@@ -64,6 +64,10 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_server(context: &crate::AppContext) -> axum_test::TestServer {
+        axum_test::TestServer::new(super::app::create_app(Self::new(context))).unwrap()
+    }
 }
 
 fn pkarr_pubky_tls_address(config: &ConfigToml) -> Option<String> {

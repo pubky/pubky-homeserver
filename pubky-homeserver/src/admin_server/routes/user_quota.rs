@@ -78,27 +78,11 @@ mod tests {
     use pubky_common::crypto::Keypair;
 
     use super::*;
-    use crate::admin_server::app::create_app;
     use crate::data_directory::quota_config::BandwidthQuota;
-
     use crate::AppContext;
 
     fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(AppState::new(context))).unwrap()
-    }
-
-    /// Create a test server with system-wide defaults configured.
-    fn create_test_server_with_defaults(context: &AppContext) -> TestServer {
-        use crate::data_directory::DefaultQuotasToml;
-
-        let mut state = AppState::new(context);
-        state.default_storage_mb = Some(100);
-        state.default_quotas = DefaultQuotasToml {
-            rate_read: Some(BandwidthQuota::from_str("10mb/s").unwrap()),
-            rate_write: Some(BandwidthQuota::from_str("5mb/s").unwrap()),
-            ..Default::default()
-        };
-        TestServer::new(create_app(state)).unwrap()
+        AppState::test_server(context)
     }
 
     #[tokio::test]
@@ -180,8 +164,13 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_get_effective_resolves_defaults() {
-        let context = AppContext::test().await;
-        let server = create_test_server_with_defaults(&context);
+        let context = AppContext::test_with_config(|c| {
+            c.storage.default_quota_mb = Some(100);
+            c.default_quotas.rate_read = Some(BandwidthQuota::from_str("10mb/s").unwrap());
+            c.default_quotas.rate_write = Some(BandwidthQuota::from_str("5mb/s").unwrap());
+        })
+        .await;
+        let server = create_test_server(&context);
         let pubkey = Keypair::random().public_key();
 
         context.user_service.create(&pubkey).await.unwrap();

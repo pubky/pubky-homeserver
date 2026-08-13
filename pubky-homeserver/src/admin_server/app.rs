@@ -188,8 +188,7 @@ mod tests {
     }
 
     fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(AppState::new(context)))
-        .unwrap()
+        AppState::test_server(context)
     }
 
     /// Seed `paths` as PUT events for a fresh random user, returning that user's pubkey.
@@ -508,8 +507,7 @@ mod tests {
     async fn test_dav_put_quota_overflow_returns_500() {
         use pubky_common::crypto::Keypair;
 
-        let context =
-            AppContext::test_with_config(|c| c.storage.default_quota_mb = Some(1)).await;
+        let context = AppContext::test_with_config(|c| c.storage.default_quota_mb = Some(1)).await;
         let server = create_test_server(&context);
         let auth_value = auth_header();
 

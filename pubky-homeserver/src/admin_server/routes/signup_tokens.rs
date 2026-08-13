@@ -82,14 +82,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        admin_server::app::create_app,
         persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
         shared::user_quota::UserQuota,
         AppContext,
     };
 
     fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(AppState::new(context))).unwrap()
+        AppState::test_server(context)
     }
 
     #[tokio::test]
