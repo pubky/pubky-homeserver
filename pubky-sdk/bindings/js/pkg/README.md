@@ -417,7 +417,7 @@ Path rules:
 
 **Convention:** put your app’s public data under a domain-like folder in `/pub`, e.g. `/pub/my-new-app/`.
 
-See [Private Storage](https://github.com/pubky/pubky-core/blob/main/docs/PRIVATE_STORAGE.md) for `/priv/` access and events.
+See [Private Storage](https://github.com/pubky/pubky-homeserver/blob/main/docs/PRIVATE_STORAGE.md) for `/priv/` access and events.
 
 ---
 
