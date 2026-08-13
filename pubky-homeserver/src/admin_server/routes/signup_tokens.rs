@@ -83,27 +83,13 @@ mod tests {
     use super::*;
     use crate::{
         admin_server::app::create_app,
-        persistence::{
-            files::FileService,
-            sql::signup_code::{SignupCode, SignupCodeRepository},
-        },
+        persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
         shared::user_quota::UserQuota,
         AppContext,
     };
 
     fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(
-            AppState::new(
-                context.sql_db.clone(),
-                FileService::new_from_context(context).unwrap(),
-                "",
-                context.user_service.clone(),
-                context.events_service.clone(),
-                context.metrics.clone(),
-            ),
-            "test",
-        ))
-        .unwrap()
+        TestServer::new(create_app(AppState::new(context))).unwrap()
     }
 
     #[tokio::test]

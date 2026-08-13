@@ -80,43 +80,25 @@ mod tests {
     use super::*;
     use crate::admin_server::app::create_app;
     use crate::data_directory::quota_config::BandwidthQuota;
-    use crate::persistence::files::FileService;
+
     use crate::AppContext;
 
     fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(
-            AppState::new(
-                context.sql_db.clone(),
-                FileService::new_from_context(context).unwrap(),
-                "",
-                context.user_service.clone(),
-                context.events_service.clone(),
-                context.metrics.clone(),
-            ),
-            "test",
-        ))
-        .unwrap()
+        TestServer::new(create_app(AppState::new(context))).unwrap()
     }
 
     /// Create a test server with system-wide defaults configured.
     fn create_test_server_with_defaults(context: &AppContext) -> TestServer {
         use crate::data_directory::DefaultQuotasToml;
 
-        let mut state = AppState::new(
-            context.sql_db.clone(),
-            FileService::new_from_context(context).unwrap(),
-            "",
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        );
+        let mut state = AppState::new(context);
         state.default_storage_mb = Some(100);
         state.default_quotas = DefaultQuotasToml {
             rate_read: Some(BandwidthQuota::from_str("10mb/s").unwrap()),
             rate_write: Some(BandwidthQuota::from_str("5mb/s").unwrap()),
             ..Default::default()
         };
-        TestServer::new(create_app(state, "test")).unwrap()
+        TestServer::new(create_app(state)).unwrap()
     }
 
     #[tokio::test]

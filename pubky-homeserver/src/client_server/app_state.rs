@@ -24,6 +24,21 @@ pub(crate) struct AppState {
     pub(crate) default_storage_mb: Option<u64>,
 }
 
+impl AppState {
+    pub(crate) fn new(context: &crate::AppContext) -> Self {
+        Self {
+            auth_state: super::auth::AuthState::new(context),
+            sql_db: context.sql_db.clone(),
+            file_service: context.file_service.clone(),
+            signup_mode: context.config_toml.general.signup_mode.clone(),
+            metrics: context.metrics.clone(),
+            events_service: context.events_service.clone(),
+            user_service: context.user_service.clone(),
+            default_storage_mb: context.config_toml.storage.default_quota_mb,
+        }
+    }
+}
+
 impl FromRef<AppState> for AuthState {
     fn from_ref(state: &AppState) -> Self {
         state.auth_state.clone()

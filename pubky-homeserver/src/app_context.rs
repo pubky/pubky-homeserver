@@ -102,6 +102,17 @@ impl AppContext {
             .expect("failed to build AppContext from DataDirMock")
     }
 
+    /// Create a new AppContext for testing with custom config overrides.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn test_with_config(f: impl FnOnce(&mut ConfigToml)) -> Self {
+        let mut config = ConfigToml::default_test_config();
+        f(&mut config);
+        let data_dir = MockDataDir::new(config, None).expect("failed to create MockDataDir");
+        Self::read_from(data_dir)
+            .await
+            .expect("failed to build AppContext from DataDirMock")
+    }
+
     /// Create a new AppContext from a data directory.
     pub async fn read_from<D: DataDir + 'static>(
         dir: D,

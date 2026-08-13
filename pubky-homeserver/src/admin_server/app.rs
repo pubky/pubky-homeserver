@@ -47,11 +47,8 @@ fn create_public_router() -> Router<AppState> {
 }
 
 /// Create the app
-pub(crate) fn create_app(
-    state: AppState,
-    password: &str,
-) -> axum::routing::IntoMakeService<Router> {
-    let admin_router = create_protected_router(password);
+pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Router> {
+    let admin_router = create_protected_router(&state.admin_password);
     let public_router = create_public_router();
     let app = Router::new()
         .merge(admin_router)
@@ -113,22 +110,9 @@ impl AdminServer {
 
     /// Run the admin server.
     pub async fn start(context: &AppContext) -> Result<Self, AdminServerBuildError> {
-        let password = context.config_toml.admin.admin_password.clone();
-        let state = AppState::new(
-            context.sql_db.clone(),
-            context.file_service.clone(),
-            &password,
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        )
-        .with_metadata_from_config(
-            context.keypair.public_key().z32(),
-            &context.config_toml,
-            env!("CARGO_PKG_VERSION"),
-        );
+        let state = AppState::new(context);
         let socket = context.config_toml.admin.listen_socket;
-        let app = create_app(state, password.as_str());
+        let app = create_app(state);
         let listener = std::net::TcpListener::bind(socket)
             .map_err(|e| AdminServerBuildError::Server(e.into()))?;
         listener
@@ -152,7 +136,7 @@ impl AdminServer {
             http_handle,
             socket,
             join_handle,
-            password,
+            password: context.config_toml.admin.admin_password.clone(),
         })
     }
 
@@ -194,7 +178,6 @@ mod tests {
     use pubky_common::crypto::Keypair;
 
     use crate::data_directory::quota_config::BandwidthQuota;
-    use crate::persistence::files::FileService;
     use crate::persistence::sql::signup_code::{SignupCode, SignupCodeRepository};
     use crate::shared::user_quota::UserQuota;
 
@@ -205,17 +188,7 @@ mod tests {
     }
 
     fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(
-            AppState::new(
-                context.sql_db.clone(),
-                FileService::new_from_context(context).unwrap(),
-                "",
-                context.user_service.clone(),
-                context.events_service.clone(),
-                context.metrics.clone(),
-            ),
-            "test",
-        ))
+        TestServer::new(create_app(AppState::new(context)))
         .unwrap()
     }
 
@@ -433,8 +406,7 @@ mod tests {
     }
 
     fn auth_header() -> String {
-        // AppState is created with password "" in create_test_server
-        let auth = base64::engine::general_purpose::STANDARD.encode("admin:");
+        let auth = base64::engine::general_purpose::STANDARD.encode("admin:test");
         format!("Basic {auth}")
     }
 
@@ -536,8 +508,8 @@ mod tests {
     async fn test_dav_put_quota_overflow_returns_500() {
         use pubky_common::crypto::Keypair;
 
-        let mut context = AppContext::test().await;
-        context.config_toml.storage.default_quota_mb = Some(1);
+        let context =
+            AppContext::test_with_config(|c| c.storage.default_quota_mb = Some(1)).await;
         let server = create_test_server(&context);
         let auth_value = auth_header();
 

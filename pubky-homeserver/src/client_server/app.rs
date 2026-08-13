@@ -112,16 +112,7 @@ impl ClientServer {
     pub(crate) fn create_router(
         context: &AppContext,
     ) -> std::result::Result<Router, ClientServerBuildError> {
-        let state = AppState {
-            auth_state: auth::AuthState::new(context),
-            sql_db: context.sql_db.clone(),
-            file_service: context.file_service.clone(),
-            signup_mode: context.config_toml.general.signup_mode.clone(),
-            metrics: context.metrics.clone(),
-            events_service: context.events_service.clone(),
-            user_service: context.user_service.clone(),
-            default_storage_mb: context.config_toml.storage.default_quota_mb,
-        };
+        let state = AppState::new(context);
         super::create_app(state.clone(), context)
     }
 
@@ -270,24 +261,22 @@ mod tests {
         app_context::AppContext,
         client_server::ClientServer,
         quota_config::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
-        ConfigToml, MockDataDir,
     };
 
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn middleware_dependencies_support_cookie_auth_and_user_rate_limits() {
-        let mut config = ConfigToml::minimal_test_config();
-        config.drive.rate_limits = vec![PathLimit {
-            path: GlobPattern::new("/session"),
-            method: HttpMethod(Method::GET),
-            quota: "1r/m".parse().unwrap(),
-            key: LimitKeyType::User,
-            burst: None,
-            whitelist: Vec::new(),
-        }];
-
-        let data_dir = MockDataDir::new(config, None).unwrap();
-        let context = AppContext::read_from(data_dir).await.unwrap();
+        let context = AppContext::test_with_config(|c| {
+            c.drive.rate_limits = vec![PathLimit {
+                path: GlobPattern::new("/session"),
+                method: HttpMethod(Method::GET),
+                quota: "1r/m".parse().unwrap(),
+                key: LimitKeyType::User,
+                burst: None,
+                whitelist: Vec::new(),
+            }];
+        })
+        .await;
         let router = ClientServer::create_router(&context).unwrap();
         let server = TestServer::new(router).unwrap();
         let user = Keypair::random();

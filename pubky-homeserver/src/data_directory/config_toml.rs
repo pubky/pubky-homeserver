@@ -253,6 +253,7 @@ impl ConfigToml {
         config.drive.pubky_listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
         config.admin.enabled = true; // Enabled for backward compat
         config.admin.listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
+        config.admin.admin_password = "test".to_string();
         config.pkdns.icann_domain =
             Some(Domain::from_str("localhost").expect("localhost is a valid domain"));
         config.pkdns.dht_relay_nodes = None;

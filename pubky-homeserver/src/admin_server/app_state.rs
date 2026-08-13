@@ -36,14 +36,8 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        sql_db: SqlDb,
-        file_service: FileService,
-        admin_password: &str,
-        user_service: UserService,
-        events_service: EventsService,
-        metrics: Metrics,
-    ) -> Self {
+    pub fn new(context: &crate::AppContext) -> Self {
+        let file_service = context.file_service.clone();
         let webdavfs = OpendalFs::new(file_service.opendal.admin_operator.clone());
         let inner_dav_handler = DavHandler::builder()
             .filesystem(webdavfs)
@@ -52,35 +46,24 @@ impl AppState {
             .autoindex(true)
             .build_handler();
         Self {
-            sql_db,
+            sql_db: context.sql_db.clone(),
             file_service,
-            admin_password: admin_password.to_string(),
+            admin_password: context.config_toml.admin.admin_password.clone(),
             inner_dav_handler,
-            metadata: AdminMetadata::default(),
-            user_service,
-            events_service,
-            metrics,
-            default_storage_mb: None,
-            default_quotas: DefaultQuotasToml::default(),
+            metadata: AdminMetadata {
+                public_key: context.keypair.public_key().z32(),
+                pkarr_pubky_address: pkarr_pubky_tls_address(&context.config_toml),
+                pkarr_icann_domain: pkarr_icann_domain(&context.config_toml),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            user_service: context.user_service.clone(),
+            events_service: context.events_service.clone(),
+            metrics: context.metrics.clone(),
+            default_storage_mb: context.config_toml.storage.default_quota_mb,
+            default_quotas: context.config_toml.default_quotas.clone(),
         }
     }
 
-    pub fn with_metadata_from_config(
-        mut self,
-        public_key: String,
-        config: &ConfigToml,
-        version: &str,
-    ) -> Self {
-        self.metadata = AdminMetadata {
-            public_key,
-            pkarr_pubky_address: pkarr_pubky_tls_address(config),
-            pkarr_icann_domain: pkarr_icann_domain(config),
-            version: version.to_string(),
-        };
-        self.default_storage_mb = config.storage.default_quota_mb;
-        self.default_quotas = config.default_quotas.clone();
-        self
-    }
 }
 
 fn pkarr_pubky_tls_address(config: &ConfigToml) -> Option<String> {

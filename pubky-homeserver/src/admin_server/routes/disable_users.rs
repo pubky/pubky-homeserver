@@ -40,7 +40,7 @@ pub async fn enable_user(
 mod tests {
     use super::super::super::app_state::AppState;
     use super::*;
-    use crate::{persistence::files::FileService, AppContext};
+    use crate::AppContext;
     use axum::routing::post;
     use axum::Router;
     use pubky_common::crypto::Keypair;
@@ -59,14 +59,7 @@ mod tests {
         assert!(!user.disabled);
 
         // Setup server
-        let app_state = AppState::new(
-            context.sql_db.clone(),
-            FileService::new_from_context(&context).unwrap(),
-            "",
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        );
+        let app_state = AppState::new(&context);
         let router = Router::new()
             .route("/users/{pubkey}/disable", post(disable_user))
             .route("/users/{pubkey}/enable", post(enable_user))
