@@ -1,8 +1,8 @@
 //! HTTP methods that support `https://` with Pkarr domains, including `_pubky.<pk>` URLs
 
-use super::{RequestAddressing, homeserver_url, is_path_addressed_storage};
+use super::{TransportHost, classify_transport_host, homeserver_url};
 use crate::PublicKey;
-use crate::errors::{PkarrError, RequestError, Result};
+use crate::errors::{PkarrError, Result};
 use crate::{PubkyHttpClient, cross_log};
 use futures_lite::StreamExt;
 use pkarr::dns::rdata::SVCParam;
@@ -17,20 +17,6 @@ enum AmbientCredentials {
 }
 
 impl PubkyHttpClient {
-    fn attach_pubky_host(
-        request: RequestBuilder,
-        url: &Url,
-        pubky_host: Option<String>,
-    ) -> RequestBuilder {
-        if let Some(pubky_host) = pubky_host
-            && !is_path_addressed_storage(url)
-        {
-            request.header("pubky-host", pubky_host)
-        } else {
-            request
-        }
-    }
-
     /// A wrapper around [`PubkyHttpClient::request`], with the same signature between native and WASM.
     pub(crate) async fn cross_request<T: IntoUrl>(
         &self,
@@ -51,7 +37,7 @@ impl PubkyHttpClient {
             .await
     }
 
-    /// Route through `homeserver` while addressing `pubky_host`.
+    /// Route an authority-addressed endpoint through `homeserver` for `pubky_host`.
     pub(crate) async fn cross_request_via_homeserver(
         &self,
         method: Method,
@@ -60,17 +46,13 @@ impl PubkyHttpClient {
         path: &str,
     ) -> Result<RequestBuilder> {
         let mut url = homeserver_url(homeserver, path)?;
-        self.prepare_request(&mut url).await?;
+        self.prepare_transport_request(&mut url).await?;
 
-        let request = self
+        Ok(self
             .http
             .request(method, url.clone())
-            .fetch_credentials_include();
-        Ok(Self::attach_pubky_host(
-            request,
-            &url,
-            Some(pubky_host.z32()),
-        ))
+            .fetch_credentials_include()
+            .header("pubky-host", pubky_host.z32()))
     }
 
     pub(super) async fn homeserver_info_request(
@@ -93,63 +75,30 @@ impl PubkyHttpClient {
         let original_url = url.as_str();
         let mut url = Url::parse(original_url)?;
 
-        let pubky_host = self.prepare_request(&mut url).await?;
+        let prepared = self.prepare_fetch(&mut url).await?;
 
         let request = self.http.request(method, url.clone());
-        let builder = match credentials {
+        let request = match credentials {
             AmbientCredentials::Include => request.fetch_credentials_include(),
             AmbientCredentials::Omit => request.fetch_credentials_omit(),
         };
 
-        Ok(Self::attach_pubky_host(builder, &url, pubky_host))
-    }
-
-    /// Prepare a URL for transport and return its `pubky-host` value when applicable.
-    ///
-    /// # Errors
-    /// Returns a validation or resolution error if the URL cannot be prepared.
-    pub async fn prepare_request(&self, url: &mut Url) -> Result<Option<String>> {
-        let addressing = self.prepare_request_addressing(url).await?;
-        let pubky_host = self.prepare_transport_request(url).await?;
-
-        Ok(match addressing {
-            RequestAddressing::LegacyStorage { owner } => Some(owner),
-            RequestAddressing::Standard | RequestAddressing::PathAddressedStorage => pubky_host,
+        Ok(match prepared.pubky_host_header {
+            Some(pubky_host) => request.header("pubky-host", pubky_host),
+            None => request,
         })
     }
 
-    async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
-        let host = url.host_str().unwrap_or("").to_string();
+    pub(super) async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
+        let public_key = match classify_transport_host(url.host_str().unwrap_or_default())? {
+            TransportHost::PubkyQname(public_key) | TransportHost::BarePublicKey(public_key) => {
+                public_key
+            }
+            TransportHost::Other => return Ok(None),
+        };
 
-        let mut pubky_host = None;
-
-        if let Some(stripped) = host.strip_prefix("_pubky.") {
-            if PublicKey::is_pubky_prefixed(stripped) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(stripped).is_ok() {
-                self.transform_url(url).await?;
-                pubky_host = Some(stripped.to_string());
-            }
-        } else {
-            if PublicKey::is_pubky_prefixed(&host) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(&host).is_ok() {
-                self.transform_url(url).await?;
-                pubky_host = Some(host);
-            }
-        }
-
-        Ok(pubky_host)
+        self.transform_url(url).await?;
+        Ok(Some(public_key.z32()))
     }
 
     async fn transform_url(&self, url: &mut Url) -> Result<()> {
@@ -262,43 +211,6 @@ mod tests {
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
-
-    #[wasm_bindgen_test]
-    fn storage_request_preserves_path_and_query_without_pubky_host() {
-        let client = PubkyHttpClient::new().unwrap();
-        let owner = Keypair::random().public_key().z32();
-        let url = Url::parse(&format!(
-            "https://example.com/storage/{owner}/pub/file.txt?cursor=hello%20world"
-        ))
-        .unwrap();
-        let request = PubkyHttpClient::attach_pubky_host(
-            client.http.request(Method::GET, url.clone()),
-            &url,
-            Some(owner),
-        )
-        .build()
-        .unwrap();
-
-        assert!(request.headers().get("pubky-host").is_none());
-        assert!(request.url().path().starts_with("/storage/"));
-        assert_eq!(request.url().query(), Some("cursor=hello%20world"));
-    }
-
-    #[wasm_bindgen_test]
-    fn cookie_session_request_keeps_pubky_host() {
-        let client = PubkyHttpClient::new().unwrap();
-        let owner = Keypair::random().public_key().z32();
-        let url = Url::parse("https://example.com/session").unwrap();
-        let request = PubkyHttpClient::attach_pubky_host(
-            client.http.request(Method::POST, url.clone()),
-            &url,
-            Some(owner.clone()),
-        )
-        .build()
-        .unwrap();
-
-        assert_eq!(request.headers().get("pubky-host").unwrap(), &owner);
-    }
 
     #[wasm_bindgen_test(async)]
     async fn transform_url_errors_when_no_domain_is_found() {

@@ -1,23 +1,37 @@
 use url::Url;
 
-use super::RequestAddressing;
-use crate::{PubkyHttpClient, PublicKey, Result, errors::RequestError};
+use super::{TransportHost, classify_transport_host};
+use crate::{Pkdns, PubkyHttpClient, PublicKey, Result, errors::RequestError};
 use pubky_common::constants::features::PATH_ADDRESSED_STORAGE;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum StorageAddressing {
+    Standard,
+    PathAddressedStorage,
+    LegacyStorage { owner: String },
+}
+
+impl StorageAddressing {
+    pub(super) fn into_pubky_host(self, standard: Option<String>) -> Option<String> {
+        match self {
+            Self::Standard => standard,
+            Self::PathAddressedStorage => None,
+            Self::LegacyStorage { owner } => Some(owner),
+        }
+    }
+}
+
 impl PubkyHttpClient {
-    pub(super) async fn prepare_request_addressing(
+    pub(super) async fn prepare_storage_addressing(
         &self,
         url: &mut Url,
-    ) -> Result<RequestAddressing> {
+    ) -> Result<StorageAddressing> {
         let Some(path) = url.path().strip_prefix("/storage/") else {
-            return Ok(RequestAddressing::Standard);
+            return Ok(StorageAddressing::Standard);
         };
-        let Some(host) = url.host_str() else {
-            return Ok(RequestAddressing::Standard);
-        };
-        let transport_host = host.strip_prefix("_pubky.").unwrap_or(host);
-        if PublicKey::try_from_z32(transport_host).is_err() {
-            return Ok(RequestAddressing::Standard);
+        let transport_host = classify_transport_host(url.host_str().unwrap_or_default())?;
+        if transport_host == TransportHost::Other {
+            return Ok(StorageAddressing::Standard);
         }
         let (owner, path) = path
             .split_once('/')
@@ -28,22 +42,28 @@ impl PubkyHttpClient {
             message: "path-addressed storage URL contains an invalid owner".to_string(),
         })?;
         let legacy_path = format!("/{path}");
-        let homeserver = url
-            .host_str()
-            .filter(|host| !host.starts_with("_pubky."))
-            .and_then(|host| PublicKey::try_from_z32(host).ok());
+        let homeserver = match transport_host {
+            TransportHost::BarePublicKey(homeserver) => Some(homeserver),
+            TransportHost::PubkyQname(_) => Pkdns::with_client(self.clone())
+                .get_homeserver_of(&owner)
+                .await
+                .ok()
+                .flatten(),
+            TransportHost::Other => None,
+        };
 
-        if self
-            .features
-            .supports(self, &owner, homeserver.as_ref(), PATH_ADDRESSED_STORAGE)
-            .await
+        if let Some(homeserver) = homeserver
+            && self
+                .features
+                .supports(self, &homeserver, PATH_ADDRESSED_STORAGE)
+                .await
         {
-            return Ok(RequestAddressing::PathAddressedStorage);
+            return Ok(StorageAddressing::PathAddressedStorage);
         }
 
         // Choose compatibility before sending storage; response errors never trigger a retry.
         url.set_path(&legacy_path);
-        Ok(RequestAddressing::LegacyStorage { owner: owner.z32() })
+        Ok(StorageAddressing::LegacyStorage { owner: owner.z32() })
     }
 }
 
@@ -70,9 +90,9 @@ mod tests {
         ))
         .unwrap();
 
-        let addressing = client.prepare_request_addressing(&mut url).await.unwrap();
+        let addressing = client.prepare_storage_addressing(&mut url).await.unwrap();
 
-        assert_eq!(addressing, RequestAddressing::PathAddressedStorage);
+        assert_eq!(addressing, StorageAddressing::PathAddressedStorage);
         assert_eq!(url.path(), format!("/storage/{}/pub/file.txt", owner.z32()));
     }
 
@@ -92,11 +112,11 @@ mod tests {
         ))
         .unwrap();
 
-        let addressing = client.prepare_request_addressing(&mut url).await.unwrap();
+        let addressing = client.prepare_storage_addressing(&mut url).await.unwrap();
 
         assert_eq!(
             addressing,
-            RequestAddressing::LegacyStorage { owner: owner.z32() }
+            StorageAddressing::LegacyStorage { owner: owner.z32() }
         );
         assert_eq!(url.path(), "/pub/My%20File%252FName/");
         assert_eq!(url.query(), Some("cursor=hello%20world"));
@@ -117,9 +137,9 @@ mod tests {
             let mut url = Url::parse(url).unwrap();
             let original = url.clone();
 
-            let addressing = client.prepare_request_addressing(&mut url).await.unwrap();
+            let addressing = client.prepare_storage_addressing(&mut url).await.unwrap();
 
-            assert_eq!(addressing, RequestAddressing::Standard);
+            assert_eq!(addressing, StorageAddressing::Standard);
             assert_eq!(url, original);
         }
     }
@@ -140,9 +160,65 @@ mod tests {
             format!("https://{}/storage/missing-path", homeserver.z32()),
         ] {
             client
-                .prepare_request_addressing(&mut Url::parse(&url).unwrap())
+                .prepare_storage_addressing(&mut Url::parse(&url).unwrap())
                 .await
                 .unwrap_err();
         }
+    }
+
+    #[tokio::test]
+    async fn unresolved_owner_uses_legacy_storage() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let owner = Keypair::random().public_key();
+        let mut url = Url::parse(&format!(
+            "https://_pubky.{}/storage/{}/pub/file.txt",
+            owner.z32(),
+            owner.z32()
+        ))
+        .unwrap();
+
+        let addressing = client.prepare_storage_addressing(&mut url).await.unwrap();
+
+        assert_eq!(
+            addressing,
+            StorageAddressing::LegacyStorage { owner: owner.z32() }
+        );
+        assert_eq!(url.path(), "/pub/file.txt");
+    }
+
+    #[test]
+    fn addressing_selects_the_pubky_host_header() {
+        let fallback = || Some("transport".to_string());
+
+        assert_eq!(
+            StorageAddressing::Standard.into_pubky_host(fallback()),
+            fallback()
+        );
+        assert_eq!(StorageAddressing::Standard.into_pubky_host(None), None);
+        assert_eq!(
+            StorageAddressing::PathAddressedStorage.into_pubky_host(fallback()),
+            None
+        );
+        assert_eq!(
+            StorageAddressing::PathAddressedStorage.into_pubky_host(None),
+            None
+        );
+        assert_eq!(
+            StorageAddressing::LegacyStorage {
+                owner: "owner".to_string()
+            }
+            .into_pubky_host(fallback()),
+            Some("owner".to_string())
+        );
+        assert_eq!(
+            StorageAddressing::LegacyStorage {
+                owner: "owner".to_string()
+            }
+            .into_pubky_host(None),
+            Some("owner".to_string())
+        );
     }
 }

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use web_time::Instant;
 
-use crate::{Pkdns, PubkyHttpClient, PublicKey};
+use crate::{PubkyHttpClient, PublicKey};
 
 const MAX_INFO_BYTES: usize = 16 * 1024;
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,23 +46,10 @@ impl HomeserverFeatures {
     pub(super) async fn supports(
         &self,
         client: &PubkyHttpClient,
-        owner: &PublicKey,
-        homeserver: Option<&PublicKey>,
+        homeserver: &PublicKey,
         feature: &str,
     ) -> bool {
-        let homeserver = if let Some(homeserver) = homeserver {
-            homeserver.clone()
-        } else {
-            let Ok(Some(homeserver)) = Pkdns::with_client(client.clone())
-                .get_homeserver_of(owner)
-                .await
-            else {
-                return false;
-            };
-            homeserver
-        };
-
-        self.supports_for(&homeserver, feature, || Self::fetch(client, &homeserver))
+        self.supports_for(homeserver, feature, || Self::fetch(client, homeserver))
             .await
     }
 

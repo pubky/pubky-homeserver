@@ -2,11 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use super::{RequestAddressing, homeserver_url, is_path_addressed_storage};
+use super::{TransportHost, classify_transport_host, homeserver_url};
 use futures_util::StreamExt;
 use tokio::net::TcpStream;
 
-use crate::errors::RequestError;
 use crate::{PubkyHttpClient, PublicKey, Result, cross_log};
 use reqwest::{IntoUrl, Method, RequestBuilder};
 use url::Url;
@@ -189,7 +188,7 @@ impl PubkyHttpClient {
         self.cross_request(method, url).await
     }
 
-    /// Route through `homeserver` while addressing `pubky_host`.
+    /// Route an authority-addressed endpoint through `homeserver` for `pubky_host`.
     pub(crate) async fn cross_request_via_homeserver(
         &self,
         method: Method,
@@ -202,14 +201,12 @@ impl PubkyHttpClient {
         let pubky_host_z32 = pubky_host.z32();
         let transport = self.transport.resolve(&homeserver_z32, &self.pkarr).await;
 
-        let pubky_host = (!is_path_addressed_storage(&url)).then_some(pubky_host_z32);
-
         self.build_request(
             method,
             ResolvedRequest {
                 url,
                 transport: RequestTransport::Pubky(transport),
-                pubky_host,
+                pubky_host: Some(pubky_host_z32),
             },
         )
     }
@@ -262,12 +259,9 @@ impl PubkyHttpClient {
     }
 
     async fn resolve_request(&self, mut url: Url) -> Result<ResolvedRequest> {
-        let addressing = self.prepare_request_addressing(&mut url).await?;
-        let Some(pubky_host) = self.prepare_transport_request(&mut url).await? else {
-            let pubky_host = match addressing {
-                RequestAddressing::LegacyStorage { owner } => Some(owner),
-                RequestAddressing::Standard | RequestAddressing::PathAddressedStorage => None,
-            };
+        let (addressing, transport_pubky_host) = self.prepare_request_parts(&mut url).await?;
+        let Some(pubky_host) = transport_pubky_host else {
+            let pubky_host = addressing.into_pubky_host(None);
 
             return Ok(ResolvedRequest {
                 url,
@@ -279,15 +273,9 @@ impl PubkyHttpClient {
         // `_pubky.<pk>` endpoints live under the full qname, not the bare key apex.
         let qname = url.host_str().unwrap_or(&pubky_host).to_string();
         let transport = self.transport.resolve(&qname, &self.pkarr).await;
-        let pubky_host = match addressing {
-            RequestAddressing::Standard
-                if matches!(&transport, ResolvedTransport::Icann { .. }) =>
-            {
-                Some(pubky_host)
-            }
-            RequestAddressing::LegacyStorage { owner } => Some(owner),
-            RequestAddressing::Standard | RequestAddressing::PathAddressedStorage => None,
-        };
+        let standard_pubky_host =
+            matches!(&transport, ResolvedTransport::Icann { .. }).then_some(pubky_host);
+        let pubky_host = addressing.into_pubky_host(standard_pubky_host);
 
         Ok(ResolvedRequest {
             url,
@@ -296,52 +284,19 @@ impl PubkyHttpClient {
         })
     }
 
-    /// Prepare a URL for transport and return its `pubky-host` value when applicable.
-    ///
-    /// # Errors
-    /// Returns a validation or resolution error if the URL cannot be prepared.
-    pub async fn prepare_request(&self, url: &mut Url) -> Result<Option<String>> {
-        let addressing = self.prepare_request_addressing(url).await?;
-        let pubky_host = self.prepare_transport_request(url).await?;
-
-        Ok(match addressing {
-            RequestAddressing::LegacyStorage { owner } => Some(owner),
-            RequestAddressing::Standard | RequestAddressing::PathAddressedStorage => pubky_host,
-        })
-    }
-
-    #[allow(
+    #[expect(
         clippy::unused_async,
         reason = "keep async signature aligned with WASM build"
     )]
-    async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
-        let host = url.host_str().unwrap_or("");
+    pub(super) async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
+        let public_key = match classify_transport_host(url.host_str().unwrap_or_default())? {
+            TransportHost::PubkyQname(public_key) | TransportHost::BarePublicKey(public_key) => {
+                public_key
+            }
+            TransportHost::Other => return Ok(None),
+        };
 
-        if let Some(stripped) = host.strip_prefix("_pubky.") {
-            if PublicKey::is_pubky_prefixed(stripped) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(stripped).is_ok() {
-                return Ok(Some(stripped.to_string()));
-            }
-        } else {
-            if PublicKey::is_pubky_prefixed(host) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(host).is_ok() {
-                return Ok(Some(host.to_string()));
-            }
-        }
-
-        Ok(None)
+        Ok(Some(public_key.z32()))
     }
 
     /// Start building a `Request` with the `Method` and `Url` (native-only).

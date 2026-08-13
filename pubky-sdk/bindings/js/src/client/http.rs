@@ -34,8 +34,7 @@ impl Client {
         }
 
         // 2) Ask the SDK to prepare (resolve pkarr, adjust host, etc.)
-        //    Returns Some(<z32>) if this targets a Pubky host.
-        let pubky_host = self.0.prepare_request(&mut url).await?;
+        let prepared = self.0.prepare_fetch(&mut url).await?;
 
         // 3) Start from caller's init; DO NOT clobber headers.
         let req_init = init
@@ -43,9 +42,7 @@ impl Client {
             .unwrap_or_default();
 
         // 3a) If needed, ensure `pubky-host` is present in *init.headers* BEFORE Request creation.
-        if let Some(host) = pubky_host.as_deref()
-            && !url.path().starts_with("/storage/")
-        {
+        if let Some(host) = prepared.pubky_host_header.as_deref() {
             // Try to read any existing headers off RequestInit via reflection.
             // This value can be: undefined/null (no headers), a real `Headers`, or
             // a plain object/array. We handle those cases explicitly.
@@ -100,7 +97,7 @@ impl Client {
             .unwrap_or(JsValue::UNDEFINED);
         let credentials_provided = !(credentials_js.is_undefined() || credentials_js.is_null());
 
-        if pubky_host.is_some() && !credentials_provided {
+        if prepared.is_pubky_target && !credentials_provided {
             // Pubky hosts rely on cookies for authentication/session I/O. If the caller
             // omitted a credential mode, fall back to `include`.
             req_init.set_credentials(RequestCredentials::Include);

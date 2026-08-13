@@ -434,6 +434,19 @@ pub struct PubkyHttpClient {
     pub(crate) testnet_host: Option<String>,
 }
 
+/// Prepared browser-fetch metadata used by the JavaScript bindings.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFetch {
+    /// The `pubky-host` header to attach, if any.
+    #[doc(hidden)]
+    pub pubky_host_header: Option<String>,
+
+    /// Whether the original request targeted a Pubky authority.
+    #[doc(hidden)]
+    pub is_pubky_target: bool,
+}
+
 impl PubkyHttpClient {
     /// Creates a client configured for public mainline DHT and pkarr relays.
     ///
