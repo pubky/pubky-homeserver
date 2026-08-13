@@ -1,6 +1,6 @@
 //! HTTP methods that support `https://` with Pkarr domains, including `_pubky.<pk>` URLs
 
-use super::{homeserver_url, is_path_addressed_storage};
+use super::{RequestAddressing, homeserver_url, is_path_addressed_storage};
 use crate::PublicKey;
 use crate::errors::{PkarrError, RequestError, Result};
 use crate::{PubkyHttpClient, cross_log};
@@ -73,6 +73,17 @@ impl PubkyHttpClient {
         ))
     }
 
+    pub(super) async fn homeserver_info_request(
+        &self,
+        homeserver: &PublicKey,
+    ) -> Result<RequestBuilder> {
+        // Bypass cross_request so discovery cannot recursively trigger itself.
+        let mut url = homeserver_url(homeserver, "/info")?;
+        self.prepare_transport_request(&mut url).await?;
+
+        Ok(self.http.request(Method::GET, url).fetch_credentials_omit())
+    }
+
     async fn cross_request_with_credentials<T: IntoUrl>(
         &self,
         method: Method,
@@ -93,12 +104,21 @@ impl PubkyHttpClient {
         Ok(Self::attach_pubky_host(builder, &url, pubky_host))
     }
 
-    /// - Resolves a clearnet host to call with fetch
-    /// - Returns the `pubky-host` value if available
+    /// Prepare a URL for transport and return its `pubky-host` value when applicable.
     ///
     /// # Errors
-    /// - Returns [`crate::errors::PkarrError`] when PKARR resolution fails or produces invalid endpoints.
+    /// Returns a validation or resolution error if the URL cannot be prepared.
     pub async fn prepare_request(&self, url: &mut Url) -> Result<Option<String>> {
+        let addressing = self.prepare_request_addressing(url).await?;
+        let pubky_host = self.prepare_transport_request(url).await?;
+
+        Ok(match addressing {
+            RequestAddressing::LegacyStorage { owner } => Some(owner),
+            RequestAddressing::Standard | RequestAddressing::PathAddressedStorage => pubky_host,
+        })
+    }
+
+    async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
         let host = url.host_str().unwrap_or("").to_string();
 
         let mut pubky_host = None;

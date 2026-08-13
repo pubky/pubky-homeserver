@@ -1,6 +1,17 @@
 use crate::{PublicKey, Result};
 use url::Url;
 
+mod features;
+pub(crate) use features::HomeserverFeatures;
+mod storage;
+
+#[derive(Debug, PartialEq, Eq)]
+enum RequestAddressing {
+    Standard,
+    PathAddressedStorage,
+    LegacyStorage { owner: String },
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
 #[cfg(target_arch = "wasm32")]

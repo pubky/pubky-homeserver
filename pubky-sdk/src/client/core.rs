@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fmt::Debug;
 use std::time::Duration;
 
+use super::http_targets::HomeserverFeatures;
 use crate::{cross_log, errors::BuildError};
 
 const DEFAULT_USER_AGENT: &str = concat!("pubky.org", "@", env!("CARGO_PKG_VERSION"),);
@@ -262,6 +263,7 @@ impl PubkyHttpClientBuilder {
         Ok(PubkyHttpClient {
             pkarr,
             http: http_builder.build()?,
+            features: HomeserverFeatures::default(),
 
             #[cfg(not(target_arch = "wasm32"))]
             icann_http: icann_http_builder.build()?,
@@ -418,6 +420,7 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 pub struct PubkyHttpClient {
     pub(crate) http: reqwest::Client,
     pub(crate) pkarr: pkarr::Client,
+    pub(crate) features: HomeserverFeatures,
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) icann_http: reqwest::Client,

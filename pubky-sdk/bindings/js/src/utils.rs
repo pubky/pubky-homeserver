@@ -68,7 +68,7 @@ pub fn set_log_level(level: Level) -> Result<(), JsValue> {
 /// Resolve a `pubky://` or `pubky<pk>/…` identifier into the homeserver transport URL.
 ///
 /// @param {string} identifier Either `pubky<pk>/...` (preferred) or `pubky://<pk>/...`.
-/// @returns {string} HTTPS URL in the form `https://_pubky.<pk>/...`.
+/// @returns {string} HTTPS URL in the form `https://_pubky.<pk>/storage/<pk>/...`.
 #[wasm_bindgen(js_name = "resolvePubky")]
 pub fn resolve_pubky(identifier: &str) -> JsResult<String> {
     Ok(pubky::resolve_pubky(identifier)?.to_string())
