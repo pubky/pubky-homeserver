@@ -304,9 +304,8 @@ impl PubkyHttpClient {
     /// Returns a `RequestBuilder`, which will allow setting headers and
     /// the request body before sending.
     ///
-    /// Call [`Self::prepare_request`] first when sending a path-addressed storage URL.
-    /// That async step negotiates homeserver features and returns any `pubky-host`
-    /// header needed by legacy homeservers.
+    /// This synchronous method does not negotiate storage addressing or resolve ICANN
+    /// fallback endpoints. Use [`Self::request_async`] for Pubky and PKDNS URLs.
     ///
     /// Differs from [`reqwest::Client::request`], in that it can make requests to:
     /// 1. HTTPS URLs with a [`crate::PublicKey`] as top-level domain, by resolving
@@ -314,9 +313,6 @@ impl PubkyHttpClient {
     ///    (example: `https://o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy`)
     /// 2. `_pubky.<public-key>` URLs like `https://_pubky.o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy`
     ///
-    /// # Errors
-    ///
-    /// This method fails whenever the supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: &U) -> RequestBuilder {
         let url_str = url.as_str();
 
@@ -515,12 +511,8 @@ mod tests {
         }
     }
 
-    /// Regression test: requests to `https://_pubky.<user>/...` must apply the
-    /// ICANN fallback. The user's endpoints are published under the
-    /// `_pubky.<user>` qname (an alias to the homeserver key), so the
-    /// transport must be resolved with the full host, not the bare key.
     #[tokio::test]
-    async fn cross_request_pubky_host_falls_back_to_icann_when_direct_unreachable() {
+    async fn request_async_resolves_icann_path_addressed_storage() {
         // Homeserver apex: unreachable direct endpoint + reachable ICANN domain.
         let homeserver = Keypair::random();
         let mut direct = SVCB::new(1, ".".try_into().unwrap());
@@ -553,9 +545,17 @@ mod tests {
         cache.put(&user.public_key().into(), &user_packet);
 
         let user_z32 = user.public_key().to_string();
-        let url = Url::parse(&format!("https://_pubky.{user_z32}/session")).unwrap();
+        let homeserver_pk = PublicKey::try_from_z32(&homeserver_z32).unwrap();
+        client.features.insert(
+            &homeserver_pk,
+            &[pubky_common::constants::features::PATH_ADDRESSED_STORAGE],
+        );
+        let url = Url::parse(&format!(
+            "https://_pubky.{user_z32}/storage/{user_z32}/pub/file.txt"
+        ))
+        .unwrap();
         let req = client
-            .cross_request(Method::POST, url)
+            .request_async(Method::GET, url)
             .await
             .unwrap()
             .build()
@@ -567,7 +567,11 @@ mod tests {
             "expected ICANN fallback for _pubky host, got {}",
             req.url()
         );
-        assert_eq!(req.headers().get("pubky-host").unwrap(), &user_z32);
+        assert_eq!(
+            req.url().path(),
+            format!("/storage/{user_z32}/pub/file.txt")
+        );
+        assert!(!req.headers().contains_key("pubky-host"));
     }
 
     #[tokio::test]

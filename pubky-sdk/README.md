@@ -164,25 +164,20 @@ See [Private Storage](../docs/PRIVATE_STORAGE.md) for `/priv/` access and events
 
 ### Resolve identifiers into transport URLs
 
-Use [`resolve_pubky`] to turn a public resource identifier into its canonical HTTPS homeserver URL. When sending that URL through `PubkyHttpClient`, call `prepare_request` first so older homeservers receive the legacy path and `pubky-host` header when needed:
+Use [`resolve_pubky`] to turn a public resource identifier into its canonical HTTPS homeserver URL. `PubkyHttpClient::request_async` resolves the transport and falls back to legacy storage addressing when needed:
 
 ```rust no_run
 # use pubky::{PubkyHttpClient, resolve_pubky};
 # use reqwest::Method;
 # async fn run() -> pubky::Result<()> {
 let client = PubkyHttpClient::new()?;
-let mut url = resolve_pubky("pubkyoperrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG")?;
+let url = resolve_pubky("pubkyoperrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG")?;
 assert_eq!(
     url.as_str(),
     "https://_pubky.operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/storage/operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG"
 );
 
-let pubky_host = client.prepare_request(&mut url).await?;
-let mut request = client.request(Method::GET, &url);
-if let Some(pubky_host) = pubky_host {
-    request = request.header("pubky-host", pubky_host);
-}
-let response = request.send().await?;
+let response = client.request_async(Method::GET, url).await?.send().await?;
 # Ok(())
 # }
 ```

@@ -1,4 +1,5 @@
 use crate::{PubkyHttpClient, PublicKey, Result, errors::RequestError};
+use reqwest::{Method, RequestBuilder};
 use url::Url;
 
 mod features;
@@ -42,6 +43,18 @@ fn classify_transport_host(host: &str) -> Result<TransportHost> {
 }
 
 impl PubkyHttpClient {
+    /// Build a request after resolving its transport and storage addressing.
+    ///
+    /// Use this for Pubky and PKDNS URLs. On native targets it selects `PubkyTLS` or
+    /// ICANN/X.509 transport. It also falls back to legacy storage addressing when
+    /// the homeserver does not advertise path-addressed storage.
+    ///
+    /// # Errors
+    /// Returns a validation or resolution error if the request cannot be prepared.
+    pub async fn request_async(&self, method: Method, url: Url) -> Result<RequestBuilder> {
+        self.cross_request(method, url).await
+    }
+
     async fn prepare_request_parts(
         &self,
         url: &mut Url,
@@ -52,10 +65,12 @@ impl PubkyHttpClient {
         Ok((addressing, pubky_host))
     }
 
-    /// Prepare a URL before calling [`Self::request`] and return its `pubky-host` value.
+    /// Prepare a URL's storage addressing and return its `pubky-host` value.
     ///
     /// This may rewrite path-addressed storage URLs for legacy homeservers. When the
     /// return value is `Some`, attach it to the request as the `pubky-host` header.
+    /// Callers using `PubkyHttpClient` should prefer [`Self::request_async`], which also
+    /// resolves the native transport.
     ///
     /// # Errors
     /// Returns a validation or resolution error if the URL cannot be prepared.

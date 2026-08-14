@@ -345,8 +345,8 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 ///
 /// ### What it does
 /// - Detects pkarr public-key hosts and resolves them to concrete endpoints.
-/// - Internally, uses a unified `cross_request(..)` that works the same on native rust and
-///   WASM (WASM performs endpoint resolution & header injection; native is a thin wrapper).
+/// - [`PubkyHttpClient::request_async`] resolves Pubky transport and storage compatibility
+///   on native Rust and WASM.
 ///
 /// ### What it *doesn’t* do
 /// - It is **not** session/identity aware. No cookies, no per-user scoping.
@@ -369,9 +369,9 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 ///     target public key—no CA chain involved.
 /// - **WASM:**
 ///   - All requests use the browser’s standard X.509 TLS stack.
-///   - For Pubky/PKDNS hosts, private method `cross_request(..)` resolves the
-///     endpoint via PKARR, rewrites the URL (including testnet/localhost mapping),
-///     and may add a `pubky-host` header to convey the intended public-key host.
+///   - For Pubky/PKDNS hosts, [`PubkyHttpClient::request_async`] resolves the endpoint
+///     via PKARR, rewrites the URL (including testnet/localhost mapping), and may add a
+///     `pubky-host` header to convey the intended public-key host.
 ///
 /// ### Examples
 /// Basic construction. Works out of the box for mainline DHT pkarr endpoints.
@@ -399,9 +399,9 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 /// # Ok(()) }
 /// ```
 ///
-/// Note: `request(..)` is available on native targets. On WASM, use the high-level
-/// actors (e.g., `Pubky`, `SessionStorage`, `PublicStorage`) or the JS bindings’
-/// `client.fetch(..)` provided in `bindings/js`.
+/// Note: `request(..)` is available only on native targets. `request_async(..)` is
+/// available on native Rust and WASM. JavaScript callers use `client.fetch(..)` from
+/// `bindings/js`.
 ///
 /// Fetching a Pubky resource via its transport URL, including legacy homeserver support:
 /// ```no_run
@@ -414,15 +414,10 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 /// let client = PubkyHttpClient::new()?;
 /// // Pubky App profile of user Pubky https://pubky.app/profile/ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y
 /// let user = "ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y";
-/// let mut url = Url::parse(&format!(
+/// let url = Url::parse(&format!(
 ///     "https://_pubky.{user}/storage/{user}/pub/pubky.app/profile.json"
 /// ))?;
-/// let pubky_host = client.prepare_request(&mut url).await?;
-/// let mut request = client.request(Method::GET, &url);
-/// if let Some(pubky_host) = pubky_host {
-///     request = request.header("pubky-host", pubky_host);
-/// }
-/// let resp = request.send().await?;
+/// let resp = client.request_async(Method::GET, url).await?.send().await?;
 /// let info = resp.text().await?;
 /// # Ok(()) }
 /// ```

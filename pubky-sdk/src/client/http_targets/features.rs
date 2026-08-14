@@ -1,10 +1,11 @@
 use std::{
-    collections::HashMap,
+    num::NonZeroUsize,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
 use futures_util::StreamExt;
+use lru::LruCache;
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use web_time::Instant;
@@ -14,11 +15,12 @@ use crate::{PubkyHttpClient, PublicKey};
 const MAX_INFO_BYTES: usize = 16 * 1024;
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const INFO_CACHE_TTL: Duration = Duration::from_secs(60);
+const INFO_CACHE_CAPACITY: usize = 256;
 type FeatureCell = Arc<AsyncMutex<Option<CachedFeatures>>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HomeserverFeatures {
-    servers: Arc<Mutex<HashMap<PublicKey, FeatureCell>>>,
+    servers: Arc<Mutex<LruCache<PublicKey, FeatureCell>>>,
     request_timeout: Duration,
 }
 
@@ -48,7 +50,10 @@ impl Default for HomeserverFeatures {
 impl HomeserverFeatures {
     pub(crate) fn new(request_timeout: Option<Duration>) -> Self {
         Self {
-            servers: Arc::default(),
+            servers: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(INFO_CACHE_CAPACITY)
+                    .expect("homeserver feature cache capacity is non-zero"),
+            ))),
             request_timeout: request_timeout
                 .map_or(INFO_TIMEOUT, |timeout| timeout.min(INFO_TIMEOUT)),
         }
@@ -66,7 +71,13 @@ impl HomeserverFeatures {
 
     fn cell(&self, homeserver: &PublicKey) -> FeatureCell {
         let mut servers = self.servers.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(servers.entry(homeserver.clone()).or_default())
+        if let Some(cell) = servers.get(homeserver) {
+            return Arc::clone(cell);
+        }
+
+        let cell = FeatureCell::default();
+        servers.put(homeserver.clone(), Arc::clone(&cell));
+        cell
     }
 
     async fn supports_for<F, Fut>(&self, homeserver: &PublicKey, feature: &str, fetch: F) -> bool
@@ -198,6 +209,29 @@ mod tests {
             HomeserverFeatures::new(Some(Duration::from_secs(10))).request_timeout,
             INFO_TIMEOUT
         );
+    }
+
+    #[test]
+    fn evicts_the_least_recently_used_homeserver() {
+        let discovery = HomeserverFeatures::default();
+        let homeservers = (0..=INFO_CACHE_CAPACITY)
+            .map(|_| crate::Keypair::random().public_key())
+            .collect::<Vec<_>>();
+
+        for homeserver in &homeservers[..INFO_CACHE_CAPACITY] {
+            drop(discovery.cell(homeserver));
+        }
+        drop(discovery.cell(&homeservers[0]));
+        drop(discovery.cell(&homeservers[INFO_CACHE_CAPACITY]));
+
+        let servers = discovery
+            .servers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(servers.len(), INFO_CACHE_CAPACITY);
+        assert!(servers.contains(&homeservers[0]));
+        assert!(!servers.contains(&homeservers[1]));
+        assert!(servers.contains(&homeservers[INFO_CACHE_CAPACITY]));
     }
 
     #[tokio::test]

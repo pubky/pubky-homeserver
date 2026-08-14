@@ -17,7 +17,7 @@ enum AmbientCredentials {
 }
 
 impl PubkyHttpClient {
-    /// A wrapper around [`PubkyHttpClient::request`], with the same signature between native and WASM.
+    /// Platform implementation for [`PubkyHttpClient::request_async`].
     pub(crate) async fn cross_request<T: IntoUrl>(
         &self,
         method: Method,

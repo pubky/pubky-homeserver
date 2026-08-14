@@ -36,6 +36,7 @@ percent-encoding.workspace = true
 cookie = "0.18"
 flume = { version = "0.11", default-features = false, features = ["async"] }
 futures-util.workspace = true
+lru = { version = "0.18", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 httpdate.workspace = true
