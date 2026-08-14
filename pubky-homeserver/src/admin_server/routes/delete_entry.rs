@@ -11,7 +11,11 @@ pub async fn delete_entry(
     State(state): State<AppState>,
     Path(entry_path): Path<EntryPathPub>,
 ) -> HttpResult<impl IntoResponse> {
-    state.file_service.admin_delete(entry_path.inner()).await?;
+    state
+        .context
+        .file_service
+        .admin_delete(entry_path.inner())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

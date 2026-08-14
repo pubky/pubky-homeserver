@@ -46,13 +46,15 @@ pub async fn head(
     )?;
 
     state
+        .context
         .user_service
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
     let entry = state
+        .context
         .file_service
-        .get_info(&entry_path, &mut state.sql_db.pool().into())
+        .get_info(&entry_path, &mut state.context.sql_db.pool().into())
         .await?;
     let response = entry.to_response_headers().into_response();
     Ok(response)
@@ -94,8 +96,9 @@ pub async fn get(
     }
 
     let entry = state
+        .context
         .file_service
-        .get_info(&entry_path, &mut state.sql_db.pool().into())
+        .get_info(&entry_path, &mut state.context.sql_db.pool().into())
         .await?;
 
     // Per RFC 7232 §3: If-None-Match has precedence over If-Modified-Since.
@@ -129,7 +132,7 @@ pub async fn get(
         }
     }
 
-    let stream = state.file_service.get_stream(&entry_path).await?;
+    let stream = state.context.file_service.get_stream(&entry_path).await?;
     let body_stream = Body::from_stream(stream);
     let mut response = entry.to_response_headers().into_response();
     *response.body_mut() = body_stream;
@@ -142,7 +145,8 @@ async fn list(
     params: ListQueryParams,
 ) -> HttpResult<Response<Body>> {
     let contains_dir =
-        EntryRepository::contains_directory(entry_path, &mut state.sql_db.pool().into()).await?;
+        EntryRepository::contains_directory(entry_path, &mut state.context.sql_db.pool().into())
+            .await?;
     if !contains_dir {
         return Err(HttpError::new_with_message(
             StatusCode::NOT_FOUND,
@@ -166,7 +170,7 @@ async fn list(
             params.limit,
             parsed_cursor,
             params.reverse,
-            &mut state.sql_db.pool().into(),
+            &mut state.context.sql_db.pool().into(),
         )
         .await?
     } else {
@@ -175,7 +179,7 @@ async fn list(
             params.limit,
             parsed_cursor,
             params.reverse,
-            &mut state.sql_db.pool().into(),
+            &mut state.context.sql_db.pool().into(),
         )
         .await?
     };

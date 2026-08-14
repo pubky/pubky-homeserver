@@ -113,7 +113,7 @@ impl ClientServer {
         context: &AppContext,
     ) -> std::result::Result<Router, ClientServerBuildError> {
         let state = AppState::new(context);
-        super::create_app(state.clone(), context)
+        super::create_app(state)
     }
 
     /// Start the ICANN HTTP server
@@ -213,14 +213,12 @@ fn base() -> Router<AppState> {
     // TODO: maybe add to a separate router (drive router?).
 }
 
-pub fn create_app(
-    state: AppState,
-    context: &AppContext,
-) -> std::result::Result<Router, ClientServerBuildError> {
+pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBuildError> {
     let auth_state = state.auth_state.clone();
-    let request_rate_limit_layer =
-        RequestRateLimitLayer::from_path_limits(context.config_toml.drive.rate_limits.clone())
-            .map_err(ClientServerBuildError::RequestRateLimits)?;
+    let request_rate_limit_layer = RequestRateLimitLayer::from_path_limits(
+        state.context.config_toml.drive.rate_limits.clone(),
+    )
+    .map_err(ClientServerBuildError::RequestRateLimits)?;
 
     let middleware = ServiceBuilder::new()
         // Request order matters: auth needs CookieManager, and bandwidth limits
@@ -230,8 +228,8 @@ pub fn create_app(
         .layer(request_rate_limit_layer)
         .layer(AuthenticationLayer::new(auth_state.clone()))
         .layer(BandwidthQuotaLimitLayer::new(
-            context.user_service.clone(),
-            context.config_toml.default_quotas.clone(),
+            state.context.user_service.clone(),
+            state.context.config_toml.default_quotas.clone(),
         ));
 
     let app = base()

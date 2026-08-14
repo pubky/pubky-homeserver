@@ -48,11 +48,12 @@ pub async fn delete(
     has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
 
     state
+        .context
         .user_service
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
-    state.file_service.delete(&entry_path).await?;
+    state.context.file_service.delete(&entry_path).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -81,6 +82,7 @@ pub async fn put(
     has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
 
     let user = state
+        .context
         .user_service
         .get_or_http_error(entry_path.pubkey(), true)
         .await?;
@@ -94,9 +96,9 @@ pub async fn put(
     fail_if_size_hint_exceeds_quota(
         content_length,
         &user,
-        state.default_storage_mb,
+        state.context.config_toml.storage.default_quota_mb,
         &entry_path,
-        &mut state.sql_db.pool().into(),
+        &mut state.context.sql_db.pool().into(),
     )
     .await?;
 
@@ -106,6 +108,7 @@ pub async fn put(
         body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
     state
+        .context
         .file_service
         .write_stream(&entry_path, converted_stream)
         .await?;

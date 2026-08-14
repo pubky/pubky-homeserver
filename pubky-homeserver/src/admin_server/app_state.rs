@@ -1,13 +1,7 @@
 use dav_server::{fakels::FakeLs, DavHandler};
 use dav_server_opendalfs::OpendalFs;
 
-use crate::data_directory::DefaultQuotasToml;
-use crate::observability::Metrics;
-use crate::persistence::{
-    files::{events::EventsService, FileService},
-    sql::SqlDb,
-};
-use crate::services::user_service::UserService;
+use crate::AppContext;
 use crate::ConfigToml;
 
 #[derive(Clone, Default)]
@@ -20,25 +14,15 @@ pub(crate) struct AdminMetadata {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) sql_db: SqlDb,
-    pub(crate) file_service: FileService,
+    pub(crate) context: AppContext,
     pub(crate) admin_password: String,
     pub(crate) inner_dav_handler: DavHandler,
     pub(crate) metadata: AdminMetadata,
-    pub(crate) user_service: UserService,
-    /// Event service for the admin all-events stream.
-    pub(crate) events_service: EventsService,
-    /// Metrics shared with the rest of the homeserver.
-    pub(crate) metrics: Metrics,
-    /// System-wide default quotas for resolving effective values.
-    pub(crate) default_storage_mb: Option<u64>,
-    pub(crate) default_quotas: DefaultQuotasToml,
 }
 
 impl AppState {
-    pub fn new(context: &crate::AppContext) -> Self {
-        let file_service = context.file_service.clone();
-        let webdavfs = OpendalFs::new(file_service.opendal.admin_operator.clone());
+    pub fn new(context: &AppContext) -> Self {
+        let webdavfs = OpendalFs::new(context.file_service.opendal.admin_operator.clone());
         let inner_dav_handler = DavHandler::builder()
             .filesystem(webdavfs)
             .locksystem(FakeLs::new())
@@ -46,8 +30,6 @@ impl AppState {
             .autoindex(true)
             .build_handler();
         Self {
-            sql_db: context.sql_db.clone(),
-            file_service,
             admin_password: context.config_toml.admin.admin_password.clone(),
             inner_dav_handler,
             metadata: AdminMetadata {
@@ -56,16 +38,12 @@ impl AppState {
                 pkarr_icann_domain: pkarr_icann_domain(&context.config_toml),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
-            user_service: context.user_service.clone(),
-            events_service: context.events_service.clone(),
-            metrics: context.metrics.clone(),
-            default_storage_mb: context.config_toml.storage.default_quota_mb,
-            default_quotas: context.config_toml.default_quotas.clone(),
+            context: context.clone(),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn test_server(context: &crate::AppContext) -> axum_test::TestServer {
+    pub(crate) fn test_server(context: &AppContext) -> axum_test::TestServer {
         axum_test::TestServer::new(super::app::create_app(Self::new(context))).unwrap()
     }
 }

@@ -64,7 +64,8 @@ pub async fn list_signup_tokens(
     Query(params): Query<SignupTokensQuery>,
 ) -> HttpResult<(StatusCode, Json<SignupTokensResponse>)> {
     let page =
-        SignupCodeRepository::list(params.list_query(), &mut state.sql_db.pool().into()).await?;
+        SignupCodeRepository::list(params.list_query(), &mut state.context.sql_db.pool().into())
+            .await?;
     let items = page.items.into_iter().map(SignupTokenItem::from).collect();
 
     Ok((

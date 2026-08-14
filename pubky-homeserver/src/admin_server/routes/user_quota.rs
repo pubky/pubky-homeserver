@@ -33,13 +33,16 @@ pub async fn get_user_quota(
     Path(pubkey): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
     let user = state
+        .context
         .user_service
         .get_or_http_error(&pubkey.0, false)
         .await?;
 
     let overrides = user.quota();
-    let effective =
-        overrides.resolve_with_defaults(state.default_storage_mb, &state.default_quotas);
+    let effective = overrides.resolve_with_defaults(
+        state.context.config_toml.storage.default_quota_mb,
+        &state.context.config_toml.default_quotas,
+    );
 
     Ok(Json(UserQuotaResponse {
         effective,
@@ -64,7 +67,11 @@ pub async fn patch_user_quota(
         .validate()
         .map_err(|e| HttpError::new_with_message(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
-    state.user_service.patch_quota(&pubkey.0, &patch).await?;
+    state
+        .context
+        .user_service
+        .patch_quota(&pubkey.0, &patch)
+        .await?;
 
     Ok(StatusCode::OK)
 }

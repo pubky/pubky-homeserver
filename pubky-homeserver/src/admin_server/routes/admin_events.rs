@@ -141,10 +141,15 @@ async fn resolve_filter(
     } else {
         let mut ids = Vec::with_capacity(params.users.len());
         for pk in &params.users {
-            let id = state.user_service.get_id(pk).await.map_err(|e| match e {
-                sqlx::Error::RowNotFound => HttpError::not_found(),
-                e => HttpError::from(e),
-            })?;
+            let id = state
+                .context
+                .user_service
+                .get_id(pk)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => HttpError::not_found(),
+                    e => HttpError::from(e),
+                })?;
             ids.push(id);
         }
         Some(ids)
@@ -153,8 +158,9 @@ async fn resolve_filter(
     let start_cursor = match params.cursor.as_deref() {
         Some(c) => Some(
             state
+                .context
                 .events_service
-                .parse_cursor(c, &mut state.sql_db.pool().into())
+                .parse_cursor(c, &mut state.context.sql_db.pool().into())
                 .await
                 .map_err(|_| HttpError::bad_request("Invalid cursor"))?,
         ),
@@ -182,8 +188,13 @@ pub async fn feed_stream(
 
     let sse = Sse::new(
         state
+            .context
             .events_service
-            .all_events_stream(state.sql_db.clone(), state.metrics.clone(), filter)
+            .all_events_stream(
+                state.context.sql_db.clone(),
+                state.context.metrics.clone(),
+                filter,
+            )
             .map(|event| {
                 Ok::<_, Infallible>(
                     Event::default()

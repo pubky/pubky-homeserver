@@ -17,7 +17,7 @@ pub async fn disable_user(
     State(state): State<AppState>,
     Path(pubkey): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    state.user_service.admin_disable(&pubkey.0).await?;
+    state.context.user_service.admin_disable(&pubkey.0).await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
@@ -32,7 +32,7 @@ pub async fn enable_user(
     State(state): State<AppState>,
     Path(pubkey): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    state.user_service.admin_enable(&pubkey.0).await?;
+    state.context.user_service.admin_enable(&pubkey.0).await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
