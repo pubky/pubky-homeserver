@@ -5,7 +5,7 @@ use crate::observability::Metrics;
 use crate::shared::HttpResult;
 
 use super::cookie::service::CookieAuthService;
-use super::{AuthSession, GrantAuthService, RevocationListener, SignupService};
+use super::{AuthSession, GrantAuthService, RevocationListener};
 
 /// Auth-specific state. Auth route handlers extract this instead of the
 /// global `AppState`, keeping the auth module fully self-contained.
@@ -20,11 +20,9 @@ pub struct AuthState {
 
 impl AuthState {
     pub fn new(context: &AppContext) -> Self {
-        let signup_service = SignupService::from_context(context);
-
         Self {
-            grant_auth_service: GrantAuthService::from_context(context, signup_service.clone()),
-            cookie_auth_service: CookieAuthService::from_context(context, signup_service),
+            grant_auth_service: GrantAuthService::from_context(context),
+            cookie_auth_service: CookieAuthService::from_context(context),
             metrics: context.metrics.clone(),
             revocation_listener: context.revocation_listener.clone(),
         }

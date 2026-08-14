@@ -53,11 +53,11 @@ pub struct GrantAuthService {
 
 impl GrantAuthService {
     /// Creates the service from the application context.
-    pub fn from_context(context: &crate::AppContext, signup_service: SignupService) -> Self {
+    pub fn from_context(context: &crate::AppContext) -> Self {
         Self {
             sql_db: context.sql_db.clone(),
             homeserver_public_key: context.keypair.public_key(),
-            signup_service,
+            signup_service: SignupService::from_context(context),
             user_service: context.user_service.clone(),
         }
     }
