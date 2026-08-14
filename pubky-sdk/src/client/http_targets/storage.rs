@@ -41,6 +41,15 @@ impl PubkyHttpClient {
         let owner = PublicKey::try_from_z32(owner).map_err(|_error| RequestError::Validation {
             message: "path-addressed storage URL contains an invalid owner".to_string(),
         })?;
+        if let TransportHost::PubkyQname(host_owner) = &transport_host
+            && host_owner != &owner
+        {
+            return Err(RequestError::Validation {
+                message: "path-addressed storage URL owner does not match its `_pubky` host"
+                    .to_string(),
+            }
+            .into());
+        }
         let legacy_path = format!("/{path}");
         let homeserver = match transport_host {
             TransportHost::BarePublicKey(homeserver) => Some(homeserver),
@@ -151,6 +160,7 @@ mod tests {
             .build()
             .unwrap();
         let homeserver = Keypair::random().public_key();
+        let owner = Keypair::random().public_key();
 
         for url in [
             format!(
@@ -158,6 +168,11 @@ mod tests {
                 homeserver.z32()
             ),
             format!("https://{}/storage/missing-path", homeserver.z32()),
+            format!(
+                "https://_pubky.{}/storage/{}/pub/file.txt",
+                homeserver.z32(),
+                owner.z32()
+            ),
         ] {
             client
                 .prepare_storage_addressing(&mut Url::parse(&url).unwrap())
