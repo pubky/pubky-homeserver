@@ -304,6 +304,10 @@ impl PubkyHttpClient {
     /// Returns a `RequestBuilder`, which will allow setting headers and
     /// the request body before sending.
     ///
+    /// Call [`Self::prepare_request`] first when sending a path-addressed storage URL.
+    /// That async step negotiates homeserver features and returns any `pubky-host`
+    /// header needed by legacy homeservers.
+    ///
     /// Differs from [`reqwest::Client::request`], in that it can make requests to:
     /// 1. HTTPS URLs with a [`crate::PublicKey`] as top-level domain, by resolving
     ///    corresponding endpoints, and verifying TLS certificates accordingly.

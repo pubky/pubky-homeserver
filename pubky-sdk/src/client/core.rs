@@ -260,10 +260,15 @@ impl PubkyHttpClientBuilder {
             icann_http_builder = icann_http_builder.pool_max_idle_per_host(max);
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let features = HomeserverFeatures::new(self.native_http.request_timeout);
+        #[cfg(target_arch = "wasm32")]
+        let features = HomeserverFeatures::default();
+
         Ok(PubkyHttpClient {
             pkarr,
             http: http_builder.build()?,
-            features: HomeserverFeatures::default(),
+            features,
 
             #[cfg(not(target_arch = "wasm32"))]
             icann_http: icann_http_builder.build()?,
@@ -398,18 +403,26 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 /// actors (e.g., `Pubky`, `SessionStorage`, `PublicStorage`) or the JS bindings’
 /// `client.fetch(..)` provided in `bindings/js`.
 ///
-/// Fetching a Pubky resource via its transport URL:
+/// Fetching a Pubky resource via its transport URL, including legacy homeserver support:
 /// ```no_run
 /// # use pubky::{PubkyHttpClient, Result};
 /// # use reqwest::Method;
+/// # use url::Url;
 /// # async fn run() -> Result<()> {
 /// # #[cfg(doctest)]
 /// # return Ok(());
 /// let client = PubkyHttpClient::new()?;
 /// // Pubky App profile of user Pubky https://pubky.app/profile/ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y
 /// let user = "ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y";
-/// let url = format!("https://_pubky.{user}/storage/{user}/pub/pubky.app/profile.json");
-/// let resp = client.request(Method::GET, &url).send().await?;
+/// let mut url = Url::parse(&format!(
+///     "https://_pubky.{user}/storage/{user}/pub/pubky.app/profile.json"
+/// ))?;
+/// let pubky_host = client.prepare_request(&mut url).await?;
+/// let mut request = client.request(Method::GET, &url);
+/// if let Some(pubky_host) = pubky_host {
+///     request = request.header("pubky-host", pubky_host);
+/// }
+/// let resp = request.send().await?;
 /// let info = resp.text().await?;
 /// # Ok(()) }
 /// ```

@@ -52,17 +52,16 @@ impl PubkyHttpClient {
         Ok((addressing, pubky_host))
     }
 
-    /// Prepare a URL for transport and return its `pubky-host` value when applicable.
+    /// Prepare a URL before calling [`Self::request`] and return its `pubky-host` value.
+    ///
+    /// This may rewrite path-addressed storage URLs for legacy homeservers. When the
+    /// return value is `Some`, attach it to the request as the `pubky-host` header.
     ///
     /// # Errors
     /// Returns a validation or resolution error if the URL cannot be prepared.
     pub async fn prepare_request(&self, url: &mut Url) -> Result<Option<String>> {
         let (addressing, pubky_host) = self.prepare_request_parts(url).await?;
-
-        Ok(match addressing {
-            StorageAddressing::LegacyStorage { owner } => Some(owner),
-            StorageAddressing::Standard | StorageAddressing::PathAddressedStorage => pubky_host,
-        })
+        Ok(addressing.into_pubky_host(pubky_host))
     }
 
     /// Prepare a URL and browser-fetch metadata for the JavaScript bindings.
@@ -155,7 +154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn path_addressed_fetch_is_a_pubky_target_without_a_header() {
+    async fn path_addressed_requests_are_pubky_targets_without_a_header() {
         let client = PubkyHttpClient::builder()
             .isolated_pkarr_test()
             .build()
@@ -173,9 +172,34 @@ mod tests {
         ))
         .unwrap();
 
+        let mut native_url = url.clone();
+        let pubky_host = client.prepare_request(&mut native_url).await.unwrap();
         let prepared = client.prepare_fetch(&mut url).await.unwrap();
 
+        assert_eq!(pubky_host, None);
         assert!(prepared.is_pubky_target);
         assert_eq!(prepared.pubky_host_header, None);
+    }
+
+    #[tokio::test]
+    async fn legacy_requests_rewrite_the_path_and_return_the_owner_header() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let homeserver = crate::Keypair::random().public_key();
+        let owner = crate::Keypair::random().public_key();
+        client.features.insert(&homeserver, &[]);
+        let mut url = Url::parse(&format!(
+            "https://{}/storage/{}/pub/file.txt",
+            homeserver.z32(),
+            owner.z32()
+        ))
+        .unwrap();
+
+        let pubky_host = client.prepare_request(&mut url).await.unwrap();
+
+        assert_eq!(url.path(), "/pub/file.txt");
+        assert_eq!(pubky_host, Some(owner.z32()));
     }
 }

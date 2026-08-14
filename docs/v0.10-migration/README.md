@@ -34,6 +34,13 @@ match pubky.get_homeserver_of(&user).await {
 JavaScript's `getHomeserverOf()` return type is unchanged, but its promise now rejects with `PkarrError` for these failures. The same errors may surface from sign-in, grant exchange, and event-stream subscriptions that resolve a homeserver internally.
 
 
+## Storage Transport Compatibility
+
+v0.10 represents public resources as `/storage/{owner}/...` transport URLs. The Rust storage APIs and JavaScript `Client.fetch` query the homeserver's `/info` endpoint and fall back to the legacy path plus `pubky-host` header when `path-addressed-storage` is unavailable. Storage requests made through these APIs remain compatible with v0.9 homeservers.
+
+If you send a URL from `resolve_pubky` or `PubkyResource::to_transport_url` yourself, call `PubkyHttpClient::prepare_request` and apply its returned `pubky-host` header before sending. A different HTTP client can use the canonical URL only with a homeserver that advertises `path-addressed-storage`.
+
+
 ## Deep Link Parsing
 
 If your Rust app parses sign-in or sign-up deep links directly, the parameter accessors changed.

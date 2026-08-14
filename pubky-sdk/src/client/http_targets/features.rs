@@ -13,12 +13,13 @@ use crate::{PubkyHttpClient, PublicKey};
 
 const MAX_INFO_BYTES: usize = 16 * 1024;
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
-const FAILED_INFO_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const INFO_CACHE_TTL: Duration = Duration::from_secs(60);
 type FeatureCell = Arc<AsyncMutex<Option<CachedFeatures>>>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct HomeserverFeatures {
     servers: Arc<Mutex<HashMap<PublicKey, FeatureCell>>>,
+    request_timeout: Duration,
 }
 
 #[derive(Deserialize)]
@@ -27,29 +28,39 @@ struct InfoResponse {
 }
 
 #[derive(Debug)]
-enum CachedFeatures {
-    Available(Vec<String>),
-    UnavailableUntil(Instant),
+struct CachedFeatures {
+    features: Vec<String>,
+    expires_at: Instant,
 }
 
 impl CachedFeatures {
     fn current(&self) -> Option<&[String]> {
-        match self {
-            Self::Available(features) => Some(features),
-            Self::UnavailableUntil(retry_at) if Instant::now() < *retry_at => Some(&[]),
-            Self::UnavailableUntil(_) => None,
-        }
+        (Instant::now() < self.expires_at).then_some(self.features.as_slice())
+    }
+}
+
+impl Default for HomeserverFeatures {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 
 impl HomeserverFeatures {
+    pub(crate) fn new(request_timeout: Option<Duration>) -> Self {
+        Self {
+            servers: Arc::default(),
+            request_timeout: request_timeout
+                .map_or(INFO_TIMEOUT, |timeout| timeout.min(INFO_TIMEOUT)),
+        }
+    }
+
     pub(super) async fn supports(
         &self,
         client: &PubkyHttpClient,
         homeserver: &PublicKey,
         feature: &str,
     ) -> bool {
-        self.supports_for(homeserver, feature, || Self::fetch(client, homeserver))
+        self.supports_for(homeserver, feature, || self.fetch(client, homeserver))
             .await
     }
 
@@ -69,22 +80,20 @@ impl HomeserverFeatures {
             return features.iter().any(|candidate| candidate == feature);
         }
 
-        let Some(features) = fetch().await else {
-            *cached = Some(CachedFeatures::UnavailableUntil(
-                Instant::now() + FAILED_INFO_RETRY_INTERVAL,
-            ));
-            return false;
-        };
+        let features = fetch().await.unwrap_or_default();
         let supports = features.iter().any(|candidate| candidate == feature);
-        *cached = Some(CachedFeatures::Available(features));
+        *cached = Some(CachedFeatures {
+            features,
+            expires_at: Instant::now() + INFO_CACHE_TTL,
+        });
         supports
     }
 
-    async fn fetch(client: &PubkyHttpClient, homeserver: &PublicKey) -> Option<Vec<String>> {
+    async fn fetch(&self, client: &PubkyHttpClient, homeserver: &PublicKey) -> Option<Vec<String>> {
         let Ok(request) = client.homeserver_info_request(homeserver).await else {
             return None;
         };
-        let Ok(response) = request.timeout(INFO_TIMEOUT).send().await else {
+        let Ok(response) = request.timeout(self.request_timeout).send().await else {
             return None;
         };
         if !response.status().is_success() {
@@ -130,9 +139,10 @@ impl HomeserverFeatures {
             cached.is_none(),
             "homeserver features were already initialized"
         );
-        *cached = Some(CachedFeatures::Available(
-            features.iter().map(ToString::to_string).collect(),
-        ));
+        *cached = Some(CachedFeatures {
+            features: features.iter().map(ToString::to_string).collect(),
+            expires_at: Instant::now() + INFO_CACHE_TTL,
+        });
     }
 }
 
@@ -178,6 +188,18 @@ mod tests {
         assert_eq!(body.len(), MAX_INFO_BYTES);
     }
 
+    #[test]
+    fn info_timeout_respects_a_shorter_client_timeout() {
+        assert_eq!(
+            HomeserverFeatures::new(Some(Duration::from_millis(100))).request_timeout,
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            HomeserverFeatures::new(Some(Duration::from_secs(10))).request_timeout,
+            INFO_TIMEOUT
+        );
+    }
+
     #[tokio::test]
     async fn temporarily_stores_failures_and_coalesces_feature_fetches() {
         let discovery = HomeserverFeatures::default();
@@ -213,18 +235,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_expired_failures() {
+    async fn refreshes_expired_features() {
         let discovery = HomeserverFeatures::default();
         let homeserver = crate::Keypair::random().public_key();
         let cell = discovery.cell(&homeserver);
-        *cell.lock().await = Some(CachedFeatures::UnavailableUntil(Instant::now()));
+        *cell.lock().await = Some(CachedFeatures {
+            features: vec![PATH_ADDRESSED_STORAGE.to_string()],
+            expires_at: Instant::now(),
+        });
 
         let supported = discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
-                Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
+                Some(Vec::new())
             })
             .await;
 
-        assert!(supported);
+        assert!(!supported);
     }
 }

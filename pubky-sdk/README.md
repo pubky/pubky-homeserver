@@ -164,19 +164,30 @@ See [Private Storage](../docs/PRIVATE_STORAGE.md) for `/priv/` access and events
 
 ### Resolve identifiers into transport URLs
 
-Need to feed a public resource into a raw HTTP client? Use [`resolve_pubky`] to transform the human-facing identifier into the HTTPS homeserver URL:
+Use [`resolve_pubky`] to turn a public resource identifier into its canonical HTTPS homeserver URL. When sending that URL through `PubkyHttpClient`, call `prepare_request` first so older homeservers receive the legacy path and `pubky-host` header when needed:
 
-```rust
-# use pubky::resolve_pubky;
-# fn main() -> pubky::Result<()> {
-let url = resolve_pubky("pubkyoperrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG")?;
+```rust no_run
+# use pubky::{PubkyHttpClient, resolve_pubky};
+# use reqwest::Method;
+# async fn run() -> pubky::Result<()> {
+let client = PubkyHttpClient::new()?;
+let mut url = resolve_pubky("pubkyoperrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG")?;
 assert_eq!(
     url.as_str(),
     "https://_pubky.operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/storage/operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG"
 );
+
+let pubky_host = client.prepare_request(&mut url).await?;
+let mut request = client.request(Method::GET, &url);
+if let Some(pubky_host) = pubky_host {
+    request = request.header("pubky-host", pubky_host);
+}
+let response = request.send().await?;
 # Ok(())
 # }
 ```
+
+The high-level Rust storage APIs and JavaScript `Client.fetch` do this automatically, so their storage requests remain compatible with older homeservers. Other HTTP clients can send the canonical `/storage/{owner}/...` URL only to homeservers that advertise `path-addressed-storage`.
 
 ## PKDNS (Pkarr)
 
@@ -212,7 +223,7 @@ Request an authorization URL and await approval.
 3. Await `await_approval()` to obtain a session-bound `PubkySession`, or `await_credential()` for a raw `GrantCredential`/`CookieCredential` that you can persist, inspect, or lift into a session later via `PubkySession::from_{grant,cookie}_credential`.
 
 ```rust
-# use pubky::{Pubky, Capabilities, Keypair, AuthFlowKind};
+# use pubky::{AuthFlowKind, Capabilities, ClientId, Keypair, Pubky};
 # async fn auth() -> pubky::Result<()> {
 
 let pubky = Pubky::new()?;
@@ -223,7 +234,11 @@ let caps = Capabilities::builder()
     .finish();
 
 // Start the flow using the default relay (see “Relay & reliability” below)
-let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
+let flow = pubky.start_grant_auth_flow(
+    &caps,
+    AuthFlowKind::signin(),
+    ClientId::new("example.com").expect("static client id is valid"),
+)?;
 println!("Scan to sign in: {}", flow.authorization_url());
 
 // On the signing device, approve with: signer.approve_auth(flow.authorization_url()).await?;
