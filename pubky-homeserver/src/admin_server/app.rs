@@ -48,7 +48,7 @@ fn create_public_router() -> Router<AppState> {
 
 /// Create the app
 pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Router> {
-    let admin_router = create_protected_router(&state.admin_password);
+    let admin_router = create_protected_router(state.admin_password());
     let public_router = create_public_router();
     let app = Router::new()
         .merge(admin_router)

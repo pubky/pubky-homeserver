@@ -6,7 +6,7 @@ use crate::persistence::sql::{
 };
 use crate::services::user_service::{UserEntity, UserService};
 use crate::shared::user_quota::UserQuota;
-use crate::SignupMode;
+use crate::{AppContext, SignupMode};
 use pubky_common::crypto::PublicKey;
 
 /// Domain errors from signup operations.
@@ -41,7 +41,17 @@ pub struct SignupService {
 }
 
 impl SignupService {
-    /// Creates a signup service with the configured signup policy.
+    /// Creates a signup service from the application context.
+    pub fn from_context(context: &AppContext) -> Self {
+        Self {
+            sql_db: context.sql_db.clone(),
+            signup_mode: context.config_toml.general.signup_mode.clone(),
+            user_service: context.user_service.clone(),
+        }
+    }
+
+    /// Creates a signup service with the configured signup policy (test-only).
+    #[cfg(test)]
     pub fn new(sql_db: SqlDb, signup_mode: SignupMode, user_service: UserService) -> Self {
         Self {
             sql_db,

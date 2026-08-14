@@ -21,11 +21,7 @@ pub struct AuthState {
 
 impl AuthState {
     pub fn new(context: &AppContext) -> Self {
-        let signup_service = SignupService::new(
-            context.sql_db.clone(),
-            context.config_toml.general.signup_mode.clone(),
-            context.user_service.clone(),
-        );
+        let signup_service = SignupService::from_context(context);
 
         Self {
             grant_auth_service: GrantAuthService::new(

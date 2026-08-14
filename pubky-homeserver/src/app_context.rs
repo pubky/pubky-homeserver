@@ -59,7 +59,10 @@ pub enum AppContextConversionError {
 /// The application context shared between all components.
 /// Think of it as a simple Dependency Injection container.
 ///
-/// Create with a `DataDir` instance: `AppContext::try_from(data_dir)`
+/// Cloning is cheap: fields are internally Arc-wrapped handles or
+/// small value types.
+///
+/// Create with a `DataDir` instance: `AppContext::read_from(data_dir)`
 ///
 #[derive(Clone)]
 pub struct AppContext {

@@ -15,7 +15,7 @@ pub async fn dav_handler(
     State(state): State<AppState>,
     req: Request<Body>,
 ) -> HttpResult<impl IntoResponse> {
-    if !is_valid_authorization_header(req.headers(), &state.admin_password) {
+    if !is_valid_authorization_header(req.headers(), state.admin_password()) {
         return Ok(Response::builder()
             .status(401)
             .header("WWW-Authenticate", "Basic") // This header will trigger the browser to show the login dialog

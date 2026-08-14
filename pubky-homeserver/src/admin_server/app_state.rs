@@ -4,20 +4,10 @@ use dav_server_opendalfs::OpendalFs;
 use crate::AppContext;
 use crate::ConfigToml;
 
-#[derive(Clone, Default)]
-pub(crate) struct AdminMetadata {
-    pub(crate) public_key: String,
-    pub(crate) pkarr_pubky_address: Option<String>,
-    pub(crate) pkarr_icann_domain: Option<String>,
-    pub(crate) version: String,
-}
-
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) context: AppContext,
-    pub(crate) admin_password: String,
     pub(crate) inner_dav_handler: DavHandler,
-    pub(crate) metadata: AdminMetadata,
 }
 
 impl AppState {
@@ -30,16 +20,29 @@ impl AppState {
             .autoindex(true)
             .build_handler();
         Self {
-            admin_password: context.config_toml.admin.admin_password.clone(),
             inner_dav_handler,
-            metadata: AdminMetadata {
-                public_key: context.keypair.public_key().z32(),
-                pkarr_pubky_address: pkarr_pubky_tls_address(&context.config_toml),
-                pkarr_icann_domain: pkarr_icann_domain(&context.config_toml),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            },
             context: context.clone(),
         }
+    }
+
+    pub(crate) fn admin_password(&self) -> &str {
+        &self.context.config_toml.admin.admin_password
+    }
+
+    pub(crate) fn public_key(&self) -> String {
+        self.context.keypair.public_key().z32()
+    }
+
+    pub(crate) fn pkarr_pubky_address(&self) -> Option<String> {
+        pkarr_pubky_tls_address(&self.context.config_toml)
+    }
+
+    pub(crate) fn pkarr_icann_domain(&self) -> Option<String> {
+        pkarr_icann_domain(&self.context.config_toml)
+    }
+
+    pub(crate) fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
     }
 
     #[cfg(test)]

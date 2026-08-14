@@ -227,10 +227,7 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         .layer(CookieManagerLayer::new())
         .layer(request_rate_limit_layer)
         .layer(AuthenticationLayer::new(auth_state.clone()))
-        .layer(BandwidthQuotaLimitLayer::new(
-            state.context.user_service.clone(),
-            state.context.config_toml.default_quotas.clone(),
-        ));
+        .layer(BandwidthQuotaLimitLayer::from_context(&state.context));
 
     let app = base()
         .merge(tenants::router())
@@ -300,18 +297,17 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn info_is_public_and_reports_no_features() {
-        let mut config = ConfigToml::minimal_test_config();
-        config.drive.rate_limits = vec![PathLimit {
-            path: GlobPattern::new("/info"),
-            method: HttpMethod(Method::GET),
-            quota: "1r/m".parse().unwrap(),
-            key: LimitKeyType::User,
-            burst: None,
-            whitelist: Vec::new(),
-        }];
-
-        let data_dir = MockDataDir::new(config, None).unwrap();
-        let context = AppContext::read_from(data_dir).await.unwrap();
+        let context = AppContext::test_with_config(|c| {
+            c.drive.rate_limits = vec![PathLimit {
+                path: GlobPattern::new("/info"),
+                method: HttpMethod(Method::GET),
+                quota: "1r/m".parse().unwrap(),
+                key: LimitKeyType::User,
+                burst: None,
+                whitelist: Vec::new(),
+            }];
+        })
+        .await;
         let router = ClientServer::create_router(&context).unwrap();
         let server = TestServer::new(router).unwrap();
 

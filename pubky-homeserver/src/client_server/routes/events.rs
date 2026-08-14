@@ -428,7 +428,8 @@ pub async fn feed_stream(
 
             let query_start = Instant::now();
             let events = match state
-                .context.events_service
+                .context
+                .events_service
                 .get_by_user_cursors(
                     current_user_cursors,
                     params.reverse,
