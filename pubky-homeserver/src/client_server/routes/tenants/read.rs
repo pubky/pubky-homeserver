@@ -21,13 +21,13 @@ use std::str::FromStr;
 use std::time::SystemTime;
 
 pub async fn legacy_head(
-    State(state): State<AppState>,
+    state: State<AppState>,
     session: Option<AuthSession>,
     tenant: RequestTenant,
     Path(path): Path<WebDavPathAxum>,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
-    let mut response = head(State(state), session, entry_path).await?;
+    let mut response = head(state, session, entry_path).await?;
     response
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("pubky-host"));
@@ -60,7 +60,7 @@ pub async fn head(
 
 #[axum::debug_handler]
 pub async fn legacy_get(
-    State(state): State<AppState>,
+    state: State<AppState>,
     headers: HeaderMap,
     session: Option<AuthSession>,
     tenant: RequestTenant,
@@ -68,7 +68,7 @@ pub async fn legacy_get(
     params: ListQueryParams,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
-    let mut response = get(State(state), headers, session, entry_path, params).await?;
+    let mut response = get(state, headers, session, entry_path, params).await?;
     response
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("pubky-host"));

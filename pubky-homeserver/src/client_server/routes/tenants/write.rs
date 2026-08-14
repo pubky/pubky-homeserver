@@ -28,13 +28,13 @@ use crate::{
 };
 
 pub async fn legacy_delete(
-    State(state): State<AppState>,
+    state: State<AppState>,
     session: AuthSession,
     tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
-    delete(State(state), session, entry_path).await
+    delete(state, session, entry_path).await
 }
 
 pub async fn delete(
@@ -57,7 +57,7 @@ pub async fn delete(
 }
 
 pub async fn legacy_put(
-    State(state): State<AppState>,
+    state: State<AppState>,
     session: AuthSession,
     tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
@@ -65,7 +65,7 @@ pub async fn legacy_put(
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
-    put(State(state), session, entry_path, headers, body).await
+    put(state, session, entry_path, headers, body).await
 }
 
 pub async fn put(
