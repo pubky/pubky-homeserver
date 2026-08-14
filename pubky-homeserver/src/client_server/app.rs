@@ -338,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn storage_metrics_use_low_cardinality_labels_without_request_data() {
+    async fn storage_metrics_only_count_resolved_requests_with_low_cardinality_labels() {
         let data_dir = MockDataDir::new(ConfigToml::minimal_test_config(), None).unwrap();
         let context = AppContext::read_from(data_dir).await.unwrap();
         let metrics = context.metrics.clone();
@@ -373,6 +373,10 @@ mod tests {
             .get(&format!("{storage_path}?pubky-host={public_key}"))
             .expect_success()
             .await;
+        server
+            .get("/favicon.ico")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
 
         let output = metrics.render().unwrap();
         let samples = output

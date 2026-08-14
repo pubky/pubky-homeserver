@@ -18,8 +18,10 @@ pub(crate) async fn record_request(
     request: Request,
     next: Next,
 ) -> Response {
-    let tenant = request.extensions().get::<RequestTenant>();
-    let addressing_mode = if tenant.and_then(RequestTenant::storage_path).is_some() {
+    let Some(tenant) = request.extensions().get::<RequestTenant>() else {
+        return next.run(request).await;
+    };
+    let addressing_mode = if tenant.storage_path().is_some() {
         StorageAddressingMode::Path
     } else {
         StorageAddressingMode::Legacy
@@ -31,8 +33,7 @@ pub(crate) async fn record_request(
                 .to_str()
                 .ok()
                 .and_then(|value| PublicKey::try_from_z32(value).ok())
-                .zip(tenant)
-                .is_some_and(|(header, tenant)| &header == tenant.public_key()) =>
+                .is_some_and(|header| &header == tenant.public_key()) =>
         {
             PubkyHostHeaderUsage::Matching
         }
