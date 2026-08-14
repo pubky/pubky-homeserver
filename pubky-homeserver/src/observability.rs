@@ -5,7 +5,10 @@
 //! server route. The `metrics_server` *serves* this over HTTP; subsystems (`persistence`,
 //! `client_server`, …) only *record* into it.
 
-use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider, UpDownCounter};
+use opentelemetry::{
+    metrics::{Counter, Histogram, Meter, MeterProvider, UpDownCounter},
+    KeyValue,
+};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use prometheus::{Encoder, Registry, TextEncoder};
 use std::sync::Arc;
@@ -25,6 +28,27 @@ pub const EVENT_STREAM_BROADCAST_HALF_FULL_COUNT: &str = "event_stream_broadcast
 pub const EVENT_STREAM_ACTIVE_CONNECTIONS: &str = "event_stream_active_connections";
 pub const EVENT_STREAM_CONNECTION_DURATION: &str = "event_stream_connection_duration_ms";
 pub const SIGNUP_COUNT: &str = "signup_count";
+pub const STORAGE_REQUEST_COUNT: &str = "storage_request_count";
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StorageAddressingMode {
+    Path,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PubkyHostHeaderUsage {
+    Absent,
+    Matching,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StorageAuthMethod {
+    None,
+    Cookie,
+    Grant,
+}
 
 #[derive(Clone, Debug)]
 pub struct Metrics {
@@ -37,6 +61,7 @@ pub struct Metrics {
     event_stream_active_connections: UpDownCounter<i64>,
     event_stream_connection_duration: Histogram<f64>,
     signup_count: Counter<u64>,
+    storage_request_count: Counter<u64>,
 }
 
 impl Metrics {
@@ -81,6 +106,11 @@ impl Metrics {
             .with_description("Total number of successful signups")
             .build();
 
+        let storage_request_count = meter
+            .u64_counter(STORAGE_REQUEST_COUNT)
+            .with_description("Number of client storage requests by migration mode")
+            .build();
+
         Ok(Self {
             registry: Arc::new(registry),
             _provider: Arc::new(provider),
@@ -91,6 +121,7 @@ impl Metrics {
             event_stream_active_connections,
             event_stream_connection_duration,
             signup_count,
+            storage_request_count,
         })
     }
 
@@ -133,6 +164,41 @@ impl Metrics {
 
     pub fn record_signup(&self) {
         self.signup_count.add(1, &[]);
+    }
+
+    // === storage migration metrics ===
+
+    pub(crate) fn record_storage_request(
+        &self,
+        addressing_mode: StorageAddressingMode,
+        pubky_host_header: PubkyHostHeaderUsage,
+        pubky_host_query: bool,
+        auth_method: StorageAuthMethod,
+    ) {
+        let addressing_mode = match addressing_mode {
+            StorageAddressingMode::Path => "path",
+            StorageAddressingMode::Legacy => "legacy",
+        };
+        let pubky_host_header = match pubky_host_header {
+            PubkyHostHeaderUsage::Absent => "absent",
+            PubkyHostHeaderUsage::Matching => "matching",
+            PubkyHostHeaderUsage::Other => "other",
+        };
+        let auth_method = match auth_method {
+            StorageAuthMethod::None => "none",
+            StorageAuthMethod::Cookie => "cookie",
+            StorageAuthMethod::Grant => "grant",
+        };
+
+        self.storage_request_count.add(
+            1,
+            &[
+                KeyValue::new("addressing_mode", addressing_mode),
+                KeyValue::new("pubky_host_header", pubky_host_header),
+                KeyValue::new("pubky_host_query", pubky_host_query),
+                KeyValue::new("auth_method", auth_method),
+            ],
+        );
     }
 
     /// Render Prometheus metrics in text format
@@ -295,6 +361,12 @@ mod tests {
         metrics.record_broadcast_half_full();
         metrics.record_connection_closed(30);
         metrics.record_signup();
+        metrics.record_storage_request(
+            StorageAddressingMode::Path,
+            PubkyHostHeaderUsage::Matching,
+            true,
+            StorageAuthMethod::Cookie,
+        );
 
         let output = metrics.render().expect("Failed to render metrics");
 
@@ -344,5 +416,15 @@ mod tests {
             SIGNUP_COUNT,
             output
         );
+        assert!(
+            output.contains(STORAGE_REQUEST_COUNT),
+            "Missing {} in: {}",
+            STORAGE_REQUEST_COUNT,
+            output
+        );
+        assert!(output.contains("addressing_mode=\"path\""));
+        assert!(output.contains("auth_method=\"cookie\""));
+        assert!(output.contains("pubky_host_header=\"matching\""));
+        assert!(output.contains("pubky_host_query=\"true\""));
     }
 }

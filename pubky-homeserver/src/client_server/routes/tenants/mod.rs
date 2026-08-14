@@ -11,12 +11,15 @@
 
 use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};
 
-use crate::client_server::{cache_policy::private_cache_policy, AppState};
+use crate::client_server::{
+    cache_policy::private_cache_policy, middleware::storage_metrics, AppState,
+};
+use crate::observability::Metrics;
 
 pub mod read;
 pub mod write;
 
-pub fn router() -> Router<AppState> {
+pub fn router(metrics: Metrics) -> Router<AppState> {
     Router::new()
         .route(
             "/storage/{user_z32}/{*path}",
@@ -35,4 +38,8 @@ pub fn router() -> Router<AppState> {
         // TODO: different max size for sessions and other routes?
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .layer(middleware::from_fn(private_cache_policy))
+        .layer(middleware::from_fn_with_state(
+            metrics,
+            storage_metrics::record_request,
+        ))
 }
