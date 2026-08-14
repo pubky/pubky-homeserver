@@ -7,7 +7,7 @@ use tower_http::trace::{
 };
 use tracing::{Level, Span};
 
-use super::pubky_host::PubkyHost;
+use super::request_tenant::RequestTenant;
 
 // Silence events path from logs to avoid noisy logs. Only log when there is an error.
 const TRACING_EXCLUDED_PATHS: [&str; 1] = ["/events/"];
@@ -23,8 +23,8 @@ pub fn with_trace_layer(router: Router) -> Router {
     router.layer(
         TraceLayer::new_for_http()
             .make_span_with(move |request: &Request| {
-                let uri = if let Some(pubky_host) = request.extensions().get::<PubkyHost>() {
-                    format!("pubky://{}{}", pubky_host.public_key().z32(), request.uri())
+                let uri = if let Some(tenant) = request.extensions().get::<RequestTenant>() {
+                    tenant.pubky_url(request.uri())
                 } else {
                     request.uri().to_string()
                 };

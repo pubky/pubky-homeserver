@@ -22,7 +22,7 @@ use super::limiter_pool::LimitTuple;
 /// Matches requests by path and method against configured limits and
 /// returns 429 TOO MANY REQUESTS when a limit is exceeded.
 ///
-/// Returns 400 BAD REQUEST if the rate-limit key (IP or pubky-host)
+/// Returns 400 BAD REQUEST if the rate-limit key (IP or request tenant)
 /// cannot be extracted.
 #[derive(Debug, Clone)]
 pub struct RequestRateLimitLayer {
@@ -143,6 +143,7 @@ mod tests {
 
     use axum::http::Method;
     use axum::{
+        middleware,
         routing::{get, post},
         Router,
     };
@@ -152,7 +153,7 @@ mod tests {
     use tokio::task::JoinHandle;
     use tower_cookies::CookieManagerLayer;
 
-    use crate::client_server::middleware::pubky_host::PubkyHostLayer;
+    use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::quota_config::{GlobPattern, HttpMethod, LimitKeyType};
     use crate::shared::HttpResult;
 
@@ -171,12 +172,13 @@ mod tests {
         let app = Router::new()
             .route("/upload", post(upload_handler))
             .route("/download", get(download_handler))
+            .route("/storage/{user_z32}/{*path}", get(download_handler))
             .layer(
                 RequestRateLimitLayer::from_path_limits(config)
                     .expect("valid test request-count rate limit"),
             )
             .layer(CookieManagerLayer::new())
-            .layer(PubkyHostLayer);
+            .layer(middleware::from_fn(RequestTenant::resolve));
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -273,6 +275,40 @@ mod tests {
             "user1 should have exactly one success and one rate-limited response"
         );
         assert_eq!(res3.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn path_addressed_storage_uses_storage_path_and_owner_for_limits() {
+        let path_limit = PathLimit {
+            path: GlobPattern::new("/pub/*"),
+            method: HttpMethod(Method::GET),
+            quota: "1r/m".parse().unwrap(),
+            key: LimitKeyType::User,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let socket = start_server(vec![path_limit]).await;
+        let owner = Keypair::random().public_key();
+        let other = Keypair::random().public_key();
+        let url = format!("http://{socket}/storage/{}/pub/file.txt", owner.z32());
+        let client = Client::new();
+
+        let first = client
+            .get(&url)
+            .header("pubky-host", other.z32())
+            .send()
+            .await
+            .unwrap();
+        let second = client
+            .get(&url)
+            .header("pubky-host", other.z32())
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

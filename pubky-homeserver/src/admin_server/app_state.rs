@@ -25,7 +25,6 @@ pub(crate) struct AppState {
     pub(crate) admin_password: String,
     pub(crate) inner_dav_handler: DavHandler,
     pub(crate) metadata: AdminMetadata,
-    /// User service for quota cache eviction on admin updates.
     pub(crate) user_service: UserService,
     /// Event service for the admin all-events stream.
     pub(crate) events_service: EventsService,

@@ -14,4 +14,4 @@ the individual components and not all of Pubky.
 ### E2E Testing
 
 E2E tests cover multiple workspace members. Test full workflows. 
-It's recommended to use `pubky-testnet` which provides a convinient way to run Pubky components.
+It's recommended to use `pubky-testnet` which provides a convenient way to run Pubky components.

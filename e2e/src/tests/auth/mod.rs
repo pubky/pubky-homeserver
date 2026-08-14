@@ -4,8 +4,11 @@ mod pkdns;
 mod signup_tokens;
 
 use super::build_full_testnet;
-use pubky_testnet::pubky::deep_links::DeepLink;
+use pubky_testnet::pubky::deep_links::{
+    DeepLink, DeepLinkScheme, DirectSignupDeepLink, DirectSignupParams,
+};
 use pubky_testnet::pubky::errors::{Error, RequestError};
+use pubky_testnet::pubky::pkarr;
 use pubky_testnet::pubky::IntoPubkyResource;
 #[allow(deprecated, reason = "E2E tests cover the deprecated cookie flow")]
 use pubky_testnet::pubky::PubkyCookieAuthFlow;

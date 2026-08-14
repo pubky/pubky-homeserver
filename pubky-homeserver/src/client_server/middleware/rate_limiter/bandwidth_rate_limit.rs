@@ -16,7 +16,7 @@ use std::time::Duration;
 use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
 
-use crate::client_server::middleware::pubky_host::PubkyHost;
+use crate::client_server::middleware::request_tenant::RequestTenant;
 use crate::quota_config::LimitKey;
 use crate::services::user_service::UserService;
 use crate::shared::HttpError;
@@ -35,7 +35,7 @@ use super::CLEANUP_INTERVAL_SECS;
 /// - Unauthenticated requests: IP-keyed read rate from
 ///   `unauthenticated_ip_rate_read`.
 ///
-/// Requires a `PubkyHostLayer` to be applied first.
+/// Requires `RequestTenant::resolve` middleware to run first.
 #[derive(Debug, Clone)]
 pub struct BandwidthQuotaLimitLayer {
     user_service: UserService,
@@ -106,7 +106,7 @@ impl BandwidthState {
 
     /// Returns `true` when there is something to check for this request.
     fn should_limit(&self, req: &Request<Body>) -> bool {
-        let has_user = req.extensions().get::<PubkyHost>().is_some();
+        let has_user = req.extensions().get::<RequestTenant>().is_some();
         let has_bandwidth = self.unauthenticated_read_limiter.is_some();
         has_user || has_bandwidth
     }
@@ -256,8 +256,7 @@ mod tests {
 
     use crate::client_server::auth::grant::session::GrantSession;
     use crate::client_server::auth::AuthSession;
-    use crate::client_server::middleware::pubky_host::PubkyHost;
-    use crate::client_server::middleware::pubky_host::PubkyHostLayer;
+    use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::data_directory::quota_config::BandwidthQuota;
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
@@ -294,7 +293,7 @@ mod tests {
                 let auth_public_key = auth_public_key.clone();
                 async move {
                     if let (Some(public_key), Some(_)) =
-                        (auth_public_key, req.extensions().get::<PubkyHost>())
+                        (auth_public_key, req.extensions().get::<RequestTenant>())
                     {
                         req.extensions_mut().insert(auth_session(public_key));
                     }
@@ -302,7 +301,7 @@ mod tests {
                 }
             }))
             .layer(CookieManagerLayer::new())
-            .layer(PubkyHostLayer);
+            .layer(from_fn(RequestTenant::resolve));
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -324,12 +323,12 @@ mod tests {
     }
 
     fn auth_session(public_key: PublicKey) -> AuthSession {
-        AuthSession::Grant(GrantSession {
-            user_key: public_key,
-            capabilities: Capabilities::builder().cap(Capability::root()).finish(),
-            grant_id: GrantId::generate(),
-            token_expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
-        })
+        AuthSession::Grant(GrantSession::test(
+            public_key,
+            Capabilities::builder().cap(Capability::root()).finish(),
+            GrantId::generate(),
+            chrono::Utc::now().timestamp() as u64 + 3600,
+        ))
     }
 
     #[tokio::test]
@@ -443,21 +442,18 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_authenticated_user_gets_per_user_rate_from_db() {
-        use crate::persistence::sql::user::UserRepository;
-
         let db = SqlDb::test().await;
         let user_service = UserService::new(db.clone());
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&pubkey).await.unwrap();
         let quota = UserQuota {
             rate_read: QuotaOverride::Value("100mb/s".parse().unwrap()),
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &quota, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &quota, &mut db.pool().into())
             .await
             .unwrap();
 

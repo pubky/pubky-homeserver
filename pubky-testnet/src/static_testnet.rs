@@ -151,7 +151,7 @@ pub struct StaticTestnet {
     /// Whether the homeserver is using persistent on-disk storage.
     is_persistent: bool,
     #[allow(dead_code)]
-    fixed_bootstrap_node: Option<pkarr::mainline::Dht>, // Keep alive
+    fixed_bootstrap_node: Option<mainline::Dht>, // Keep alive
     #[allow(dead_code)]
     temp_dirs: Vec<tempfile::TempDir>, // Keep temp dirs alive for the pkarr relay
 }
@@ -276,6 +276,7 @@ impl StaticTestnet {
     pub fn bootstrap_nodes(&self) -> Vec<String> {
         let mut nodes = vec![];
         if let Some(dht) = &self.fixed_bootstrap_node {
+            #[allow(deprecated, reason = "mainline has no synchronous replacement")]
             nodes.push(dht.info().local_addr().to_string());
         }
         nodes.extend(
@@ -291,7 +292,7 @@ impl StaticTestnet {
     /// If it's already running, return None.
     fn run_fixed_bootsrap_node(
         other_bootstrap_nodes: &[String],
-    ) -> anyhow::Result<Option<pkarr::mainline::Dht>> {
+    ) -> anyhow::Result<Option<mainline::Dht>> {
         let port_suffix = format!(":{}", testnet_ports::BOOTSTRAP);
         if other_bootstrap_nodes
             .iter()
@@ -300,7 +301,7 @@ impl StaticTestnet {
             return Ok(None);
         }
 
-        let mut builder = pkarr::mainline::Dht::builder();
+        let mut builder = mainline::Dht::builder();
         let dht = builder
             .port(testnet_ports::BOOTSTRAP)
             .bootstrap(other_bootstrap_nodes)
@@ -317,9 +318,17 @@ impl StaticTestnet {
             .http_port(testnet_ports::PKARR_RELAY)
             .storage(temp_dir.path().to_path_buf())
             .disable_rate_limiter()
-            .pkarr(|pkarr| {
-                pkarr.no_default_network();
-                pkarr.bootstrap(&self.testnet.dht.bootstrap)
+            .report_policy(pkarr::dht::ReportPolicy::testnet())
+            .dht(|config| {
+                config.bootstrap = Some(
+                    self.testnet
+                        .dht
+                        .bootstrap
+                        .iter()
+                        .map(|address| address.parse().expect("testnet bootstrap address is valid"))
+                        .collect(),
+                );
+                config
             });
         let relay = unsafe { builder.run() }.await?;
         self.testnet.pkarr_relays.push(relay);
@@ -330,6 +339,7 @@ impl StaticTestnet {
     /// Creates a fixed http relay.
     async fn run_fixed_http_relay(&mut self) -> anyhow::Result<()> {
         let relay = HttpRelay::builder()
+            .bind_address(BIND_ALL)
             .http_port(testnet_ports::HTTP_RELAY)
             .cors_allow_all(true)
             .run()

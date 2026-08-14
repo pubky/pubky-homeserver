@@ -30,7 +30,7 @@ use uuid::Uuid;
 ///     // Iterate over all operators.
 ///     for (_scheme, operator) in OpendalTestOperators::new().operators() {
 ///         // Add a layer to the operator if needed.
-///         let operator = operator.layer(UserQuotaLayer::new());
+///         let operator = operator.layer(MyStorageLayer::new());
 ///         // Perform tests
 ///         operator.write("1234567890/test.txt", vec![0; 10]).await.expect_err("Should fail because the path doesn't start with a pubkey");
 ///         // No need to clean up the operator as it is automatically cleaned up when OpendalTestOperators is dropped.

@@ -7,6 +7,7 @@ use crate::actors::DEFAULT_HTTP_RELAY_INBOX;
 use crate::actors::auth::cookie::flow::PubkyCookieAuthFlow;
 use crate::actors::auth::deep_links::{
     DeepLink, DeepLinkScheme, SigninDeepLink, SigninParams, SignupDeepLink, SignupParams,
+    XCallbackParams,
 };
 use crate::actors::auth::kind::AuthFlowKind;
 use crate::actors::auth::relay::auth_relay_listener::AuthRelayListener;
@@ -25,6 +26,7 @@ pub struct CookieAuthFlowBuilder {
     client: Option<PubkyHttpClient>,
     auth_kind: AuthFlowKind,
     client_secret: [u8; 32],
+    x_callback: XCallbackParams,
 }
 
 impl CookieAuthFlowBuilder {
@@ -36,6 +38,7 @@ impl CookieAuthFlowBuilder {
             client: None,
             auth_kind,
             client_secret: random_bytes::<32>(),
+            x_callback: XCallbackParams::default(),
         }
     }
 
@@ -60,6 +63,13 @@ impl CookieAuthFlowBuilder {
         self
     }
 
+    /// Attach optional x-callback-url metadata to the authorization deep link.
+    #[must_use]
+    pub fn x_callback(mut self, x_callback: XCallbackParams) -> Self {
+        self.x_callback = x_callback;
+        self
+    }
+
     /// Finalize: derive channel, compute the `pubkyauth://` deep link, spawn
     /// the background poller, and return the flow handle.
     ///
@@ -74,6 +84,7 @@ impl CookieAuthFlowBuilder {
             client,
             auth_kind,
             client_secret,
+            x_callback,
         } = self;
 
         let client = match client {
@@ -103,7 +114,8 @@ impl CookieAuthFlowBuilder {
                     signup_token,
                 },
             )),
-        };
+        }
+        .with_x_callback(x_callback);
 
         let relay_listener = AuthRelayListener::builder(client_secret)
             .relay_base_url(base_relay)

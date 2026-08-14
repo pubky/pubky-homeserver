@@ -18,7 +18,7 @@ use crate::quota_config::{LimitKey, LimitKeyType, PathLimit};
 
 use super::extract_ip::extract_ip;
 use super::CLEANUP_INTERVAL_SECS;
-use crate::client_server::middleware::pubky_host::PubkyHost;
+use crate::client_server::middleware::request_tenant::RequestTenant;
 use axum::body::Body;
 use axum::http::Request;
 
@@ -121,7 +121,7 @@ impl LimitTuple {
             LimitKeyType::User => {
                 // Extract the user pubkey from the request.
                 req.extensions()
-                    .get::<PubkyHost>()
+                    .get::<RequestTenant>()
                     .map(|pk| LimitKey::User(pk.public_key().clone()))
                     .ok_or(anyhow::anyhow!("Failed to extract user pubkey."))
             }
@@ -130,7 +130,11 @@ impl LimitTuple {
 
     /// Check if the request matches the limit.
     pub fn is_match(&self, req: &Request<Body>) -> bool {
-        let path = req.uri().path();
+        let path = req
+            .extensions()
+            .get::<RequestTenant>()
+            .and_then(RequestTenant::storage_path)
+            .map_or(req.uri().path(), |path| path.as_str());
         let glob_match = self.limit.path.is_match(path);
         let method_match = self.limit.method.0 == req.method();
         glob_match && method_match

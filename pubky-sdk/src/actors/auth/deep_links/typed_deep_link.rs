@@ -6,7 +6,7 @@ use std::{
 
 use url::Url;
 
-use super::{DeepLinkParseError, schemes::DeepLinkScheme};
+use super::{DeepLinkParseError, XCallbackParams, schemes::DeepLinkScheme};
 
 /// Intent marker for typed Pubky deep links.
 pub trait DeepLinkIntent {
@@ -32,6 +32,7 @@ pub trait DeepLinkParams: Sized {
 pub struct TypedDeepLink<I, P> {
     scheme: DeepLinkScheme,
     params: P,
+    x_callback: XCallbackParams,
     _intent: PhantomData<I>,
 }
 
@@ -41,6 +42,7 @@ impl<I, P> TypedDeepLink<I, P> {
         Self {
             scheme,
             params,
+            x_callback: XCallbackParams::default(),
             _intent: PhantomData,
         }
     }
@@ -65,6 +67,7 @@ where
         Ok(Self {
             scheme,
             params: P::parse(url)?,
+            x_callback: XCallbackParams::from_url(url),
             _intent: PhantomData,
         })
     }
@@ -84,6 +87,18 @@ where
         &self.params
     }
 
+    /// Return the optional x-callback-url metadata carried by this deep link.
+    pub const fn x_callback(&self) -> &XCallbackParams {
+        &self.x_callback
+    }
+
+    /// Attach x-callback-url metadata to this deep link.
+    #[must_use]
+    pub fn with_x_callback(mut self, x_callback: XCallbackParams) -> Self {
+        self.x_callback = x_callback;
+        self
+    }
+
     /// Convert this typed deep link into a URL.
     ///
     /// # Panics
@@ -93,6 +108,7 @@ where
         let mut url = Url::parse(&format!("{}://{}", self.scheme.as_str(), I::NAME))
             .expect("invariant: deep-link scheme and intent form a valid URL");
         self.params.append_query_pairs(&mut url);
+        self.x_callback.append_to_url(&mut url);
         url
     }
 }
@@ -222,6 +238,46 @@ mod tests {
         let url: Url = deep_link.into();
 
         assert_eq!(url.as_str(), "pubkyauth://test?value=hello");
+    }
+
+    #[test]
+    fn parses_and_serializes_x_callback_metadata() {
+        let deep_link: TestDeepLink = "pubkyauth://test?value=hello&x-source=Bitkit%20Wallet&x-success=bitkit%3A%2F%2Fcallback%3Fnonce%3Dabc%26state%3Dready"
+            .parse()
+            .unwrap();
+
+        assert_eq!(
+            deep_link.x_callback(),
+            &XCallbackParams {
+                x_source: Some("Bitkit Wallet".into()),
+                x_success: Some("bitkit://callback?nonce=abc&state=ready".into()),
+                ..XCallbackParams::default()
+            }
+        );
+        assert_eq!(
+            deep_link.to_string(),
+            "pubkyauth://test?value=hello&x-source=Bitkit%20Wallet&x-success=bitkit%3A%2F%2Fcallback%3Fnonce%3Dabc%26state%3Dready"
+        );
+    }
+
+    #[test]
+    fn attaches_x_callback_metadata_without_changing_params() {
+        let deep_link = TestDeepLink::new(
+            DeepLinkScheme::PubkyAuth,
+            TestParams {
+                value: "hello".into(),
+            },
+        )
+        .with_x_callback(XCallbackParams {
+            x_cancel: Some("bitkit://cancel".into()),
+            ..XCallbackParams::default()
+        });
+
+        assert_eq!(deep_link.params().value, "hello");
+        assert_eq!(
+            deep_link.to_string(),
+            "pubkyauth://test?value=hello&x-cancel=bitkit%3A%2F%2Fcancel"
+        );
     }
 
     #[test]

@@ -1,19 +1,25 @@
 import test from "tape";
 import { Keypair, Pubky, PublicKey } from "../index.js";
-import { Assert, IsExact, createSignupToken } from "./utils.js";
+import {
+  Assert,
+  IsExact,
+  assertPubkyError,
+  createSignupToken,
+} from "./utils.js";
 
 const HOMESERVER_PUBLICKEY = PublicKey.from(
   "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo",
 );
 
 /**
- * PKDNS: fresh key has no _pubky record.
+ * PKDNS: operational resolution failures reject.
  * Flow:
  *  - facade -> read-only pkdns resolver
  *  - generate keypair without publishing any record
- *  - resolver returns undefined
+ *  - the isolated testnet cannot resolve the key
+ *  - resolver rejects instead of treating the failure as an absent record
  */
-test("pkdns: getHomeserver not found", async (t) => {
+test("pkdns: getHomeserver rejects resolution failures", async (t) => {
   const sdk = Pubky.testnet();
   type Sdk = typeof sdk;
   const _resolver: Assert<
@@ -23,9 +29,17 @@ test("pkdns: getHomeserver not found", async (t) => {
   const fresh = Keypair.random();
   const pubkey = fresh.publicKey;
 
-  const hs = await sdk.getHomeserverOf(pubkey);
-
-  t.equal(hs, undefined, "no homeserver for a fresh keypair");
+  try {
+    await sdk.getHomeserverOf(pubkey);
+    t.fail("resolution failure should reject");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(error.name, "PkarrError", "resolution failure maps to PkarrError");
+    t.ok(
+      error.message.includes("no responses"),
+      "error preserves the resolution failure",
+    );
+  }
   t.end();
 });
 

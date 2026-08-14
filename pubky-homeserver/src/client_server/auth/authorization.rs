@@ -11,8 +11,9 @@
 //! and [`has_read_permission`] decides authentication too: 401 for an anonymous
 //! `/priv/` read, 403 for a wrong-tenant or under-scoped one.
 //!
-//! Both predicates take the tenant as a [`PublicKey`]: storage handlers pass the
-//! key from the `Host` header, the event stream passes the `user=` query key.
+//! Both predicates take the tenant as a [`PublicKey`]: `/storage` handlers pass
+//! the path owner, deprecated owner-relative handlers pass the legacy-resolved
+//! owner, and the event stream passes the `user=` query key.
 //!
 //! [`AuthenticationLayer`]: super::AuthenticationLayer
 
@@ -21,7 +22,7 @@ use pubky_common::crypto::PublicKey;
 
 use crate::client_server::auth::AuthSession;
 use crate::constants::{PRIVATE_ROOT, PUBLIC_ROOT};
-use crate::shared::webdav::WebDavPath;
+use crate::shared::webdav::StoragePath;
 use crate::shared::HttpError;
 
 /// Storage roots a write may target.
@@ -41,7 +42,7 @@ const STORAGE_ROOTS: [&str; 2] = [PUBLIC_ROOT, PRIVATE_ROOT];
 pub fn has_write_permission(
     session: &AuthSession,
     pubkey: &PublicKey,
-    path: &WebDavPath,
+    path: &StoragePath,
 ) -> Result<(), HttpError> {
     let path_str = path.as_str();
 
@@ -51,7 +52,7 @@ pub fn has_write_permission(
         ));
     }
 
-    session_has_action(session, pubkey, path_str, Action::Write)
+    session_has_action(session, pubkey, path, Action::Write)
 }
 
 /// Authorize a read of `path` for an optional `session` against an optional
@@ -70,7 +71,7 @@ pub fn has_write_permission(
 pub fn has_read_permission(
     session: Option<&AuthSession>,
     pubkey: Option<&PublicKey>,
-    path: &WebDavPath,
+    path: &StoragePath,
 ) -> Result<(), HttpError> {
     let path_str = path.as_str();
 
@@ -97,7 +98,7 @@ pub fn has_read_permission(
         HttpError::forbidden_with_message("A private read must be scoped to exactly one user")
     })?;
 
-    session_has_action(session, pubkey, path_str, Action::Read)
+    session_has_action(session, pubkey, path, Action::Read)
 }
 
 /// Whether `session` targets tenant `pubkey` and holds a capability whose scope
@@ -105,7 +106,7 @@ pub fn has_read_permission(
 fn session_has_action(
     session: &AuthSession,
     pubkey: &PublicKey,
-    path: &str,
+    path: &StoragePath,
     action: Action,
 ) -> Result<(), HttpError> {
     if session.user_key() != pubkey {
@@ -117,7 +118,7 @@ fn session_has_action(
     let granted = session
         .capabilities()
         .iter()
-        .any(|cap| cap.scope_covers_path(path) && cap.actions.contains(&action));
+        .any(|cap| cap.scope_covers_path(path) && cap.actions().contains(&action));
     if granted {
         return Ok(());
     }
@@ -146,17 +147,17 @@ mod tests {
         Keypair::random().public_key()
     }
 
-    fn web_path(s: &str) -> WebDavPath {
-        WebDavPath::new(s).expect("test path must be a syntactically valid webdav path")
+    fn web_path(s: &str) -> StoragePath {
+        StoragePath::new(s).expect("test path must be a syntactically valid webdav path")
     }
 
     fn session_with_key(pk: PublicKey, capabilities: Capabilities) -> AuthSession {
-        AuthSession::Grant(GrantSession {
-            user_key: pk,
+        AuthSession::Grant(GrantSession::test(
+            pk,
             capabilities,
-            grant_id: GrantId::generate(),
-            token_expires_at: 9999999999,
-        })
+            GrantId::generate(),
+            9999999999,
+        ))
     }
 
     fn session_with_caps(capabilities: Capabilities) -> (AuthSession, PublicKey) {
@@ -170,15 +171,15 @@ mod tests {
     }
 
     fn scoped_caps(scope: &str) -> Capabilities {
-        Capabilities::from(vec![Capability::write(scope)])
+        Capabilities::from(vec![Capability::write(scope).unwrap()])
     }
 
     fn read_only_caps() -> Capabilities {
-        Capabilities::from(vec![Capability::read("/")])
+        Capabilities::from(vec![Capability::read("/").unwrap()])
     }
 
     fn read_scoped_caps(scope: &str) -> Capabilities {
-        Capabilities::from(vec![Capability::read(scope)])
+        Capabilities::from(vec![Capability::read(scope).unwrap()])
     }
 
     fn read_rejection_status(result: Result<(), HttpError>) -> StatusCode {

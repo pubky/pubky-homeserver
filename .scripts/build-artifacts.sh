@@ -1,16 +1,15 @@
 #!/bin/bash
-
 # -------------------------------------------------------------------------------------------------
 # This script prepares the artifacts for the current project.
 # It builds all the binaries and prepares them for upload as a Github Release.
 # The end result will be a target/github-release directory with the following structure:
 #
 # target/github-release/
-# ├── pubky-core-v0.5.0-rc.0-linux-arm64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-linux-amd64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-windows-amd64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-osx-arm64.tar.gz
-# ├── pubky-core-v0.5.0-rc.0-osx-amd64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-linux-arm64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-linux-amd64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-windows-amd64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-osx-arm64.tar.gz
+# ├── pubky-homeserver-v0.5.0-rc.0-osx-amd64.tar.gz
 # └── ...
 #
 # Make sure you installed https://github.com/cross-rs/cross for cross-compilation.
@@ -19,11 +18,9 @@
 # to authenticate yourself.
 # -------------------------------------------------------------------------------------------------
 
-
 set -e # fail the script if any command fails
 set -u # fail the script if any variable is not set
 set -o pipefail # fail the script if any pipe command fails
-
 
 # Check if cross is installed
 if ! command -v cross &> /dev/null
@@ -35,12 +32,13 @@ fi
 # Read the version from the homeserver
 VERSION=$(cargo pkgid -p pubky-homeserver | awk -F# '{print $NF}')
 echo "Preparing release executables for version $VERSION..."
+
 TARGETS=(
 # target, nickname
 "aarch64-unknown-linux-musl,linux-arm64"
 "x86_64-unknown-linux-musl,linux-amd64"
 "x86_64-pc-windows-gnu,windows-amd64"
-"aarch64-apple-darwin,osx-arm64" 
+"aarch64-apple-darwin,osx-arm64"
 "x86_64-apple-darwin,osx-amd64"
 )
 
@@ -56,19 +54,29 @@ build_target() {
     local TARGET=$1
     local NICKNAME=$2
     echo "Build $NICKNAME with $TARGET"
-    FOLDER="pubky-core-v$VERSION-$NICKNAME"
+
+    FOLDER="pubky-homeserver-v$VERSION-$NICKNAME"
     DICT="target/github-release/$FOLDER"
     mkdir -p $DICT
+
+    # Isolate the cargo target directory per target. The cross images use
+    # different glibc versions, and cargo caches host-compiled build scripts
+    # (build.rs) in a shared directory. Reusing a build script compiled in a
+    # newer-glibc image inside an older-glibc image fails with
+    # "GLIBC_X.YY not found".
+    TARGET_DIR="target/cross/$TARGET"
+
     for ARTIFACT in "${ARTIFACTS[@]}"; do
         echo "- Build $ARTIFACT with $TARGET"
-        cross build -p $ARTIFACT --release --target $TARGET
+        CARGO_TARGET_DIR=$TARGET_DIR cross build -p $ARTIFACT --release --target $TARGET
         if [[ $TARGET == *"windows"* ]]; then
-            cp target/$TARGET/release/$ARTIFACT.exe $DICT/
+            cp $TARGET_DIR/$TARGET/release/$ARTIFACT.exe $DICT/
         else
-            cp target/$TARGET/release/$ARTIFACT $DICT/
+            cp $TARGET_DIR/$TARGET/release/$ARTIFACT $DICT/
         fi
         echo "[Done] Artifact $ARTIFACT built for $TARGET"
     done;
+
     (cd target/github-release && tar -czf $FOLDER.tar.gz $FOLDER && rm -rf $FOLDER)
 }
 
@@ -77,7 +85,6 @@ echo "Build all the binaries for version $VERSION..."
 for ELEMENT in "${TARGETS[@]}"; do
     # Split tuple by comma
     IFS=',' read -r TARGET NICKNAME <<< "$ELEMENT"
-
     build_target $TARGET $NICKNAME
 done
 

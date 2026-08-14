@@ -8,8 +8,8 @@ use opendal::Result;
 
 /// OpenDAL layer that enforces per-user `allowed_write_paths` restrictions.
 ///
-/// Stacked as the outermost layer so rejected writes never reach
-/// quota/entry/event layers.
+/// Stacked as the outermost layer so rejected mutations never reach write
+/// finalization or the storage backend.
 ///
 /// - Reads, stats, and lists pass through unmodified.
 /// - Writes, deletes, copies, renames, and create_dir check the user's
@@ -180,39 +180,40 @@ mod tests {
     use crate::persistence::files::opendal::opendal_test_operators::{
         get_fs_operator, get_memory_operator,
     };
-    use crate::persistence::files::user_quota_layer::UserQuotaLayer;
-    use crate::persistence::sql::user::UserRepository;
+    use crate::persistence::files::{
+        events::EventsService, write_finalization_layer::WriteFinalizationLayer,
+    };
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
     use crate::shared::user_quota::UserQuota;
-    use crate::shared::webdav::WebDavPath;
+    use crate::shared::webdav::StoragePath;
 
     use super::*;
 
-    fn wdp(s: &str) -> WebDavPath {
+    fn wdp(s: &str) -> StoragePath {
         s.parse().unwrap()
     }
 
     /// Create a user and set allowed_write_paths on them.
     async fn create_user_with_write_paths(
         db: &SqlDb,
-        allowed_write_paths: Option<Vec<WebDavPath>>,
+        allowed_write_paths: Option<Vec<StoragePath>>,
     ) -> pubky_common::crypto::PublicKey {
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user_service = UserService::new(db.clone());
+        let user = user_service.create(&pubkey).await.unwrap();
         let config = UserQuota {
             allowed_write_paths,
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &config, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &config, &mut db.pool().into())
             .await
             .unwrap();
         pubkey
     }
 
-    /// Build an operator with both WritePathLayer (outermost) and UserQuotaLayer,
+    /// Build an operator with both WritePathLayer (outermost) and WriteFinalizationLayer,
     /// matching the production stack order.
     fn build_test_operator(db: &SqlDb) -> opendal::Operator {
         build_test_operator_with(db, get_memory_operator())
@@ -226,9 +227,15 @@ mod tests {
 
     fn build_test_operator_with(db: &SqlDb, base: opendal::Operator) -> opendal::Operator {
         let user_service = UserService::new(db.clone());
-        let user_quota_layer = UserQuotaLayer::new(user_service.clone(), None);
+        let write_finalization_layer = WriteFinalizationLayer::new(
+            user_service.clone(),
+            db.clone(),
+            EventsService::new(100),
+            None,
+            true,
+        );
         let write_path_layer = WritePathLayer::new(user_service);
-        base.layer(user_quota_layer).layer(write_path_layer)
+        base.layer(write_finalization_layer).layer(write_path_layer)
     }
 
     #[tokio::test]
@@ -306,9 +313,8 @@ mod tests {
 
         // Create with no restrictions, write a file, then restrict.
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user_service = UserService::new(db.clone());
+        let user = user_service.create(&pubkey).await.unwrap();
         let raw = pubkey.z32();
 
         operator
@@ -321,7 +327,8 @@ mod tests {
             allowed_write_paths: Some(vec![wdp("/pub/tokens/")]),
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &config, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &config, &mut db.pool().into())
             .await
             .unwrap();
         // Invalidate cache by creating a fresh operator.
@@ -388,9 +395,8 @@ mod tests {
 
         // Create unrestricted, write a file, then restrict.
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user_service = UserService::new(db.clone());
+        let user = user_service.create(&pubkey).await.unwrap();
         let raw = pubkey.z32();
 
         let operator = build_test_operator(&db);
@@ -403,7 +409,8 @@ mod tests {
             allowed_write_paths: Some(vec![wdp("/pub/tokens/")]),
             ..Default::default()
         };
-        UserRepository::set_quota(user.id, &config, &mut db.pool().into())
+        user_service
+            .set_quota_in_tx(user.id, &config, &mut db.pool().into())
             .await
             .unwrap();
         let operator = build_test_operator(&db);

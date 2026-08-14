@@ -1,15 +1,15 @@
 [package]
 name = "pubky_test_utils"
 version = "0.1.0"
-description = "Test utilities for Pubky Core testing"
+description = "Test utilities for Pubky homeserver"
 keywords = ["pubky", "test", "utilities"]
 categories = ["testing"]
 edition = "2021"
 rust-version = "1.89"
 authors = []
 license = "MIT"
-homepage = "https://github.com/pubky/pubky-core"
-repository = "https://github.com/pubky/pubky-core"
+homepage = "https://github.com/pubky/pubky-homeserver"
+repository = "https://github.com/pubky/pubky-homeserver"
 publish = false
 
 [dependencies]

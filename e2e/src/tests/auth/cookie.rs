@@ -71,7 +71,9 @@ async fn cookie_auth_flow() {
     // Third-party app (keyless)
     let caps = Capabilities::builder()
         .read_write("/pub/pubky.app/")
+        .unwrap()
         .read("/pub/foo.bar/file")
+        .unwrap()
         .finish();
     let auth = PubkyCookieAuthFlow::builder(&caps, AuthFlowKind::signin())
         .relay(http_relay_url)
@@ -125,7 +127,9 @@ async fn auth_flow_signup_preserves_deep_link_fields() {
     // Third-party app (keyless)
     let caps = Capabilities::builder()
         .read_write("/pub/pubky.app/")
+        .unwrap()
         .read("/pub/foo.bar/file")
+        .unwrap()
         .finish();
 
     // Third-party app (keyless)
@@ -188,7 +192,9 @@ async fn auth_flow_survives_long_poll_timeout() {
     // Third-party app (keyless) with a short HTTP timeout to force long-poll retries
     let capabilities = Capabilities::builder()
         .read_write("/pub/pubky.app/")
+        .unwrap()
         .read("/pub/foo.bar/file")
+        .unwrap()
         .finish();
 
     let client = testnet

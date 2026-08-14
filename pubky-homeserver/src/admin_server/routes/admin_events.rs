@@ -18,11 +18,8 @@ use url::form_urlencoded;
 
 use super::super::app_state::AppState;
 use crate::{
-    persistence::{
-        files::events::{AllEventsFilter, Mode, PathFilter, MAX_EVENT_STREAM_USERS},
-        sql::user::UserRepository,
-    },
-    shared::{webdav::WebDavPath, HttpError, HttpResult},
+    persistence::files::events::{AllEventsFilter, Mode, PathFilter, MAX_EVENT_STREAM_USERS},
+    shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
 /// Parsed query parameters for the admin event stream.
@@ -38,7 +35,7 @@ struct AdminStreamParams {
     /// Path filters (repeatable; union — an event matches if it satisfies any). A trailing slash
     /// matches a directory and its descendants; without one it matches that exact file (see
     /// [`PathFilter`]).
-    paths: Vec<WebDavPath>,
+    paths: Vec<StoragePath>,
 }
 
 /// Parse the raw query string, handling repeated `user=` params.
@@ -51,7 +48,7 @@ fn parse_admin_stream_query(query: &str) -> Result<AdminStreamParams, HttpError>
     let mut limit = None;
     let mut live = false;
     let mut reverse = false;
-    let mut paths: Vec<WebDavPath> = Vec::new();
+    let mut paths: Vec<StoragePath> = Vec::new();
 
     for (key, value) in form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
@@ -96,7 +93,7 @@ fn parse_admin_stream_query(query: &str) -> Result<AdminStreamParams, HttpError>
                 } else {
                     format!("/{value}")
                 };
-                let path = WebDavPath::new(&normalized)
+                let path = StoragePath::normalize(&normalized)
                     .map_err(|_| HttpError::bad_request(format!("Invalid path: {normalized}")))?;
                 paths.push(path);
             }
@@ -144,12 +141,10 @@ async fn resolve_filter(
     } else {
         let mut ids = Vec::with_capacity(params.users.len());
         for pk in &params.users {
-            let id = UserRepository::get_id(pk, &mut state.sql_db.pool().into())
-                .await
-                .map_err(|e| match e {
-                    sqlx::Error::RowNotFound => HttpError::not_found(),
-                    e => HttpError::from(e),
-                })?;
+            let id = state.user_service.get_id(pk).await.map_err(|e| match e {
+                sqlx::Error::RowNotFound => HttpError::not_found(),
+                e => HttpError::from(e),
+            })?;
             ids.push(id);
         }
         Some(ids)

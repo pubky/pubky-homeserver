@@ -20,6 +20,9 @@ async fn put_quota_applied() {
         .signup_cookie(&server.public_key(), None)
         .await
         .unwrap();
+    let cookie_secret = session.as_cookie().unwrap().export_secret().unwrap();
+    let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
+    let cookie = format!("{cookie_name}={cookie_value}");
 
     let p1 = "/pub/data";
     let p2 = "/pub/data2";
@@ -33,17 +36,22 @@ async fn put_quota_applied() {
     let resp = session.storage().put(p1, data_600k.clone()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    // Write 600 KB more at a different path (total 1.2 MB) → 507
-    let err = session
-        .storage()
-        .put(p2, data_600k.clone())
+    // Write 600 KB more through `/storage/{user_z32}/{path}` (total 1.2 MB) → 507.
+    let storage_url = format!(
+        "{}storage/{}/{}",
+        server.icann_http_url(),
+        session.public_key().z32(),
+        p2.trim_start_matches('/')
+    );
+    let response = session
+        .client()
+        .request(Method::PUT, &storage_url)
+        .header("Cookie", cookie)
+        .body(data_600k.clone())
+        .send()
         .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        Error::Request(RequestError::Server { status, .. })
-            if status == StatusCode::INSUFFICIENT_STORAGE
-    ));
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
 
     // Overwrite /pub/data with 1.1 MB → 507
     let data_1100k: Vec<u8> = vec![0; 1_100_000];

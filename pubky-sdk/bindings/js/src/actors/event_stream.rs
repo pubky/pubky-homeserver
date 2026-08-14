@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use wasm_bindgen::prelude::*;
 use web_sys::ReadableStream;
 
+use crate::actors::session::Session;
 use crate::wrappers::event_stream::Event;
 
 /// Builder for creating an event stream subscription.
@@ -19,6 +20,15 @@ use crate::wrappers::event_stream::Event;
 /// for await (const event of stream) {
 ///   console.log(event.eventType, event.resource.path);
 /// }
+/// ```
+///
+/// @example
+/// ```typescript
+/// // Private events: attach a session and request a `/priv/...` path.
+/// const stream = await pubky.eventStreamForUser(userPubkey, null)
+///   .session(session)
+///   .path("/priv/app/")
+///   .subscribe();
 /// ```
 #[wasm_bindgen]
 pub struct EventStreamBuilder(pub(crate) pubky::EventStreamBuilder);
@@ -150,16 +160,36 @@ impl EventStreamBuilder {
         EventStreamBuilder(self.0.reverse())
     }
 
-    /// Filter events by path prefix.
+    /// Filter events by path. Call once per path to receive the
+    /// union of several scopes (e.g. `/pub/` plus a private `/priv/app/`).
     ///
-    /// Format: Path WITHOUT `pubky://` scheme or user pubkey (e.g., "/pub/files/" or "/pub/").
-    /// Only events whose path starts with this prefix are returned.
+    /// Format: a path WITHOUT the `pubky://` scheme or user pubkey. A trailing
+    /// slash matches a directory and all its descendants (`/pub/files/`); no
+    /// trailing slash matches an exact file (`/pub/notes.txt`).
     ///
-    /// @param {string} path - Path prefix to filter by
+    /// Private (`/priv/...`) paths require a session attached via `session()`;
+    /// without one the homeserver rejects the subscription with 401.
+    ///
+    /// @param {string} path - Path filter (repeatable)
     /// @returns {EventStreamBuilder} - Builder for chaining
     #[wasm_bindgen]
     pub fn path(self, path: String) -> Self {
         EventStreamBuilder(self.0.path(path))
+    }
+
+    /// Authenticate the subscription with a user `Session`.
+    ///
+    /// Required to receive private (`/priv/...`) events: the session credential
+    /// (grant or cookie) is attached so the homeserver can authorize each private
+    /// `path()` against the session's read capabilities. Public subscriptions
+    /// don't need this.
+    ///
+    ///
+    /// @param {Session} session - The authenticated session
+    /// @returns {EventStreamBuilder} - Builder for chaining
+    #[wasm_bindgen]
+    pub fn session(self, session: &Session) -> Self {
+        EventStreamBuilder(self.0.session(&session.0))
     }
 
     /// Subscribe to the event stream.

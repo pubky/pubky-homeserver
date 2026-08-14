@@ -3,6 +3,7 @@ mod auth;
 mod events;
 mod http;
 mod metrics;
+mod private_data;
 mod rate_limiting;
 mod storage;
 

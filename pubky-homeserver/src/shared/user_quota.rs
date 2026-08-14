@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::data_directory::quota_config::BandwidthQuota;
 use crate::data_directory::DefaultQuotasToml;
-use crate::shared::webdav::WebDavPath;
+use crate::shared::webdav::StoragePath;
 
 /// Maximum length of the VARCHAR column used for rate strings in the DB.
 /// Matches the `VARCHAR(32)` used in the `m20260327_add_quota_columns` migration.
@@ -246,12 +246,12 @@ fn validate_burst(
 
 /// Validate that allowed_write_paths entries are well-formed path restrictions.
 ///
-/// Each `WebDavPath` is already normalized and validated by serde deserialization.
+/// Each `StoragePath` is already normalized and validated by serde deserialization.
 /// This checks the remaining domain constraints: not root, no duplicates.
 ///
 /// Entries can be either directories (ending with `/`) for prefix matching,
 /// or specific files for exact-path matching.
-fn validate_allowed_write_paths(paths: &Option<Vec<WebDavPath>>) -> Result<(), String> {
+fn validate_allowed_write_paths(paths: &Option<Vec<StoragePath>>) -> Result<(), String> {
     if let Some(ref entries) = paths {
         let mut seen = std::collections::HashSet::new();
         for (i, p) in entries.iter().enumerate() {
@@ -302,7 +302,7 @@ pub struct UserQuota {
     /// - `Some([])` = read-only (no writes allowed)
     /// - `Some(["/pub/tokens/", "/pub/paykit/"])` = only these prefix paths
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_write_paths: Option<Vec<WebDavPath>>,
+    pub allowed_write_paths: Option<Vec<StoragePath>>,
 }
 
 impl UserQuota {
@@ -321,7 +321,7 @@ impl UserQuota {
         allowed_write_paths: Option<String>,
     ) -> Self {
         let allowed_write_paths = allowed_write_paths.map(|s| {
-            serde_json::from_str::<Vec<WebDavPath>>(&s).unwrap_or_else(|e| {
+            serde_json::from_str::<Vec<StoragePath>>(&s).unwrap_or_else(|e| {
                 tracing::error!(
                     "Invalid allowed_write_paths JSON in DB: {e}; falling back to read-only"
                 );
@@ -493,11 +493,11 @@ where
 /// - field `[...]` → `Some(Some(vec))` (set paths)
 fn deserialize_patch_allowed_write_paths<'de, D>(
     d: D,
-) -> Result<Option<Option<Vec<WebDavPath>>>, D::Error>
+) -> Result<Option<Option<Vec<StoragePath>>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    Option::<Vec<WebDavPath>>::deserialize(d).map(Some)
+    Option::<Vec<StoragePath>>::deserialize(d).map(Some)
 }
 
 /// Serde helper for patch `Option<Option<NonZeroU32>>`:
@@ -546,7 +546,7 @@ pub struct UserQuotaPatch {
     pub rate_write_burst: Option<Option<NonZeroU32>>,
     /// Allowed write paths. absent = keep, null = reset to unrestricted, array = set paths.
     #[serde(default, deserialize_with = "deserialize_patch_allowed_write_paths")]
-    pub allowed_write_paths: Option<Option<Vec<WebDavPath>>>,
+    pub allowed_write_paths: Option<Option<Vec<StoragePath>>>,
 }
 
 impl UserQuotaPatch {
@@ -1147,9 +1147,9 @@ mod tests {
         assert!(json.contains(r#""rate_read_burst":50"#));
     }
 
-    /// Helper to create a `WebDavPath` in tests.
-    fn wdp(s: &str) -> WebDavPath {
-        WebDavPath::from_str(s).unwrap()
+    /// Helper to create a `StoragePath` in tests.
+    fn wdp(s: &str) -> StoragePath {
+        StoragePath::from_str(s).unwrap()
     }
 
     #[test]
@@ -1320,23 +1320,16 @@ mod tests {
 
     #[test]
     fn test_serde_rejects_dotdot_path() {
-        // WebDavPath normalizes "../" so the round-trip won't match;
-        // serde deserialization itself succeeds but produces a different path.
-        // The key point is that a dotdot path can't sneak through.
         let result =
             serde_json::from_str::<UserQuota>(r#"{"allowed_write_paths": ["/pub/../etc/"]}"#);
-        // WebDavPath::new normalizes "/pub/../etc/" to "/etc/" — so deserialization succeeds
-        // but the stored path is "/etc/", not the original. This is safe.
-        if let Ok(q) = result {
-            assert_eq!(q.allowed_write_paths.unwrap()[0].as_str(), "/etc/");
-        }
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_serde_normalizes_double_slash() {
-        let q: UserQuota =
-            serde_json::from_str(r#"{"allowed_write_paths": ["/pub//tokens/"]}"#).unwrap();
-        assert_eq!(q.allowed_write_paths.unwrap()[0].as_str(), "/pub/tokens/");
+    fn test_serde_rejects_double_slash() {
+        let result =
+            serde_json::from_str::<UserQuota>(r#"{"allowed_write_paths": ["/pub//tokens/"]}"#);
+        assert!(result.is_err());
     }
 
     #[test]

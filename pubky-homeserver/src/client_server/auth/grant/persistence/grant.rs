@@ -258,10 +258,12 @@ fn parse_grant_metadata(
     sqlx::Error,
 > {
     let capabilities: String = row.try_get(GrantIden::Capabilities.to_string().as_str())?;
-    let capabilities: Capabilities = capabilities
-        .as_str()
-        .try_into()
-        .map_err(|e: pubky_common::capabilities::Error| sqlx::Error::Decode(e.into()))?;
+    let capabilities: Capabilities =
+        capabilities
+            .parse()
+            .map_err(|e: pubky_common::capabilities::CapabilitiesParseError| {
+                sqlx::Error::Decode(e.into())
+            })?;
     let issued_at: i64 = row.try_get(GrantIden::IssuedAt.to_string().as_str())?;
     let expires_at: i64 = row.try_get(GrantIden::ExpiresAt.to_string().as_str())?;
     let revoked_at: Option<i64> = row.try_get(GrantIden::RevokedAt.to_string().as_str())?;
@@ -278,7 +280,8 @@ mod tests {
         crypto::Keypair,
     };
 
-    use crate::persistence::sql::{entities::user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
 
     fn make_new_grant(user_id: i32) -> NewGrant {
         let now = chrono::Utc::now().timestamp() as u64;
@@ -298,7 +301,8 @@ mod tests {
     async fn test_create_and_get_grant() {
         let db = SqlDb::test().await;
         let keypair = Keypair::random();
-        let user = UserRepository::create(&keypair.public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&keypair.public_key())
             .await
             .unwrap();
 
@@ -331,7 +335,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_create_grant_is_idempotent() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 
@@ -349,7 +354,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_revoke_and_is_revoked() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 
@@ -385,7 +391,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_list_active_for_user() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 
@@ -426,7 +433,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_list_active_for_user_empty() {
         let db = SqlDb::test().await;
-        let user = UserRepository::create(&Keypair::random().public_key(), &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
             .await
             .unwrap();
 

@@ -2,11 +2,9 @@
 
 use crate::persistence::sql::{
     signup_code::{SignupCode, SignupCodeRepository},
-    uexecutor,
-    user::{UserEntity, UserRepository},
-    SqlDb,
+    uexecutor, SqlDb,
 };
-use crate::services::user_service::UserService;
+use crate::services::user_service::{UserEntity, UserService};
 use crate::shared::user_quota::UserQuota;
 use crate::SignupMode;
 use pubky_common::crypto::PublicKey;
@@ -84,23 +82,34 @@ impl SignupService {
         signup_token: Option<&SignupCode>,
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
     ) -> Result<UserEntity, SignupServiceError> {
-        Self::ensure_user_not_exists(public_key, tx).await?;
+        self.ensure_user_not_exists(public_key, tx).await?;
         let quota = if self.signup_mode == SignupMode::TokenRequired {
             Self::validate_and_consume_signup_token(signup_token, public_key, tx).await?
         } else {
             UserQuota::default()
         };
-        let user = UserRepository::create(public_key, uexecutor!(*tx)).await?;
-        let user = UserRepository::set_quota(user.id, &quota, uexecutor!(*tx)).await?;
+        let user = self
+            .user_service
+            .create_in_tx(public_key, uexecutor!(*tx))
+            .await?;
+        let user = self
+            .user_service
+            .set_quota_in_tx(user.id, &quota, uexecutor!(*tx))
+            .await?;
         Ok(user)
     }
 
     /// Fails if a user row already exists for `public_key`.
     async fn ensure_user_not_exists(
+        &self,
         public_key: &PublicKey,
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
     ) -> Result<(), SignupServiceError> {
-        match UserRepository::get(public_key, uexecutor!(*tx)).await {
+        match self
+            .user_service
+            .get_in_tx(public_key, uexecutor!(*tx))
+            .await
+        {
             Ok(_) => Err(SignupServiceError::UserAlreadyExists),
             Err(sqlx::Error::RowNotFound) => Ok(()),
             Err(e) => Err(e.into()),

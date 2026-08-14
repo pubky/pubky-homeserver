@@ -287,7 +287,8 @@ mod tests {
     use super::*;
     use crate::persistence::files::events::{EventRepository, EventType, EventsService};
     use crate::persistence::sql::SqlDb;
-    use crate::shared::webdav::{EntryPath, WebDavPath};
+    use crate::services::user_service::UserService;
+    use crate::shared::webdav::{EntryPath, StoragePath};
     use pubky_common::crypto::{Hash, Keypair};
     use std::time::Duration;
     use tokio::sync::broadcast;
@@ -299,7 +300,7 @@ mod tests {
         path: &str,
         pubkey: &pubky_common::crypto::PublicKey,
     ) -> u64 {
-        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new(path).unwrap());
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
         let mut tx = db.pool().begin().await.unwrap();
         let event = EventRepository::create(
             user_id,
@@ -337,10 +338,7 @@ mod tests {
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         let mut rx_a = events_service_a.subscribe();
         let mut rx_b = events_service_b.subscribe();
@@ -369,7 +367,7 @@ mod tests {
         path: &str,
         pubkey: &pubky_common::crypto::PublicKey,
     ) -> u64 {
-        let entry_path = EntryPath::new(pubkey.clone(), WebDavPath::new(path).unwrap());
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
         let mut tx = db.pool().begin().await.unwrap();
         let event = EventRepository::create(
             user_id,
@@ -404,10 +402,7 @@ mod tests {
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         let mut rx = events_service.subscribe();
 
@@ -463,10 +458,7 @@ mod tests {
         // Insert some events
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         let mut last_id = 0;
         for i in 1..=3 {
@@ -492,10 +484,7 @@ mod tests {
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         // Phase 1: Start listener, verify it works
         let listener = PgEventListener::start(db.pool(), events_service.clone())
@@ -560,10 +549,7 @@ mod tests {
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         let mut rx = events_service.subscribe();
 
@@ -610,10 +596,7 @@ mod tests {
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         let mut rx = events_service.subscribe();
 
@@ -697,10 +680,7 @@ mod tests {
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         let mut rx = events_service.subscribe();
 
@@ -718,7 +698,7 @@ mod tests {
                 barrier.wait().await;
                 let entry_path = EntryPath::new(
                     pubkey,
-                    WebDavPath::new(&format!("/pub/race{}.txt", i)).unwrap(),
+                    StoragePath::new(&format!("/pub/race{}.txt", i)).unwrap(),
                 );
                 let mut tx = db.pool().begin().await.unwrap();
                 let event = EventRepository::create(
@@ -789,10 +769,7 @@ mod tests {
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
-        let user =
-            crate::persistence::sql::user::UserRepository::create(&pubkey, &mut db.pool().into())
-                .await
-                .unwrap();
+        let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
 
         // Subscribe but do NOT read — simulate a slow consumer
         let mut rx = events_service.subscribe();

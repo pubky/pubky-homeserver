@@ -57,6 +57,7 @@
 //! - **Nonce**: each PoP nonce is tracked in `pop_nonces` (unique constraint, GC after 360 s).
 //! - **Audience**: PoP `aud` must match this homeserver's public key.
 
+pub(crate) mod bearer;
 pub mod crypto;
 mod error_mapping;
 pub mod middleware;

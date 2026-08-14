@@ -26,6 +26,20 @@ export function args(argv, { aliases = {}, defaults = {}, usage } = {}) {
 }
 
 /**
+ * Check whether an SDK request failed because the resource already exists.
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isConflictError(error) {
+  return (
+    error?.name === "RequestError" &&
+    typeof error.data === "object" &&
+    error.data !== null &&
+    error.data.statusCode === 409
+  );
+}
+
+/**
  * Prompt for a hidden passphrase (Node 20+).
  * @param {string} message
  * @returns {Promise<string>}

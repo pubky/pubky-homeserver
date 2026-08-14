@@ -62,6 +62,22 @@ pubkyauth:///
   &secret=mAa8kGmlrynGzQLteDVW6-WeUGnfvHTpEmbNerbWfPI
  ```
  and finally show that URL as a QR code to the user.
+
+The request may also carry x-callback-url metadata used by an authenticator to
+return control to the requesting application:
+
+| Parameter | Meaning |
+| --- | --- |
+| `x-source` | Human-readable name of the requesting application. |
+| `x-success` | Destination after successful handling. |
+| `x-error` | Destination after an error. |
+| `x-cancel` | Destination after cancellation or timeout. |
+
+Values are percent-encoded once as URI components. Authenticators should
+decode them exactly once; in particular, nested percent escapes must remain
+escaped for the destination URL. For compatibility, `callback` may be parsed
+as a fallback for `x-success`, but new requests should emit `x-success`.
+
 1. The `Authenticator` app scans that QR code, parses the URL and shows a consent form for the user.
 1. The user decides whether or not to grant these capabilities to the `3rd Party App`.
 1. If the user approves, the `Authenticator` uses their Keypair to sign an [`AuthToken`](#authtoken-encoding), then encrypts that token with the `client_secret`. The `channel_id` is then calculated by hashing that secret and the encrypted token is sent to the callback url, which is the `relay` + `channel_id`.

@@ -2,6 +2,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::constants::PUBLIC_ROOT;
+
 use super::EntryPath;
 
 /// A path to an entry that requires the leading `/pub/` segment.
@@ -25,8 +27,8 @@ impl FromStr for EntryPathPub {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let inner = EntryPath::from_str(s)?;
-        if !inner.path().as_str().starts_with("/pub/") {
-            return Err(anyhow::anyhow!("Path must start with /pub/"));
+        if !inner.path().as_str().starts_with(PUBLIC_ROOT) {
+            return Err(anyhow::anyhow!("Path must start with {PUBLIC_ROOT}"));
         }
         Ok(Self(inner))
     }

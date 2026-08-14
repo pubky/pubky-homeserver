@@ -1,4 +1,5 @@
 mod authorization;
+mod legacy_put_get_delete;
 mod listing;
 mod objects;
 mod quotas;

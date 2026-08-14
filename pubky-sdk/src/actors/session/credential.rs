@@ -80,6 +80,10 @@ pub(crate) trait SessionCredential: Debug + Send + Sync {
     /// browser jar on WASM).
     async fn attach(&self, rb: RequestBuilder, client: &PubkyHttpClient) -> Result<RequestBuilder>;
 
+    /// Whether this credential may be attached to a request targeting
+    /// `homeserver`.
+    async fn can_attach_to(&self, homeserver: &PublicKey) -> bool;
+
     /// Round-trip the homeserver to verify this credential is still valid.
     ///
     /// Returns:

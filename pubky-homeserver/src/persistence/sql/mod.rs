@@ -15,7 +15,9 @@ mod sql_db;
 mod unified_executor;
 
 pub use connection_string::ConnectionString;
-pub use entities::*;
+pub use entities::entry;
+pub use entities::signup_code;
+pub(crate) use entities::user;
 pub use migrator::Migrator;
 pub(crate) use pg_event_listener::PgEventListener;
 pub use sql_db::SqlDb;

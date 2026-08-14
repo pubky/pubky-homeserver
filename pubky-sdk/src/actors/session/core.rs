@@ -8,36 +8,51 @@ use super::credential::SessionCredential;
 use crate::errors::Error;
 use crate::{PubkyHttpClient, Result, SessionStorage, cross_log};
 
-/// Stateful, per-identity API driver built on a shared [`PubkyHttpClient`].
+/// Your authenticated handle after signing in.
 ///
 /// A `PubkySession` represents one user/identity authenticated to a homeserver.
-/// It hides the choice of credential (legacy cookie vs grant-based) behind
-/// a single API: callers always go through `info()`, `storage()`, `revalidate()`,
-/// `signout()`, etc., and the SDK dispatches to the right wire format internally
-/// via an internal credential trait.
+/// It carries credentials automatically and provides access to
+/// [`SessionStorage`] for reading and writing data as the signed-in user.
 ///
-/// What it does:
+/// # What it does
+///
 /// - Attaches the correct authentication header (`Cookie` or `Authorization: Bearer`)
-///   to requests targeting this user's homeserver.
-/// - Exposes homeserver verbs (`get/put/post/patch/delete/head`) scoped to this identity.
-/// - Implements identity flows: `signup`, `signin`, `signout`, `session`, and pubkyauth.
+///   to every request targeting this user's homeserver.
+/// - Provides [`storage()`](Self::storage) for path-based CRUD operations as this user.
+/// - Supports session lifecycle: [`revalidate()`](Self::revalidate) and
+///   [`signout()`](Self::signout).
+/// - Offers credential-specific views via [`as_grant()`](Self::as_grant) and
+///   [`as_cookie()`](Self::as_cookie) for grant management or secret export.
 ///
-/// To opaque bearer-only or cookie-only operations (grant management, secret
-/// export), use the capability-view accessors [`Self::as_grant`] and
-/// [`Self::as_cookie`].
+/// # Concurrency
 ///
-/// Credential-specific factory functions live alongside each auth flow:
-/// - Cookie: `crate::actors::auth::cookie` — `CookieCredential::from_auth_token`
-///   and the `secret` module for rehydration helpers.
-/// - Grant: `crate::actors::auth::grant::grant_exchange` —
-///   `credential_from_grant_exchange`.
+/// `PubkySession` is **cheap to clone** and **thread-safe**. Pass clones freely to
+/// async tasks or threads.
 ///
-/// Thin delegations on `PubkySession` (`export`, `import`, `import_secret`,
-/// `from_secret_file`) preserve the public API surface.
+/// # Persistence
 ///
-/// Concurrency:
-/// - `PubkySession` is cheap to clone and thread-safe; it shares the underlying
-///   [`PubkyHttpClient`] and credential state via `Arc`.
+/// Sessions can survive process restarts. See
+/// [`GrantSessionView::export_local_secret`](crate::GrantSessionView::export_local_secret)
+/// and [`Pubky::restore_session`](crate::Pubky::restore_session).
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn run(session: pubky::PubkySession) -> pubky::Result<()> {
+/// // Write data
+/// session.storage().put("/pub/my.app/greeting.txt", "hello").await?;
+///
+/// // Read it back
+/// let text = session.storage().get("/pub/my.app/greeting.txt").await?.text().await?;
+/// assert_eq!(text, "hello");
+///
+/// // List a directory
+/// let entries = session.storage().list("/pub/my.app/")?.send().await?;
+///
+/// // Sign out when done
+/// session.signout().await.map_err(|(e, _session)| e)?;
+/// # Ok(()) }
+/// ```
 #[derive(Clone)]
 pub struct PubkySession {
     pub(crate) client: PubkyHttpClient,

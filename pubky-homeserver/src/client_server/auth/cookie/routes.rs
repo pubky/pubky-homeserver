@@ -5,7 +5,9 @@
 
 use crate::persistence::sql::signup_code::SignupCode;
 use crate::shared::{HttpError, HttpResult};
-use crate::{client_server::auth::AuthState, client_server::middleware::pubky_host::PubkyHost};
+use crate::{
+    client_server::auth::AuthState, client_server::middleware::request_tenant::RequestTenant,
+};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -107,11 +109,11 @@ pub async fn signout(
     auth: Option<crate::client_server::auth::AuthSession>,
     cookies: Cookies,
     Host(host): Host,
-    pubky: PubkyHost,
+    tenant: RequestTenant,
 ) -> HttpResult<impl IntoResponse> {
     state.cookie_auth_service.signout(auth).await?;
 
-    let mut removal = Cookie::new(pubky.public_key().z32(), String::new());
+    let mut removal = Cookie::new(tenant.public_key().z32(), String::new());
     removal.make_removal();
     configure_session_cookie(&mut removal, &host);
     cookies.add(removal);

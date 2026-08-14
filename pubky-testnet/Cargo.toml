@@ -1,6 +1,6 @@
 [package]
 name = "pubky-testnet"
-description = "A local test network for Pubky Core development."
+description = "A local test network for developing Pubky homeserver or applications depending on it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,6 +19,7 @@ clap.workspace = true
 # External http-relay: server + link-compat, no persist/cli (in-memory storage for tests)
 http-relay = { workspace = true, features = ["server", "link-compat"] }
 libc = { version = "0.2", optional = true }
+mainline.workspace = true
 pkarr = { workspace = true }
 pkarr-relay = { workspace = true }
 pubky = { workspace = true, features = ["json"] }

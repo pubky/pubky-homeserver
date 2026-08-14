@@ -8,6 +8,8 @@ use crate::{
     wrappers::keys::PublicKey,
 };
 
+use super::XCallbackParams;
+
 #[wasm_bindgen]
 pub struct SignupDeepLink(pubky::deep_links::SignupDeepLink);
 
@@ -48,6 +50,12 @@ impl SignupDeepLink {
     #[wasm_bindgen(js_name = "signupToken", getter)]
     pub fn signup_token(&self) -> Option<String> {
         self.0.params().signup_token.clone()
+    }
+
+    /// Optional x-callback-url metadata carried by this deep link.
+    #[wasm_bindgen(js_name = "xCallback", getter)]
+    pub fn x_callback(&self) -> XCallbackParams {
+        self.0.x_callback().into()
     }
 
     #[allow(

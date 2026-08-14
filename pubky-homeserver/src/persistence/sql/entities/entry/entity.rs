@@ -4,7 +4,7 @@ use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::{
     persistence::sql::{entities::user::UserIden, entry::EntryIden},
-    shared::webdav::{EntryPath, WebDavPath},
+    shared::webdav::{EntryPath, StoragePath},
 };
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -28,8 +28,8 @@ impl FromRow<'_, PgRow> for EntryEntity {
             .parse()
             .map_err(|e: pkarr::errors::PublicKeyError| sqlx::Error::Decode(e.into()))?;
         let path: String = row.try_get(EntryIden::Path.to_string().as_str())?;
-        let webdav_path = WebDavPath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
-        let entry_path = EntryPath::new(user_pubkey, webdav_path);
+        let storage_path = StoragePath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
+        let entry_path = EntryPath::new(user_pubkey, storage_path);
         let content_hash_vec: Vec<u8> = row.try_get(EntryIden::ContentHash.to_string().as_str())?;
 
         // Ensure content_hash is exactly 32 bytes

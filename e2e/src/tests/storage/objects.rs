@@ -27,67 +27,120 @@ async fn put_get_delete() {
         .await
         .unwrap();
     let public_key = session.public_key();
-
-    // relative URL is always based over own user homeserver
-    let path = "/pub/foo.txt";
-
-    session
-        .storage()
-        .put(path, vec![0, 1, 2, 3, 4])
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-
-    // Use Pubky native method to get data from homeserver
-    let response = pubky
-        .public_storage()
-        .get(format!("{public_key}/{path}"))
-        .await
-        .unwrap();
-
-    let content_header = response.headers().get("content-type").unwrap();
-    // Tests if MIME type was inferred correctly from the file path (magic bytes do not work)
-    assert_eq!(content_header, "text/plain");
-
-    let byte_value = response.bytes().await.unwrap();
-    assert_eq!(byte_value, bytes::Bytes::from(vec![0, 1, 2, 3, 4]));
-
-    // Use regular web method to get data from homeserver (with query pubky-host)
-    let regular_url = format!(
-        "{}pub/foo.txt?pubky-host={}",
+    let cookie_secret = session.as_cookie().unwrap().export_secret().unwrap();
+    let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
+    let cookie = format!("{cookie_name}={cookie_value}");
+    let storage_url = format!(
+        "{}storage/{}/pub/foo.txt",
         server.icann_http_url(),
-        session.public_key().z32()
+        public_key.z32()
     );
+    let directory_url = format!(
+        "{}storage/{}/pub/directory/",
+        server.icann_http_url(),
+        public_key.z32()
+    );
+    let unrelated_user = Keypair::random().public_key();
 
-    // We set `non.pubky.host` header as otherwise he client will use by default
-    // the homeserver pubky as host and this request will resolve the `/pub/foo.txt` of
-    // the wrong tenant user
+    // PUT and DELETE only operate on file-shaped `/storage` paths.
     let response = session
         .client()
-        .request(Method::GET, &regular_url)
-        .header("Host", "non.pubky.host")
+        .request(Method::PUT, &directory_url)
+        .header("Cookie", &cookie)
+        .body(vec![0])
         .send()
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let content_header = response.headers().get("content-type").unwrap();
-    // Tests if MIME type was inferred correctly from the file path (magic bytes do not work)
-    assert_eq!(content_header, "text/plain");
+    let response = session
+        .client()
+        .request(Method::DELETE, &directory_url)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let byte_value = response.bytes().await.unwrap();
-    assert_eq!(byte_value, bytes::Bytes::from(vec![0, 1, 2, 3, 4]));
+    let response = session
+        .client()
+        .request(
+            Method::PUT,
+            &format!("{storage_url}?pubky-host={}", unrelated_user.z32()),
+        )
+        .header("pubky-host", unrelated_user.z32())
+        .header("Cookie", &cookie)
+        .body(vec![0, 1, 2, 3, 4])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
 
-    session
-        .storage()
-        .delete(path)
+    let response = session
+        .client()
+        .request(Method::GET, &storage_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain"
+    );
+    assert_eq!(
+        response.bytes().await.unwrap(),
+        bytes::Bytes::from(vec![0, 1, 2, 3, 4])
+    );
+
+    let response = session
+        .client()
+        .request(Method::HEAD, &storage_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("content-length").unwrap(), "5");
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain"
+    );
+    assert!(response.headers().contains_key("etag"));
+
+    let response = session
+        .client()
+        .request(Method::DELETE, &storage_url)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = session
+        .client()
+        .request(Method::GET, &storage_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // `/storage` writes and deletes emit the same public events as legacy routes.
+    let response = pubky
+        .client()
+        .request(Method::GET, &format!("{}events/", server.icann_http_url()))
+        .send()
         .await
         .unwrap()
         .error_for_status()
         .unwrap();
-
-    // Should not exist, PubkyError of 404 type
-    assert!(session.storage().get(path).await.is_err());
+    let events = response.text().await.unwrap();
+    assert!(
+        events.starts_with(&format!(
+            "PUT pubky://{}/pub/foo.txt\nDEL pubky://{}/pub/foo.txt\n",
+            public_key.z32(),
+            public_key.z32()
+        )),
+        "unexpected event feed: {events}"
+    );
 }
 
 #[tokio::test]

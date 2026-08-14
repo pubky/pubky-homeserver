@@ -31,7 +31,7 @@ async fn list_deep() {
     }
 
     // List all files with no cursor, no limit
-    let url = format!("/pub/example.com/");
+    let url = "/pub/example.com/".to_string();
     {
         let list = owner_session
             .storage()
@@ -173,7 +173,7 @@ async fn list_shallow() {
     }
 
     // List all files with no cursor, no limit
-    let url = format!("/pub/");
+    let url = "/pub/".to_string();
     {
         let list = owner_session
             .storage()

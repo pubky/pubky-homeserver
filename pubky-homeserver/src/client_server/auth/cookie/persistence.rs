@@ -185,10 +185,9 @@ impl FromRow<'_, PgRow> for SessionEntity {
             .try_into()
             .map_err(|e: pkarr::errors::PublicKeyError| sqlx::Error::Decode(e.into()))?;
         let capabilities: String = row.try_get(SessionIden::Capabilities.to_string().as_str())?;
-        let capabilities: Capabilities = capabilities
-            .as_str()
-            .try_into()
-            .map_err(|e: pubky_common::capabilities::Error| sqlx::Error::Decode(e.into()))?;
+        let capabilities: Capabilities = capabilities.parse().map_err(
+            |e: pubky_common::capabilities::CapabilitiesParseError| sqlx::Error::Decode(e.into()),
+        )?;
         let created_at: sqlx::types::chrono::NaiveDateTime =
             row.try_get(SessionIden::CreatedAt.to_string().as_str())?;
         Ok(SessionEntity {
@@ -207,7 +206,8 @@ mod tests {
     use pubky_common::capabilities::Capability;
     use pubky_common::crypto::Keypair;
 
-    use crate::persistence::sql::{entities::user::UserRepository, SqlDb};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
 
     use super::*;
 
@@ -226,7 +226,8 @@ mod tests {
         let user_pubkey = Keypair::random().public_key();
 
         // Test create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
             .await
             .unwrap();
 

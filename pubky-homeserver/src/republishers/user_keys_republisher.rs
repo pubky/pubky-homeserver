@@ -1,15 +1,14 @@
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
-use super::pkarr_republisher::{
-    MultiRepublishResult, MultiRepublisher, RepublisherSettings, ResilientClientBuilderError,
-};
+use pkarr::{dns::rdata::RData, errors::BuildError, SignedPacket};
 use pubky_common::crypto::PublicKey;
 use tokio::{
     task::JoinHandle,
     time::{interval, Instant},
 };
 
-use crate::persistence::sql::{user::UserRepository, SqlDb};
+use super::pkarr_republisher::{BatchRepublisher, BatchRepublisherSettings, RepublishSummary};
+use crate::services::user_service::UserService;
 
 const MIN_REPUBLISH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
@@ -18,7 +17,7 @@ pub(crate) enum UserKeysRepublisherError {
     #[error(transparent)]
     DB(#[from] sqlx::Error),
     #[error(transparent)]
-    Pkarr(#[from] ResilientClientBuilderError),
+    Pkarr(#[from] BuildError),
 }
 
 /// Publishes the pkarr keys of all users to the Mainline DHT.
@@ -31,8 +30,9 @@ impl UserKeysRepublisherJob {
 
     /// Run the user keys republisher with an initial delay.
     pub fn start(
-        db: SqlDb,
+        user_service: UserService,
         pkarr_builder: pkarr::ClientBuilder,
+        homeserver_public_key: PublicKey,
         mut republish_interval: Duration,
     ) -> Option<Self> {
         if republish_interval.is_zero() {
@@ -59,7 +59,11 @@ impl UserKeysRepublisherJob {
             );
         }
 
-        let republisher = UserKeysRepublisher { db, pkarr_builder };
+        let republisher = UserKeysRepublisher {
+            user_service,
+            pkarr_builder,
+            homeserver_public_key,
+        };
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Self::INITIAL_DELAY_BEFORE_REPUBLISH).await;
             let mut interval = interval(republish_interval);
@@ -79,92 +83,190 @@ impl Drop for UserKeysRepublisherJob {
 }
 
 struct UserKeysRepublisher {
-    db: SqlDb,
+    user_service: UserService,
     pkarr_builder: pkarr::ClientBuilder,
+    homeserver_public_key: PublicKey,
 }
 
 impl UserKeysRepublisher {
     async fn republish(&self) {
         let start = Instant::now();
         tracing::debug!("Republishing user keys...");
-        let result = match self.republish_impl().await {
-            Ok(result) if result.is_empty() => return,
-            Ok(result) => result,
+        let summary = match self.republish_impl().await {
+            Ok(summary) if summary.is_empty() => return,
+            Ok(summary) => summary,
             Err(e) => {
                 tracing::error!("Error republishing user keys: {e:?}");
                 return;
             }
         };
         let elapsed = start.elapsed();
-        Self::log_republish_result(&result, elapsed);
+        if summary.has_issues() {
+            tracing::warn!(?summary, ?elapsed, "Processed user keys");
+        } else {
+            tracing::debug!(?summary, ?elapsed, "Processed user keys");
+        }
     }
 
-    async fn republish_impl(&self) -> Result<MultiRepublishResult, UserKeysRepublisherError> {
+    async fn republish_impl(&self) -> Result<RepublishSummary, UserKeysRepublisherError> {
         let keys = self.get_all_user_keys().await?;
         if keys.is_empty() {
             tracing::debug!("No user keys to republish.");
-            return Ok(MultiRepublishResult::new(HashMap::new()));
+            return Ok(RepublishSummary::default());
         }
-        let settings = RepublisherSettings::default();
-        let republisher = MultiRepublisher::new_with_settings(settings, self.pkarr_builder.clone());
-        // TODO: Only publish if user points to this home server.
+        let homeserver_public_key = self.homeserver_public_key.clone();
+        let settings =
+            BatchRepublisherSettings::default().with_republish_condition(move |packet| {
+                packet_points_to_homeserver(packet, &homeserver_public_key)
+            });
+        let republisher = BatchRepublisher::new(settings, self.pkarr_builder.clone());
         let pkarr_keys = keys.into_iter().map(Into::into).collect();
-        Ok(republisher.run(pkarr_keys, 12).await?)
+        Ok(republisher.run(pkarr_keys).await?)
     }
 
     async fn get_all_user_keys(&self) -> Result<Vec<PublicKey>, sqlx::Error> {
-        let users = UserRepository::get_all(&mut self.db.pool().into()).await?;
+        let users = self.user_service.get_all().await?;
         Ok(users.into_iter().map(|user| user.public_key).collect())
     }
+}
 
-    fn log_republish_result(result: &MultiRepublishResult, elapsed: Duration) {
-        let total_count = result.len();
-        let elapsed_secs = elapsed.as_secs_f32();
-        let success_count = result.success_count();
-        let missing_count = result.missing_count();
-        let failed_count = result.publishing_failed_count();
-
-        if missing_count == 0 {
-            tracing::debug!(
-                "Republished {total_count} user keys within {elapsed_secs:.1}s. {success_count} success, {missing_count} missing, {failed_count} failed.",
-            );
-        } else {
-            tracing::warn!(
-                "Republished {total_count} user keys within {elapsed_secs:.1}s. {success_count} success, {missing_count} missing, {failed_count} failed.",
-            );
-        }
-    }
+fn packet_points_to_homeserver(packet: &SignedPacket, homeserver_public_key: &PublicKey) -> bool {
+    packet
+        .resource_records("_pubky")
+        .find_map(|record| match &record.rdata {
+            RData::SVCB(svcb) => Some(svcb.target.to_string()),
+            RData::HTTPS(https) => Some(https.0.target.to_string()),
+            _ => None,
+        })
+        .and_then(|target| PublicKey::try_from_z32(&target).ok())
+        .is_some_and(|target| target == *homeserver_public_key)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::persistence::sql::user::UserRepository;
+    use super::*;
     use crate::persistence::sql::SqlDb;
-    use crate::republishers::user_keys_republisher::UserKeysRepublisher;
+    use crate::republishers::pkarr_republisher::test_client_builder;
+    use crate::services::user_service::UserService;
+    use pkarr::dns::rdata::SVCB;
     use pubky_common::crypto::Keypair;
 
-    async fn init_db_with_users(count: usize) -> SqlDb {
+    fn packet_with_https_homeserver(user: &Keypair, homeserver: &str) -> SignedPacket {
+        SignedPacket::builder()
+            .https(
+                "_pubky".try_into().unwrap(),
+                SVCB::new(0, homeserver.try_into().unwrap()),
+                3600,
+            )
+            .sign(user)
+            .unwrap()
+    }
+
+    fn packet_with_svcb_homeserver(user: &Keypair, homeserver: &str) -> SignedPacket {
+        SignedPacket::builder()
+            .svcb(
+                "_pubky".try_into().unwrap(),
+                SVCB::new(0, homeserver.try_into().unwrap()),
+                3600,
+            )
+            .sign(user)
+            .unwrap()
+    }
+
+    async fn init_db_with_users(count: usize) -> (SqlDb, UserService) {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         for _ in 0..count {
             let public_key = Keypair::random().public_key();
-            UserRepository::create(&public_key, &mut db.pool().into())
-                .await
-                .unwrap();
+            user_service.create(&public_key).await.unwrap();
         }
-        db
+        (db, user_service)
     }
 
     /// Test that the republisher tries to republish all keys passed.
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_republish_keys_once() {
-        let db = init_db_with_users(10).await;
-        let pkarr_builder = pkarr::ClientBuilder::default();
-        let worker = UserKeysRepublisher { db, pkarr_builder };
-        let result = worker.republish_impl().await.unwrap();
-        assert_eq!(result.len(), 10);
-        assert_eq!(result.success_count(), 0);
-        assert_eq!(result.missing_count(), 10);
-        assert_eq!(result.publishing_failed_count(), 0);
+        let (_db, user_service) = init_db_with_users(10).await;
+        let dht = mainline::Testnet::builder(1).build().unwrap();
+        let pkarr_builder = test_client_builder(&dht);
+        let worker = UserKeysRepublisher {
+            user_service,
+            pkarr_builder,
+            homeserver_public_key: Keypair::random().public_key(),
+        };
+        let summary = worker.republish_impl().await.unwrap();
+        assert_eq!(summary.len(), 10);
+        assert_eq!(summary.success_count(), 0);
+        assert_eq!(summary.missing_count(), 10);
+        assert_eq!(summary.failed_count(), 0);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn user_pointing_to_another_homeserver_is_skipped() {
+        let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
+        let dht = mainline::Testnet::builder(1).build().unwrap();
+        let pkarr_builder = test_client_builder(&dht);
+        let pkarr_client = pkarr_builder.clone().build().unwrap();
+        let user = Keypair::random();
+        user_service.create(&user.public_key()).await.unwrap();
+
+        let current_homeserver = Keypair::random().public_key();
+        let other_homeserver = Keypair::random().public_key();
+        let packet = packet_with_https_homeserver(&user, &other_homeserver.z32());
+        pkarr_client.publish(&packet).await.unwrap();
+
+        let worker = UserKeysRepublisher {
+            user_service,
+            pkarr_builder,
+            homeserver_public_key: current_homeserver,
+        };
+        let summary = worker.republish_impl().await.unwrap();
+
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary.skipped_count(), 1);
+        assert_eq!(summary.success_count(), 0);
+        assert_eq!(summary.failed_count(), 0);
+    }
+
+    #[test]
+    fn https_packet_pointing_to_current_homeserver_is_accepted() {
+        let user = Keypair::random();
+        let homeserver = Keypair::random().public_key();
+        let packet = packet_with_https_homeserver(&user, &homeserver.z32());
+
+        assert!(packet_points_to_homeserver(&packet, &homeserver));
+    }
+
+    #[test]
+    fn svcb_packet_pointing_to_current_homeserver_is_accepted() {
+        let user = Keypair::random();
+        let homeserver = Keypair::random().public_key();
+        let packet = packet_with_svcb_homeserver(&user, &homeserver.z32());
+
+        assert!(packet_points_to_homeserver(&packet, &homeserver));
+    }
+
+    #[test]
+    fn packet_pointing_to_another_homeserver_is_rejected() {
+        let user = Keypair::random();
+        let current_homeserver = Keypair::random().public_key();
+        let other_homeserver = Keypair::random().public_key();
+        let packet = packet_with_https_homeserver(&user, &other_homeserver.z32());
+
+        assert!(!packet_points_to_homeserver(&packet, &current_homeserver));
+    }
+
+    #[test]
+    fn packet_without_a_public_key_homeserver_is_rejected() {
+        let user = Keypair::random();
+        let homeserver = Keypair::random().public_key();
+        let domain_packet = packet_with_https_homeserver(&user, "example.com");
+        let missing_packet = SignedPacket::builder().sign(&user).unwrap();
+
+        assert!(!packet_points_to_homeserver(&domain_packet, &homeserver));
+        assert!(!packet_points_to_homeserver(&missing_packet, &homeserver));
     }
 }

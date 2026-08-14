@@ -1,6 +1,6 @@
 # Pubky
 
-JS/WASM SDK for [Pubky](https://github.com/pubky/pubky-core).
+JS/WASM SDK for [Pubky](https://github.com/pubky/pubky-homeserver).
 
 Works in browsers and Node 20+.
 
@@ -56,7 +56,7 @@ const addr = `${userPk}/pub/my-cool-app/hello.json`;
 const json = await pubky.publicStorage.getJson(addr); // -> { hello: "world" }
 ```
 
-Find here [**ready-to-run examples**](https://github.com/pubky/pubky-core/tree/main/examples).
+Find here [**ready-to-run examples**](https://github.com/pubky/pubky-homeserver/tree/main/examples).
 
 ### Key formats (display vs transport)
 
@@ -225,6 +225,16 @@ like a bearer token. Delegated browser grant sessions should use
 await signer.approveAuthRequest("pubkyauth://signin?caps=...&secret=...&relay=...");
 ```
 
+**Handle a pubkyauth deep link**
+
+General entry point for any supported `pubkyauth://` link. Auth request links
+are approved through their relay (like `approveAuthRequest`), while a
+`direct_signup` link creates the account directly on its target homeserver:
+
+```js
+await signer.handleDeepLink("pubkyauth://direct_signup?hs=...");
+```
+
 ---
 
 ### GrantAuthFlow (pubkyauth)
@@ -245,7 +255,16 @@ const relay = "https://httprelay.pubky.app/inbox/"; // optional (defaults to thi
 const flow = await pubky.startGrantAuthFlow(
   caps,
   AuthFlowKind.signin(),
-  { clientId: "my-cool-app.example", relay },
+  {
+    clientId: "my-cool-app.example",
+    relay,
+    xCallback: {
+      xSource: "My Cool App",
+      xSuccess: "my-cool-app://auth/success?nonce=unique",
+      xError: "my-cool-app://auth/error?nonce=unique",
+      xCancel: "my-cool-app://auth/cancel?nonce=unique",
+    },
+  },
 );
 
 renderQr(flow.authorizationUrl); // show to user
@@ -253,6 +272,12 @@ renderQr(flow.authorizationUrl); // show to user
 // Blocks until the signer approves; returns a ready Session
 const session = await flow.awaitApproval();
 ```
+
+The same callback object can be passed as the fourth argument to legacy cookie
+auth: `startCookieAuthFlow(caps, kind, relay, xCallback)`. The SDK emits
+`x-source`, `x-success`, `x-error`, and `x-cancel` using the encoding expected
+by Pubky Ring. Parsed deep-link objects expose them through `xCallback`; the
+legacy `callback` parameter is accepted as an `xSuccess` fallback.
 
 #### Resume an auth flow after page refresh
 
@@ -309,9 +334,13 @@ try {
 }
 ```
 
-On invalid input, `validateCapabilities` throws a `PubkyError` with
-`{ name: "InvalidInput", message: "Invalid capability entries: …" }`, so you can
-surface precise feedback to the user.
+On invalid input, `validateCapabilities` throws a `PubkyError` identifying the
+first malformed entry and its position. Its `data.invalidEntries` array contains
+that entry so applications can surface precise feedback to the user.
+
+Capability scopes must be canonical absolute paths. Repeated separators and
+`.` or `..` segments are rejected rather than normalized. Percent sequences are
+literal scope characters; URL encoding is handled by the enclosing deep link.
 
 #### Http Relay & reliability
 
@@ -383,10 +412,12 @@ await s.delete("/pub/example.com/data.json");
 
 Path rules:
 
-- Session storage uses **absolute** paths like `"/pub/app/file.txt"`.
+- Session storage uses **absolute** paths under `/pub/` or `/priv/`.
 - Public storage uses **addressed** form `pubky<user>/pub/app/file.txt` (preferred) or `pubky://<user>/...`.
 
 **Convention:** put your app’s public data under a domain-like folder in `/pub`, e.g. `/pub/my-new-app/`.
+
+See [Private Storage](https://github.com/pubky/pubky-homeserver/blob/main/docs/PRIVATE_STORAGE.md) for `/priv/` access and events.
 
 ---
 
@@ -400,7 +431,8 @@ import { Pubky, PublicKey, Keypair } from "@synonymdev/pubky";
 const pubky = new Pubky();
 
 // Read-only resolver
-const homeserver = await pubky.getHomeserverOf(PublicKey.from("pubky<z32>")); // string | undefined
+const homeserver = await pubky.getHomeserverOf(PublicKey.from("pubky<z32>")); // PublicKey | undefined
+// Rejects if PKARR resolution fails or the `_pubky` target is malformed.
 
 // With keys (signer-bound)
 const signer = pubky.signer(Keypair.random());

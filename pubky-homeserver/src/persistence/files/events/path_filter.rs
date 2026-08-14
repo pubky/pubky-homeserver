@@ -2,20 +2,20 @@
 
 use sea_query::{Expr, LikeExpr, SimpleExpr};
 
-use crate::shared::webdav::WebDavPath;
+use crate::shared::webdav::StoragePath;
 
 use super::events_repository::{EventIden, EVENT_TABLE};
 
 /// A single authorized path filter for the event stream.
 ///
-/// Wraps a validated [`WebDavPath`]. A file path (no trailing `/`) matches only its exact path,
+/// Wraps a validated [`StoragePath`]. A file path (no trailing `/`) matches only its exact path,
 /// while a directory path (trailing `/`) matches that directory and all of its
 /// descendants.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathFilter(WebDavPath);
+pub struct PathFilter(StoragePath);
 
-impl From<WebDavPath> for PathFilter {
-    fn from(path: WebDavPath) -> Self {
+impl From<StoragePath> for PathFilter {
+    fn from(path: StoragePath) -> Self {
         Self(path)
     }
 }
@@ -55,7 +55,7 @@ mod tests {
     use super::*;
 
     fn pf(s: &str) -> PathFilter {
-        WebDavPath::new(s).unwrap().into()
+        StoragePath::new(s).unwrap().into()
     }
 
     #[test]

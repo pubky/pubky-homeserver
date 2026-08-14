@@ -1,4 +1,6 @@
 use sqlx::postgres::PgPool;
+#[cfg(test)]
+use sqlx::postgres::PgPoolOptions;
 
 use crate::persistence::sql::connection_string::ConnectionString;
 
@@ -166,6 +168,35 @@ impl SqlDb {
         use crate::persistence::sql::migrator::Migrator;
         let db = Self::test_without_migrations().await;
         let migrator = Migrator::new(&db);
+        migrator.run().await.expect("Failed to run migrations");
+        db
+    }
+
+    /// Create a migrated test database with an explicitly bounded connection pool.
+    /// Useful for regression tests that need to prove nested acquisitions cannot deadlock.
+    #[cfg(test)]
+    pub async fn test_with_pool_options(
+        max_connections: u32,
+        acquire_timeout: std::time::Duration,
+    ) -> Self {
+        let admin_con_string = Self::derive_connection_string(None);
+        let test_db_con_string = Self::create_test_database(admin_con_string.clone())
+            .await
+            .expect("Failed to create test database");
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(acquire_timeout)
+            .connect(test_db_con_string.as_str())
+            .await
+            .expect("Failed to connect to test database");
+        let db = Self {
+            pool,
+            db_dropper: Some(std::sync::Arc::new(TestDbDropper::new(
+                test_db_con_string.database_name().to_string(),
+                admin_con_string.to_string(),
+            ))),
+        };
+        let migrator = crate::persistence::sql::migrator::Migrator::new(&db);
         migrator.run().await.expect("Failed to run migrations");
         db
     }

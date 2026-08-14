@@ -5,6 +5,8 @@ use wasm_bindgen::prelude::*;
 
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 
+use super::XCallbackParams;
+
 #[wasm_bindgen]
 pub struct SigninDeepLink(pubky::deep_links::SigninDeepLink);
 
@@ -35,6 +37,12 @@ impl SigninDeepLink {
     #[wasm_bindgen(getter)]
     pub fn secret(&self) -> Uint8Array {
         Uint8Array::from(self.0.params().secret.as_ref())
+    }
+
+    /// Optional x-callback-url metadata carried by this deep link.
+    #[wasm_bindgen(js_name = "xCallback", getter)]
+    pub fn x_callback(&self) -> XCallbackParams {
+        self.0.x_callback().into()
     }
 
     #[allow(

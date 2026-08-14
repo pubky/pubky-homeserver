@@ -3,12 +3,8 @@
 //! Route handlers call `AuthService` methods instead of orchestrating
 //! verification, persistence, and minting steps directly.
 
-use crate::persistence::sql::{
-    signup_code::SignupCode,
-    uexecutor,
-    user::{UserEntity, UserRepository},
-    SqlDb, UnifiedExecutor,
-};
+use crate::persistence::sql::{signup_code::SignupCode, uexecutor, SqlDb, UnifiedExecutor};
+use crate::services::user_service::{UserEntity, UserService};
 use chrono::Utc;
 use pubky_common::{
     auth::grant::GrantClaims,
@@ -27,13 +23,12 @@ use super::crypto::{
 };
 use super::persistence::{
     grant::{GrantEntity, GrantRepository, NewGrant},
-    grant_session::{GrantSessionRepository, NewGrantSession},
+    grant_session::{GrantSessionEntity, GrantSessionRepository, NewGrantSession},
     pop_nonce::{PopNonceError, PopNonceRepository},
 };
 use super::service_error::AuthServiceError;
 use super::session::GrantSession;
-use crate::client_server::auth::AuthSession;
-use crate::client_server::auth::SignupService;
+use crate::client_server::auth::{AuthRevocation, AuthSession, SignupService};
 
 /// Default session bearer lifetime: 1 hour.
 const DEFAULT_SESSION_TOKEN_LIFETIME_SECS: u64 = 3600;
@@ -53,6 +48,7 @@ pub struct GrantAuthService {
     sql_db: SqlDb,
     homeserver_public_key: PublicKey,
     signup_service: SignupService,
+    user_service: UserService,
 }
 
 impl GrantAuthService {
@@ -61,11 +57,13 @@ impl GrantAuthService {
         sql_db: SqlDb,
         homeserver_public_key: PublicKey,
         signup_service: SignupService,
+        user_service: UserService,
     ) -> Self {
         Self {
             sql_db,
             homeserver_public_key,
             signup_service,
+            user_service,
         }
     }
 
@@ -123,6 +121,7 @@ impl GrantAuthService {
         let mut tx = self.sql_db.pool().begin().await?;
         GrantRepository::revoke(grant_id, uexecutor!(tx)).await?;
         GrantSessionRepository::delete_all_for_grant(grant_id, uexecutor!(tx)).await?;
+        AuthRevocation::notify_grant_in_transaction(grant_id, uexecutor!(tx)).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -177,19 +176,14 @@ impl GrantAuthService {
             AuthServiceError::SessionNotFound,
         )?;
 
-        let now = Utc::now().timestamp();
-        if session.expires_at <= now {
-            return Err(AuthServiceError::SessionExpired);
-        }
-
-        let grant = self.get_grant(&session.grant_id).await?;
-        grant.require_active(now)?;
+        let grant = self.validate_active_grant_session_entity(&session).await?;
 
         Ok(GrantSession {
             user_key: grant.user_pubkey.clone(),
             capabilities: grant.capabilities,
             grant_id: session.grant_id,
             token_expires_at: session.expires_at as u64,
+            token_hash: session.token_hash,
         })
     }
 
@@ -214,6 +208,42 @@ impl GrantAuthService {
     }
 
     // ── Private helpers ─────────────────────────────────────────────────
+
+    /// Recheck that this exact bearer session row still exists before opening
+    /// a private long-lived stream.
+    pub(crate) async fn validate_active_grant_session(
+        &self,
+        session: &GrantSession,
+    ) -> Result<GrantEntity, AuthServiceError> {
+        let persisted = map_not_found(
+            GrantSessionRepository::get_by_token_hash(
+                &session.token_hash,
+                &mut self.sql_db.pool().into(),
+            )
+            .await,
+            AuthServiceError::SessionNotFound,
+        )?;
+
+        if persisted.grant_id != session.grant_id {
+            return Err(AuthServiceError::SessionNotFound);
+        }
+
+        self.validate_active_grant_session_entity(&persisted).await
+    }
+
+    async fn validate_active_grant_session_entity(
+        &self,
+        session: &GrantSessionEntity,
+    ) -> Result<GrantEntity, AuthServiceError> {
+        let now = Utc::now().timestamp();
+        if session.expires_at <= now {
+            return Err(AuthServiceError::SessionExpired);
+        }
+
+        let grant = self.get_grant(&session.grant_id).await?;
+        grant.require_active(now)?;
+        Ok(grant)
+    }
 
     /// Shared verification pipeline: verify grant → check revocation → verify PoP → check nonce.
     async fn verify_grant_and_pop(
@@ -302,7 +332,7 @@ impl GrantAuthService {
     /// Look up the user identified by the grant's `iss` claim. Returns error if not found.
     async fn find_user(&self, grant: &GrantClaims) -> Result<UserEntity, AuthServiceError> {
         map_not_found(
-            UserRepository::get(&grant.iss, &mut self.sql_db.pool().into()).await,
+            self.user_service.get(&grant.iss).await,
             AuthServiceError::UserNotFound,
         )
     }
@@ -465,15 +495,13 @@ mod tests {
         let db = SqlDb::test().await;
         let hs_kp = Keypair::random();
         let user_service = crate::services::user_service::UserService::new(db.clone());
-        let signup_service = SignupService::new(db.clone(), signup_mode, user_service);
-        GrantAuthService::new(db, hs_kp.public_key(), signup_service)
+        let signup_service = SignupService::new(db.clone(), signup_mode, user_service.clone());
+        GrantAuthService::new(db, hs_kp.public_key(), signup_service, user_service)
     }
 
     async fn create_test_user(service: &GrantAuthService) -> (Keypair, i32) {
         let kp = Keypair::random();
-        let user = UserRepository::create(&kp.public_key(), &mut service.sql_db.pool().into())
-            .await
-            .unwrap();
+        let user = service.user_service.create(&kp.public_key()).await.unwrap();
         (kp, user.id)
     }
 
@@ -661,7 +689,9 @@ mod tests {
             .signup_grant_account(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
-        let user = UserRepository::get(&user_kp.public_key(), &mut service.sql_db.pool().into())
+        let user = service
+            .user_service
+            .get(&user_kp.public_key())
             .await
             .unwrap();
         assert_eq!(user.public_key, user_kp.public_key());
@@ -845,6 +875,41 @@ mod tests {
 
         assert_eq!(session.user_key, user_kp.public_key());
         assert_eq!(session.grant_id, raw_grant.jti);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn validate_active_grant_session_rejects_rotated_bearer() {
+        let service = test_service().await;
+        let (user_kp, _) = create_test_user(&service).await;
+        let client_kp = Keypair::random();
+        let (grant_jws, pop_jws, raw_grant) =
+            sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
+
+        let response = service
+            .create_grant_session(&grant_jws, &pop_jws)
+            .await
+            .unwrap();
+        let session = service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&response.token).unwrap())
+            .await
+            .unwrap();
+
+        service
+            .validate_active_grant_session(&session)
+            .await
+            .unwrap();
+
+        service
+            .mint_session(&raw_grant, &mut service.sql_db.pool().into())
+            .await
+            .unwrap();
+
+        let err = service
+            .validate_active_grant_session(&session)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthServiceError::SessionNotFound));
     }
 
     #[tokio::test]
@@ -1064,23 +1129,25 @@ mod tests {
 
     #[test]
     fn require_root_capability_passes_with_root() {
-        let session = GrantSession {
-            user_key: Keypair::random().public_key(),
-            capabilities: Capabilities::builder().cap(Capability::root()).finish(),
-            grant_id: GrantId::generate(),
-            token_expires_at: 0,
-        };
+        let session = GrantSession::test(
+            Keypair::random().public_key(),
+            Capabilities::builder().cap(Capability::root()).finish(),
+            GrantId::generate(),
+            0,
+        );
         assert!(GrantAuthService::require_root_capability(&AuthSession::Grant(session)).is_ok());
     }
 
     #[test]
     fn require_root_capability_fails_without_root() {
-        let session = GrantSession {
-            user_key: Keypair::random().public_key(),
-            capabilities: Capabilities::builder().cap(Capability::read("/")).finish(),
-            grant_id: GrantId::generate(),
-            token_expires_at: 0,
-        };
+        let session = GrantSession::test(
+            Keypair::random().public_key(),
+            Capabilities::builder()
+                .cap(Capability::read("/").unwrap())
+                .finish(),
+            GrantId::generate(),
+            0,
+        );
         let err =
             GrantAuthService::require_root_capability(&AuthSession::Grant(session)).unwrap_err();
         assert!(matches!(err, AuthServiceError::RootCapabilityRequired));

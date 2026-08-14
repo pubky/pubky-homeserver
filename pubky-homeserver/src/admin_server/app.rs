@@ -226,16 +226,13 @@ mod tests {
         paths: &[&str],
     ) -> pubky_common::crypto::PublicKey {
         use crate::persistence::files::events::EventType;
-        use crate::persistence::sql::user::UserRepository;
-        use crate::shared::webdav::{EntryPath, WebDavPath};
+        use crate::shared::webdav::{EntryPath, StoragePath};
         use pubky_common::crypto::{Hash, Keypair};
 
         let pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        let user = context.user_service.create(&pubkey).await.unwrap();
         for p in paths {
-            let path = EntryPath::new(pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(p).unwrap());
             context
                 .events_service
                 .create_event(
@@ -471,19 +468,16 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_dav_put_get_delete_file() {
-        use crate::persistence::sql::user::UserRepository;
         use pubky_common::crypto::Keypair;
 
         let context = AppContext::test().await;
         let server = create_test_server(&context);
         let auth_value = auth_header();
 
-        // Register a user so writes are accepted by the entry layer
+        // Register a user so storage finalization can lock and account for the write.
         let keypair = Keypair::from_secret(&[0; 32]);
         let pubkey = keypair.public_key();
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let file_content = b"hello webdav";
         let file_url = format!("/dav/{}/pub/test.txt", pubkey.z32());
@@ -540,7 +534,6 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_dav_put_quota_overflow_returns_500() {
-        use crate::persistence::sql::user::UserRepository;
         use pubky_common::crypto::Keypair;
 
         let mut context = AppContext::test().await;
@@ -550,9 +543,7 @@ mod tests {
 
         let keypair = Keypair::from_secret(&[0; 32]);
         let pubkey = keypair.public_key();
-        UserRepository::create(&pubkey, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        context.user_service.create(&pubkey).await.unwrap();
 
         let pubkey = keypair.public_key().z32();
         let file1_url = format!("/dav/{pubkey}/pub/one.bin");

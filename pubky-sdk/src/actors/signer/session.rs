@@ -34,11 +34,17 @@ enum PublishMode {
 impl PubkySigner {
     /// Create an account on a homeserver.
     ///
-    /// Side effects:
-    /// - Publishes the `_pubky` pkarr record pointing to `homeserver` (force mode).
+    /// This is a **one-time** operation. After signing up, call
+    /// [`signin`](Self::signin) to obtain a [`PubkySession`] for reading and
+    /// writing data.
     ///
-    /// Notes:
-    /// - Uses a short-lived root grant + `PoP` proof (sufficient for signup).
+    /// Side effects:
+    /// - Publishes the `_pubky` PKARR record pointing to `homeserver` (force mode),
+    ///   so other users can discover this identity.
+    ///
+    /// # Arguments
+    /// - `homeserver` — public key of the homeserver to register on.
+    /// - `signup_token` — optional invite token required by some homeservers.
     ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Parse`] if the homeserver URL cannot be constructed.
@@ -64,14 +70,26 @@ impl PubkySigner {
         Ok(())
     }
 
-    // All of these methods use root capabilities
-
-    /// Sign in to the users homeserver by locally signing a root-capability token.
-    /// This call returns a user session.
+    /// Sign in to the user's homeserver and return a [`PubkySession`].
     ///
-    /// In case the users pkdns records are stale, this call with republish them in the background.
+    /// Locally signs a root-capability grant and exchanges it for a
+    /// session at the homeserver. If the user's PKDNS record is stale,
+    /// it is republished **in the background** so this call returns fast.
     ///
-    /// Prefer this signin for best user experience, it returns fast.
+    /// # Arguments
+    /// - `client_id` — a [`ClientId`] identifying your application (e.g.
+    ///   `ClientId::new("my.app").unwrap()`). The homeserver records which
+    ///   app holds each grant.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use pubky::{Pubky, Keypair, ClientId};
+    /// # async fn run() -> pubky::Result<()> {
+    /// let signer = Pubky::new()?.signer(Keypair::random());
+    /// let session = signer.signin(ClientId::new("my.app").unwrap()).await?;
+    /// println!("Signed in as {}", session.public_key());
+    /// # Ok(()) }
+    /// ```
     ///
     /// # Errors
     /// - Propagates transport failures during the session exchange.
@@ -81,11 +99,16 @@ impl PubkySigner {
             .await
     }
 
-    /// Sign in by locally signing a root-capability token. Returns a session-bound session.
-    /// Publishes the homeserver record if stale in the background.
+    /// Sign in, **blocking** until the PKDNS record is republished (if stale).
     ///
-    /// Prefer this signin for highest guarantees of discoverability from Dht and pkarr relays,
-    /// it returns slow (~3-5 seconds).
+    /// Unlike [`Self::signin`], this variant waits for the homeserver PKDNS
+    /// record to be fully published before returning. This gives the highest
+    /// guarantee of discoverability from the DHT and Pkarr relays, at the
+    /// cost of being slower (~3–5 seconds).
+    ///
+    /// Use this when the signer's identity must be immediately discoverable
+    /// by other users (e.g. first-time setup). For interactive apps, prefer
+    /// [`Self::signin`] which publishes in the background.
     ///
     /// # Errors
     /// - Propagates transport failures during the session exchange.
@@ -101,12 +124,8 @@ impl PubkySigner {
         client_id: ClientId,
         mode: PublishMode,
     ) -> Result<PubkySession> {
-        let homeserver = self.pkdns().get_homeserver().await?.ok_or_else(|| {
-            crate::errors::AuthError::Validation(format!(
-                "could not resolve homeserver for {}",
-                self.keypair.public_key().z32()
-            ))
-        })?;
+        let user = self.keypair.public_key();
+        let homeserver = self.pkdns().require_homeserver_of(&user).await?;
         let client_keypair = Keypair::random();
         let (grant_jws, grant_claims) = self.session_grant(client_id, &client_keypair);
         let client_signer = GrantPopSigner::local(client_keypair);
@@ -149,7 +168,8 @@ impl PubkySigner {
             .await?;
 
         self.publish_signup_homeserver(homeserver).await?;
-        let cookie_credential = CookieCredential::from_response(response).await?;
+        let cookie_credential =
+            CookieCredential::from_response(response, Some(homeserver.clone())).await?;
         Ok(PubkySession::from_credential(
             self.client.clone(),
             Arc::new(cookie_credential),
@@ -177,7 +197,10 @@ impl PubkySigner {
 
     async fn signin_cookie_with_publish(&self, mode: PublishMode) -> Result<PubkySession> {
         let token = self.root_capability_token();
-        let credential = CookieCredential::from_auth_token(&token, &self.client).await?;
+        let user = self.keypair.public_key();
+        let homeserver = self.pkdns().get_homeserver_of(&user).await?;
+        let credential =
+            CookieCredential::from_auth_token(&token, &self.client, homeserver).await?;
         let session = PubkySession::from_cookie_credential(self.client.clone(), credential);
         self.publish_after_signin(mode).await?;
         Ok(session)
@@ -265,8 +288,7 @@ impl PubkySigner {
     ) -> GrantClaims {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         GrantClaims {
             iss: self.keypair.public_key(),
             client_id,

@@ -10,12 +10,12 @@ use futures_util::stream::StreamExt;
 use crate::{
     client_server::{
         auth::{has_write_permission, AuthSession},
-        middleware::pubky_host::PubkyHost,
+        middleware::request_tenant::RequestTenant,
         AppState,
     },
     persistence::{
         files::{
-            user_quota_layer::{resolve_storage_max_bytes, would_exceed_limit},
+            write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
             WriteStreamError,
         },
         sql::{entry::EntryRepository, user::UserEntity, UnifiedExecutor},
@@ -27,41 +27,63 @@ use crate::{
     },
 };
 
+pub async fn legacy_delete(
+    state: State<AppState>,
+    session: AuthSession,
+    tenant: RequestTenant,
+    Path(path): Path<WebDavFilePathAxum>,
+) -> HttpResult<impl IntoResponse> {
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
+    delete(state, session, entry_path).await
+}
+
 pub async fn delete(
     State(state): State<AppState>,
     session: AuthSession,
-    pubky: PubkyHost,
-    Path(path): Path<WebDavFilePathAxum>,
+    entry_path: EntryPath,
 ) -> HttpResult<impl IntoResponse> {
-    has_write_permission(&session, pubky.public_key(), path.inner())?;
+    if !entry_path.path().is_file() {
+        return Err(HttpError::bad_request("Target path must be a file"));
+    }
+    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
 
-    let public_key = pubky.public_key();
     state
         .user_service
-        .get_or_http_error(public_key, false)
+        .get_or_http_error(entry_path.pubkey(), false)
         .await?;
-    let entry_path = EntryPath::new(public_key.clone(), path.inner().to_owned());
 
     state.file_service.delete(&entry_path).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
-pub async fn put(
-    State(state): State<AppState>,
+pub async fn legacy_put(
+    state: State<AppState>,
     session: AuthSession,
-    pubky: PubkyHost,
+    tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
     headers: HeaderMap,
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
-    has_write_permission(&session, pubky.public_key(), path.inner())?;
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
+    put(state, session, entry_path, headers, body).await
+}
 
-    let public_key = pubky.public_key();
+pub async fn put(
+    State(state): State<AppState>,
+    session: AuthSession,
+    entry_path: EntryPath,
+    headers: HeaderMap,
+    body: Body,
+) -> HttpResult<impl IntoResponse> {
+    if !entry_path.path().is_file() {
+        return Err(HttpError::bad_request("Target path must be a file"));
+    }
+    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
+
     let user = state
         .user_service
-        .get_or_http_error(public_key, true)
+        .get_or_http_error(entry_path.pubkey(), true)
         .await?;
-    let entry_path = EntryPath::new(public_key.clone(), path.inner().to_owned());
 
     // Early fail: check Content-Length header against the user's storage quota
     // so we can reject before streaming the entire body.
@@ -137,9 +159,9 @@ async fn fail_if_size_hint_exceeds_quota<'a>(
 mod tests {
     use pubky_common::crypto::Keypair;
 
-    use crate::persistence::sql::user::UserRepository;
     use crate::persistence::sql::SqlDb;
-    use crate::shared::webdav::WebDavPath;
+    use crate::services::user_service::UserService;
+    use crate::shared::webdav::StoragePath;
 
     use super::*;
 
@@ -151,7 +173,7 @@ mod tests {
         path: &str,
         size_hint: Option<u64>,
     ) -> HttpResult<()> {
-        let entry_path = EntryPath::new(user.public_key.clone(), WebDavPath::new(path).unwrap());
+        let entry_path = EntryPath::new(user.public_key.clone(), StoragePath::new(path).unwrap());
         fail_if_size_hint_exceeds_quota(
             size_hint,
             user,
@@ -167,7 +189,9 @@ mod tests {
     async fn test_no_size_hint_always_ok() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         // No size hint → always OK regardless of quota
         check_hint(&db, &user, None, "/test.txt", None)
@@ -180,7 +204,9 @@ mod tests {
     async fn test_small_hint_within_quota() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         // 100 bytes + FILE_METADATA_SIZE is well within 1 MB
         check_hint(&db, &user, None, "/test.txt", Some(100))
@@ -193,7 +219,9 @@ mod tests {
     async fn test_hint_exceeds_quota() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         // 1 MB content + FILE_METADATA_SIZE > 1 MB quota
         check_hint(&db, &user, None, "/test.txt", Some(1024 * 1024))
@@ -206,7 +234,9 @@ mod tests {
     async fn test_new_file_accounts_for_metadata_overhead() {
         let db = SqlDb::test().await;
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create_with_quota_mb(&db, &pk, 1).await;
+        let user = UserService::new(db.clone())
+            .create_with_quota_mb(&pk, 1)
+            .await;
 
         let one_mb = 1024u64 * 1024;
         let max_content = one_mb - FILE_METADATA_SIZE;
@@ -228,9 +258,7 @@ mod tests {
         let db = SqlDb::test().await;
         // No system default → unlimited for Default users
         let pk = Keypair::random().public_key();
-        let user = UserRepository::create(&pk, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = UserService::new(db.clone()).create(&pk).await.unwrap();
 
         // Even a huge hint should pass with unlimited quota
         check_hint(&db, &user, None, "/test.txt", Some(10 * 1024 * 1024 * 1024))

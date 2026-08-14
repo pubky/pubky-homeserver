@@ -1,0 +1,711 @@
+---
+openapi: 3.1.0
+info:
+  title: Pubky Homeserver Admin API
+  description: |-
+    The Admin Server exposes homeserver administration and WebDAV operations on a
+    separate interface from the client API.
+
+    Most operations require the `X-Admin-Password` header. The root identification
+    endpoint is public, while `/dav/{path}` uses HTTP Basic authentication with
+    username `admin` and the admin password.
+  version: 0.9.0
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+- url: http://localhost:6288
+  description: Admin server (default port)
+security: []
+tags:
+- name: General
+  description: Public admin server identification
+- name: Events
+  description: Administrative event streaming
+- name: Admin
+  description: Password-protected administration and WebDAV operations
+paths:
+  "/":
+    get:
+      tags:
+      - General
+      summary: Admin server info
+      description: Public health check and admin server identification.
+      operationId: getAdminRoot
+      responses:
+        '200':
+          description: Server name
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Homeserver - Admin Endpoint
+  "/info":
+    get:
+      tags:
+      - Admin
+      summary: Server statistics
+      operationId: getAdminInfo
+      security:
+      - adminPassword: []
+      responses:
+        '200':
+          description: Server statistics
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/AdminInfoResponse"
+        '401':
+          description: Missing or invalid admin password
+  "/generate_signup_token":
+    get:
+      tags:
+      - Admin
+      summary: Generate signup token (default limits)
+      operationId: generateSignupToken
+      security:
+      - adminPassword: []
+      responses:
+        '200':
+          description: Generated token
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: Missing or invalid admin password
+    post:
+      tags:
+      - Admin
+      summary: Generate signup token (custom limits)
+      operationId: generateSignupTokenWithLimits
+      security:
+      - adminPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/UserQuota"
+            examples:
+              customLimits:
+                value:
+                  storage_quota_mb: 1024
+                  rate_read: 200mb/m
+              unlimited:
+                value:
+                  storage_quota_mb: unlimited
+                  rate_read: unlimited
+                  rate_write: unlimited
+      responses:
+        '200':
+          description: Generated token
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: Missing or invalid admin password
+        '422':
+          description: Invalid quota format
+  "/signup_tokens":
+    get:
+      tags:
+      - Admin
+      summary: List signup tokens
+      description: |
+        Paginated list of signup tokens with usage information.
+        Supports filtering by state (`all`, `used`, `unused`).
+      operationId: listSignupTokens
+      security:
+      - adminPassword: []
+      parameters:
+      - name: limit
+        in: query
+        description: Maximum number of tokens to return per page.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      - name: cursor
+        in: query
+        description: Pagination cursor (token string from `next_cursor` of a previous
+          response).
+        schema:
+          type: string
+      - name: state
+        in: query
+        description: Filter by token state.
+        schema:
+          type: string
+          enum:
+          - all
+          - used
+          - unused
+          default: all
+      responses:
+        '200':
+          description: Paginated list of signup tokens
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SignupTokensResponse"
+        '400':
+          description: Invalid query parameters (bad cursor format, unknown state,
+            limit=0)
+        '401':
+          description: Missing or invalid admin password
+  "/events-stream":
+    get:
+      tags:
+      - Events
+      summary: Real-time event stream (SSE)
+      description: |-
+        Admin-only Server-Sent Events feed over all public and private homeserver events.
+
+        Two modes are supported:
+        - **Batch mode** (`live=false` or omitted): fetches historical events then closes.
+        - **Live mode** (`live=true`): fetches historical events, then streams new events in real-time.
+
+        Omit `user` to stream every user, or repeat it to filter by z-base-32 public key.
+        The standalone `cursor` parameter is a single global cursor over the combined feed.
+        Slow clients that fall behind in live mode will have their connection closed.
+
+        Each SSE message has an event type (`PUT` or `DEL`) and multiline data:
+        ```
+        event: PUT
+        data: pubky://user_pubkey/pub/example.txt
+        data: cursor: 42
+        data: content_hash: r0NJufX5oaagQE3qNtzJSZvLJcmtwRK3zJqTyuQfMmI=
+        ```
+      operationId: getAdminEventStream
+      security:
+      - adminPassword: []
+      parameters:
+      - name: user
+        in: query
+        required: false
+        description: |-
+          Optional z-base-32 user public key filter. Repeat for multiple users.
+          Omit the parameter to stream every user. Per-user cursor suffixes are not accepted.
+          Duplicate values are ignored; more than 50 distinct users returns `400`.
+        schema:
+          type: array
+          items:
+            type: string
+        style: form
+        explode: true
+        examples:
+          single:
+            value:
+            - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo
+      - name: cursor
+        in: query
+        description: Resume the combined feed after this single global event cursor.
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Maximum total events to send.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      - name: reverse
+        in: query
+        description: Reverse chronological order. Cannot be combined with `live=true`.
+        schema:
+          type: boolean
+          default: false
+      - name: live
+        in: query
+        description: Enable live streaming mode. Cannot be combined with `reverse=true`.
+        schema:
+          type: boolean
+          default: false
+      - name: path
+        in: query
+        description: |-
+          Path filter (repeatable; union semantics). A trailing slash matches a directory
+          and its descendants; otherwise the exact file is matched. Both public and private
+          paths may be requested.
+        schema:
+          type: array
+          items:
+            type: string
+        style: form
+        explode: true
+        examples:
+          publicDir:
+            value:
+            - "/pub/files/"
+          mixed:
+            value:
+            - "/pub/"
+            - "/priv/app/"
+      responses:
+        '200':
+          description: SSE event stream
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: |-
+            Invalid user public key or global cursor, excessive user parameters, zero/invalid
+            limit, incompatible `live=true` and `reverse=true`, or invalid path.
+        '401':
+          description: Missing or invalid `X-Admin-Password`.
+        '404':
+          description: A requested user was not found.
+  "/webdav/{entry_path}":
+    delete:
+      tags:
+      - Admin
+      summary: Delete entry via admin
+      operationId: adminDeleteEntry
+      security:
+      - adminPassword: []
+      parameters:
+      - name: entry_path
+        in: path
+        required: true
+        description: 'Full path: `{pubkey}/path` (e.g. `o1gg96ewuo.../pub/file.txt`)'
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Entry deleted
+        '400':
+          description: Invalid pubkey format
+        '401':
+          description: Missing or invalid admin password
+        '404':
+          description: Entry not found
+  "/dav/{path}":
+    description: |
+      Full WebDAV endpoint. In addition to GET/PUT/DELETE shown here, this route
+      accepts any HTTP method (via `any()` handler) including PROPFIND, MKCOL, etc.
+    get:
+      tags:
+      - Admin
+      summary: WebDAV GET
+      operationId: adminDavGet
+      security:
+      - adminBasicAuth: []
+      parameters:
+      - name: path
+        in: path
+        required: true
+        description: 'WebDAV path: `{pubkey}/{webdav_path}`'
+        schema:
+          type: string
+      responses:
+        '200':
+          description: File content
+        '404':
+          description: Not found
+    put:
+      tags:
+      - Admin
+      summary: WebDAV PUT
+      operationId: adminDavPut
+      security:
+      - adminBasicAuth: []
+      parameters:
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: File created
+    delete:
+      tags:
+      - Admin
+      summary: WebDAV DELETE
+      operationId: adminDavDelete
+      security:
+      - adminBasicAuth: []
+      parameters:
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: File deleted
+  "/users/{pubkey}/disable":
+    post:
+      tags:
+      - Admin
+      summary: Disable user account
+      operationId: disableUser
+      security:
+      - adminPassword: []
+      parameters:
+      - "$ref": "#/components/parameters/AdminPubkey"
+      responses:
+        '200':
+          description: User disabled
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Ok
+        '400':
+          description: Invalid pubkey format
+        '401':
+          description: Missing or invalid admin password
+        '404':
+          description: User not found
+  "/users/{pubkey}/enable":
+    post:
+      tags:
+      - Admin
+      summary: Enable user account
+      operationId: enableUser
+      security:
+      - adminPassword: []
+      parameters:
+      - "$ref": "#/components/parameters/AdminPubkey"
+      responses:
+        '200':
+          description: User enabled
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Ok
+        '400':
+          description: Invalid pubkey format
+        '401':
+          description: Missing or invalid admin password
+        '404':
+          description: User not found
+  "/users/{pubkey}/quota":
+    get:
+      tags:
+      - Admin
+      summary: Get user quota
+      description: |
+        Returns both the effective quota (overrides merged with system defaults)
+        and the raw per-user overrides.
+      operationId: getUserQuota
+      security:
+      - adminPassword: []
+      parameters:
+      - "$ref": "#/components/parameters/AdminPubkey"
+      responses:
+        '200':
+          description: User quota
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/UserQuotaResponse"
+              examples:
+                withDefaults:
+                  value:
+                    effective:
+                      storage_quota_mb: 100
+                      rate_read: 10mb/s
+                      rate_write: 5mb/s
+                    overrides: {}
+                withOverrides:
+                  value:
+                    effective:
+                      storage_quota_mb: 500
+                      rate_read: 100mb/m
+                      rate_write: unlimited
+                    overrides:
+                      storage_quota_mb: 500
+                      rate_read: 100mb/m
+        '400':
+          description: Invalid pubkey format
+        '401':
+          description: Missing or invalid admin password
+        '404':
+          description: User not found
+    patch:
+      tags:
+      - Admin
+      summary: Update user quota
+      description: |
+        Partially update per-user quota overrides.
+        - Absent fields: keep existing value
+        - `null`: reset to system default
+        - `"unlimited"`: no limit
+        - Value: explicit custom limit
+      operationId: patchUserQuota
+      security:
+      - adminPassword: []
+      parameters:
+      - "$ref": "#/components/parameters/AdminPubkey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/UserQuotaPatch"
+            examples:
+              setCustom:
+                value:
+                  storage_quota_mb: 500
+                  rate_read: 100mb/m
+              resetToDefault:
+                value:
+                  storage_quota_mb:
+                  rate_read:
+                  rate_write:
+              setUnlimited:
+                value:
+                  rate_read: unlimited
+      responses:
+        '200':
+          description: Quota updated
+        '400':
+          description: Invalid pubkey format
+        '401':
+          description: Missing or invalid admin password
+        '404':
+          description: User not found
+        '422':
+          description: Invalid quota format
+components:
+  securitySchemes:
+    adminPassword:
+      type: apiKey
+      in: header
+      name: X-Admin-Password
+      description: Admin server password.
+    adminBasicAuth:
+      type: http
+      scheme: basic
+      description: Basic auth for WebDAV endpoints. Username `admin`, password is
+        the admin password.
+  parameters:
+    AdminPubkey:
+      name: pubkey
+      in: path
+      required: true
+      description: User's z-base-32 encoded public key.
+      schema:
+        type: string
+  schemas:
+    SignupTokensResponse:
+      type: object
+      required:
+      - items
+      - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            "$ref": "#/components/schemas/SignupTokenItem"
+        next_cursor:
+          type:
+          - string
+          - 'null'
+          description: Cursor for the next page, or `null` if this is the last page.
+    SignupTokenItem:
+      type: object
+      required:
+      - token
+      - created_at
+      - used_at
+      - used_by
+      properties:
+        token:
+          type: string
+          description: The signup token string.
+        created_at:
+          type: string
+          format: date-time
+          description: When the token was created.
+        used_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: When the token was used, or `null` if unused.
+        used_by:
+          type:
+          - string
+          - 'null'
+          description: z-base-32 public key of the user who used the token, or `null`
+            if unused.
+    AdminInfoResponse:
+      type: object
+      required:
+      - num_users
+      - num_disabled_users
+      - total_disk_used_mb
+      - num_signup_codes
+      - num_unused_signup_codes
+      - public_key
+      - pkarr_pubky_address
+      - pkarr_icann_domain
+      - version
+      properties:
+        num_users:
+          type: integer
+          format: int64
+          minimum: 0
+        num_disabled_users:
+          type: integer
+          format: int64
+          minimum: 0
+        total_disk_used_mb:
+          type: integer
+          format: int64
+          minimum: 0
+        num_signup_codes:
+          type: integer
+          format: int64
+          minimum: 0
+        num_unused_signup_codes:
+          type: integer
+          format: int64
+          minimum: 0
+        public_key:
+          type: string
+          description: z-base-32 encoded homeserver public key.
+        pkarr_pubky_address:
+          type:
+          - string
+          - 'null'
+          description: Pubky address from pkarr config.
+        pkarr_icann_domain:
+          type:
+          - string
+          - 'null'
+          description: ICANN domain from pkarr config.
+        version:
+          type: string
+          description: Homeserver version.
+    UserQuota:
+      type: object
+      description: |
+        Quota configuration. All fields are optional.
+        - Absent or `null`: use system default
+        - `"unlimited"`: no limit
+        - Value: explicit limit
+      properties:
+        storage_quota_mb:
+          description: Storage quota in megabytes, `"unlimited"`, or `null` for default.
+          oneOf:
+          - type: integer
+          - type: string
+            enum:
+            - unlimited
+        rate_read:
+          description: Read bandwidth limit (e.g. `"200mb/m"`, `"unlimited"`, or `null`).
+          type: string
+        rate_write:
+          description: Write bandwidth limit (e.g. `"100mb/m"`, `"unlimited"`, or
+            `null`).
+          type: string
+        rate_read_burst:
+          description: |
+            Burst override for read rate limit, in the rate's natural unit
+            (MB for "…mb/s", KB for "…kb/s"). `null` or absent = burst equals rate (default).
+          type: integer
+          format: int32
+          minimum: 1
+        rate_write_burst:
+          description: |
+            Burst override for write rate limit, in the rate's natural unit
+            (MB for "…mb/s", KB for "…kb/s"). `null` or absent = burst equals rate (default).
+          type: integer
+          format: int32
+          minimum: 1
+        allowed_write_paths:
+          description: |
+            Restrict which paths a user can write to.
+            - `null` or absent: unrestricted (all paths allowed) — default
+            - `[]`: read-only (no writes allowed)
+            - `["/pub/tokens/", "/pub/paykit/"]`: only these prefix paths
+          type: array
+          items:
+            type: string
+    UserQuotaPatch:
+      type: object
+      description: |
+        Partial quota update. Only fields present in the body are changed.
+        - Absent: keep existing value (no change)
+        - `null`: reset to system default
+        - `"unlimited"`: no limit
+        - Value: explicit custom limit
+      properties:
+        storage_quota_mb:
+          description: Storage quota in MB, `"unlimited"`, or `null` to reset.
+          oneOf:
+          - type: integer
+          - type: string
+            enum:
+            - unlimited
+          - type: 'null'
+        rate_read:
+          description: Read bandwidth limit string, `"unlimited"`, or `null` to reset.
+          type:
+          - string
+          - 'null'
+        rate_write:
+          description: Write bandwidth limit string, `"unlimited"`, or `null` to reset.
+          type:
+          - string
+          - 'null'
+        rate_read_burst:
+          description: Burst for read rate limit (in rate's natural unit), or `null`
+            to reset to default.
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+        rate_write_burst:
+          description: Burst for write rate limit (in rate's natural unit), or `null`
+            to reset to default.
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+        allowed_write_paths:
+          description: |
+            Allowed write paths. Absent = keep existing, `null` = reset to unrestricted,
+            `[]` = read-only, `["/pub/tokens/"]` = only these prefix paths.
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+    UserQuotaResponse:
+      type: object
+      required:
+      - effective
+      - overrides
+      properties:
+        effective:
+          description: Overrides merged with system defaults. All fields are always
+            present.
+          allOf:
+          - "$ref": "#/components/schemas/UserQuota"
+        overrides:
+          description: Only per-user customizations. Fields using the system default
+            are omitted.
+          allOf:
+          - "$ref": "#/components/schemas/UserQuota"

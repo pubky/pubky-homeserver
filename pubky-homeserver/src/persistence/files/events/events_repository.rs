@@ -401,31 +401,29 @@ mod tests {
     use pubky_common::crypto::{Hash, Keypair};
 
     use crate::{
-        persistence::sql::{user::UserRepository, SqlDb},
-        shared::webdav::WebDavPath,
+        persistence::sql::SqlDb, services::user_service::UserService, shared::webdav::StoragePath,
     };
 
     use super::*;
     use std::ops::Add;
 
     fn pf(s: &str) -> PathFilter {
-        WebDavPath::new(s).unwrap().into()
+        StoragePath::new(s).unwrap().into()
     }
 
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_create_list_event() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
 
         // Create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Create events
         for _ in 0..10 {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test").unwrap());
             let _ = EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -452,7 +450,7 @@ mod tests {
         assert_eq!(events[0].user_id, user.id);
         assert_eq!(
             events[0].path,
-            EntryPath::new(user_pubkey, WebDavPath::new("/test").unwrap())
+            EntryPath::new(user_pubkey, StoragePath::new("/test").unwrap())
         );
         assert!(matches!(events[0].event_type, EventType::Put { .. }));
     }
@@ -461,10 +459,9 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_cursor_public_visibility_excludes_private() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Interleave public, private, and look-alike roots that must NOT match
         // the `/pub/` prefix (`/public/...` and `/pub` without a trailing slash).
@@ -478,7 +475,7 @@ mod tests {
             "/pub",         // 7: bare root, not under `/pub/` -> excluded
         ];
         for p in paths {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -538,19 +535,18 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_transform_legacy_cursor() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
 
         // Create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         let mut timestamp_events = Vec::new();
         // Create events with specific timestamps
         for i in 0..10 {
             let timestamp = Timestamp::now().add(1_000_000 * i); // Add 1s for each event
             let created_at = timestamp_to_sqlx_datetime(&timestamp);
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test").unwrap());
             let event = EventRepository::create_with_timestamp(
                 user.id,
                 EventType::Put {
@@ -579,19 +575,18 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_parse_cursor_backwards_compatibility() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
 
         // Create user
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // Create test events with specific timestamps
         let mut events = Vec::new();
         for i in 0..5 {
             let timestamp = Timestamp::now().add(1_000_000 * i); // Add 1s for each event
             let created_at = timestamp_to_sqlx_datetime(&timestamp);
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new("/test").unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new("/test").unwrap());
             let event = EventRepository::create_with_timestamp(
                 user.id,
                 EventType::Put {
@@ -666,10 +661,9 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_user_cursors_multi_path_union_and_boundaries() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         // ids 1..=6
         let paths = [
@@ -681,7 +675,7 @@ mod tests {
             "/pub/b",           // 6 public
         ];
         for p in paths {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -740,13 +734,12 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_user_cursors_escapes_like_metacharacters() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let user_pubkey = Keypair::random().public_key();
-        let user = UserRepository::create(&user_pubkey, &mut db.pool().into())
-            .await
-            .unwrap();
+        let user = user_service.create(&user_pubkey).await.unwrap();
 
         for p in ["/priv/a_b/x", "/priv/axb/y", "/priv/a%/m", "/priv/apct/n"] {
-            let path = EntryPath::new(user_pubkey.clone(), WebDavPath::new(p).unwrap());
+            let path = EntryPath::new(user_pubkey.clone(), StoragePath::new(p).unwrap());
             EventRepository::create(
                 user.id,
                 EventType::Put {
@@ -790,18 +783,15 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_get_by_user_cursors_multi_user_public_filter_excludes_private() {
         let db = SqlDb::test().await;
+        let user_service = UserService::new(db.clone());
         let ka = Keypair::random().public_key();
         let kb = Keypair::random().public_key();
-        let ua = UserRepository::create(&ka, &mut db.pool().into())
-            .await
-            .unwrap();
-        let ub = UserRepository::create(&kb, &mut db.pool().into())
-            .await
-            .unwrap();
+        let ua = user_service.create(&ka).await.unwrap();
+        let ub = user_service.create(&kb).await.unwrap();
 
         for (k, uid) in [(&ka, ua.id), (&kb, ub.id)] {
             for p in ["/pub/x", "/priv/secret"] {
-                let path = EntryPath::new(k.clone(), WebDavPath::new(p).unwrap());
+                let path = EntryPath::new(k.clone(), StoragePath::new(p).unwrap());
                 EventRepository::create(
                     uid,
                     EventType::Put {

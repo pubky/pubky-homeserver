@@ -13,39 +13,12 @@
 //! - **No Authorization header** → forwards without an identity.
 //! - **Non-Bearer / malformed Authorization header** → forwards without an identity.
 
-use crate::client_server::auth::grant::crypto::session_token::SessionBearer;
+use crate::client_server::auth::grant::bearer::{extract_bearer_token, BearerTokenExtraction};
 use crate::client_server::auth::{AuthSession, AuthState};
-use axum::http::header;
 use axum::{body::Body, http::Request};
 use futures_util::future::BoxFuture;
 use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
-
-// ── Bearer token extraction ────────────────────────────────────────────────
-
-enum BearerTokenExtraction {
-    Present(SessionBearer),
-    Missing,
-    Invalid,
-}
-
-fn extract_bearer_token(req: &Request<Body>) -> BearerTokenExtraction {
-    let Some(value) = req.headers().get(header::AUTHORIZATION) else {
-        return BearerTokenExtraction::Missing;
-    };
-    let Ok(value) = value.to_str() else {
-        return BearerTokenExtraction::Invalid;
-    };
-
-    let Some(raw_token) = value.strip_prefix("Bearer ") else {
-        return BearerTokenExtraction::Invalid;
-    };
-
-    match SessionBearer::parse(raw_token) {
-        Ok(bearer) => BearerTokenExtraction::Present(bearer),
-        Err(_) => BearerTokenExtraction::Invalid,
-    }
-}
 
 // ── Layer ───────────────────────────────────────────────────────────────────
 
@@ -100,12 +73,12 @@ where
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
-            let bearer = match extract_bearer_token(&req) {
+            let bearer = match extract_bearer_token(req.headers()) {
                 BearerTokenExtraction::Present(bearer) => bearer,
                 BearerTokenExtraction::Missing => {
                     return inner.call(req).await.map_err(|e| match e {});
                 }
-                BearerTokenExtraction::Invalid => {
+                BearerTokenExtraction::InvalidBearer | BearerTokenExtraction::NonBearer => {
                     tracing::debug!(
                         "Authorization header present but not a usable Bearer token; forwarding without auth"
                     );
@@ -247,68 +220,5 @@ mod tests {
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    // ── extract_bearer_token unit tests ────────────────────────────────
-
-    #[test]
-    fn extract_bearer_no_auth_header() {
-        let req = Request::builder().body(Body::empty()).unwrap();
-        assert!(matches!(
-            extract_bearer_token(&req),
-            BearerTokenExtraction::Missing
-        ));
-    }
-
-    #[test]
-    fn extract_bearer_basic_auth_rejected() {
-        let req = Request::builder()
-            .header("Authorization", "Basic dXNlcjpwYXNz")
-            .body(Body::empty())
-            .unwrap();
-        assert!(matches!(
-            extract_bearer_token(&req),
-            BearerTokenExtraction::Invalid
-        ));
-    }
-
-    #[test]
-    fn extract_bearer_empty_token() {
-        let req = Request::builder()
-            .header("Authorization", "Bearer ")
-            .body(Body::empty())
-            .unwrap();
-        assert!(matches!(
-            extract_bearer_token(&req),
-            BearerTokenExtraction::Invalid
-        ));
-    }
-
-    #[test]
-    fn extract_bearer_wrong_length_token() {
-        let huge = "a".repeat(WRONG_LENGTH_BEARER_LEN);
-        let req = Request::builder()
-            .header("Authorization", format!("Bearer {huge}"))
-            .body(Body::empty())
-            .unwrap();
-        assert!(matches!(
-            extract_bearer_token(&req),
-            BearerTokenExtraction::Invalid
-        ));
-    }
-
-    #[test]
-    fn extract_bearer_valid_token() {
-        let req = Request::builder()
-            .header(
-                "Authorization",
-                format!("Bearer {UNKNOWN_WELL_FORMED_BEARER}"),
-            )
-            .body(Body::empty())
-            .unwrap();
-        let BearerTokenExtraction::Present(bearer) = extract_bearer_token(&req) else {
-            panic!("expected bearer token to be present");
-        };
-        assert_eq!(bearer.as_str(), UNKNOWN_WELL_FORMED_BEARER);
     }
 }

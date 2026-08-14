@@ -73,9 +73,9 @@ pub enum PkarrError {
     #[error("Failed to publish record to the DHT: {0}")]
     Publish(#[from] pkarr::errors::PublishError),
 
-    /// DHT query (lookup) failed (often transient).
-    #[error("Failed to query the DHT: {0}")]
-    Query(#[from] pkarr::errors::QueryError),
+    /// DHT resolution failed (often transient).
+    #[error("Failed to resolve the DHT record: {0}")]
+    Resolve(#[from] pkarr::errors::ResolveError),
 
     /// Record was present but malformed or missing required fields.
     #[error("Pkarr record is malformed or missing required data: {0}")]
@@ -86,7 +86,7 @@ impl PkarrError {
     /// Returns true if the error is from a DHT operation that might succeed by simply retrying.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::Publish(_) | Self::Query(_))
+        matches!(self, Self::Publish(_) | Self::Resolve(_))
     }
 }
 
@@ -167,7 +167,7 @@ macro_rules! impl_from_for_error {
 // Pkarr Errors
 impl_from_for_error!(pkarr::errors::SignedPacketBuildError, Error::Pkarr);
 impl_from_for_error!(pkarr::errors::PublishError, Error::Pkarr);
-impl_from_for_error!(pkarr::errors::QueryError, Error::Pkarr);
+impl_from_for_error!(pkarr::errors::ResolveError, Error::Pkarr);
 impl_from_for_error!(pkarr::dns::SimpleDnsError, Error::Pkarr);
 
 // Auth Errors

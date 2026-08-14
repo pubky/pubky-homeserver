@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn creates_signup_grant_deep_link_from_params() {
-        let capabilities = Capabilities::builder().read_write("/").finish();
+        let capabilities = Capabilities::builder().read_write("/").unwrap().finish();
         let relay = Url::parse("https://httprelay.pubky.app/inbox/").unwrap();
         let homeserver = PublicKey::from_str(HOMESERVER).unwrap();
         let client_id = ClientId::new("franky.pubky.app").unwrap();

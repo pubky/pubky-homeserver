@@ -14,7 +14,10 @@
 //! # async fn run() -> pubky::Result<()> {
 //! let pubky = Pubky::new()?; // or Pubky::testnet() / Pubky::with_client(...)
 //!
-//! let caps = Capabilities::builder().write("/pub/demoapp/").finish();
+//! let caps = Capabilities::builder()
+//!     .write("/pub/demoapp/")
+//!     .expect("static scope is canonical")
+//!     .finish();
 //! let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
 //! println!("Scan to sign in: {}", flow.authorization_url());
 //!
@@ -59,7 +62,10 @@ use crate::PubkyCookieAuthFlow;
 use crate::{
     Capabilities, ClientId, DelegatedGrantCredentialState, EventCursor, EventStreamBuilder,
     GrantCredential, Pkdns, PubkyGrantAuthFlow, PubkyHttpClient, PubkySession, PubkySigner,
-    PublicStorage, Result, actors::AuthFlowKind, deep_links::DeepLink, errors::AuthError,
+    PublicStorage, Result,
+    actors::AuthFlowKind,
+    deep_links::{DeepLink, XCallbackParams},
+    errors::AuthError,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -67,10 +73,54 @@ use crate::errors::RequestError;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
-/// High-level facade. Owns a `PubkyHttpClient` and constructs the main actors.
-/// Prefer to instantiate only once and use trough your application a single shared `Pubky`
-/// instead of constructing one per request. This avoids reinitializing transports and keeps
-/// the same client available for repeated usage.
+/// High-level facade — your entry point to the Pubky SDK.
+///
+/// Create one at startup and share it across your app. It holds the HTTP client
+/// and connection pool, and provides access to everything else: signers, sessions,
+/// public storage, event streams, and PKDNS resolution.
+///
+/// Prefer to instantiate only once and reuse a single shared `Pubky` instead of
+/// constructing one per request. This avoids reinitializing transports and keeps
+/// the same connection pool available for repeated usage.
+///
+/// # Actor overview
+///
+/// ```text
+///   Pubky::new()
+///     ├── .signer(keypair)          → PubkySigner        (signup / signin / approve auth)
+///     │     └── .signin(cid)        → PubkySession        (authenticated handle)
+///     │           └── .storage()    → SessionStorage       (put / get / delete / list)
+///     ├── .public_storage()         → PublicStorage        (read anyone's data, no keys)
+///     ├── .pkdns()                  → Pkdns                (resolve homeserver records)
+///     ├── .event_stream_for_user()  → EventStreamBuilder   (real-time SSE subscriptions)
+///     └── .start_grant_auth_flow()  → PubkyGrantAuthFlow   (QR / deeplink auth)
+/// ```
+///
+/// # Examples
+///
+/// **Sign in with a local key and write data:**
+/// ```no_run
+/// use pubky::{ClientId, Pubky, Keypair};
+///
+/// # async fn run() -> pubky::Result<()> {
+/// let pubky = Pubky::new()?;
+/// let signer = pubky.signer(Keypair::random());
+///
+/// let session = signer.signin(ClientId::new("demo.app").unwrap()).await?;
+/// session.storage().put("/pub/demo.app/hello.txt", "hi").await?;
+/// # Ok(()) }
+/// ```
+///
+/// **Read public data (no identity needed):**
+/// ```no_run
+/// use pubky::Pubky;
+///
+/// # async fn run(user: pubky::PublicKey) -> pubky::Result<()> {
+/// let pubky = Pubky::new()?;
+/// let addr = format!("pubky://{}/pub/pubky.app/profile.json", user.z32());
+/// let body = pubky.public_storage().get(addr).await?.text().await?;
+/// # Ok(()) }
+/// ```
 #[derive(Clone, Debug)]
 pub struct Pubky {
     client: PubkyHttpClient,
@@ -177,11 +227,12 @@ impl Pubky {
         reason = "Cookie flow is intentionally exposed via this facade while deprecated"
     )]
     pub fn resume_cookie_auth_flow(&self, authorization_url: &str) -> Result<PubkyCookieAuthFlow> {
-        let (caps, relay, secret, auth_kind) = parse_auth_deep_link(authorization_url)?;
+        let (caps, relay, secret, auth_kind, x_callback) = parse_auth_deep_link(authorization_url)?;
 
         PubkyCookieAuthFlow::builder(&caps, auth_kind)
             .client_secret(secret)
             .relay(relay)
+            .x_callback(x_callback)
             .client(self.client.clone())
             .start()
     }
@@ -209,12 +260,19 @@ impl Pubky {
         Pkdns::with_client(self.client.clone())
     }
 
-    /// Resolve current homeserver host for a user public key via Pkarr.
+    /// Resolve current homeserver for a user public key via Pkarr.
     ///
-    /// Returns the `_pubky` SVCB/HTTPS target (domain or pubkey-as-host),
-    /// or `None` if the record is missing/unresolvable. Uses an internal
-    /// read-only [`Pkdns`] actor.
-    pub async fn get_homeserver_of(&self, user_public_key: &PublicKey) -> Option<PublicKey> {
+    /// Returns `Ok(Some(host))` when the `_pubky` record resolves to a valid homeserver public
+    /// key, `Ok(None)` when no record exists or no homeserver is configured, and `Err(_)` when
+    /// Pkarr resolution fails or a resolved `_pubky` target is malformed.
+    ///
+    /// # Errors
+    /// - [`crate::errors::Error::Pkarr`] if Pkarr resolution fails or the resolved `_pubky`
+    ///   target is not a valid public key (see [`Pkdns::get_homeserver_of`]).
+    pub async fn get_homeserver_of(
+        &self,
+        user_public_key: &PublicKey,
+    ) -> Result<Option<PublicKey>> {
         Pkdns::with_client(self.client.clone())
             .get_homeserver_of(user_public_key)
             .await
@@ -272,7 +330,7 @@ impl Pubky {
     ///
     /// // When subscribing to multiple users on the same homeserver,
     /// // specify the homeserver directly to avoid redundant Pkarr lookups
-    /// let homeserver = pubky.get_homeserver_of(&user1).await.unwrap();
+    /// let homeserver = pubky.get_homeserver_of(&user1).await?.unwrap();
     ///
     /// let mut stream = pubky.event_stream_for(&homeserver)
     ///     .add_users([(&user1, None), (&user2, None)])?
@@ -387,7 +445,15 @@ impl Pubky {
 /// Parse a `pubkyauth://` URL into the components needed to rebuild an auth flow.
 ///
 /// Rejects `SeedExport` deep links since they cannot be resumed as auth flows.
-fn parse_auth_deep_link(url: &str) -> Result<(Capabilities, url::Url, [u8; 32], AuthFlowKind)> {
+fn parse_auth_deep_link(
+    url: &str,
+) -> Result<(
+    Capabilities,
+    url::Url,
+    [u8; 32],
+    AuthFlowKind,
+    XCallbackParams,
+)> {
     let deep_link = DeepLink::from_str(url)
         .map_err(|e| AuthError::Validation(format!("Failed to parse authorization URL: {e}")))?;
 
@@ -397,6 +463,7 @@ fn parse_auth_deep_link(url: &str) -> Result<(Capabilities, url::Url, [u8; 32], 
             s.params().relay.clone(),
             s.params().secret,
             AuthFlowKind::signin(),
+            s.x_callback().clone(),
         )),
         DeepLink::Signup(s) => Ok((
             s.params().capabilities.clone(),
@@ -406,10 +473,15 @@ fn parse_auth_deep_link(url: &str) -> Result<(Capabilities, url::Url, [u8; 32], 
                 s.params().homeserver.clone(),
                 s.params().signup_token.clone(),
             ),
+            s.x_callback().clone(),
         )),
         DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) => Err(AuthError::Validation(
             "grant auth flows cannot be resumed from the authorization URL alone; the PoP client private key is required and is not encoded in the deep link."
                 .into(),
+        )
+        .into()),
+        DeepLink::DirectSignup(_) => Err(AuthError::Validation(
+            "Direct signup URLs cannot be resumed as cookie auth flows.".into(),
         )
         .into()),
         DeepLink::SeedExport(_) => {

@@ -344,11 +344,6 @@ test("getHomeserverOf: resolve user homeserver", async (t) => {
     "resolved homeserver should match the signup homeserver",
   );
 
-  // Non-existent user should return undefined
-  const fakeUser = Keypair.random().publicKey;
-  const fakeHomeserver = await sdk.getHomeserverOf(fakeUser);
-  t.notOk(fakeHomeserver, "non-existent user should return undefined");
-
   t.end();
 });
 

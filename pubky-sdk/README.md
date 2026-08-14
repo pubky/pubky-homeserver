@@ -2,7 +2,7 @@
 
 Ergonomic building blocks for Pubky apps: one facade (`Pubky`) plus focused actors for sessions, storage API, signer helpers, and QR auth flow for keyless apps.
 
-Rust implementation of [Pubky](https://github.com/pubky/pubky-core) SDK.
+Rust implementation of [Pubky](https://github.com/pubky/pubky-homeserver) SDK.
 
 ## Install
 
@@ -50,7 +50,10 @@ let txt = pubky
 assert_eq!(txt, "hello");
 
 // 5) Keyless app flow (QR/deeplink)
-let caps = Capabilities::builder().write("/pub/example.com/").finish();
+let caps = Capabilities::builder()
+    .write("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
 let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
 println!("Scan to sign in: {}", flow.authorization_url());
 let app_session = flow.await_approval().await?;
@@ -141,17 +144,19 @@ for entry in entries {
 # Ok(()) }
 ```
 
-See the [Public Storage example](https://github.com/pubky/pubky-core/tree/main/examples/rust/4-storage).
+See the [Public Storage example](https://github.com/pubky/pubky-homeserver/tree/main/examples/rust/3-storage).
 
 Path rules:
 
-- Session storage uses **absolute** paths like `"/pub/app/file.txt"`.
+- Session storage uses **absolute** paths under `/pub/` or `/priv/`.
 - Public storage uses **addressed** form `pubky<user>/pub/app/file.txt` (preferred) or `pubky://<user>/...`.
 - A storage path cannot be both an exact file and an implicit folder prefix. For example:
   - if `/pub/app/foo` exists, writing `/pub/app/foo/bar.json` returns `409 Conflict`.
   - if descendants under `/pub/app/foo/` exist, writing `/pub/app/foo` returns `409 Conflict`.
 
 **Convention:** put your app’s public data under a domain-like folder in `/pub`, e.g. `/pub/my-new-app/`.
+
+See [Private Storage](../docs/PRIVATE_STORAGE.md) for `/priv/` access and events.
 
 ### Resolve identifiers into transport URLs
 
@@ -179,7 +184,7 @@ use pubky::{Pubky, PublicKey, Keypair};
 let pubky = Pubky::new()?;
 
 // read-only homeserver resolver
-let host = pubky.get_homeserver_of(&other).await;
+let host: Option<PublicKey> = pubky.get_homeserver_of(&other).await?;
 
 // publish with your key
 let signer = pubky.signer(Keypair::random());
@@ -208,7 +213,10 @@ Request an authorization URL and await approval.
 
 let pubky = Pubky::new()?;
 // Read/Write capabilities for acme.app route
-let caps = Capabilities::builder().read_write("pub/example.com/").finish();
+let caps = Capabilities::builder()
+    .read_write("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
 
 // Start the flow using the default relay (see “Relay & reliability” below)
 let flow = pubky.start_cookie_auth_flow(&caps, AuthFlowKind::signin())?;
@@ -222,13 +230,43 @@ let session = flow.await_approval().await?;
 # Ok(()) }
 ```
 
+Optional x-callback parameters let the authenticator return control to the
+requesting app after it has handled the deep link. They work with both cookie
+and grant flows:
+
+```rust
+# use pubky::{AuthFlowKind, Capabilities, ClientId, PubkyGrantAuthFlow};
+# use pubky::deep_links::XCallbackParams;
+# fn callback_flow() -> pubky::Result<()> {
+let caps = Capabilities::builder()
+    .read_write("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
+let callbacks = XCallbackParams {
+    x_source: Some("Example App".into()),
+    x_success: Some("example://auth/success?nonce=unique".into()),
+    x_error: Some("example://auth/error?nonce=unique".into()),
+    x_cancel: Some("example://auth/cancel?nonce=unique".into()),
+};
+
+let flow = PubkyGrantAuthFlow::builder(
+    &caps,
+    AuthFlowKind::signin(),
+    ClientId::new("example.com").expect("static client id is valid"),
+)
+.x_callback(callbacks)
+.start()?;
+# drop(flow);
+# Ok(()) }
+```
+
 Approve an auth request
 
 ```rust ignore
 signer.approve_auth(authorization_url).await?;
 ```
 
-See the fully functional [**Auth Flow Example**](https://github.com/pubky/pubky-core/tree/main/examples/rust/3-auth_flow).
+See the fully functional [**Auth Flow Example**](https://github.com/pubky/pubky-homeserver/tree/main/examples/rust/2-auth_flow).
 
 #### Relay & reliability
 
@@ -242,7 +280,10 @@ See the fully functional [**Auth Flow Example**](https://github.com/pubky/pubky-
 # use pubky::{Pubky, PubkyGrantAuthFlow, Capabilities, AuthFlowKind, ClientId};
 # async fn custom_relay() -> pubky::Result<()> {
 let pubky = Pubky::new()?;
-let caps = Capabilities::builder().read("pub/example.com/").finish();
+let caps = Capabilities::builder()
+    .read("/pub/example.com/")
+    .expect("static scope is canonical")
+    .finish();
 let client_id = ClientId::new("my.app").unwrap();
 let auth_flow = PubkyGrantAuthFlow::builder(&caps, AuthFlowKind::signin(), client_id)
     .client(pubky.client().clone())
@@ -323,7 +364,7 @@ let restored = pubky.session_from_file("alice.sess").await?;
 
 ## Example code
 
-Check more [examples](https://github.com/pubky/pubky-core/tree/main/examples) using the Pubky SDK.
+Check more [examples](https://github.com/pubky/pubky-homeserver/tree/main/examples) using the Pubky SDK.
 
 ## JS bindings
 

@@ -1,6 +1,35 @@
 use crate::{BuildError, Keypair, PubkyHttpClient, PublicKey};
 
-/// Key holder and signer.
+/// Holds a private key and proves identity.
+///
+/// Use a `PubkySigner` to:
+/// - **Sign up** for a homeserver ([`signup`](crate::PubkySigner::signup)).
+/// - **Sign in** locally to get a [`PubkySession`](crate::PubkySession)
+///   ([`signin`](crate::PubkySigner::signin)).
+/// - **Approve auth** requests from other apps via QR / deep link
+///   ([`approve_auth`](crate::PubkySigner::approve_auth),
+///   [`handle_deeplink`](crate::PubkySigner::handle_deeplink)).
+/// - **Publish PKDNS** records so others can discover your homeserver
+///   ([`pkdns()`](crate::PubkySigner::pkdns)).
+///
+/// # Creating a signer
+///
+/// Prefer [`Pubky::signer`](crate::Pubky::signer) to share the same HTTP
+/// client. Use [`PubkySigner::new`] only when you don't have a [`Pubky`](crate::Pubky) facade.
+///
+/// # Quick start
+///
+/// ```no_run
+/// use pubky::{Pubky, Keypair, ClientId};
+///
+/// # async fn run() -> pubky::Result<()> {
+/// let signer = Pubky::testnet()?.signer(Keypair::random());
+///
+/// // See signup() and signin() for full examples
+/// let session = signer.signin(ClientId::new("my.app").unwrap()).await?;
+/// session.storage().put("/pub/my.app/hello.txt", "world").await?;
+/// # Ok(()) }
+/// ```
 #[derive(Debug, Clone)]
 pub struct PubkySigner {
     pub(crate) client: PubkyHttpClient,
@@ -8,15 +37,15 @@ pub struct PubkySigner {
 }
 
 impl PubkySigner {
-    /// Construct a new `PubkySigner`.
+    /// Construct a standalone `PubkySigner` with its own HTTP client.
     ///
-    /// This is your entry point to keychain managing tooling.
+    /// If you already have a [`Pubky`](crate::Pubky) facade, prefer
+    /// [`Pubky::signer`](crate::Pubky::signer) to share the connection pool.
     ///
     /// # Examples
     /// ```
     /// # use pubky::{PubkySigner, Keypair};
-    /// let keypair = Keypair::random();
-    /// let app  = PubkySigner::new(keypair)?;
+    /// let signer = PubkySigner::new(Keypair::random())?;
     /// # Ok::<_, pubky::BuildError>(())
     /// ```
     ///

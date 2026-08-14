@@ -3,7 +3,7 @@ use crate::shared::{HttpError, HttpResult};
 use crate::{
     client_server::{
         auth::{has_read_permission, AuthSession},
-        middleware::pubky_host::PubkyHost,
+        middleware::request_tenant::RequestTenant,
         query_params::ListQueryParams,
         AppState,
     },
@@ -20,20 +20,35 @@ use sqlx::types::chrono::{DateTime, Utc};
 use std::str::FromStr;
 use std::time::SystemTime;
 
+pub async fn legacy_head(
+    state: State<AppState>,
+    session: Option<AuthSession>,
+    tenant: RequestTenant,
+    Path(path): Path<WebDavPathAxum>,
+) -> HttpResult<impl IntoResponse> {
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
+    let mut response = head(state, session, entry_path).await?;
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("pubky-host"));
+    Ok(response)
+}
+
 pub async fn head(
     State(state): State<AppState>,
     session: Option<AuthSession>,
-    pubky: PubkyHost,
-    Path(path): Path<WebDavPathAxum>,
-) -> HttpResult<impl IntoResponse> {
-    has_read_permission(session.as_ref(), Some(pubky.public_key()), path.inner())?;
+    entry_path: EntryPath,
+) -> HttpResult<Response<Body>> {
+    has_read_permission(
+        session.as_ref(),
+        Some(entry_path.pubkey()),
+        entry_path.path(),
+    )?;
 
     state
         .user_service
-        .get_or_http_error(pubky.public_key(), false)
+        .get_or_http_error(entry_path.pubkey(), false)
         .await?;
-
-    let entry_path = EntryPath::new(pubky.public_key().clone(), path.inner().clone());
 
     let entry = state
         .file_service
@@ -44,18 +59,36 @@ pub async fn head(
 }
 
 #[axum::debug_handler]
+pub async fn legacy_get(
+    state: State<AppState>,
+    headers: HeaderMap,
+    session: Option<AuthSession>,
+    tenant: RequestTenant,
+    Path(path): Path<WebDavPathAxum>,
+    params: ListQueryParams,
+) -> HttpResult<impl IntoResponse> {
+    let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().clone());
+    let mut response = get(state, headers, session, entry_path, params).await?;
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("pubky-host"));
+    Ok(response)
+}
+
+#[axum::debug_handler]
 pub async fn get(
     State(state): State<AppState>,
     headers: HeaderMap,
     session: Option<AuthSession>,
-    pubky: PubkyHost,
-    Path(path): Path<WebDavPathAxum>,
+    entry_path: EntryPath,
     params: ListQueryParams,
-) -> HttpResult<impl IntoResponse> {
-    has_read_permission(session.as_ref(), Some(pubky.public_key()), path.inner())?;
+) -> HttpResult<Response<Body>> {
+    has_read_permission(
+        session.as_ref(),
+        Some(entry_path.pubkey()),
+        entry_path.path(),
+    )?;
 
-    let public_key = pubky.public_key().clone();
-    let entry_path = EntryPath::new(public_key.clone(), path.inner().clone());
     if entry_path.path().is_directory() {
         return list(state, &entry_path, params).await;
     }
@@ -189,7 +222,6 @@ fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<Body>> {
             header::LAST_MODIFIED,
             to_http_date(&entry.modified_at).to_string().as_str(),
         )
-        .header(header::VARY, "pubky-host")
         .header(header::CACHE_CONTROL, "private, must-revalidate")
         .body(Body::empty())?)
 }
@@ -229,8 +261,6 @@ impl EntryEntity {
             .try_into()
             .expect("base64 string is valid"),
         );
-        // tenant-aware caching
-        headers.insert(header::VARY, HeaderValue::from_static("pubky-host"));
         headers.insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("private, must-revalidate"),
@@ -241,7 +271,7 @@ impl EntryEntity {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{header, Method, StatusCode};
+    use axum::http::{header, HeaderMap, Method, StatusCode};
     use axum::Router;
     use axum_test::TestServer;
     use pubky_common::{
@@ -253,11 +283,12 @@ mod tests {
     use crate::app_context::AppContext;
     use crate::client_server::ClientServer;
 
-    pub async fn create_root_user(
+    async fn create_user_with_capabilities(
         server: &axum_test::TestServer,
         keypair: &Keypair,
+        capabilities: Vec<Capability>,
     ) -> anyhow::Result<String> {
-        let auth_token = AuthToken::sign(keypair, vec![Capability::root()]);
+        let auth_token = AuthToken::sign(keypair, capabilities);
         let body_bytes: axum::body::Bytes = auth_token.serialize().into();
         let response = server
             .post("/signup")
@@ -276,20 +307,134 @@ mod tests {
         Ok(header_value)
     }
 
-    pub async fn create_environment(
-    ) -> anyhow::Result<(AppContext, Router, TestServer, PublicKey, String)> {
+    pub async fn create_root_user(
+        server: &axum_test::TestServer,
+        keypair: &Keypair,
+    ) -> anyhow::Result<String> {
+        create_user_with_capabilities(server, keypair, vec![Capability::root()]).await
+    }
+
+    async fn sign_in_with_capabilities(
+        server: &axum_test::TestServer,
+        keypair: &Keypair,
+        capabilities: Vec<Capability>,
+    ) -> anyhow::Result<String> {
+        let auth_token = AuthToken::sign(keypair, capabilities);
+        let body_bytes: axum::body::Bytes = auth_token.serialize().into();
+        let response = server
+            .post("/session")
+            .add_header("host", keypair.public_key().to_z32())
+            .bytes(body_bytes)
+            .expect_success()
+            .await;
+
+        Ok(response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|h| h.to_str().ok())
+            .expect("should return a set-cookie header")
+            .to_string())
+    }
+
+    async fn create_environment_with_keypair(
+    ) -> anyhow::Result<(AppContext, Router, TestServer, Keypair, String)> {
         let context = AppContext::test().await;
         let router = ClientServer::create_router(&context)?;
         let server = axum_test::TestServer::new(router.clone()).unwrap();
 
         let keypair = Keypair::random();
+        let cookie = create_root_user(&server, &keypair).await?.to_string();
+
+        Ok((context, router, server, keypair, cookie))
+    }
+
+    pub async fn create_environment(
+    ) -> anyhow::Result<(AppContext, Router, TestServer, PublicKey, String)> {
+        let (context, router, server, keypair, cookie) = create_environment_with_keypair().await?;
         let public_key = keypair.public_key();
-        let cookie = create_root_user(&server, &keypair)
-            .await
-            .unwrap()
-            .to_string();
 
         Ok((context, router, server, public_key, cookie))
+    }
+
+    fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+        headers.get(name).and_then(|value| value.to_str().ok())
+    }
+
+    fn assert_does_not_vary_on(headers: &HeaderMap, ignored_header: &str) {
+        let varies_on_ignored_header = header_value(headers, header::VARY)
+            .into_iter()
+            .flat_map(|vary| vary.split(','))
+            .any(|name| name.trim().eq_ignore_ascii_case(ignored_header));
+        assert!(
+            !varies_on_ignored_header,
+            "response must not vary on {ignored_header}"
+        );
+    }
+
+    fn assert_private_cache_policy(headers: &HeaderMap) {
+        assert_eq!(
+            header_value(headers, header::CACHE_CONTROL),
+            Some("no-store")
+        );
+        assert_eq!(
+            header_value(headers, header::VARY),
+            Some("pubky-host, Authorization, Cookie")
+        );
+    }
+
+    fn assert_no_validators(headers: &HeaderMap) {
+        assert!(!headers.contains_key(header::ETAG));
+        assert!(!headers.contains_key(header::LAST_MODIFIED));
+    }
+
+    fn assert_validators_present(headers: &HeaderMap) {
+        assert!(headers.contains_key(header::ETAG));
+        assert!(headers.contains_key(header::LAST_MODIFIED));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn invalid_path_aliases_cannot_modify_target_file() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        server
+            .put("/pub/report")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .text("original")
+            .expect_success()
+            .await;
+
+        for alias in [
+            "/pub/report%20",
+            "/pub/report%C2%A0",
+            "/pub/report%E3%80%80",
+            "/pub/scope/%5C..%5Creport",
+        ] {
+            server
+                .put(alias)
+                .add_header("host", public_key.z32())
+                .add_header(header::COOKIE, cookie.clone())
+                .text("overwritten")
+                .expect_failure()
+                .await
+                .assert_status(StatusCode::BAD_REQUEST);
+
+            server
+                .delete(alias)
+                .add_header("host", public_key.z32())
+                .add_header(header::COOKIE, cookie.clone())
+                .expect_failure()
+                .await
+                .assert_status(StatusCode::BAD_REQUEST);
+        }
+
+        let response = server
+            .get("/pub/report")
+            .add_header("host", public_key.z32())
+            .expect_success()
+            .await;
+        assert_eq!(response.text(), "original");
     }
 
     #[tokio::test]
@@ -655,5 +800,295 @@ mod tests {
             body.contains("/priv/app/b.txt"),
             "listing should include b.txt, got: {body}"
         );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn priv_responses_use_no_store_and_auth_vary() {
+        let (_, _, server, keypair, cookie) = create_environment_with_keypair().await.unwrap();
+        let public_key = keypair.public_key();
+
+        server
+            .put("/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(Vec::from("top secret").into())
+            .expect_success()
+            .await;
+        server
+            .put("/priv/app/a.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(Vec::from("a").into())
+            .expect_success()
+            .await;
+
+        let ok = server
+            .get("/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .expect_success()
+            .await;
+        assert_private_cache_policy(ok.headers());
+        assert_validators_present(ok.headers());
+
+        let not_modified = server
+            .get("/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header(
+                header::IF_NONE_MATCH,
+                ok.headers().get(header::ETAG).unwrap(),
+            )
+            .await;
+        not_modified.assert_status(StatusCode::NOT_MODIFIED);
+        assert_private_cache_policy(not_modified.headers());
+        assert_validators_present(not_modified.headers());
+
+        let head = server
+            .method(Method::HEAD, "/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .await;
+        head.assert_status(StatusCode::OK);
+        assert_private_cache_policy(head.headers());
+        assert_validators_present(head.headers());
+
+        let listing = server
+            .get("/priv/app/")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .expect_success()
+            .await;
+        assert_private_cache_policy(listing.headers());
+
+        let unauthorized = server
+            .get("/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .await;
+        unauthorized.assert_status(StatusCode::UNAUTHORIZED);
+        assert_private_cache_policy(unauthorized.headers());
+        assert_no_validators(unauthorized.headers());
+
+        let write_only_cookie = sign_in_with_capabilities(
+            &server,
+            &keypair,
+            vec![Capability::write("/priv/").unwrap()],
+        )
+        .await
+        .unwrap();
+        let forbidden = server
+            .get("/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, write_only_cookie)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+        assert_private_cache_policy(forbidden.headers());
+        assert_no_validators(forbidden.headers());
+
+        let missing = server
+            .get("/priv/missing.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+        assert_private_cache_policy(missing.headers());
+        assert_no_validators(missing.headers());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn pub_headers_are_unchanged_by_private_cache_policy() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        server
+            .put("/pub/file.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(Vec::from("public").into())
+            .expect_success()
+            .await;
+        server
+            .put("/pub/app/a.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie)
+            .bytes(Vec::from("a").into())
+            .expect_success()
+            .await;
+
+        let ok = server
+            .get("/pub/file.txt")
+            .add_header("host", public_key.z32())
+            .expect_success()
+            .await;
+        assert_eq!(
+            header_value(ok.headers(), header::CACHE_CONTROL),
+            Some("private, must-revalidate")
+        );
+        assert_eq!(header_value(ok.headers(), header::VARY), Some("pubky-host"));
+        assert_validators_present(ok.headers());
+
+        let not_modified = server
+            .get("/pub/file.txt")
+            .add_header("host", public_key.z32())
+            .add_header(
+                header::IF_NONE_MATCH,
+                ok.headers().get(header::ETAG).unwrap(),
+            )
+            .await;
+        not_modified.assert_status(StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            header_value(not_modified.headers(), header::CACHE_CONTROL),
+            Some("private, must-revalidate")
+        );
+        assert_eq!(
+            header_value(not_modified.headers(), header::VARY),
+            Some("pubky-host")
+        );
+        assert_validators_present(not_modified.headers());
+
+        let listing = server
+            .get("/pub/app/")
+            .add_header("host", public_key.z32())
+            .expect_success()
+            .await;
+        assert!(header_value(listing.headers(), header::CACHE_CONTROL).is_none());
+        assert_eq!(
+            header_value(listing.headers(), header::VARY),
+            Some("pubky-host")
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn path_addressed_get_and_head_ignore_legacy_tenant_headers() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+        let other = Keypair::random().public_key();
+
+        server
+            .put("/pub/file.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie)
+            .text("path addressed")
+            .expect_success()
+            .await;
+
+        let url = format!(
+            "/storage/{}/pub/file.txt?pubky-host={}",
+            public_key.z32(),
+            other.z32()
+        );
+        let response = server
+            .get(&url)
+            .add_header("pubky-host", other.z32())
+            .expect_success()
+            .await;
+        assert_eq!(response.text(), "path addressed");
+        assert_does_not_vary_on(response.headers(), "pubky-host");
+
+        let head = server
+            .method(Method::HEAD, &url)
+            .add_header("pubky-host", "invalid")
+            .await;
+        head.assert_status(StatusCode::OK);
+        assert_does_not_vary_on(head.headers(), "pubky-host");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn path_addressed_listing_preserves_pagination() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        for name in ["a.txt", "b.txt"] {
+            server
+                .put(&format!("/pub/app/{name}"))
+                .add_header("host", public_key.z32())
+                .add_header(header::COOKIE, cookie.clone())
+                .text(name)
+                .expect_success()
+                .await;
+        }
+
+        let base = format!("/storage/{}/pub/app/", public_key.z32());
+        let first = server
+            .get(&format!("{base}?limit=1"))
+            .expect_success()
+            .await;
+        let first_entry = first.text();
+        assert_eq!(first_entry.lines().count(), 1);
+        assert_does_not_vary_on(first.headers(), "pubky-host");
+
+        let cursor = first_entry.trim_start_matches("pubky://");
+        let second = server
+            .get(&format!("{base}?limit=1&cursor={cursor}"))
+            .expect_success()
+            .await;
+        let second_entry = second.text();
+        assert_eq!(second_entry.lines().count(), 1);
+        assert_ne!(first_entry, second_entry);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn path_addressed_private_reads_use_path_owner_cookie_and_cache_policy() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        server
+            .put("/priv/secret.txt")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .text("private")
+            .expect_success()
+            .await;
+
+        let url = format!("/storage/{}/priv/secret.txt", public_key.z32());
+        server
+            .get(&url)
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+
+        let response = server
+            .get(&url)
+            .add_header(header::COOKIE, cookie)
+            .expect_success()
+            .await;
+        assert_eq!(response.text(), "private");
+        assert_eq!(
+            header_value(response.headers(), header::CACHE_CONTROL),
+            Some("no-store")
+        );
+        assert_eq!(
+            header_value(response.headers(), header::VARY),
+            Some("Authorization, Cookie")
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn malformed_path_addressing_is_a_client_error_and_writes_require_authentication() {
+        let (_, _, server, public_key, _) = create_environment().await.unwrap();
+
+        let malformed = [
+            "/storage".to_string(),
+            "/storage/".to_string(),
+            "/storage/short/pub/file.txt".to_string(),
+            format!("/storage/pubky{}/pub/file.txt", public_key.z32()),
+            format!("/storage/{}/", public_key.z32()),
+        ];
+        for path in malformed {
+            let response = server
+                .get(&path)
+                .add_header(header::ORIGIN, "https://app.example")
+                .await;
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert!(response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        }
+
+        server
+            .put(&format!("/storage/{}/pub/file.txt", public_key.z32()))
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
     }
 }
