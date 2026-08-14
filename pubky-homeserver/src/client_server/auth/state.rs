@@ -1,6 +1,5 @@
 //! Auth-specific sub-state for the auth module.
 
-use super::cookie::verifier::CookieAuthVerifier;
 use crate::app_context::AppContext;
 use crate::observability::Metrics;
 use crate::shared::HttpResult;
@@ -24,18 +23,8 @@ impl AuthState {
         let signup_service = SignupService::from_context(context);
 
         Self {
-            grant_auth_service: GrantAuthService::new(
-                context.sql_db.clone(),
-                context.keypair.public_key(),
-                signup_service.clone(),
-                context.user_service.clone(),
-            ),
-            cookie_auth_service: CookieAuthService::new(
-                context.sql_db.clone(),
-                context.user_service.clone(),
-                CookieAuthVerifier::default(),
-                signup_service,
-            ),
+            grant_auth_service: GrantAuthService::from_context(context, signup_service.clone()),
+            cookie_auth_service: CookieAuthService::from_context(context, signup_service),
             metrics: context.metrics.clone(),
             revocation_listener: context.revocation_listener.clone(),
         }

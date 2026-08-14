@@ -14,7 +14,7 @@ pub(crate) struct InfoResponse {
     public_key: String,
     pkarr_pubky_address: Option<String>,
     pkarr_icann_domain: Option<String>,
-    version: String,
+    version: &'static str,
 }
 
 /// Return summary statistics about the homeserver.
@@ -33,7 +33,7 @@ pub async fn info(State(state): State<AppState>) -> HttpResult<(StatusCode, Json
         public_key: state.public_key(),
         pkarr_pubky_address: state.pkarr_pubky_address(),
         pkarr_icann_domain: state.pkarr_icann_domain(),
-        version: state.version().to_string(),
+        version: state.version(),
     };
 
     Ok((StatusCode::OK, Json(body)))
