@@ -1,9 +1,5 @@
 <h1 align="center"><a href="https://pubky.org/"><img alt="Pubky" src="./.svg/pubky-homeserver-logo.svg" width="200" /></a></h1>
 
-<h3 align="center">
-  Homeserver and SDKs for Pubky.
-</h3>
-
 <div align="center">
   <h3>
     <a href="https://pubky.org/">Docs</a>
