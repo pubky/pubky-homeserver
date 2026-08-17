@@ -177,6 +177,7 @@ mod tests {
     use base64::Engine;
     use pubky_common::crypto::Keypair;
 
+    use crate::admin_server::AdminAuthExt;
     use crate::data_directory::quota_config::BandwidthQuota;
     use crate::persistence::sql::signup_code::{SignupCode, SignupCodeRepository};
     use crate::shared::user_quota::UserQuota;
@@ -227,7 +228,7 @@ mod tests {
     async fn admin_stream_body(server: &TestServer, query: &str) -> String {
         let response = server
             .get(&format!("/events-stream{query}"))
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -292,14 +293,14 @@ mod tests {
 
         let response = server
             .get("/generate_signup_token")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let token = response.text();
 
         let response = server
             .get("/signup_tokens")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -344,7 +345,7 @@ mod tests {
         // returns the last item in the page as the cursor.
         let response = server
             .get("/signup_tokens?state=unused&limit=1")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -358,7 +359,7 @@ mod tests {
         // Increasing the limit changes the page size and advances the cursor.
         let response = server
             .get("/signup_tokens?state=unused&limit=2")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -373,7 +374,7 @@ mod tests {
         // When the limit reaches all remaining unused tokens, there is no next page.
         let response = server
             .get("/signup_tokens?state=unused&limit=3")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -391,7 +392,7 @@ mod tests {
             .get(&format!(
                 "/signup_tokens?state=unused&limit=2&cursor={token2}"
             ))
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -405,7 +406,7 @@ mod tests {
     }
 
     fn auth_header() -> String {
-        let auth = base64::engine::general_purpose::STANDARD.encode("admin:test");
+        let auth = base64::engine::general_purpose::STANDARD.encode("admin:admin");
         format!("Basic {auth}")
     }
 
@@ -553,7 +554,7 @@ mod tests {
         });
         let response = server
             .post("/generate_signup_token")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
@@ -600,7 +601,7 @@ mod tests {
         ] {
             let response = server
                 .get(&format!("/events-stream{query}"))
-                .add_header("X-Admin-Password", "test")
+                .admin_auth()
                 .expect_failure()
                 .await;
             response.assert_status_bad_request();

@@ -85,6 +85,7 @@ mod tests {
     use pubky_common::crypto::Keypair;
 
     use super::*;
+    use crate::admin_server::AdminAuthExt;
     use crate::data_directory::quota_config::BandwidthQuota;
     use crate::AppContext;
 
@@ -104,11 +105,7 @@ mod tests {
         let url = format!("/users/{}/quota", pubkey.z32());
 
         // GET fresh user: overrides empty, effective all "unlimited" (no system defaults)
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         response.assert_status_ok();
         let json: serde_json::Value = response.json();
         assert_eq!(json["overrides"], serde_json::json!({}));
@@ -123,18 +120,14 @@ mod tests {
         });
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
             .await;
 
         // GET after PATCH: effective shows overrides + defaults, overrides shows only patched
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["effective"]["storage_quota_mb"], 500);
         assert_eq!(json["effective"]["rate_read"], "100mb/m");
@@ -151,18 +144,14 @@ mod tests {
         });
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
             .await;
 
         // GET after reset: overrides empty again
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["overrides"], serde_json::json!({}));
     }
@@ -185,11 +174,7 @@ mod tests {
         let url = format!("/users/{}/quota", pubkey.z32());
 
         // Fresh user: effective shows system defaults, overrides empty
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["effective"]["storage_quota_mb"], 100);
         assert_eq!(json["effective"]["rate_read"], "10mb/s");
@@ -200,18 +185,14 @@ mod tests {
         let body = serde_json::json!({"storage_quota_mb": 500});
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
             .await;
 
         // effective: storage overridden, rates still show system defaults
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["effective"]["storage_quota_mb"], 500);
         assert_eq!(json["effective"]["rate_read"], "10mb/s");
@@ -223,18 +204,14 @@ mod tests {
         let body = serde_json::json!({"rate_read": "unlimited"});
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
             .await;
 
         // effective: unlimited overrides the system default
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["effective"]["storage_quota_mb"], 500);
         assert_eq!(json["effective"]["rate_read"], "unlimited");
@@ -261,7 +238,7 @@ mod tests {
         });
         let response = server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_failure()
@@ -278,11 +255,7 @@ mod tests {
 
         let url = format!("/users/{}/quota", pubkey.z32());
 
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_failure()
-            .await;
+        let response = server.get(&url).admin_auth().expect_failure().await;
         response.assert_status(axum::http::StatusCode::NOT_FOUND);
     }
 
@@ -304,17 +277,13 @@ mod tests {
         });
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
             .await;
 
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         // Unlimited → present as "unlimited" in overrides
         assert_eq!(json["overrides"]["rate_read"], "unlimited");
@@ -343,7 +312,7 @@ mod tests {
         });
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
@@ -355,18 +324,14 @@ mod tests {
         });
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&patch).unwrap().into())
             .expect_success()
             .await;
 
         // 3) Verify overrides: storage_quota_mb changed, all others preserved
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["overrides"]["storage_quota_mb"], 200);
         assert_eq!(json["overrides"]["rate_read"], "100mb/m");
@@ -378,17 +343,13 @@ mod tests {
         });
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&patch).unwrap().into())
             .expect_success()
             .await;
 
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["overrides"]["storage_quota_mb"], 200);
         assert_eq!(json["overrides"]["rate_read"], "100mb/m");
@@ -398,17 +359,13 @@ mod tests {
         let patch = serde_json::json!({});
         server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&patch).unwrap().into())
             .expect_success()
             .await;
 
-        let response = server
-            .get(&url)
-            .add_header("X-Admin-Password", "test")
-            .expect_success()
-            .await;
+        let response = server.get(&url).admin_auth().expect_success().await;
         let json: serde_json::Value = response.json();
         assert_eq!(json["overrides"]["storage_quota_mb"], 200);
         assert_eq!(json["overrides"]["rate_read"], "100mb/m");
@@ -431,7 +388,7 @@ mod tests {
         });
         let response = server
             .patch(&url)
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&patch).unwrap().into())
             .expect_failure()
