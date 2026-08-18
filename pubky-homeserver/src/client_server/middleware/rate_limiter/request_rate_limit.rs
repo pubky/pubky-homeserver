@@ -11,7 +11,7 @@ use axum::{
 };
 use futures_util::future::BoxFuture;
 use governor::clock::Clock;
-use std::{convert::Infallible, task::Poll, time::Duration};
+use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
 
 use crate::quota_config::PathLimit;
@@ -125,37 +125,21 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
         }
         if let Err(e) = limit.limiter.check_key(&key) {
             let retry_after = e.wait_time_from(limit.limiter.clock().now());
+            let retry_after_secs = retry_after.as_secs().max(1);
             tracing::debug!(
-                "Rate limit of {} exceeded for {key}: {e}. Retry after {retry_after:?}",
+                "Rate limit of {} exceeded for {key}: {e}. Retry after {retry_after_secs}s",
                 limit.limit.quota,
             );
-            return Err(rate_limited_response(retry_after));
+
+            let response = (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(RETRY_AFTER, retry_after_secs)],
+                "Rate limit exceeded",
+            );
+            return Err(response.into_response());
         }
     }
     Ok(())
-}
-
-/// Build a `429 Too Many Requests` response carrying a `Retry-After: <seconds>` header.
-///
-/// The value is a wait time in seconds, rounded up to the nearest second with a minimum of 1.
-///
-/// See also:
-/// - https://www.rfc-editor.org/info/rfc6585/#section-4
-/// - https://www.rfc-editor.org/info/rfc9110/#section-10.2.3
-fn rate_limited_response(retry_after: Duration) -> Response {
-    let temp_secs = retry_after.as_secs();
-    let delay_secs = if retry_after.subsec_nanos() > 0 {
-        temp_secs.saturating_add(1)
-    } else {
-        temp_secs.max(1)
-    };
-
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(RETRY_AFTER, delay_secs.to_string())],
-        "Rate limit exceeded",
-    )
-        .into_response()
 }
 
 #[cfg(test)]
