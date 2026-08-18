@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use dav_server::{fakels::FakeLs, DavHandler};
 use dav_server_opendalfs::OpendalFs;
 
@@ -6,12 +8,12 @@ use crate::ConfigToml;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) context: AppContext,
+    pub(crate) context: Arc<AppContext>,
     pub(crate) inner_dav_handler: DavHandler,
 }
 
 impl AppState {
-    pub fn new(context: &AppContext) -> Self {
+    pub fn new(context: Arc<AppContext>) -> Self {
         let webdavfs = OpendalFs::new(context.file_service.opendal.admin_operator.clone());
         let inner_dav_handler = DavHandler::builder()
             .filesystem(webdavfs)
@@ -21,7 +23,7 @@ impl AppState {
             .build_handler();
         Self {
             inner_dav_handler,
-            context: context.clone(),
+            context,
         }
     }
 
@@ -46,8 +48,8 @@ impl AppState {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_server(context: &AppContext) -> axum_test::TestServer {
-        axum_test::TestServer::new(super::app::create_app(Self::new(context))).unwrap()
+    pub(crate) fn test_server(context: &Arc<AppContext>) -> axum_test::TestServer {
+        axum_test::TestServer::new(super::app::create_app(Self::new(Arc::clone(context)))).unwrap()
     }
 }
 

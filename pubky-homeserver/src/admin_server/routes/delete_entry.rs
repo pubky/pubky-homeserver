@@ -21,6 +21,8 @@ pub async fn delete_entry(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::super::app_state::AppState;
     use super::*;
     use crate::persistence::files::{
@@ -50,7 +52,7 @@ mod tests {
         let file_path = "my_file.txt";
         let db = context.sql_db.clone();
         let file_service = context.file_service.clone();
-        let app_state = AppState::new(&context);
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/webdav/{*entry_path}", delete(delete_entry))
             .with_state(app_state);
@@ -105,7 +107,7 @@ mod tests {
         let keypair = Keypair::from_secret(&[0; 32]);
         let pubkey = keypair.public_key();
         let file_path = "my_file.txt";
-        let app_state = AppState::new(&context);
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/webdav/{*entry_path}", delete(delete_entry))
             .with_state(app_state);
@@ -123,7 +125,7 @@ mod tests {
         // Set everything up
         let context = AppContext::test().await;
 
-        let app_state = AppState::new(&context);
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/webdav/{*entry_path}", delete(delete_entry))
             .with_state(app_state);

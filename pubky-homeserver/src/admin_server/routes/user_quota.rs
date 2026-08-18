@@ -79,6 +79,7 @@ pub async fn patch_user_quota(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::sync::Arc;
 
     use axum_test::TestServer;
 
@@ -89,7 +90,7 @@ mod tests {
     use crate::data_directory::quota_config::BandwidthQuota;
     use crate::AppContext;
 
-    fn create_test_server(context: &AppContext) -> TestServer {
+    fn create_test_server(context: &Arc<AppContext>) -> TestServer {
         AppState::test_server(context)
     }
 

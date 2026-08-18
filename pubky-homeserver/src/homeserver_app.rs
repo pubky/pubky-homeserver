@@ -18,6 +18,7 @@ use crate::{app_context::AppContext, data_directory::PersistentDataDir};
 use anyhow::Result;
 use pubky_common::crypto::PublicKey;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Errors that can occur when building a `HomeserverApp`.
@@ -39,7 +40,7 @@ pub enum HomeserverAppBuildError {
 ///
 /// When dropped, the homeserver will stop.
 pub struct HomeserverApp {
-    context: AppContext,
+    context: Arc<AppContext>,
 
     #[allow(dead_code)] // Keep this alive. When dropped, the homeserver will stop.
     client_server: ClientServer,
@@ -82,6 +83,7 @@ impl HomeserverApp {
     pub async fn start(context: AppContext) -> Result<Self> {
         // Tracing Subscriber initialization based on the config file.
         let _ = init_tracing_logs_with_config_if_set(&context.config_toml);
+        let context = Arc::new(context);
 
         tracing::debug!("Homeserver data dir: {}", context.data_dir.path().display());
 
@@ -97,7 +99,7 @@ impl HomeserverApp {
         );
 
         let admin_server = if context.config_toml.admin.enabled {
-            Some(AdminServer::start(&context).await?)
+            Some(AdminServer::start(Arc::clone(&context)).await?)
         } else {
             None
         };
@@ -106,7 +108,7 @@ impl HomeserverApp {
         } else {
             None
         };
-        let client_server = ClientServer::start(context.clone()).await?;
+        let client_server = ClientServer::start(Arc::clone(&context)).await?;
 
         let key_republisher = HomeserverKeyRepublisher::start(
             &context,

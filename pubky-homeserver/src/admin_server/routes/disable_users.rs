@@ -38,6 +38,8 @@ pub async fn enable_user(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::super::app_state::AppState;
     use super::*;
     use crate::AppContext;
@@ -59,7 +61,7 @@ mod tests {
         assert!(!user.disabled);
 
         // Setup server
-        let app_state = AppState::new(&context);
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/users/{pubkey}/disable", post(disable_user))
             .route("/users/{pubkey}/enable", post(enable_user))

@@ -52,7 +52,7 @@ pub enum ClientServerBuildError {
 /// A Pubky homeserver with ICANN HTTP and Pubky TLS servers.
 pub struct ClientServer {
     /// Keep context alive.
-    context: AppContext,
+    context: Arc<AppContext>,
 
     pub(crate) icann_http_handle: Handle<SocketAddr>,
     pub(crate) icann_http_socket: SocketAddr,
@@ -68,7 +68,7 @@ impl ClientServer {
     ) -> Result<Self, ClientServerBuildError> {
         let data_dir = PersistentDataDir::new(dir_path);
         let context = AppContext::read_from(data_dir).await?;
-        Self::start(context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Run the homeserver with configurations from a data directory.
@@ -76,7 +76,7 @@ impl ClientServer {
         dir: PersistentDataDir,
     ) -> Result<Self, ClientServerBuildError> {
         let context = AppContext::read_from(dir).await?;
-        Self::start(context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Run the homeserver with configurations from a data directory mock.
@@ -85,12 +85,14 @@ impl ClientServer {
         dir: MockDataDir,
     ) -> Result<Self, ClientServerBuildError> {
         let context = AppContext::read_from(dir).await?;
-        Self::start(context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Start homeserver services with the given application context.
-    pub async fn start(context: AppContext) -> std::result::Result<Self, ClientServerBuildError> {
-        let router = Self::create_router(&context)?;
+    pub async fn start(
+        context: Arc<AppContext>,
+    ) -> std::result::Result<Self, ClientServerBuildError> {
+        let router = Self::create_router(Arc::clone(&context))?;
 
         let (icann_http_handle, icann_http_socket) =
             Self::start_icann_http_server(&context, router.clone())
@@ -110,7 +112,7 @@ impl ClientServer {
     }
 
     pub(crate) fn create_router(
-        context: &AppContext,
+        context: Arc<AppContext>,
     ) -> std::result::Result<Router, ClientServerBuildError> {
         let state = AppState::new(context);
         super::create_app(state)
@@ -248,6 +250,8 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::http::{header, Method, StatusCode};
     use axum_test::TestServer;
     use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
@@ -272,7 +276,7 @@ mod tests {
             }];
         })
         .await;
-        let router = ClientServer::create_router(&context).unwrap();
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router).unwrap();
         let user = Keypair::random();
 
@@ -308,7 +312,7 @@ mod tests {
             }];
         })
         .await;
-        let router = ClientServer::create_router(&context).unwrap();
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router).unwrap();
 
         let response = server.get("/info").await;

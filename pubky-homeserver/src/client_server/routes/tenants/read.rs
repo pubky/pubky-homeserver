@@ -275,6 +275,8 @@ impl EntryEntity {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::http::{header, HeaderMap, Method, StatusCode};
     use axum::Router;
     use axum_test::TestServer;
@@ -341,9 +343,9 @@ mod tests {
     }
 
     async fn create_environment_with_keypair(
-    ) -> anyhow::Result<(AppContext, Router, TestServer, Keypair, String)> {
+    ) -> anyhow::Result<(Arc<AppContext>, Router, TestServer, Keypair, String)> {
         let context = AppContext::test().await;
-        let router = ClientServer::create_router(&context)?;
+        let router = ClientServer::create_router(Arc::clone(&context))?;
         let server = axum_test::TestServer::new(router.clone()).unwrap();
 
         let keypair = Keypair::random();
@@ -353,7 +355,7 @@ mod tests {
     }
 
     pub async fn create_environment(
-    ) -> anyhow::Result<(AppContext, Router, TestServer, PublicKey, String)> {
+    ) -> anyhow::Result<(Arc<AppContext>, Router, TestServer, PublicKey, String)> {
         let (context, router, server, keypair, cookie) = create_environment_with_keypair().await?;
         let public_key = keypair.public_key();
 

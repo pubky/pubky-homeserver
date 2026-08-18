@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::routes::{
@@ -90,7 +91,7 @@ impl AdminServer {
         let context = AppContext::read_from(data_dir)
             .await
             .map_err(AdminServerBuildError::DataDir)?;
-        Self::start(&context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Create a new admin server from a data directory path.
@@ -105,12 +106,12 @@ impl AdminServer {
         let context = AppContext::read_from(mock_dir)
             .await
             .map_err(AdminServerBuildError::DataDir)?;
-        Self::start(&context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Run the admin server.
-    pub async fn start(context: &AppContext) -> Result<Self, AdminServerBuildError> {
-        let state = AppState::new(context);
+    pub async fn start(context: Arc<AppContext>) -> Result<Self, AdminServerBuildError> {
+        let state = AppState::new(Arc::clone(&context));
         let socket = context.config_toml.admin.listen_socket;
         let app = create_app(state);
         let listener = std::net::TcpListener::bind(socket)
@@ -188,7 +189,7 @@ mod tests {
         BandwidthQuota::from_str(s).unwrap()
     }
 
-    fn create_test_server(context: &AppContext) -> TestServer {
+    fn create_test_server(context: &Arc<AppContext>) -> TestServer {
         AppState::test_server(context)
     }
 

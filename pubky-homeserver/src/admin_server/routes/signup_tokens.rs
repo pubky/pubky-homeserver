@@ -79,6 +79,8 @@ pub async fn list_signup_tokens(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum_test::TestServer;
 
     use super::*;
@@ -89,7 +91,7 @@ mod tests {
         AppContext,
     };
 
-    fn create_test_server(context: &AppContext) -> TestServer {
+    fn create_test_server(context: &Arc<AppContext>) -> TestServer {
         AppState::test_server(context)
     }
 
