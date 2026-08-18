@@ -66,6 +66,10 @@ impl HttpError {
     pub fn unauthorized_with_message(message: impl ToString) -> HttpError {
         Self::new_with_message(StatusCode::UNAUTHORIZED, message)
     }
+
+    pub fn method_not_allowed() -> HttpError {
+        Self::new_with_message(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed")
+    }
 }
 
 impl IntoResponse for HttpError {

@@ -568,7 +568,7 @@ paths:
     delete:
       tags:
       - Data
-      summary: Delete a path-addressed file
+      summary: Delete a path-addressed file or folder
       description: |
         The owner in `/storage/{user_z32}/{path}` is authoritative;
         any `pubky-host` header or query parameter is accepted for compatibility
@@ -576,13 +576,19 @@ paths:
 
         The authenticated user must match `user_z32` and have write capability
         covering the storage path.
+
+        Deleting a file removes that file. Deleting a folder path (trailing `/`)
+        recursively removes the folder and all its descendants (WebDAV
+        `Depth: infinity` semantics), emitting one `DEL` event per file.
+        Recursive deletion is synchronous: very large trees may run into
+        HTTP timeouts.
       operationId: deletePathAddressedEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
       responses:
         '204':
-          description: File deleted.
+          description: File or folder deleted.
         '400':
           description: Invalid owner public key or storage path.
         '401':
@@ -591,6 +597,85 @@ paths:
           description: Insufficient permissions or path outside `pub/` and `priv/`.
         '404':
           description: File or storage owner not found.
+    copy:
+      tags:
+      - Data
+      summary: Copy a path-addressed file (WebDAV COPY)
+      description: |
+        WebDAV `COPY` (RFC 4918). Copies the file at `{path}` to the
+        `Destination` header path within the same tenant, replacing the two
+        client calls (read + write) with one server-side operation.
+
+        The `Destination` header accepts a storage path (`/pub/app/new.txt`)
+        or a path-addressed URL path (`/storage/{user_z32}/pub/app/new.txt`)
+        for the same user. An existing destination file is overwritten.
+        Source and destination must be files under `pub/` or `priv/` covered
+        by the session's write capability. Emits a `PUT` event for the
+        destination.
+      operationId: copyPathAddressedEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      parameters:
+      - name: Destination
+        in: header
+        required: true
+        description: Target storage path on the same tenant.
+        schema:
+          type: string
+      responses:
+        '201':
+          description: File copied.
+        '400':
+          description: Invalid owner public key, storage path, or Destination header.
+        '401':
+          description: No valid session.
+        '403':
+          description: Insufficient permissions or path outside `pub/` and `priv/`.
+        '404':
+          description: Source file or storage owner not found.
+        '409':
+          description: File/folder path collision at the destination.
+        '507':
+          description: Storage quota exceeded.
+    move:
+      tags:
+      - Data
+      summary: Move a path-addressed file (WebDAV MOVE)
+      description: |
+        WebDAV `MOVE` (RFC 4918). Moves the file at `{path}` to the
+        `Destination` header path within the same tenant, replacing the three
+        client calls (read + write + delete) with one server-side operation.
+
+        Behaves like `COPY` followed by `DELETE` of the source: emits a `PUT`
+        event for the destination and a `DEL` event for the source. An existing
+        destination file is overwritten.
+      operationId: movePathAddressedEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      parameters:
+      - name: Destination
+        in: header
+        required: true
+        description: Target storage path on the same tenant.
+        schema:
+          type: string
+      responses:
+        '201':
+          description: File moved.
+        '400':
+          description: Invalid owner public key, storage path, or Destination header.
+        '401':
+          description: No valid session.
+        '403':
+          description: Insufficient permissions or path outside `pub/` and `priv/`.
+        '404':
+          description: Source file or storage owner not found.
+        '409':
+          description: File/folder path collision at the destination.
+        '507':
+          description: Storage quota exceeded.
   "/{path}":
     parameters:
     - name: path
@@ -838,12 +923,14 @@ paths:
     delete:
       tags:
       - Data
-      summary: Delete file
+      summary: Delete file or folder
       deprecated: true
       description: |
         Deprecated: use `DELETE /storage/{user_z32}/{path}`.
 
-        Deletes a file at the given path. Path must be under `/pub/` or `/priv/`.
+        Deletes a file at the given path. A folder path (trailing `/`) recursively
+        deletes the folder and all descendants (WebDAV `Depth: infinity` semantics),
+        emitting one `DEL` event per file. Path must be under `/pub/` or `/priv/`.
         The authenticated user must match the target tenant and have write capability.
       operationId: deleteEntry
       security:
@@ -851,13 +938,88 @@ paths:
       - cookieAuth: []
       responses:
         '204':
-          description: File deleted
+          description: File or folder deleted
         '401':
           description: No valid session
         '403':
           description: Insufficient permissions or path outside `/pub/` and `/priv/`
         '404':
           description: File not found
+    copy:
+      tags:
+      - Data
+      summary: Copy file (WebDAV COPY)
+      deprecated: true
+      description: |
+        Deprecated: use `COPY /storage/{user_z32}/{path}`.
+
+        WebDAV `COPY` (RFC 4918). Copies the file at `{path}` to the `Destination`
+        header path within the same tenant. An existing destination file is
+        overwritten. Emits a `PUT` event for the destination.
+      operationId: copyEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      parameters:
+      - name: Destination
+        in: header
+        required: true
+        description: Target storage path on the same tenant.
+        schema:
+          type: string
+      responses:
+        '201':
+          description: File copied
+        '400':
+          description: Invalid storage path or Destination header
+        '401':
+          description: No valid session
+        '403':
+          description: Insufficient permissions or path outside `/pub/` and `/priv/`
+        '404':
+          description: Source file not found
+        '409':
+          description: File/folder path collision at the destination
+        '507':
+          description: Storage quota exceeded
+    move:
+      tags:
+      - Data
+      summary: Move file (WebDAV MOVE)
+      deprecated: true
+      description: |
+        Deprecated: use `MOVE /storage/{user_z32}/{path}`.
+
+        WebDAV `MOVE` (RFC 4918). Moves the file at `{path}` to the `Destination`
+        header path within the same tenant: `COPY` followed by `DELETE` of the
+        source. Emits a `PUT` event for the destination and a `DEL` event for the
+        source. An existing destination file is overwritten.
+      operationId: moveEntry
+      security:
+      - bearerAuth: []
+      - cookieAuth: []
+      parameters:
+      - name: Destination
+        in: header
+        required: true
+        description: Target storage path on the same tenant.
+        schema:
+          type: string
+      responses:
+        '201':
+          description: File moved
+        '400':
+          description: Invalid storage path or Destination header
+        '401':
+          description: No valid session
+        '403':
+          description: Insufficient permissions or path outside `/pub/` and `/priv/`
+        '404':
+          description: Source file not found
+        '409':
+          description: File/folder path collision at the destination
+        '507':
+          description: Storage quota exceeded
   "/events/":
     get:
       tags:

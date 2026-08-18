@@ -23,14 +23,16 @@ pub fn router() -> Router<AppState> {
             get(read::get)
                 .head(read::head)
                 .put(write::put)
-                .delete(write::delete),
+                .delete(write::delete)
+                .fallback(write::webdav_extension_method),
         )
         .route(
             "/{*path}",
             get(read::legacy_get)
                 .head(read::legacy_head)
                 .put(write::legacy_put)
-                .delete(write::legacy_delete),
+                .delete(write::legacy_delete)
+                .fallback(write::webdav_extension_method),
         )
         // TODO: different max size for sessions and other routes?
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))

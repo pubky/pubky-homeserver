@@ -42,7 +42,7 @@ async fn put_get_delete() {
     );
     let unrelated_user = Keypair::random().public_key();
 
-    // PUT and DELETE only operate on file-shaped `/storage` paths.
+    // PUT still rejects directory-shaped paths
     let response = session
         .client()
         .request(Method::PUT, &directory_url)
@@ -53,6 +53,7 @@ async fn put_get_delete() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
+    // DELETE now succeeds on directory-shaped paths (recursive folder delete)
     let response = session
         .client()
         .request(Method::DELETE, &directory_url)
@@ -60,7 +61,7 @@ async fn put_get_delete() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let response = session
         .client()

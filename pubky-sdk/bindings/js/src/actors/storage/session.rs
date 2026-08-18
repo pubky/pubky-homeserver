@@ -165,7 +165,8 @@ impl SessionStorage {
         Ok(())
     }
 
-    /// Delete a path (file or empty directory).
+    /// Delete a path. A folder path (trailing `/`) is deleted recursively,
+    /// removing all descendants.
     ///
     /// @param {Path} path
     /// @returns {Promise<void>}
@@ -175,6 +176,38 @@ impl SessionStorage {
         #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
     ) -> JsResult<()> {
         self.0.delete(path).await?;
+        Ok(())
+    }
+
+    /// Copy a file from one absolute session path to another (server-side).
+    /// An existing destination file is overwritten.
+    ///
+    /// @param {Path} from Source file path.
+    /// @param {Path} to Destination file path.
+    /// @returns {Promise<void>}
+    #[wasm_bindgen]
+    pub async fn copy(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] from: String,
+        #[wasm_bindgen(unchecked_param_type = "Path")] to: String,
+    ) -> JsResult<()> {
+        self.0.copy(from, to).await?;
+        Ok(())
+    }
+
+    /// Move a file from one absolute session path to another (server-side).
+    /// An existing destination file is overwritten.
+    ///
+    /// @param {Path} from Source file path.
+    /// @param {Path} to Destination file path.
+    /// @returns {Promise<void>}
+    #[wasm_bindgen(js_name = "moveFile")]
+    pub async fn move_file(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] from: String,
+        #[wasm_bindgen(unchecked_param_type = "Path")] to: String,
+    ) -> JsResult<()> {
+        self.0.move_file(from, to).await?;
         Ok(())
     }
 }

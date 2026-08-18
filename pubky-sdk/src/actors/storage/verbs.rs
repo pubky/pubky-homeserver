@@ -1,8 +1,11 @@
+use std::str::FromStr;
+
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 
 use super::core::{PublicStorage, SessionStorage};
 use super::resource::{IntoPubkyResource, IntoResourcePath};
 use super::stats::ResourceStats;
+use crate::errors::RequestError;
 use crate::{Result, cross_log, util::check_http_status};
 
 /// Interpret the result of a `HEAD` request into a shared outcome used by both
@@ -107,6 +110,9 @@ impl SessionStorage {
 
     /// HTTP `DELETE` for an **absolute path**.
     ///
+    /// Deleting a folder path (trailing `/`) recursively deletes the folder and
+    /// all its descendants (`WebDAV` `Depth: infinity` semantics).
+    ///
     /// # Errors
     /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
     ///   responds with a non-success status (the server message is captured).
@@ -114,6 +120,54 @@ impl SessionStorage {
     ///   resource/URL.
     pub async fn delete<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::DELETE, path).await?;
+        send_checked(rb).await
+    }
+
+    /// `WebDAV` `COPY` for an **absolute path**: copies the file at `from` to
+    /// `to` on the homeserver, replacing a client-side read + write.
+    ///
+    /// An existing destination file is overwritten. Both paths must be files
+    /// covered by the session's write capability.
+    ///
+    /// # Errors
+    /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
+    ///   responds with a non-success status (the server message is captured).
+    /// - [`crate::errors::Error::Parse`] if either path cannot be converted into a valid
+    ///   resource/URL.
+    pub async fn copy<P: IntoResourcePath>(&self, from: P, to: P) -> Result<Response> {
+        self.copy_or_move(from, to, "COPY").await
+    }
+
+    /// `WebDAV` `MOVE` for an **absolute path**: moves the file at `from` to
+    /// `to` on the homeserver, replacing a client-side read + write + delete.
+    ///
+    /// An existing destination file is overwritten. Both paths must be files
+    /// covered by the session's write capability.
+    ///
+    /// # Errors
+    /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
+    ///   responds with a non-success status (the server message is captured).
+    /// - [`crate::errors::Error::Parse`] if either path cannot be converted into a valid
+    ///   resource/URL.
+    pub async fn move_file<P: IntoResourcePath>(&self, from: P, to: P) -> Result<Response> {
+        self.copy_or_move(from, to, "MOVE").await
+    }
+
+    /// Shared implementation of the `WebDAV` `COPY` and `MOVE` verbs.
+    async fn copy_or_move<P: IntoResourcePath>(
+        &self,
+        from: P,
+        to: P,
+        method_str: &'static str,
+    ) -> Result<Response> {
+        let to_path: super::resource::ResourcePath = to.into_abs_path()?;
+        let method = Method::from_str(method_str).map_err(|_e| RequestError::Validation {
+            message: format!("Invalid method: {method_str}"),
+        })?;
+        let rb = self
+            .request(method, from)
+            .await?
+            .header("Destination", to_path.as_str());
         send_checked(rb).await
     }
 }

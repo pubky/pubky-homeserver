@@ -270,7 +270,7 @@ impl EntryEntity {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::http::{header, HeaderMap, Method, StatusCode};
     use axum::Router;
     use axum_test::TestServer;

@@ -108,6 +108,68 @@ impl FileService {
         self.opendal.admin_delete(path).await?;
         Ok(())
     }
+
+    /// Copy a file from `from` to `to` (same tenant).
+    ///
+    /// Composed from `get_stream` + `write_stream` so that write finalization
+    /// (quota, entry upsert, PUT event) runs for the destination. Overwrites
+    /// the destination if it exists.
+    pub async fn copy(&self, from: &EntryPath, to: &EntryPath) -> Result<EntryEntity, FileIoError> {
+        use futures_util::StreamExt;
+        let stream = self
+            .get_stream(from)
+            .await?
+            .map(|chunk| chunk.map_err(|e| WriteStreamError::Other(e.into())));
+        self.write_stream(to, stream).await
+    }
+
+    /// Move a file from `from` to `to` (same tenant).
+    ///
+    /// Composed from `copy` + `delete` so that finalization runs for both the
+    /// destination (PUT event, quota increase) and the source (DEL event,
+    /// quota decrease).
+    pub async fn move_file(
+        &self,
+        from: &EntryPath,
+        to: &EntryPath,
+    ) -> Result<EntryEntity, FileIoError> {
+        let entry = self.copy(from, to).await?;
+        self.delete(from).await?;
+        Ok(entry)
+    }
+
+    /// Recursively delete a folder and all its descendants.
+    ///
+    /// Lists the folder's entries page by page and deletes each file
+    /// individually, so every file goes through delete finalization (entry
+    /// removal, quota decrease, DEL event). Synchronous: for very large trees
+    /// the caller may run into an HTTP timeout.
+    ///
+    /// Deleting a non-existing or empty folder will NOT return an error.
+    pub async fn delete_folder(&self, path: &EntryPath) -> Result<(), FileIoError> {
+        const PAGE_SIZE: u16 = 1000;
+        // No cursor: deleted entries disappear from subsequent pages, so
+        // re-listing from the start eventually drains the folder.
+        loop {
+            let page = EntryRepository::list_deep(
+                path,
+                Some(PAGE_SIZE),
+                None,
+                false,
+                &mut self.db.pool().into(),
+            )
+            .await?;
+            if page.is_empty() {
+                return Ok(());
+            }
+            for entry_path in page {
+                // Unconditional delete: finalization removes the SQL row even
+                // when the blob is already gone, so every listed entry makes
+                // progress and the loop always terminates.
+                self.opendal.delete(&entry_path).await?;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -481,5 +543,171 @@ mod tests {
             user_service.get(&pubkey).await.unwrap().used_bytes,
             test_data.len() as u64 + FILE_METADATA_SIZE
         );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_copy_file() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let user_service = context.user_service.clone();
+
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        user_service.create(&pubkey).await.unwrap();
+
+        let from = EntryPath::new(
+            pubkey.clone(),
+            StoragePath::new("/pub/app/from.txt").unwrap(),
+        );
+        let to = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/to.txt").unwrap());
+        let data = Buffer::from(b"copy me".as_slice());
+
+        file_service.write(&from, data.clone()).await.unwrap();
+        file_service.copy(&from, &to).await.unwrap();
+
+        // Source untouched, destination has the content.
+        assert_eq!(
+            file_service.get(&from).await.unwrap(),
+            data.to_vec().as_slice()
+        );
+        assert_eq!(
+            file_service.get(&to).await.unwrap(),
+            data.to_vec().as_slice()
+        );
+
+        // Quota counts both files.
+        let per_file = data.len() as u64 + FILE_METADATA_SIZE;
+        assert_eq!(
+            user_service.get(&pubkey).await.unwrap().used_bytes,
+            per_file * 2
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_copy_missing_source_is_not_found() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let user_service = context.user_service.clone();
+
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        user_service.create(&pubkey).await.unwrap();
+
+        let from = EntryPath::new(
+            pubkey.clone(),
+            StoragePath::new("/pub/app/none.txt").unwrap(),
+        );
+        let to = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/to.txt").unwrap());
+
+        let err = file_service
+            .copy(&from, &to)
+            .await
+            .expect_err("missing source");
+        assert!(matches!(err, FileIoError::NotFound));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_move_file() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let user_service = context.user_service.clone();
+
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        user_service.create(&pubkey).await.unwrap();
+
+        let from = EntryPath::new(
+            pubkey.clone(),
+            StoragePath::new("/pub/app/from.txt").unwrap(),
+        );
+        let to = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/to.txt").unwrap());
+        let data = Buffer::from(b"move me".as_slice());
+
+        file_service.write(&from, data.clone()).await.unwrap();
+        file_service.move_file(&from, &to).await.unwrap();
+
+        // Source gone, destination has the content.
+        file_service
+            .get(&from)
+            .await
+            .expect_err("source should be deleted after move");
+        assert_eq!(
+            file_service.get(&to).await.unwrap(),
+            data.to_vec().as_slice()
+        );
+
+        // Quota counts only the destination file.
+        assert_eq!(
+            user_service.get(&pubkey).await.unwrap().used_bytes,
+            data.len() as u64 + FILE_METADATA_SIZE
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_delete_folder_recursive() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let user_service = context.user_service.clone();
+
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        user_service.create(&pubkey).await.unwrap();
+
+        let data = Buffer::from(b"x".as_slice());
+        let inside = [
+            "/pub/app/folder/a.txt",
+            "/pub/app/folder/sub/b.txt",
+            "/pub/app/folder/sub/deep/c.txt",
+        ];
+        let outside = "/pub/app/other.txt";
+        for p in inside.iter().chain([outside].iter()) {
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(p).unwrap());
+            file_service.write(&path, data.clone()).await.unwrap();
+        }
+        assert_eq!(
+            user_service.get(&pubkey).await.unwrap().used_bytes,
+            4 * (data.len() as u64 + FILE_METADATA_SIZE)
+        );
+
+        let folder = EntryPath::new(
+            pubkey.clone(),
+            StoragePath::new("/pub/app/folder/").unwrap(),
+        );
+        file_service.delete_folder(&folder).await.unwrap();
+
+        for p in inside {
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(p).unwrap());
+            file_service
+                .get(&path)
+                .await
+                .expect_err("folder contents should be deleted");
+        }
+        let outside_path = EntryPath::new(pubkey.clone(), StoragePath::new(outside).unwrap());
+        assert_eq!(
+            file_service.get(&outside_path).await.unwrap(),
+            data.to_vec().as_slice(),
+            "files outside the folder must remain"
+        );
+        assert_eq!(
+            user_service.get(&pubkey).await.unwrap().used_bytes,
+            data.len() as u64 + FILE_METADATA_SIZE
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_delete_folder_empty_or_missing_is_ok() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let user_service = context.user_service.clone();
+
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        user_service.create(&pubkey).await.unwrap();
+
+        let folder = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/none/").unwrap());
+        file_service
+            .delete_folder(&folder)
+            .await
+            .expect("deleting a missing folder should be a no-op");
     }
 }
