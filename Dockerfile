@@ -55,7 +55,7 @@ ARG BUILD_TARGET=testnet
 RUN apk add --no-cache ca-certificates
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/pubky-$BUILD_TARGET /usr/local/bin/homeserver
+COPY --from=builder /usr/src/app/target/release/pubky-$BUILD_TARGET /usr/local/bin/pubky-homeserver
 
 # Set the working directory
 WORKDIR /usr/local/bin
@@ -63,5 +63,5 @@ WORKDIR /usr/local/bin
 # Expose the port the homeserver listens on (should match that of config.toml)
 EXPOSE 6287
 
-# Set the default command to run the binary
-CMD ["homeserver"]
+# Run the binary by default and pass docker run arguments to it.
+ENTRYPOINT ["pubky-homeserver"]
