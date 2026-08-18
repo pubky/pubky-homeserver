@@ -19,7 +19,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 rust-version = "1.89"
 edition = "2021"
 authors = [
@@ -56,10 +56,10 @@ mainline = "8"
 pkarr = { version = "8", default-features = false }
 pkarr-relay = { version = "2", default-features = false }
 percent-encoding = "2"
-pubky = { path = "pubky-sdk", version = "0.10", default-features = false }
-pubky-common = { path = "pubky-common", version = "0.10" }
-pubky-homeserver = { path = "pubky-homeserver", version = "0.10", default-features = false }
-pubky-testnet = { path = "pubky-testnet", version = "0.10" }
+pubky = { path = "pubky-sdk", version = "0.11", default-features = false }
+pubky-common = { path = "pubky-common", version = "0.11" }
+pubky-homeserver = { path = "pubky-homeserver", version = "0.11", default-features = false }
+pubky-testnet = { path = "pubky-testnet", version = "0.11" }
 pubky_test_utils = { path = "test_utils/pubky_test", version = "0.1" }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }
