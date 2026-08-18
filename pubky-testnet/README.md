@@ -34,10 +34,10 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
   cargo run -p pubky-testnet -- --homeserver-config my-config.toml persist ./my-testnet-data
 ```
 
-If you don't need persistent state, omit the `persist` subcommand and add `?pubky-test=true` to the connection string. The database is auto-created on startup and cleaned up on shutdown:
+If you don't need persistent state, simply omit the `persist` subcommand. An ephemeral database is auto-created on startup and cleaned up on shutdown:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo run -p pubky-testnet
 ```
 
@@ -80,12 +80,14 @@ async fn my_test() {
 
 ### Postgres for tests
 
-You need a running PostgreSQL instance (see [Quick start](#quick-start) for a Docker one-liner). By default, `EphemeralTestnet` reads the `TEST_PUBKY_CONNECTION_STRING` environment variable. The `?pubky-test=true` parameter tells the homeserver to create an ephemeral `pubky_test_*` database. The `#[pubky_testnet::test]` macro ensures the database is cleaned up after the test completes or panics.
+You need a running PostgreSQL instance (see [Quick start](#quick-start) for a Docker one-liner). By default, `EphemeralTestnet` reads the `TEST_PUBKY_CONNECTION_STRING` environment variable:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo test -p my-crate
 ```
+
+Each test automatically gets its own ephemeral `pubky_test_{uuid}` database on the configured server. The `#[pubky_testnet::test]` macro ensures the database is cleaned up after the test completes or panics.
 
 You can also pass the connection string programmatically:
 
@@ -96,7 +98,7 @@ use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConnectionString};
 #[pubky_testnet::test]
 async fn my_test() {
     let connection_string = ConnectionString::new(
-        "postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true"
+        "postgres://postgres:postgres@localhost:5432/postgres"
     ).unwrap();
 
     let testnet = EphemeralTestnet::builder()
@@ -133,7 +135,13 @@ async fn main() {
 }
 ```
 
-Each call to `.with_docker_postgres()` starts a **separate** container. To share **one** container across all tests, use `DockerPostgres::shared()`:
+> **Important**: If you have multiple tests, see [Sharing Docker Postgres Across Tests](#sharing-docker-postgres-across-tests) below.
+
+### Sharing Docker Postgres Across Tests
+
+Each `.with_docker_postgres()` starts a **separate** container. To avoid that overhead,
+use `DockerPostgres::shared()` to start one container and reuse it. Tests remain isolated
+— each testnet gets its own ephemeral database.
 
 ```rust
 # #[cfg(feature = "docker-postgres")]
@@ -165,9 +173,7 @@ async fn test_two() {
 # }
 ```
 
-Each testnet still gets its own ephemeral database within the shared PostgreSQL instance, so tests remain isolated.
-
-### Custom configuration
+### Custom Configuration
 
 ```rust,no_run
 use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConfigToml, pubky::Keypair};

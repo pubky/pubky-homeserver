@@ -1,4 +1,5 @@
 use super::ConfigToml;
+use crate::persistence::sql::DatabaseMode;
 use dyn_clone::DynClone;
 use std::path::Path;
 
@@ -20,6 +21,13 @@ pub trait DataDir: std::fmt::Debug + DynClone + Send + Sync {
     /// Reads the secret file from the data directory.
     /// Creates a new secret file if it doesn't exist.
     fn read_or_create_keypair(&self) -> anyhow::Result<pubky_common::crypto::Keypair>;
+
+    /// Resolve how the homeserver should connect to its database.
+    ///
+    /// Each implementation decides its own strategy:
+    /// - [`PersistentDataDir`](super::PersistentDataDir): [`DatabaseMode::Direct`] — connects to the configured URL.
+    /// - [`MockDataDir`](super::MockDataDir): [`DatabaseMode::EphemeralTest`] — creates a temporary database.
+    fn resolve_database_mode(&self, conf: &ConfigToml) -> anyhow::Result<DatabaseMode>;
 }
 
 dyn_clone::clone_trait_object!(DataDir);

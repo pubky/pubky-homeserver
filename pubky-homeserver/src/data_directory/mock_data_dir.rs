@@ -56,6 +56,13 @@ impl DataDir for MockDataDir {
         self.temp_dir.path()
     }
 
+    fn resolve_database_mode(
+        &self,
+        conf: &super::ConfigToml,
+    ) -> anyhow::Result<crate::persistence::sql::DatabaseMode> {
+        crate::persistence::sql::DatabaseMode::resolve_test(conf.general.database_url.clone())
+    }
+
     fn ensure_data_dir_exists_and_is_writable(&self) -> anyhow::Result<()> {
         Ok(()) // Always ok because this is validated by the tempfile crate.
     }
@@ -66,5 +73,35 @@ impl DataDir for MockDataDir {
 
     fn read_or_create_keypair(&self) -> anyhow::Result<pubky_common::crypto::Keypair> {
         Ok(self.keypair.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persistence::sql::{ConnectionString, DatabaseMode};
+
+    #[test]
+    fn resolve_database_mode_returns_ephemeral() {
+        let mock = MockDataDir::test();
+        let conf = mock.config_toml.clone();
+        let mode = mock.resolve_database_mode(&conf).unwrap();
+        assert!(
+            matches!(mode, DatabaseMode::EphemeralTest(_)),
+            "MockDataDir should always resolve to EphemeralTest"
+        );
+    }
+
+    #[test]
+    fn resolve_database_mode_with_explicit_url_returns_ephemeral() {
+        let mut config = super::super::ConfigToml::default_test_config();
+        config.general.database_url =
+            Some(ConnectionString::new("postgres://custom:5432/mydb").unwrap());
+        let mock = MockDataDir::new(config.clone(), None).unwrap();
+        let mode = mock.resolve_database_mode(&config).unwrap();
+        assert!(
+            matches!(mode, DatabaseMode::EphemeralTest(_)),
+            "MockDataDir should return EphemeralTest even with an explicit URL"
+        );
     }
 }

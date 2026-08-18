@@ -3,6 +3,7 @@ use sqlx::postgres::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::persistence::sql::connection_string::ConnectionString;
+use crate::persistence::sql::database_mode::DatabaseMode;
 
 /// The SqlDb is a wrapper around the postgres connection pool.
 /// It is used to connect to the database and run queries.
@@ -28,17 +29,22 @@ impl std::fmt::Debug for SqlDb {
 }
 
 impl SqlDb {
-    /// Connect to the database. Respects the pubky_test flag
-    pub async fn connect(con_string: &ConnectionString) -> Result<Self, sqlx::Error> {
-        #[cfg(any(test, feature = "testing"))]
-        if con_string.is_test_db() {
-            return Self::test_postgres_db(Some(con_string.clone())).await;
+    /// Connect to the database using the given [`DatabaseMode`].
+    ///
+    /// - [`DatabaseMode::Direct`]: connects to the database identified by the URL.
+    /// - [`DatabaseMode::EphemeralTest`]: creates a fresh `pubky_test_{uuid}` database
+    ///   on the server, connects to it, and drops it when this `SqlDb` is dropped.
+    pub async fn connect(mode: DatabaseMode) -> Result<Self, sqlx::Error> {
+        match mode {
+            DatabaseMode::Direct(url) => Self::connect_inner(&url).await,
+            #[cfg(any(test, feature = "testing"))]
+            DatabaseMode::EphemeralTest(admin_url) => {
+                Self::create_ephemeral_test_db(admin_url).await
+            }
         }
-
-        Self::connect_inner(con_string).await
     }
 
-    /// Connect to the database. directly without any test db logic.
+    /// Connect to the database directly without any test db logic.
     async fn connect_inner(con_string: &ConnectionString) -> Result<Self, sqlx::Error> {
         let pool: PgPool = PgPool::connect(con_string.as_str()).await?;
         Ok(Self {
@@ -84,86 +90,55 @@ impl Drop for TestDbDropper {
 }
 
 #[cfg(any(test, feature = "testing"))]
-const DEFAULT_TEST_CONNECTION_STRING: &str = "postgres://localhost:5432/postgres";
-
-#[cfg(any(test, feature = "testing"))]
 impl SqlDb {
-    /// Creates a new test database with the name `pubky_test_{uuid}`.
-    /// The provided `admin_con_string` is used to create the test database. The database name defined by the admin connection string
-    /// is only used to create the actual test database.
-    /// If no connection string is passed, the connection string is read from the TEST_PUBKY_CONNECTION_STRING environment variable.
-    /// If the environment variable is not set, the default test connection string is used.
-    async fn create_test_database(
+    /// Creates an ephemeral `pubky_test_{uuid}` database and connects to it.
+    ///
+    /// `admin_con_string` is used for the initial admin connection that creates
+    /// the database. The returned `SqlDb` will drop its database on scope exit.
+    async fn create_ephemeral_test_db(
         admin_con_string: ConnectionString,
-    ) -> Result<ConnectionString, sqlx::Error> {
-        use uuid::Uuid;
-        let admin_con = Self::connect_inner(&admin_con_string).await?;
-        let test_db_name = format!("pubky_test_{}", Uuid::new_v4().as_simple());
-        let query = format!("CREATE DATABASE {}", test_db_name);
-        sqlx::query(&query).execute(admin_con.pool()).await?;
-        let mut test_db_con_string = admin_con_string.clone();
-        test_db_con_string.set_database_name(&test_db_name);
-        Ok(test_db_con_string)
-    }
-    /// Creates a new test database with the name `pubky_test_{uuid}`.
-    /// The provided `admin_con_string` is used to create the test database. The database name defined by the admin connection string
-    /// is only used to create the actual test database.
-    /// If no connection string is passed, the connection string is read from the TEST_PUBKY_CONNECTION_STRING environment variable.
-    /// If the environment variable is not set, the default test connection string is used.
-    pub async fn test_postgres_db(
-        admin_con_string: Option<ConnectionString>,
     ) -> Result<Self, sqlx::Error> {
-        let admin_con_string = Self::derive_connection_string(admin_con_string);
+        let (test_db_url, test_db_name) =
+            Self::create_ephemeral_db_on_server(&admin_con_string).await?;
 
-        let test_db_con_string = Self::create_test_database(admin_con_string.clone()).await?;
-
-        // Connect to the test database.
-        let mut con = Self::connect_inner(&test_db_con_string).await?;
+        let mut con = Self::connect_inner(&test_db_url).await?;
         con.db_dropper = Some(std::sync::Arc::new(TestDbDropper::new(
-            test_db_con_string.database_name().to_string(),
+            test_db_name,
             admin_con_string.to_string(),
         )));
         Ok(con)
     }
 
-    /// Derives the admin connection string to use for the test database creation.
-    /// If the user passed a connection string, use it.
-    /// If the user passed a connection string as a env variable, use it.
-    /// If no connection string is passed, use the default test connection string.
-    pub fn derive_connection_string(
-        admin_con_string: Option<ConnectionString>,
-    ) -> ConnectionString {
-        if let Some(con_string) = admin_con_string {
-            // If the user passed a connection string, use it.
-            return con_string.clone();
-        }
-        if let Ok(raw_con_string) = std::env::var("TEST_PUBKY_CONNECTION_STRING") {
-            // If the user passed a connection string as a env variable, use it.
-            match ConnectionString::new(&raw_con_string) {
-                Ok(con_string) => return con_string,
-                Err(e) => {
-                    tracing::warn!("Invalid database connection string in TEST_PUBKY_CONNECTION_STRING environment variable: {}. Fallback to default test connection string. Error: {e}", raw_con_string);
-                }
-            }
-        }
+    /// Create an ephemeral `pubky_test_{uuid}` database on the given server.
+    ///
+    /// Returns the connection string to the new database and its name.
+    async fn create_ephemeral_db_on_server(
+        admin_con_string: &ConnectionString,
+    ) -> Result<(ConnectionString, String), sqlx::Error> {
+        use uuid::Uuid;
 
-        // If no connection string is passed, use the default test connection string.
-        ConnectionString::new(DEFAULT_TEST_CONNECTION_STRING)
-            .expect("Default test connection string is valid")
+        let admin_con = Self::connect_inner(admin_con_string).await?;
+        let test_db_name = format!("pubky_test_{}", Uuid::new_v4().as_simple());
+        let query = format!("CREATE DATABASE \"{}\"", test_db_name);
+        sqlx::query(&query).execute(admin_con.pool()).await?;
+
+        let mut test_db_url = admin_con_string.clone();
+        test_db_url.set_database_name(&test_db_name);
+        Ok((test_db_url, test_db_name))
     }
 
-    /// Create a test database without running migrations
-    /// If the DB_CONNECTION_STRING environment variable is not set, a temporary directory is used for the sqlite database
-    /// If the DB_CONNECTION_STRING environment variable is set, the test database is created on the existing database
+    /// Create a test database without running migrations.
+    #[cfg(test)]
     pub async fn test_without_migrations() -> Self {
-        Self::test_postgres_db(None)
+        let mode = DatabaseMode::resolve_test(None).expect("Failed to resolve test database mode");
+        Self::connect(mode)
             .await
             .expect("Failed to create test database")
     }
 
-    /// Create a test database and run migrations
-    /// If the DB_CONNECTION_STRING environment variable is not set, a temporary directory is used for the sqlite database
-    /// If the DB_CONNECTION_STRING environment variable is set, the migrations are run on the existing database
+    /// Create a test database and run migrations.
+    /// Convenience wrapper around [`Self::test_without_migrations`] + [`Migrator::run`].
+    #[cfg(test)]
     pub async fn test() -> Self {
         use crate::persistence::sql::migrator::Migrator;
         let db = Self::test_without_migrations().await;
@@ -179,21 +154,25 @@ impl SqlDb {
         max_connections: u32,
         acquire_timeout: std::time::Duration,
     ) -> Self {
-        let admin_con_string = Self::derive_connection_string(None);
-        let test_db_con_string = Self::create_test_database(admin_con_string.clone())
+        let mode = DatabaseMode::resolve_test(None).expect("Failed to resolve test database mode");
+        let admin_url = match mode {
+            DatabaseMode::EphemeralTest(url) | DatabaseMode::Direct(url) => url,
+        };
+        let (test_db_url, test_db_name) = Self::create_ephemeral_db_on_server(&admin_url)
             .await
             .expect("Failed to create test database");
+
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(acquire_timeout)
-            .connect(test_db_con_string.as_str())
+            .connect(test_db_url.as_str())
             .await
             .expect("Failed to connect to test database");
         let db = Self {
             pool,
             db_dropper: Some(std::sync::Arc::new(TestDbDropper::new(
-                test_db_con_string.database_name().to_string(),
-                admin_con_string.to_string(),
+                test_db_name,
+                admin_url.to_string(),
             ))),
         };
         let migrator = crate::persistence::sql::migrator::Migrator::new(&db);
@@ -208,7 +187,8 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_pg_db_available() {
-        let _db = SqlDb::test_postgres_db(None).await.unwrap();
+    async fn pg_db_available() {
+        let mode = DatabaseMode::resolve_test(None).unwrap();
+        let _db = SqlDb::connect(mode).await.unwrap();
     }
 }
