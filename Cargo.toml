@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "homeserver-cli",
   "pubky-*",
   "pubky-sdk/bindings/js",
   "e2e",

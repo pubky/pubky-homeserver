@@ -9,4 +9,5 @@ test_utils/**/Cargo.lock
 gcs-service-account.json
 .DS_Store
 .claude/
+homeserver-cli/config.toml
 lcov.info

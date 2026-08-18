@@ -1,0 +1,29 @@
+[package]
+name = "homeserver-cli"
+description = "Pubky homeserver cli."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["cli", "homeserver", "pubky"]
+categories = ["web-programming", "authentication", "cryptography"]
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+url = { version = "2", features = ["serde"] }
+toml = "0.8"
+rpassword = "7"
+reqwest = { workspace = true, features = ["blocking", "json"] }
+pubky = { version = "0.9.0", path = "../pubky-sdk" }
+thiserror.workspace = true
+clap-verbosity-flag = "3"
+log.workspace = true
+env_logger = "0.11.11"
+
+[dev-dependencies]
+serde_json.workspace = true

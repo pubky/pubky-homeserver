@@ -1,0 +1,3 @@
+[admin]
+admin_password="config"
+admin_endpoint="https://config.com"
