@@ -27,7 +27,7 @@ Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), 
 Pick a version and platform from the [releases page](https://github.com/pubky/pubky-homeserver/releases). The commands below use these variables, so set them first:
 
 ```bash
-PUBKY_VERSION=0.x
+PUBKY_VERSION=0.11
 PUBKY_PLATFORM=linux-amd64  # or linux-arm64. Alternatively: osx-arm64, osx-amd64, windows-amd64
 ```
 
