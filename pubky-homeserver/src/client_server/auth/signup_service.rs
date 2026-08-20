@@ -2,7 +2,7 @@
 
 use crate::persistence::sql::{
     signup_code::{SignupCode, SignupCodeRepository},
-    uexecutor, SqlDb,
+    uexecutor, SqlDb, UnifiedExecutor,
 };
 use crate::services::user_service::{UserEntity, UserService};
 use crate::shared::quota::UserQuota;
@@ -71,7 +71,7 @@ impl SignupService {
     ) -> Result<UserEntity, SignupServiceError> {
         let mut tx = self.sql_db.pool().begin().await?;
         let user = self
-            .create_user_in_tx(public_key, signup_token, &mut tx)
+            .create_user_in_tx(public_key, signup_token, uexecutor!(tx))
             .await?;
         tx.commit().await?;
         self.user_service.cache_user_quota(&user);
@@ -86,40 +86,33 @@ impl SignupService {
     ///
     /// Used by auth flows that must atomically create the user and persist
     /// method-specific session state, such as grant signup.
-    pub(crate) async fn create_user_in_tx(
+    pub(crate) async fn create_user_in_tx<'a>(
         &self,
         public_key: &PublicKey,
         signup_token: Option<&SignupCode>,
-        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        executor: &mut UnifiedExecutor<'a>,
     ) -> Result<UserEntity, SignupServiceError> {
-        self.ensure_user_not_exists(public_key, tx).await?;
+        self.ensure_user_not_exists(public_key, executor).await?;
         let quota = if self.signup_mode == SignupMode::TokenRequired {
-            Self::validate_and_consume_signup_token(signup_token, public_key, tx).await?
+            Self::validate_and_consume_signup_token(signup_token, public_key, executor).await?
         } else {
             UserQuota::default()
         };
+        let user = self.user_service.create_in_tx(public_key, executor).await?;
         let user = self
             .user_service
-            .create_in_tx(public_key, uexecutor!(*tx))
-            .await?;
-        let user = self
-            .user_service
-            .set_quota_in_tx(user.id, &quota, uexecutor!(*tx))
+            .set_quota_in_tx(user.id, &quota, executor)
             .await?;
         Ok(user)
     }
 
     /// Fails if a user row already exists for `public_key`.
-    async fn ensure_user_not_exists(
+    async fn ensure_user_not_exists<'a>(
         &self,
         public_key: &PublicKey,
-        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        executor: &mut UnifiedExecutor<'a>,
     ) -> Result<(), SignupServiceError> {
-        match self
-            .user_service
-            .get_in_tx(public_key, uexecutor!(*tx))
-            .await
-        {
+        match self.user_service.get_in_tx(public_key, executor).await {
             Ok(_) => Err(SignupServiceError::UserAlreadyExists),
             Err(sqlx::Error::RowNotFound) => Ok(()),
             Err(e) => Err(e.into()),
@@ -127,13 +120,13 @@ impl SignupService {
     }
 
     /// Validates a signup token and marks it as consumed by `public_key`.
-    async fn validate_and_consume_signup_token(
+    async fn validate_and_consume_signup_token<'a>(
         signup_token: Option<&SignupCode>,
         public_key: &PublicKey,
-        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        executor: &mut UnifiedExecutor<'a>,
     ) -> Result<UserQuota, SignupServiceError> {
         let code_id = signup_token.ok_or(SignupServiceError::SignupTokenRequired)?;
-        let code = match SignupCodeRepository::get(code_id, uexecutor!(*tx)).await {
+        let code = match SignupCodeRepository::get(code_id, executor).await {
             Ok(code) => code,
             Err(sqlx::Error::RowNotFound) => return Err(SignupServiceError::InvalidSignupToken),
             Err(e) => return Err(SignupServiceError::Internal(e)),
@@ -142,7 +135,7 @@ impl SignupService {
             return Err(SignupServiceError::SignupTokenAlreadyUsed);
         }
         let quota = code.quota();
-        SignupCodeRepository::mark_as_used(code_id, public_key, uexecutor!(*tx)).await?;
+        SignupCodeRepository::mark_as_used(code_id, public_key, executor).await?;
         Ok(quota)
     }
 }

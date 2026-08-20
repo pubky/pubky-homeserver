@@ -106,7 +106,7 @@ impl GrantAuthService {
         let mut tx = self.sql_db.pool().begin().await?;
         let user = self
             .signup_service
-            .create_user_in_tx(&grant.iss, signup_token, &mut tx)
+            .create_user_in_tx(&grant.iss, signup_token, uexecutor!(tx))
             .await?;
         tx.commit().await?;
         self.signup_service.cache_user_quota(&user);
