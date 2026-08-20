@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use futures_util::Stream;
-use sqlx::PgPool;
 use tokio::sync::broadcast;
 
 use crate::observability::{ConnectionGuard, Metrics};
@@ -25,6 +24,7 @@ pub(crate) const PG_NOTIFY_CHANNEL: &str = "events";
 /// Service that handles all event-related business logic.
 #[derive(Clone, Debug)]
 pub struct EventsService {
+    sql_db: SqlDb,
     event_tx: broadcast::Sender<EventEntity>,
     channel_capacity: usize,
 }
@@ -70,9 +70,10 @@ pub(crate) struct AllEventsFilter {
 impl EventsService {
     /// Create a new EventsService with a broadcast channel.
     /// The channel_capacity determines how many events can be buffered before old ones are dropped.
-    pub fn new(channel_capacity: usize) -> Self {
+    pub fn new(sql_db: SqlDb, channel_capacity: usize) -> Self {
         let (event_tx, _rx) = broadcast::channel(channel_capacity);
         Self {
+            sql_db,
             event_tx,
             channel_capacity,
         }
@@ -99,7 +100,7 @@ impl EventsService {
     /// let mut tx = db.pool().begin().await?;
     /// let event = events_service.create_event(..., &mut (&mut tx).into()).await?;
     /// tx.commit().await?;
-    /// EventsService::notify_event(pool).await;
+    /// events_service.notify_event().await;
     /// ```
     pub async fn create_event<'a>(
         &self,
@@ -132,10 +133,10 @@ impl EventsService {
     /// This is a best-effort wake-up signal. The PgEventListener will poll the
     /// database for actual events, so a missed NOTIFY only adds latency (up to
     /// the fallback poll interval) — it never causes missed events.
-    pub async fn notify_event(pool: &PgPool) {
+    pub async fn notify_event(&self) {
         if let Err(e) = sqlx::query("SELECT pg_notify($1, '')")
             .bind(PG_NOTIFY_CHANNEL)
-            .execute(pool)
+            .execute(self.sql_db.pool())
             .await
         {
             tracing::error!("Failed to send NOTIFY: {}", e);
@@ -213,7 +214,6 @@ impl EventsService {
     /// admin-authenticated routes may call it.
     pub(crate) fn all_events_stream(
         &self,
-        sql_db: SqlDb,
         metrics: Metrics,
         filter: AllEventsFilter,
     ) -> impl Stream<Item = EventEntity> {
@@ -252,7 +252,7 @@ impl EventsService {
                         reverse,
                         &filter.paths,
                         filter.user_ids.as_deref(),
-                        &mut sql_db.pool().into(),
+                        &mut service.sql_db.pool().into(),
                     )
                     .await
                 {
@@ -351,7 +351,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_events_service_create_and_broadcast() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(100);
+        let events_service = EventsService::new(db.clone(), 100);
         let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
@@ -391,7 +391,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_events_service_get_public_by_cursor() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(100);
+        let events_service = EventsService::new(db.clone(), 100);
         let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
@@ -446,7 +446,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_events_service_get_all_events_includes_private() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(100);
+        let events_service = EventsService::new(db.clone(), 100);
         let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();

@@ -157,7 +157,7 @@ impl AppContext {
             .await
             .map_err(AppContextConversionError::Migrations)?;
 
-        let events_service = EventsService::new(1000);
+        let events_service = EventsService::new(sql_db.clone(), 1000);
 
         let pg_event_listener = PgEventListener::start(sql_db.pool(), events_service.clone())
             .await
