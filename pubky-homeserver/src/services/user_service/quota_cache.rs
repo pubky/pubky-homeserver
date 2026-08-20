@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use pubky_common::crypto::PublicKey;
 
-use crate::shared::user_quota::UserQuota;
+use crate::shared::quota::UserQuota;
 
 /// How long a cached limit entry is considered fresh before re-resolving from DB.
 ///

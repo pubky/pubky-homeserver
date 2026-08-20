@@ -8,7 +8,7 @@ use sea_query_binder::SqlxBinder;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlx::{postgres::PgRow, FromRow, Row};
 
-use crate::shared::user_quota::UserQuota;
+use crate::shared::quota::UserQuota;
 use crate::{
     constants::{DEFAULT_LIST_LIMIT, DEFAULT_MAX_LIST_LIMIT},
     persistence::sql::UnifiedExecutor,
@@ -473,8 +473,8 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_create_with_quota() {
-        use crate::data_directory::quota_config::BandwidthQuota;
-        use crate::shared::user_quota::QuotaOverride;
+        use crate::shared::quota::user_quota::QuotaOverride;
+        use crate::shared::quota::BandwidthQuota;
         use std::str::FromStr;
 
         let db = SqlDb::test().await;
@@ -603,9 +603,9 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_signup_token_limits_applied_to_user() {
-        use crate::data_directory::quota_config::BandwidthQuota;
         use crate::services::user_service::UserService;
-        use crate::shared::user_quota::QuotaOverride;
+        use crate::shared::quota::user_quota::QuotaOverride;
+        use crate::shared::quota::BandwidthQuota;
         use std::str::FromStr;
 
         let db = SqlDb::test().await;

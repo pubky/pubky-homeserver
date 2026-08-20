@@ -485,7 +485,7 @@ mod tests {
         signup_code::{SignupCode, SignupCodeRepository},
         SqlDb,
     };
-    use crate::shared::user_quota::UserQuota;
+    use crate::shared::quota::UserQuota;
     use crate::SignupMode;
     use pubky_common::{
         auth::{

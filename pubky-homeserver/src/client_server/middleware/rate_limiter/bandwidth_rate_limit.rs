@@ -17,8 +17,8 @@ use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
 
 use crate::client_server::middleware::request_tenant::RequestTenant;
-use crate::quota_config::LimitKey;
 use crate::services::user_service::UserService;
+use crate::shared::quota::LimitKey;
 use crate::shared::HttpError;
 use crate::DefaultQuotasToml;
 
@@ -267,10 +267,10 @@ mod tests {
     use crate::client_server::auth::grant::session::GrantSession;
     use crate::client_server::auth::AuthSession;
     use crate::client_server::middleware::request_tenant::RequestTenant;
-    use crate::data_directory::quota_config::BandwidthQuota;
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
-    use crate::shared::user_quota::{QuotaOverride, UserQuota};
+    use crate::shared::quota::user_quota::QuotaOverride;
+    use crate::shared::quota::{BandwidthQuota, UserQuota};
     use crate::shared::HttpResult;
 
     use super::*;

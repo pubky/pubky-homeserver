@@ -6,10 +6,8 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::shared::{
-    user_quota::{UserQuota, UserQuotaPatch},
-    HttpError, HttpResult, Z32Pubkey,
-};
+use crate::shared::quota::{UserQuota, UserQuotaPatch};
+use crate::shared::{HttpError, HttpResult, Z32Pubkey};
 
 use super::super::app_state::AppState;
 
@@ -87,7 +85,7 @@ mod tests {
 
     use super::*;
     use crate::admin_server::AdminAuthExt;
-    use crate::data_directory::quota_config::BandwidthQuota;
+    use crate::shared::quota::BandwidthQuota;
     use crate::AppContext;
 
     fn create_test_server(context: &Arc<AppContext>) -> TestServer {

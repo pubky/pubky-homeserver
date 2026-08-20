@@ -87,7 +87,7 @@ mod tests {
     use crate::admin_server::AdminAuthExt;
     use crate::{
         persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
-        shared::user_quota::UserQuota,
+        shared::quota::UserQuota,
         AppContext,
     };
 

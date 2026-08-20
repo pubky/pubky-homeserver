@@ -12,7 +12,7 @@ use futures_util::future::BoxFuture;
 use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
 
-use crate::quota_config::PathLimit;
+use crate::shared::quota::PathLimit;
 use crate::shared::HttpError;
 
 use super::limiter_pool::LimitTuple;
@@ -154,7 +154,7 @@ mod tests {
     use tower_cookies::CookieManagerLayer;
 
     use crate::client_server::middleware::request_tenant::RequestTenant;
-    use crate::quota_config::{GlobPattern, HttpMethod, LimitKeyType};
+    use crate::shared::quota::{GlobPattern, HttpMethod, LimitKeyType};
     use crate::shared::HttpResult;
 
     use super::*;

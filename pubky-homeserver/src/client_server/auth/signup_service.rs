@@ -5,7 +5,7 @@ use crate::persistence::sql::{
     uexecutor, SqlDb,
 };
 use crate::services::user_service::{UserEntity, UserService};
-use crate::shared::user_quota::UserQuota;
+use crate::shared::quota::UserQuota;
 use crate::SignupMode;
 use pubky_common::crypto::PublicKey;
 

@@ -2,7 +2,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 use crate::{
     persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
-    shared::{user_quota::UserQuota, HttpError, HttpResult},
+    shared::{quota::UserQuota, HttpError, HttpResult},
 };
 
 use super::super::app_state::AppState;
