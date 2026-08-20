@@ -43,6 +43,16 @@ pub struct BandwidthQuotaLimitLayer {
 }
 
 impl BandwidthQuotaLimitLayer {
+    /// Creates the layer from the application context.
+    pub fn from_context(context: &crate::AppContext) -> Self {
+        Self {
+            user_service: context.user_service.clone(),
+            defaults: context.config_toml.default_quotas.clone(),
+        }
+    }
+
+    /// Creates the layer with explicit services (test-only).
+    #[cfg(test)]
     pub fn new(user_service: UserService, defaults: DefaultQuotasToml) -> Self {
         Self {
             user_service,

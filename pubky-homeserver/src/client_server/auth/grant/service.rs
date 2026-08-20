@@ -52,7 +52,18 @@ pub struct GrantAuthService {
 }
 
 impl GrantAuthService {
-    /// Create a new auth service with the given database and homeserver public key.
+    /// Creates the service from the application context.
+    pub fn from_context(context: &crate::AppContext) -> Self {
+        Self {
+            sql_db: context.sql_db.clone(),
+            homeserver_public_key: context.keypair.public_key(),
+            signup_service: SignupService::from_context(context),
+            user_service: context.user_service.clone(),
+        }
+    }
+
+    /// Creates the service with explicit dependencies (test-only).
+    #[cfg(test)]
     pub fn new(
         sql_db: SqlDb,
         homeserver_public_key: PublicKey,

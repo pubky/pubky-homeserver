@@ -64,7 +64,8 @@ pub async fn list_signup_tokens(
     Query(params): Query<SignupTokensQuery>,
 ) -> HttpResult<(StatusCode, Json<SignupTokensResponse>)> {
     let page =
-        SignupCodeRepository::list(params.list_query(), &mut state.sql_db.pool().into()).await?;
+        SignupCodeRepository::list(params.list_query(), &mut state.context.sql_db.pool().into())
+            .await?;
     let items = page.items.into_iter().map(SignupTokenItem::from).collect();
 
     Ok((
@@ -78,32 +79,20 @@ pub async fn list_signup_tokens(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum_test::TestServer;
 
     use super::*;
+    use crate::admin_server::AdminAuthExt;
     use crate::{
-        admin_server::app::create_app,
-        persistence::{
-            files::FileService,
-            sql::signup_code::{SignupCode, SignupCodeRepository},
-        },
+        persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
         shared::quota::UserQuota,
         AppContext,
     };
 
-    fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(
-            AppState::new(
-                context.sql_db.clone(),
-                FileService::new_from_context(context).unwrap(),
-                "",
-                context.user_service.clone(),
-                context.events_service.clone(),
-                context.metrics.clone(),
-            ),
-            "test",
-        ))
-        .unwrap()
+    fn create_test_server(context: &Arc<AppContext>) -> TestServer {
+        AppState::test_server(context)
     }
 
     #[tokio::test]
@@ -116,7 +105,7 @@ mod tests {
 
         let response = server
             .get("/generate_signup_token")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let token = response.text();
@@ -129,7 +118,7 @@ mod tests {
 
         let response = server
             .get("/signup_tokens")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -152,13 +141,13 @@ mod tests {
 
         let used_token = server
             .get("/generate_signup_token")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await
             .text();
         let unused_token = server
             .get("/generate_signup_token")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await
             .text();
@@ -175,7 +164,7 @@ mod tests {
 
         let response = server
             .get("/signup_tokens?state=used")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let body: serde_json::Value = response.json();
@@ -185,7 +174,7 @@ mod tests {
 
         let response = server
             .get("/signup_tokens?state=unused")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let body: serde_json::Value = response.json();
@@ -195,7 +184,7 @@ mod tests {
 
         let response = server
             .get("/signup_tokens?state=all")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let body: serde_json::Value = response.json();
@@ -223,7 +212,7 @@ mod tests {
 
         let response = server
             .get("/signup_tokens?limit=2")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let body: serde_json::Value = response.json();
@@ -235,7 +224,7 @@ mod tests {
 
         let response = server
             .get(&format!("/signup_tokens?limit=2&cursor={token2}"))
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let body: serde_json::Value = response.json();
@@ -253,21 +242,21 @@ mod tests {
 
         let response = server
             .get("/signup_tokens?state=unknown")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_failure()
             .await;
         response.assert_status_bad_request();
 
         let response = server
             .get("/signup_tokens?cursor=invalid")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_failure()
             .await;
         response.assert_status_bad_request();
 
         let response = server
             .get("/signup_tokens?limit=0")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_failure()
             .await;
         response.assert_status_bad_request();

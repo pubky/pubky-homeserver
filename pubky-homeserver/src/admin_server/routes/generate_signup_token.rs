@@ -12,7 +12,7 @@ async fn create_signup_code(state: &AppState, limits: &UserQuota) -> HttpResult<
     let code = SignupCodeRepository::create(
         &SignupCode::random(),
         limits,
-        &mut state.sql_db.pool().into(),
+        &mut state.context.sql_db.pool().into(),
     )
     .await?;
     Ok((StatusCode::OK, code.id.0))

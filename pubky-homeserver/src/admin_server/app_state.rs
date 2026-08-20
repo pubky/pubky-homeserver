@@ -1,50 +1,20 @@
+use std::sync::Arc;
+
 use dav_server::{fakels::FakeLs, DavHandler};
 use dav_server_opendalfs::OpendalFs;
 
-use crate::observability::Metrics;
-use crate::persistence::{
-    files::{events::EventsService, FileService},
-    sql::SqlDb,
-};
-use crate::services::user_service::UserService;
-use crate::shared::quota::DefaultQuotasToml;
+use crate::AppContext;
 use crate::ConfigToml;
-
-#[derive(Clone, Default)]
-pub(crate) struct AdminMetadata {
-    pub(crate) public_key: String,
-    pub(crate) pkarr_pubky_address: Option<String>,
-    pub(crate) pkarr_icann_domain: Option<String>,
-    pub(crate) version: String,
-}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) sql_db: SqlDb,
-    pub(crate) file_service: FileService,
-    pub(crate) admin_password: String,
+    pub(crate) context: Arc<AppContext>,
     pub(crate) inner_dav_handler: DavHandler,
-    pub(crate) metadata: AdminMetadata,
-    pub(crate) user_service: UserService,
-    /// Event service for the admin all-events stream.
-    pub(crate) events_service: EventsService,
-    /// Metrics shared with the rest of the homeserver.
-    pub(crate) metrics: Metrics,
-    /// System-wide default quotas for resolving effective values.
-    pub(crate) default_storage_mb: Option<u64>,
-    pub(crate) default_quotas: DefaultQuotasToml,
 }
 
 impl AppState {
-    pub fn new(
-        sql_db: SqlDb,
-        file_service: FileService,
-        admin_password: &str,
-        user_service: UserService,
-        events_service: EventsService,
-        metrics: Metrics,
-    ) -> Self {
-        let webdavfs = OpendalFs::new(file_service.opendal.admin_operator.clone());
+    pub fn new(context: Arc<AppContext>) -> Self {
+        let webdavfs = OpendalFs::new(context.file_service.opendal.admin_operator.clone());
         let inner_dav_handler = DavHandler::builder()
             .filesystem(webdavfs)
             .locksystem(FakeLs::new())
@@ -52,34 +22,34 @@ impl AppState {
             .autoindex(true)
             .build_handler();
         Self {
-            sql_db,
-            file_service,
-            admin_password: admin_password.to_string(),
             inner_dav_handler,
-            metadata: AdminMetadata::default(),
-            user_service,
-            events_service,
-            metrics,
-            default_storage_mb: None,
-            default_quotas: DefaultQuotasToml::default(),
+            context,
         }
     }
 
-    pub fn with_metadata_from_config(
-        mut self,
-        public_key: String,
-        config: &ConfigToml,
-        version: &str,
-    ) -> Self {
-        self.metadata = AdminMetadata {
-            public_key,
-            pkarr_pubky_address: pkarr_pubky_tls_address(config),
-            pkarr_icann_domain: pkarr_icann_domain(config),
-            version: version.to_string(),
-        };
-        self.default_storage_mb = config.storage.default_quota_mb;
-        self.default_quotas = config.default_quotas.clone();
-        self
+    pub(crate) fn admin_password(&self) -> &str {
+        &self.context.config_toml.admin.admin_password
+    }
+
+    pub(crate) fn public_key(&self) -> String {
+        self.context.keypair.public_key().z32()
+    }
+
+    pub(crate) fn pkarr_pubky_address(&self) -> Option<String> {
+        pkarr_pubky_tls_address(&self.context.config_toml)
+    }
+
+    pub(crate) fn pkarr_icann_domain(&self) -> Option<String> {
+        pkarr_icann_domain(&self.context.config_toml)
+    }
+
+    pub(crate) fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_server(context: &Arc<AppContext>) -> axum_test::TestServer {
+        axum_test::TestServer::new(super::app::create_app(Self::new(Arc::clone(context)))).unwrap()
     }
 }
 

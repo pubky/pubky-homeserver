@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::routes::{
@@ -47,11 +48,8 @@ fn create_public_router() -> Router<AppState> {
 }
 
 /// Create the app
-pub(crate) fn create_app(
-    state: AppState,
-    password: &str,
-) -> axum::routing::IntoMakeService<Router> {
-    let admin_router = create_protected_router(password);
+pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Router> {
+    let admin_router = create_protected_router(state.admin_password());
     let public_router = create_public_router();
     let app = Router::new()
         .merge(admin_router)
@@ -93,7 +91,7 @@ impl AdminServer {
         let context = AppContext::read_from(data_dir)
             .await
             .map_err(AdminServerBuildError::DataDir)?;
-        Self::start(&context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Create a new admin server from a data directory path.
@@ -108,27 +106,14 @@ impl AdminServer {
         let context = AppContext::read_from(mock_dir)
             .await
             .map_err(AdminServerBuildError::DataDir)?;
-        Self::start(&context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Run the admin server.
-    pub async fn start(context: &AppContext) -> Result<Self, AdminServerBuildError> {
-        let password = context.config_toml.admin.admin_password.clone();
-        let state = AppState::new(
-            context.sql_db.clone(),
-            context.file_service.clone(),
-            &password,
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        )
-        .with_metadata_from_config(
-            context.keypair.public_key().z32(),
-            &context.config_toml,
-            env!("CARGO_PKG_VERSION"),
-        );
+    pub async fn start(context: Arc<AppContext>) -> Result<Self, AdminServerBuildError> {
+        let state = AppState::new(Arc::clone(&context));
         let socket = context.config_toml.admin.listen_socket;
-        let app = create_app(state, password.as_str());
+        let app = create_app(state);
         let listener = std::net::TcpListener::bind(socket)
             .map_err(|e| AdminServerBuildError::Server(e.into()))?;
         listener
@@ -152,7 +137,7 @@ impl AdminServer {
             http_handle,
             socket,
             join_handle,
-            password,
+            password: context.config_toml.admin.admin_password.clone(),
         })
     }
 
@@ -193,7 +178,7 @@ mod tests {
     use base64::Engine;
     use pubky_common::crypto::Keypair;
 
-    use crate::persistence::files::FileService;
+    use crate::admin_server::AdminAuthExt;
     use crate::persistence::sql::signup_code::{SignupCode, SignupCodeRepository};
     use crate::shared::quota::{BandwidthQuota, UserQuota};
 
@@ -203,19 +188,8 @@ mod tests {
         BandwidthQuota::from_str(s).unwrap()
     }
 
-    fn create_test_server(context: &AppContext) -> TestServer {
-        TestServer::new(create_app(
-            AppState::new(
-                context.sql_db.clone(),
-                FileService::new_from_context(context).unwrap(),
-                "",
-                context.user_service.clone(),
-                context.events_service.clone(),
-                context.metrics.clone(),
-            ),
-            "test",
-        ))
-        .unwrap()
+    fn create_test_server(context: &Arc<AppContext>) -> TestServer {
+        AppState::test_server(context)
     }
 
     /// Seed `paths` as PUT events for a fresh random user, returning that user's pubkey.
@@ -254,7 +228,7 @@ mod tests {
     async fn admin_stream_body(server: &TestServer, query: &str) -> String {
         let response = server
             .get(&format!("/events-stream{query}"))
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -319,14 +293,14 @@ mod tests {
 
         let response = server
             .get("/generate_signup_token")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         let token = response.text();
 
         let response = server
             .get("/signup_tokens")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -371,7 +345,7 @@ mod tests {
         // returns the last item in the page as the cursor.
         let response = server
             .get("/signup_tokens?state=unused&limit=1")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -385,7 +359,7 @@ mod tests {
         // Increasing the limit changes the page size and advances the cursor.
         let response = server
             .get("/signup_tokens?state=unused&limit=2")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -400,7 +374,7 @@ mod tests {
         // When the limit reaches all remaining unused tokens, there is no next page.
         let response = server
             .get("/signup_tokens?state=unused&limit=3")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -418,7 +392,7 @@ mod tests {
             .get(&format!(
                 "/signup_tokens?state=unused&limit=2&cursor={token2}"
             ))
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .expect_success()
             .await;
         response.assert_status_ok();
@@ -432,8 +406,7 @@ mod tests {
     }
 
     fn auth_header() -> String {
-        // AppState is created with password "" in create_test_server
-        let auth = base64::engine::general_purpose::STANDARD.encode("admin:");
+        let auth = base64::engine::general_purpose::STANDARD.encode("admin:admin");
         format!("Basic {auth}")
     }
 
@@ -535,8 +508,7 @@ mod tests {
     async fn test_dav_put_quota_overflow_returns_500() {
         use pubky_common::crypto::Keypair;
 
-        let mut context = AppContext::test().await;
-        context.config_toml.storage.default_quota_mb = Some(1);
+        let context = AppContext::test_with_config(|c| c.storage.default_quota_mb = Some(1)).await;
         let server = create_test_server(&context);
         let auth_value = auth_header();
 
@@ -582,7 +554,7 @@ mod tests {
         });
         let response = server
             .post("/generate_signup_token")
-            .add_header("X-Admin-Password", "test")
+            .admin_auth()
             .content_type("application/json")
             .bytes(serde_json::to_vec(&body).unwrap().into())
             .expect_success()
@@ -629,7 +601,7 @@ mod tests {
         ] {
             let response = server
                 .get(&format!("/events-stream{query}"))
-                .add_header("X-Admin-Password", "test")
+                .admin_auth()
                 .expect_failure()
                 .await;
             response.assert_status_bad_request();

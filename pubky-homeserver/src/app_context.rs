@@ -59,8 +59,10 @@ pub enum AppContextConversionError {
 /// The application context shared between all components.
 /// Think of it as a simple Dependency Injection container.
 ///
-/// Create with a `DataDir` instance: `AppContext::try_from(data_dir)`
+/// Create with a `DataDir` instance: `AppContext::read_from(data_dir)`
 ///
+/// Implements `Clone` but prefer wrapping in `Arc<AppContext>` for
+/// hot paths like axum state (avoids deep-copying config strings).
 #[derive(Clone)]
 pub struct AppContext {
     /// The SQL database connection.
@@ -93,13 +95,47 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    /// Create a new AppContext for testing.
+    /// Replace the pkarr client and builder (e.g. to point at a test DHT).
+    #[cfg(test)]
+    pub(crate) fn with_pkarr(
+        mut self,
+        client: pkarr::Client,
+        builder: pkarr::ClientBuilder,
+    ) -> Self {
+        self.pkarr_client = client;
+        self.pkarr_builder = builder;
+        self
+    }
+
+    /// Replace the keypair (e.g. to test with a specific identity).
+    #[cfg(test)]
+    pub(crate) fn with_keypair(mut self, keypair: Keypair) -> Self {
+        self.keypair = keypair;
+        self
+    }
+
+    /// Create a new AppContext for testing, wrapped in Arc for use in AppState.
     #[cfg(any(test, feature = "testing"))]
-    pub async fn test() -> Self {
+    pub async fn test() -> Arc<Self> {
         let data_dir = MockDataDir::test();
-        Self::read_from(data_dir)
-            .await
-            .expect("failed to build AppContext from DataDirMock")
+        Arc::new(
+            Self::read_from(data_dir)
+                .await
+                .expect("failed to build AppContext from DataDirMock"),
+        )
+    }
+
+    /// Create a new AppContext for testing with custom config overrides, wrapped in Arc.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn test_with_config(f: impl FnOnce(&mut ConfigToml)) -> Arc<Self> {
+        let mut config = ConfigToml::default_test_config();
+        f(&mut config);
+        let data_dir = MockDataDir::new(config, None).expect("failed to create MockDataDir");
+        Arc::new(
+            Self::read_from(data_dir)
+                .await
+                .expect("failed to build AppContext from DataDirMock"),
+        )
     }
 
     /// Create a new AppContext from a data directory.

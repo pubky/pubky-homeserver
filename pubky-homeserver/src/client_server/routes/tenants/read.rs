@@ -46,13 +46,15 @@ pub async fn head(
     )?;
 
     state
+        .context
         .user_service
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
     let entry = state
+        .context
         .file_service
-        .get_info(&entry_path, &mut state.sql_db.pool().into())
+        .get_info(&entry_path, &mut state.context.sql_db.pool().into())
         .await?;
     let response = entry.to_response_headers().into_response();
     Ok(response)
@@ -94,8 +96,9 @@ pub async fn get(
     }
 
     let entry = state
+        .context
         .file_service
-        .get_info(&entry_path, &mut state.sql_db.pool().into())
+        .get_info(&entry_path, &mut state.context.sql_db.pool().into())
         .await?;
 
     // Per RFC 7232 §3: If-None-Match has precedence over If-Modified-Since.
@@ -129,7 +132,7 @@ pub async fn get(
         }
     }
 
-    let stream = state.file_service.get_stream(&entry_path).await?;
+    let stream = state.context.file_service.get_stream(&entry_path).await?;
     let body_stream = Body::from_stream(stream);
     let mut response = entry.to_response_headers().into_response();
     *response.body_mut() = body_stream;
@@ -142,7 +145,8 @@ async fn list(
     params: ListQueryParams,
 ) -> HttpResult<Response<Body>> {
     let contains_dir =
-        EntryRepository::contains_directory(entry_path, &mut state.sql_db.pool().into()).await?;
+        EntryRepository::contains_directory(entry_path, &mut state.context.sql_db.pool().into())
+            .await?;
     if !contains_dir {
         return Err(HttpError::new_with_message(
             StatusCode::NOT_FOUND,
@@ -166,7 +170,7 @@ async fn list(
             params.limit,
             parsed_cursor,
             params.reverse,
-            &mut state.sql_db.pool().into(),
+            &mut state.context.sql_db.pool().into(),
         )
         .await?
     } else {
@@ -175,7 +179,7 @@ async fn list(
             params.limit,
             parsed_cursor,
             params.reverse,
-            &mut state.sql_db.pool().into(),
+            &mut state.context.sql_db.pool().into(),
         )
         .await?
     };
@@ -271,6 +275,8 @@ impl EntryEntity {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::http::{header, HeaderMap, Method, StatusCode};
     use axum::Router;
     use axum_test::TestServer;
@@ -337,9 +343,9 @@ mod tests {
     }
 
     async fn create_environment_with_keypair(
-    ) -> anyhow::Result<(AppContext, Router, TestServer, Keypair, String)> {
+    ) -> anyhow::Result<(Arc<AppContext>, Router, TestServer, Keypair, String)> {
         let context = AppContext::test().await;
-        let router = ClientServer::create_router(&context)?;
+        let router = ClientServer::create_router(Arc::clone(&context))?;
         let server = axum_test::TestServer::new(router.clone()).unwrap();
 
         let keypair = Keypair::random();
@@ -349,7 +355,7 @@ mod tests {
     }
 
     pub async fn create_environment(
-    ) -> anyhow::Result<(AppContext, Router, TestServer, PublicKey, String)> {
+    ) -> anyhow::Result<(Arc<AppContext>, Router, TestServer, PublicKey, String)> {
         let (context, router, server, keypair, cookie) = create_environment_with_keypair().await?;
         let public_key = keypair.public_key();
 

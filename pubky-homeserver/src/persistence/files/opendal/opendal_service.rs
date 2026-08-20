@@ -266,8 +266,10 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_build_storage_operator_from_config_file_system() {
-        let mut context = AppContext::test().await;
-        context.config_toml.storage.backend = StorageConfigToml::FileSystem;
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
 
         let service =
             OpendalService::new(&context).expect("Failed to create OpenDAL service for testing");
