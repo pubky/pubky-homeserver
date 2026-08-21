@@ -295,6 +295,7 @@ mod tests {
 
     /// Helper: create a real event in the DB and send a NOTIFY to wake the listener.
     async fn create_event_and_notify(
+        events_service: &EventsService,
         db: &SqlDb,
         user_id: i32,
         path: &str,
@@ -314,8 +315,7 @@ mod tests {
         .unwrap();
         tx.commit().await.unwrap();
 
-        // Send NOTIFY to wake the listener (empty payload, just a hint)
-        EventsService::notify_event(db.pool()).await;
+        events_service.notify_event().await;
 
         event.id
     }
@@ -326,12 +326,12 @@ mod tests {
     async fn test_cross_instance_propagation() {
         let db = SqlDb::test().await;
 
-        let events_service_a = EventsService::new(100);
+        let events_service_a = EventsService::new(db.clone(), 100);
         let _listener_a = PgEventListener::start(db.pool(), events_service_a.clone())
             .await
             .unwrap();
 
-        let events_service_b = EventsService::new(100);
+        let events_service_b = EventsService::new(db.clone(), 100);
         let _listener_b = PgEventListener::start(db.pool(), events_service_b.clone())
             .await
             .unwrap();
@@ -344,7 +344,9 @@ mod tests {
         let mut rx_b = events_service_b.subscribe();
 
         // Instance A writes an event
-        let event_id = create_event_and_notify(&db, user.id, "/pub/from-a.txt", &pubkey).await;
+        let event_id =
+            create_event_and_notify(&events_service_a, &db, user.id, "/pub/from-a.txt", &pubkey)
+                .await;
 
         // Both instances should receive it
         let recv_a = tokio::time::timeout(Duration::from_secs(5), rx_a.recv())
@@ -390,7 +392,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_fallback_polling_delivers_gap_events() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(100);
+        let events_service = EventsService::new(db.clone(), 100);
 
         let _listener = PgEventListener::start_with_poll_interval(
             db.pool(),
@@ -407,7 +409,9 @@ mod tests {
         let mut rx = events_service.subscribe();
 
         // Phase 1: Deliver an event normally via NOTIFY to advance last_broadcast_id
-        let first_id = create_event_and_notify(&db, user.id, "/pub/normal.txt", &pubkey).await;
+        let first_id =
+            create_event_and_notify(&events_service, &db, user.id, "/pub/normal.txt", &pubkey)
+                .await;
         let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("Timeout")
@@ -480,7 +484,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_listener_restart_skips_gap_and_resumes() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(100);
+        let events_service = EventsService::new(db.clone(), 100);
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
@@ -492,8 +496,14 @@ mod tests {
             .unwrap();
         let mut rx = events_service.subscribe();
 
-        let initial_id =
-            create_event_and_notify(&db, user.id, "/pub/before-crash.txt", &pubkey).await;
+        let initial_id = create_event_and_notify(
+            &events_service,
+            &db,
+            user.id,
+            "/pub/before-crash.txt",
+            &pubkey,
+        )
+        .await;
 
         let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
@@ -520,8 +530,14 @@ mod tests {
             .unwrap();
 
         // Phase 5: Create a new event after restart
-        let post_restart_id =
-            create_event_and_notify(&db, user.id, "/pub/after-restart.txt", &pubkey).await;
+        let post_restart_id = create_event_and_notify(
+            &events_service,
+            &db,
+            user.id,
+            "/pub/after-restart.txt",
+            &pubkey,
+        )
+        .await;
 
         // Phase 6: The subscriber should receive ONLY the post-restart event.
         // Gap events are skipped because the new listener initialized last_broadcast_id
@@ -541,7 +557,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_batch_boundary_over_100_events() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(250);
+        let events_service = EventsService::new(db.clone(), 250);
 
         let _listener = PgEventListener::start(db.pool(), events_service.clone())
             .await
@@ -563,7 +579,7 @@ mod tests {
         }
 
         // Send a single NOTIFY to wake the poll loop
-        EventsService::notify_event(db.pool()).await;
+        events_service.notify_event().await;
 
         // All 150 events should be delivered in order
         for (idx, expected_id) in expected_ids.iter().enumerate() {
@@ -588,7 +604,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_concurrent_writers() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(500);
+        let events_service = EventsService::new(db.clone(), 500);
 
         let _listener = PgEventListener::start(db.pool(), events_service.clone())
             .await
@@ -606,12 +622,14 @@ mod tests {
         let mut handles = Vec::new();
         for task_idx in 0..num_tasks {
             let db = db.clone();
+            let events_service = events_service.clone();
             let pubkey = pubkey.clone();
             let user_id = user.id;
             handles.push(tokio::spawn(async move {
                 let mut ids = Vec::new();
                 for event_idx in 0..events_per_task {
                     let id = create_event_and_notify(
+                        &events_service,
                         &db,
                         user_id,
                         &format!("/pub/t{}-e{}.txt", task_idx, event_idx),
@@ -668,7 +686,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_concurrent_barrier_inserts_no_skipped_events() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(500);
+        let events_service = EventsService::new(db.clone(), 500);
 
         let _listener = PgEventListener::start_with_poll_interval(
             db.pool(),
@@ -691,6 +709,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..num_tasks {
             let db = db.clone();
+            let events_service = events_service.clone();
             let pubkey = pubkey.clone();
             let user_id = user.id;
             let barrier = barrier.clone();
@@ -712,7 +731,7 @@ mod tests {
                 .await
                 .unwrap();
                 tx.commit().await.unwrap();
-                EventsService::notify_event(db.pool()).await;
+                events_service.notify_event().await;
                 event.id
             }));
         }
@@ -757,7 +776,7 @@ mod tests {
         let db = SqlDb::test().await;
         // Use a very small channel capacity to force overflow
         let channel_capacity = 4;
-        let events_service = EventsService::new(channel_capacity);
+        let events_service = EventsService::new(db.clone(), channel_capacity);
 
         let _listener = PgEventListener::start_with_poll_interval(
             db.pool(),
@@ -778,9 +797,14 @@ mod tests {
         let overflow_count = channel_capacity + 10;
         let mut all_ids = Vec::new();
         for i in 0..overflow_count {
-            let id =
-                create_event_and_notify(&db, user.id, &format!("/pub/overflow{}.txt", i), &pubkey)
-                    .await;
+            let id = create_event_and_notify(
+                &events_service,
+                &db,
+                user.id,
+                &format!("/pub/overflow{}.txt", i),
+                &pubkey,
+            )
+            .await;
             all_ids.push(id);
         }
 
@@ -813,8 +837,14 @@ mod tests {
         // After lagging, re-subscribe to get a fresh receiver, then verify
         // new events are still delivered.
         let mut rx = events_service.subscribe();
-        let new_id =
-            create_event_and_notify(&db, user.id, "/pub/after-overflow.txt", &pubkey).await;
+        let new_id = create_event_and_notify(
+            &events_service,
+            &db,
+            user.id,
+            "/pub/after-overflow.txt",
+            &pubkey,
+        )
+        .await;
 
         // Drain until we see the specific new event (older events may still be in-flight)
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

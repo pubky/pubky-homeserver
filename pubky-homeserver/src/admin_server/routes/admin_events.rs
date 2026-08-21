@@ -190,11 +190,7 @@ pub async fn feed_stream(
         state
             .context
             .events_service
-            .all_events_stream(
-                state.context.sql_db.clone(),
-                state.context.metrics.clone(),
-                filter,
-            )
+            .all_events_stream(state.context.metrics.clone(), filter)
             .map(|event| {
                 Ok::<_, Infallible>(
                     Event::default()

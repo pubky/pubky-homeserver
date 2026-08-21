@@ -230,7 +230,7 @@ mod tests {
         let write_finalization_layer = WriteFinalizationLayer::new(
             user_service.clone(),
             db.clone(),
-            EventsService::new(100),
+            EventsService::new(db.clone(), 100),
             None,
             true,
         );
