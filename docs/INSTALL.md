@@ -221,23 +221,32 @@ sed -i 's|^# \[general\]|[general]|; s|^# database_url = .*|database_url = "post
 ### Docker
 
 ```bash
-docker run -d --restart unless-stopped --network=host -v ~/.pubky:/root/.pubky pubky-homeserver homeserver
+docker run -d --name pubky-homeserver --restart unless-stopped --network=host -v ~/.pubky:/root/.pubky pubky-homeserver homeserver
 ```
 
 `--network=host` lets the container reach PostgreSQL on the host and expose its endpoints. The volume mount shares the data directory (config and keypair) with the container. `--restart unless-stopped` ensures the homeserver starts automatically after a reboot.
 
+Managing the container:
 
-### Native
+```bash
+docker logs -f pubky-homeserver        # view logs
+docker restart pubky-homeserver        # restart (e.g. after editing config.toml)
+docker stop pubky-homeserver           # stop
+```
 
-Start the homeserver:
+### Native (foreground)
+
+Start the homeserver in the foreground (useful for testing, does not survive reboots):
 
 ```bash
 pubky-homeserver
 ```
 
+Press `Ctrl+C` to stop. For production use, set up a [systemd service](#systemd-service) instead.
+
 ### systemd Service
 
-Below is an example setup using systemd, which is available on most Linux distributions. This will run the homeserver in the background, start it on boot, and restart it automatically on failure.
+systemd is available on most Linux distributions. It runs the homeserver in the background, starts it on boot, and restarts it automatically on failure.
 
 Create a service file:
 
@@ -278,16 +287,13 @@ sudo systemctl enable pubky-homeserver
 sudo systemctl start pubky-homeserver
 ```
 
-Check that it is running:
+Managing the service:
 
 ```bash
-systemctl status pubky-homeserver
-```
-
-View logs:
-
-```bash
-journalctl -u pubky-homeserver -f
+systemctl status pubky-homeserver              # check status
+sudo systemctl restart pubky-homeserver        # restart (e.g. after editing config.toml)
+journalctl -u pubky-homeserver -f              # view logs
+sudo systemctl stop pubky-homeserver           # stop
 ```
  
 ## Next Steps
