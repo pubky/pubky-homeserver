@@ -1,4 +1,4 @@
-use pubky_testnet::pubky::{Keypair, Method, PubkyHttpClient, StatusCode};
+use pubky_testnet::pubky::{ClientId, Keypair, Method, PubkyHttpClient, StatusCode};
 
 /// Poll metrics endpoint until condition is met or timeout occurs
 async fn wait_for_metric_condition<F>(
@@ -63,7 +63,7 @@ async fn metrics_comprehensive() {
         .unwrap();
 
     // Extract values we need before getting SDK to avoid borrow conflicts
-    let (metrics_url, server_public_key, server_public_key_z32) = {
+    let (metrics_url, server_public_key, server_public_key_z32, icann_http_url) = {
         let server = testnet.homeserver_app();
 
         let metrics_server = server
@@ -73,8 +73,9 @@ async fn metrics_comprehensive() {
         let metrics_url = format!("http://{}/metrics", metrics_socket);
         let public_key = server.public_key().clone();
         let public_key_z32 = public_key.z32();
+        let icann_http_url = server.icann_http_url();
 
-        (metrics_url, public_key, public_key_z32)
+        (metrics_url, public_key, public_key_z32, icann_http_url)
     };
 
     let pubky = testnet.sdk().unwrap();
@@ -129,6 +130,30 @@ async fn metrics_comprehensive() {
         .put("/pub/test2.txt", vec![2])
         .await
         .unwrap();
+
+    // Exercise grant authentication on the canonical path-addressed route.
+    let grant_session = signer1
+        .signin(ClientId::new("metrics.test").unwrap())
+        .await
+        .unwrap();
+    let bearer = grant_session.as_grant().unwrap().current_bearer().await;
+    let grant_storage_path = "/pub/grant-metrics-secret.txt";
+    let response = pubky
+        .client()
+        .request(
+            Method::PUT,
+            &format!(
+                "{icann_http_url}storage/{}{}",
+                user_pubky1.z32(),
+                grant_storage_path
+            ),
+        )
+        .header("Authorization", format!("Bearer {bearer}"))
+        .body(vec![3])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
 
     // 3. Test concurrent stream connections to generate metrics
     let stream_url1 = format!(
@@ -266,4 +291,20 @@ async fn metrics_comprehensive() {
         "Should have exactly 2 signups recorded, metrics:\n{}",
         final_metrics
     );
+
+    let grant_sample = final_metrics
+        .lines()
+        .find(|line| {
+            line.starts_with("storage_request_count_total{")
+                && line.contains("addressing_mode=\"path\"")
+                && line.contains("auth_method=\"grant\"")
+        })
+        .expect("canonical grant storage request should be recorded");
+    assert!(
+        grant_sample.ends_with(" 1"),
+        "unexpected sample: {grant_sample}"
+    );
+    assert!(!final_metrics.contains(&bearer));
+    assert!(!final_metrics.contains(&user_pubky1.z32()));
+    assert!(!final_metrics.contains(grant_storage_path));
 }

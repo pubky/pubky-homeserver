@@ -29,6 +29,7 @@ ignore unknown identifiers.
 ## Architecture
 
 - [PKARR republishing](../docs/REPUBLISHING.md) — cache-first resolution, network fallback, and retry behavior.
+- [Storage-addressing migration](../docs/STORAGE_ADDRESSING_MIGRATION.md) — adoption metrics, migration clock, and legacy-removal review.
 
 ## Library Usage
 

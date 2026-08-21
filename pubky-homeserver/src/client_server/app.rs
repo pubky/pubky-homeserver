@@ -232,7 +232,7 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         .layer(BandwidthQuotaLimitLayer::from_context(&state.context));
 
     let app = base()
-        .merge(tenants::router())
+        .merge(tenants::router(context.metrics.clone()))
         .with_state(state)
         .merge(auth::base_router(auth_state.clone()))
         .merge(auth::tenant_router(auth_state))
@@ -328,6 +328,85 @@ mod tests {
         response.assert_json(&serde_json::json!({
             "features": ["path-addressed-storage"]
         }));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn storage_metrics_only_count_resolved_requests_with_low_cardinality_labels() {
+        let data_dir = MockDataDir::new(ConfigToml::minimal_test_config(), None).unwrap();
+        let context = AppContext::read_from(data_dir).await.unwrap();
+        let metrics = context.metrics.clone();
+        let router = ClientServer::create_router(&context).unwrap();
+        let server = TestServer::new(router).unwrap();
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+        let unrelated_public_key = Keypair::random().public_key().z32();
+        let storage_path = "/pub/metrics-secret.txt";
+
+        server
+            .put(&format!(
+                "/storage/{public_key}{storage_path}?pubky-host={public_key}"
+            ))
+            .add_header("pubky-host", public_key.clone())
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(vec![1].into())
+            .expect_success()
+            .await;
+        server
+            .get(storage_path)
+            .add_header("pubky-host", public_key.clone())
+            .expect_success()
+            .await;
+        server
+            .get(&format!("/storage/{public_key}{storage_path}"))
+            .add_header("pubky-host", unrelated_public_key.clone())
+            .expect_success()
+            .await;
+        server
+            .get(&format!("{storage_path}?pubky-host={public_key}"))
+            .expect_success()
+            .await;
+        server
+            .get("/favicon.ico")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+
+        let output = metrics.render().unwrap();
+        let samples = output
+            .lines()
+            .filter(|line| line.starts_with("storage_request_count_total{"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(samples.len(), 4, "unexpected metric samples:\n{output}");
+        assert!(samples.iter().any(|sample| {
+            sample.contains("addressing_mode=\"path\"")
+                && sample.contains("auth_method=\"cookie\"")
+                && sample.contains("pubky_host_header=\"matching\"")
+                && sample.contains("pubky_host_query=\"true\"")
+        }));
+        assert!(samples.iter().any(|sample| {
+            sample.contains("addressing_mode=\"legacy\"")
+                && sample.contains("auth_method=\"none\"")
+                && sample.contains("pubky_host_header=\"matching\"")
+                && sample.contains("pubky_host_query=\"false\"")
+        }));
+        assert!(samples.iter().any(|sample| {
+            sample.contains("addressing_mode=\"path\"")
+                && sample.contains("auth_method=\"none\"")
+                && sample.contains("pubky_host_header=\"other\"")
+                && sample.contains("pubky_host_query=\"false\"")
+        }));
+        assert!(samples.iter().any(|sample| {
+            sample.contains("addressing_mode=\"legacy\"")
+                && sample.contains("auth_method=\"none\"")
+                && sample.contains("pubky_host_header=\"absent\"")
+                && sample.contains("pubky_host_query=\"true\"")
+        }));
+        assert!(!output.contains(&public_key));
+        assert!(!output.contains(&unrelated_public_key));
+        assert!(!output.contains(storage_path));
+        assert!(!output.contains(&cookie));
     }
 
     async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
