@@ -14,7 +14,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use axum::{middleware as axum_middleware, routing::get, Router};
+use axum::{http::header::RETRY_AFTER, middleware as axum_middleware, routing::get, Router};
 use axum_server::{
     tls_rustls::{RustlsAcceptor, RustlsConfig},
     Handle,
@@ -52,7 +52,7 @@ pub enum ClientServerBuildError {
 /// A Pubky homeserver with ICANN HTTP and Pubky TLS servers.
 pub struct ClientServer {
     /// Keep context alive.
-    context: AppContext,
+    context: Arc<AppContext>,
 
     pub(crate) icann_http_handle: Handle<SocketAddr>,
     pub(crate) icann_http_socket: SocketAddr,
@@ -68,7 +68,7 @@ impl ClientServer {
     ) -> Result<Self, ClientServerBuildError> {
         let data_dir = PersistentDataDir::new(dir_path);
         let context = AppContext::read_from(data_dir).await?;
-        Self::start(context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Run the homeserver with configurations from a data directory.
@@ -76,7 +76,7 @@ impl ClientServer {
         dir: PersistentDataDir,
     ) -> Result<Self, ClientServerBuildError> {
         let context = AppContext::read_from(dir).await?;
-        Self::start(context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Run the homeserver with configurations from a data directory mock.
@@ -85,12 +85,14 @@ impl ClientServer {
         dir: MockDataDir,
     ) -> Result<Self, ClientServerBuildError> {
         let context = AppContext::read_from(dir).await?;
-        Self::start(context).await
+        Self::start(Arc::new(context)).await
     }
 
     /// Start homeserver services with the given application context.
-    pub async fn start(context: AppContext) -> std::result::Result<Self, ClientServerBuildError> {
-        let router = Self::create_router(&context)?;
+    pub async fn start(
+        context: Arc<AppContext>,
+    ) -> std::result::Result<Self, ClientServerBuildError> {
+        let router = Self::create_router(Arc::clone(&context))?;
 
         let (icann_http_handle, icann_http_socket) =
             Self::start_icann_http_server(&context, router.clone())
@@ -110,19 +112,10 @@ impl ClientServer {
     }
 
     pub(crate) fn create_router(
-        context: &AppContext,
+        context: Arc<AppContext>,
     ) -> std::result::Result<Router, ClientServerBuildError> {
-        let state = AppState {
-            auth_state: auth::AuthState::new(context),
-            sql_db: context.sql_db.clone(),
-            file_service: context.file_service.clone(),
-            signup_mode: context.config_toml.general.signup_mode.clone(),
-            metrics: context.metrics.clone(),
-            events_service: context.events_service.clone(),
-            user_service: context.user_service.clone(),
-            default_storage_mb: context.config_toml.storage.default_quota_mb,
-        };
-        super::create_app(state.clone(), context)
+        let state = AppState::new(context);
+        super::create_app(state)
     }
 
     /// Start the ICANN HTTP server
@@ -222,14 +215,12 @@ fn base() -> Router<AppState> {
     // TODO: maybe add to a separate router (drive router?).
 }
 
-pub fn create_app(
-    state: AppState,
-    context: &AppContext,
-) -> std::result::Result<Router, ClientServerBuildError> {
+pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBuildError> {
     let auth_state = state.auth_state.clone();
-    let request_rate_limit_layer =
-        RequestRateLimitLayer::from_path_limits(context.config_toml.drive.rate_limits.clone())
-            .map_err(ClientServerBuildError::RequestRateLimits)?;
+    let request_rate_limit_layer = RequestRateLimitLayer::from_path_limits(
+        state.context.config_toml.drive.rate_limits.clone(),
+    )
+    .map_err(ClientServerBuildError::RequestRateLimits)?;
 
     let middleware = ServiceBuilder::new()
         // Request order matters: auth needs CookieManager, and bandwidth limits
@@ -238,10 +229,7 @@ pub fn create_app(
         .layer(CookieManagerLayer::new())
         .layer(request_rate_limit_layer)
         .layer(AuthenticationLayer::new(auth_state.clone()))
-        .layer(BandwidthQuotaLimitLayer::new(
-            context.user_service.clone(),
-            context.config_toml.default_quotas.clone(),
-        ));
+        .layer(BandwidthQuotaLimitLayer::from_context(&state.context));
 
     let app = base()
         .merge(tenants::router())
@@ -257,11 +245,13 @@ pub fn create_app(
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
     Ok(with_trace_layer(app)
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
-        .layer(CorsLayer::very_permissive()))
+        .layer(CorsLayer::very_permissive().expose_headers([RETRY_AFTER])))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::http::{header, Method, StatusCode};
     use axum_test::TestServer;
     use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
@@ -269,26 +259,24 @@ mod tests {
     use crate::{
         app_context::AppContext,
         client_server::ClientServer,
-        quota_config::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
-        ConfigToml, MockDataDir,
+        shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
     };
 
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn middleware_dependencies_support_cookie_auth_and_user_rate_limits() {
-        let mut config = ConfigToml::minimal_test_config();
-        config.drive.rate_limits = vec![PathLimit {
-            path: GlobPattern::new("/session"),
-            method: HttpMethod(Method::GET),
-            quota: "1r/m".parse().unwrap(),
-            key: LimitKeyType::User,
-            burst: None,
-            whitelist: Vec::new(),
-        }];
-
-        let data_dir = MockDataDir::new(config, None).unwrap();
-        let context = AppContext::read_from(data_dir).await.unwrap();
-        let router = ClientServer::create_router(&context).unwrap();
+        let context = AppContext::test_with_config(|c| {
+            c.drive.rate_limits = vec![PathLimit {
+                path: GlobPattern::new("/session"),
+                method: HttpMethod(Method::GET),
+                quota: "1r/m".parse().unwrap(),
+                key: LimitKeyType::User,
+                burst: None,
+                whitelist: Vec::new(),
+            }];
+        })
+        .await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router).unwrap();
         let user = Keypair::random();
 
@@ -305,27 +293,31 @@ mod tests {
             .get("/session")
             .add_header("host", user.public_key().z32())
             .add_header(header::COOKIE, cookie)
+            .add_header(header::ORIGIN, "https://app.example") // Add Origin, to turns this into a CORS request
             .await;
 
         response.assert_status(StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+
+        // Retry-After is not CORS-safelisted, so browsers need it explicitly exposed.
+        response.assert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "retry-after");
     }
 
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn info_is_public_and_reports_features() {
-        let mut config = ConfigToml::minimal_test_config();
-        config.drive.rate_limits = vec![PathLimit {
-            path: GlobPattern::new("/info"),
-            method: HttpMethod(Method::GET),
-            quota: "1r/m".parse().unwrap(),
-            key: LimitKeyType::User,
-            burst: None,
-            whitelist: Vec::new(),
-        }];
-
-        let data_dir = MockDataDir::new(config, None).unwrap();
-        let context = AppContext::read_from(data_dir).await.unwrap();
-        let router = ClientServer::create_router(&context).unwrap();
+        let context = AppContext::test_with_config(|c| {
+            c.drive.rate_limits = vec![PathLimit {
+                path: GlobPattern::new("/info"),
+                method: HttpMethod(Method::GET),
+                quota: "1r/m".parse().unwrap(),
+                key: LimitKeyType::User,
+                burst: None,
+                whitelist: Vec::new(),
+            }];
+        })
+        .await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router).unwrap();
 
         let response = server.get("/info").await;

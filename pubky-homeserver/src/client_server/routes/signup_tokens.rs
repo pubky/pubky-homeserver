@@ -35,7 +35,7 @@ pub async fn get(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> HttpResult<impl IntoResponse> {
-    if state.signup_mode != SignupMode::TokenRequired {
+    if state.context.config_toml.general.signup_mode != SignupMode::TokenRequired {
         return Err(HttpError::new_with_message(
             StatusCode::BAD_REQUEST,
             "Signup tokens not required",
@@ -50,7 +50,9 @@ pub async fn get(
     })?;
 
     let code =
-        match SignupCodeRepository::get(&signup_code_id, &mut state.sql_db.pool().into()).await {
+        match SignupCodeRepository::get(&signup_code_id, &mut state.context.sql_db.pool().into())
+            .await
+        {
             Ok(code) => code,
             Err(sqlx::Error::RowNotFound) => {
                 return Err(HttpError::new_with_message(

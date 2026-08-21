@@ -169,6 +169,7 @@ mod tests {
     use futures_lite::StreamExt;
     use pkarr::{extra::endpoints::Endpoint, ResolvePolicy};
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
 
     use super::*;
     use crate::republishers::pkarr_republisher::test_client_builder;
@@ -176,9 +177,10 @@ mod tests {
     async fn test_context() -> (AppContext, mainline::Testnet) {
         let dht = mainline::Testnet::builder(1).build().unwrap();
         let pkarr_builder = test_client_builder(&dht);
-        let mut context = AppContext::test().await;
-        context.pkarr_client = pkarr_builder.clone().build().unwrap();
-        context.pkarr_builder = pkarr_builder;
+        let context = Arc::try_unwrap(AppContext::test().await)
+            .ok()
+            .expect("unique Arc")
+            .with_pkarr(pkarr_builder.clone().build().unwrap(), pkarr_builder);
         (context, dht)
     }
 
@@ -211,8 +213,8 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_endpoints() {
-        let (mut context, _dht) = test_context().await;
-        context.keypair = pubky_common::crypto::Keypair::random();
+        let (context, _dht) = test_context().await;
+        let context = context.with_keypair(pubky_common::crypto::Keypair::random());
         let _republisher = HomeserverKeyRepublisher::start(&context, 8080, 8080)
             .await
             .unwrap();

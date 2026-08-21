@@ -3,7 +3,7 @@
   "entryPoints": ["pubky.d.ts"],
   "tsconfig": "tsconfig.typedoc.json",
   "out": "docs",
-  "hostedBaseUrl": "https://pubky.github.io/pubky-core/js-sdk-typedoc/",
+  "hostedBaseUrl": "https://pubky.github.io/pubky-homeserver/js-sdk-typedoc/",
   "name": "@synonymdev/pubky",
   "readme": "none",
   "excludePrivate": true,

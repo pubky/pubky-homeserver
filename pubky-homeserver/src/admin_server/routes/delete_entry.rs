@@ -11,12 +11,18 @@ pub async fn delete_entry(
     State(state): State<AppState>,
     Path(entry_path): Path<EntryPathPub>,
 ) -> HttpResult<impl IntoResponse> {
-    state.file_service.admin_delete(entry_path.inner()).await?;
+    state
+        .context
+        .file_service
+        .admin_delete(entry_path.inner())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::super::app_state::AppState;
     use super::*;
     use crate::persistence::files::{
@@ -45,15 +51,8 @@ mod tests {
         let pubkey = keypair.public_key();
         let file_path = "my_file.txt";
         let db = context.sql_db.clone();
-        let file_service = FileService::new_from_context(&context).unwrap();
-        let app_state = AppState::new(
-            context.sql_db.clone(),
-            file_service.clone(),
-            "",
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        );
+        let file_service = context.file_service.clone();
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/webdav/{*entry_path}", delete(delete_entry))
             .with_state(app_state);
@@ -108,14 +107,7 @@ mod tests {
         let keypair = Keypair::from_secret(&[0; 32]);
         let pubkey = keypair.public_key();
         let file_path = "my_file.txt";
-        let app_state = AppState::new(
-            context.sql_db.clone(),
-            FileService::new_from_context(&context).unwrap(),
-            "",
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        );
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/webdav/{*entry_path}", delete(delete_entry))
             .with_state(app_state);
@@ -133,15 +125,7 @@ mod tests {
         // Set everything up
         let context = AppContext::test().await;
 
-        let sql_db = context.sql_db.clone();
-        let app_state = AppState::new(
-            sql_db.clone(),
-            FileService::new_from_context(&context).unwrap(),
-            "",
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        );
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/webdav/{*entry_path}", delete(delete_entry))
             .with_state(app_state);

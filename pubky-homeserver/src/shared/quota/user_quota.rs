@@ -14,8 +14,7 @@ use std::num::NonZeroU32;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::data_directory::quota_config::BandwidthQuota;
-use crate::data_directory::DefaultQuotasToml;
+use super::{BandwidthQuota, DefaultQuotasToml};
 use crate::shared::webdav::StoragePath;
 
 /// Maximum length of the VARCHAR column used for rate strings in the DB.

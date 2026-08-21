@@ -296,8 +296,9 @@ pub async fn feed(
     };
 
     let cursor = match state
+        .context
         .events_service
-        .parse_cursor(cursor.as_str(), &mut state.sql_db.pool().into())
+        .parse_cursor(cursor.as_str(), &mut state.context.sql_db.pool().into())
         .await
     {
         Ok(cursor) => cursor,
@@ -306,10 +307,16 @@ pub async fn feed(
 
     let query_start = Instant::now();
     let events = state
+        .context
         .events_service
-        .get_public_by_cursor(Some(cursor), params.limit, &mut state.sql_db.pool().into())
+        .get_public_by_cursor(
+            Some(cursor),
+            params.limit,
+            &mut state.context.sql_db.pool().into(),
+        )
         .await?;
     state
+        .context
         .metrics
         .record_events_db_query(query_start.elapsed().as_millis());
 
@@ -391,9 +398,9 @@ pub async fn feed_stream(
 
     let mut user_cursor_map = resolve_user_cursors(
         &params.user_cursors,
-        &state.events_service,
-        &state.sql_db,
-        &state.user_service,
+        &state.context.events_service,
+        &state.context.sql_db,
+        &state.context.user_service,
     )
     .await
     .map_err(HttpError::from)?;
@@ -401,11 +408,11 @@ pub async fn feed_stream(
     let mut total_sent: usize = 0;
     let stream = async_stream::stream! {
          // Create guard to ensure cleanup on any exit path (increments on creation, decrements on drop)
-        let _guard = ConnectionGuard::new(state.metrics.clone());
+        let _guard = ConnectionGuard::new(state.context.metrics.clone());
 
         // Subscribe to broadcast channel immediately to prevent race condition
         // Events that occur during Phase 1 will be buffered in the channel
-        let mut rx = state.events_service.subscribe();
+        let mut rx = state.context.events_service.subscribe();
 
         // Phase 1: Batch Mode
         loop {
@@ -421,12 +428,13 @@ pub async fn feed_stream(
 
             let query_start = Instant::now();
             let events = match state
+                .context
                 .events_service
                 .get_by_user_cursors(
                     current_user_cursors,
                     params.reverse,
                     &allowed_paths,
-                    &mut state.sql_db.pool().into(),
+                    &mut state.context.sql_db.pool().into(),
                 )
                 .await
             {
@@ -436,7 +444,7 @@ pub async fn feed_stream(
                     break;
                 }
             };
-            state.metrics.record_event_stream_db_query(query_start.elapsed().as_millis());
+            state.context.metrics.record_event_stream_db_query(query_start.elapsed().as_millis());
 
             let event_count = events.len();
 
@@ -480,7 +488,7 @@ pub async fn feed_stream(
         // Phase 2: Live mode
         if params.live {
             let user_ids: Vec<i32> = user_cursor_map.keys().copied().collect();
-            let half_capacity = state.events_service.channel_capacity() / 2;
+            let half_capacity = state.context.events_service.channel_capacity() / 2;
 
             loop {
                 tokio::select! {
@@ -494,7 +502,7 @@ pub async fn feed_stream(
                         Ok(event) => {
                         // Check if receiver queue is at half capacity (early warning of slow clients)
                         if rx.len() >= half_capacity {
-                            state.metrics.record_broadcast_half_full();
+                            state.context.metrics.record_broadcast_half_full();
                         }
                         // Filter events based on user_ids, cursors, and path
                         if !should_include_live_event(&event, &user_ids, &user_cursor_map, &allowed_paths) {
@@ -518,7 +526,7 @@ pub async fn feed_stream(
                         }
                     }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            state.metrics.record_broadcast_lagged();
+                            state.context.metrics.record_broadcast_lagged();
                             tracing::warn!(
                                 "Slow client detected: broadcast channel lagged by {} events. Closing connection.",
                                 skipped

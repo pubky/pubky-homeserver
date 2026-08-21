@@ -185,7 +185,7 @@ mod tests {
     };
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
-    use crate::shared::user_quota::UserQuota;
+    use crate::shared::quota::UserQuota;
     use crate::shared::webdav::StoragePath;
 
     use super::*;
@@ -230,7 +230,7 @@ mod tests {
         let write_finalization_layer = WriteFinalizationLayer::new(
             user_service.clone(),
             db.clone(),
-            EventsService::new(100),
+            EventsService::new(db.clone(), 100),
             None,
             true,
         );

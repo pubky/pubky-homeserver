@@ -2,7 +2,7 @@
 
 This guide covers applications upgrading from `v0.9.x`. `v0.10` includes multiple breaking changes, most notably a new, more secure grant authentication system.
 
-We strongly recommend upgrading to **grant authentication**. **Cookie authentication is now deprecated** and will be removed in a future version because it is [insecure](https://github.com/pubky/pubky-core/issues/520). Cookie auth still exists in v0.10, but the SDK now names the cookie-compatible APIs explicitly. If you do not want to upgrade to grant authentication, the main migration is to replace the old generic sign-in and sign-up methods with the new `*Cookie` methods.
+We strongly recommend upgrading to **grant authentication**. **Cookie authentication is now deprecated** and will be removed in a future version because it is [insecure](https://github.com/pubky/pubky-homeserver/issues/520). Cookie auth still exists in v0.10, but the SDK now names the cookie-compatible APIs explicitly. If you do not want to upgrade to grant authentication, the main migration is to replace the old generic sign-in and sign-up methods with the new `*Cookie` methods.
 
 You will need to consider whether each of the breaking changes listed below will affect your code.
 

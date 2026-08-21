@@ -3,7 +3,7 @@ use std::fmt::{self, Debug};
 use std::result::Result;
 use std::str::FromStr;
 
-use super::domain::Domain;
+use super::Domain;
 
 /// A domain and port pair.
 #[derive(Clone, PartialEq)]

@@ -17,7 +17,7 @@ pub async fn disable_user(
     State(state): State<AppState>,
     Path(pubkey): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    state.user_service.admin_disable(&pubkey.0).await?;
+    state.context.user_service.admin_disable(&pubkey.0).await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
@@ -32,15 +32,17 @@ pub async fn enable_user(
     State(state): State<AppState>,
     Path(pubkey): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    state.user_service.admin_enable(&pubkey.0).await?;
+    state.context.user_service.admin_enable(&pubkey.0).await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::super::app_state::AppState;
     use super::*;
-    use crate::{persistence::files::FileService, AppContext};
+    use crate::AppContext;
     use axum::routing::post;
     use axum::Router;
     use pubky_common::crypto::Keypair;
@@ -59,14 +61,7 @@ mod tests {
         assert!(!user.disabled);
 
         // Setup server
-        let app_state = AppState::new(
-            context.sql_db.clone(),
-            FileService::new_from_context(&context).unwrap(),
-            "",
-            context.user_service.clone(),
-            context.events_service.clone(),
-            context.metrics.clone(),
-        );
+        let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
             .route("/users/{pubkey}/disable", post(disable_user))
             .route("/users/{pubkey}/enable", post(enable_user))

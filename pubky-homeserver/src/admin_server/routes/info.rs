@@ -14,14 +14,14 @@ pub(crate) struct InfoResponse {
     public_key: String,
     pkarr_pubky_address: Option<String>,
     pkarr_icann_domain: Option<String>,
-    version: String,
+    version: &'static str,
 }
 
 /// Return summary statistics about the homeserver.
 pub async fn info(State(state): State<AppState>) -> HttpResult<(StatusCode, Json<InfoResponse>)> {
-    let user_overview = state.user_service.get_overview().await?;
+    let user_overview = state.context.user_service.get_overview().await?;
     let signup_code_overview =
-        SignupCodeRepository::get_overview(&mut state.sql_db.pool().into()).await?;
+        SignupCodeRepository::get_overview(&mut state.context.sql_db.pool().into()).await?;
 
     // Build response
     let body = InfoResponse {
@@ -30,10 +30,10 @@ pub async fn info(State(state): State<AppState>) -> HttpResult<(StatusCode, Json
         total_disk_used_mb: user_overview.total_used_mb,
         num_signup_codes: signup_code_overview.num_signup_codes,
         num_unused_signup_codes: signup_code_overview.num_unused_signup_codes,
-        public_key: state.metadata.public_key.clone(),
-        pkarr_pubky_address: state.metadata.pkarr_pubky_address.clone(),
-        pkarr_icann_domain: state.metadata.pkarr_icann_domain.clone(),
-        version: state.metadata.version.clone(),
+        public_key: state.public_key(),
+        pkarr_pubky_address: state.pkarr_pubky_address(),
+        pkarr_icann_domain: state.pkarr_icann_domain(),
+        version: state.version(),
     };
 
     Ok((StatusCode::OK, Json(body)))

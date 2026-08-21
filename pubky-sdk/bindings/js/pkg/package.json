@@ -2,7 +2,7 @@
   "name": "@synonymdev/pubky",
   "type": "module",
   "description": "Decentralized identity, auth flows, and user-owned storage",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "license": "MIT",
   "repository": {
     "type": "git",

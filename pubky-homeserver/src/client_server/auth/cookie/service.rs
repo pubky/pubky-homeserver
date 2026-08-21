@@ -21,17 +21,13 @@ pub(crate) struct CookieAuthService {
 }
 
 impl CookieAuthService {
-    pub(crate) fn new(
-        sql_db: SqlDb,
-        user_service: UserService,
-        verifier: CookieAuthVerifier,
-        signup_service: SignupService,
-    ) -> Self {
+    /// Creates the service from the application context.
+    pub(crate) fn from_context(context: &crate::AppContext) -> Self {
         Self {
-            sql_db,
-            user_service,
-            verifier,
-            signup_service,
+            sql_db: context.sql_db.clone(),
+            user_service: context.user_service.clone(),
+            verifier: CookieAuthVerifier::default(),
+            signup_service: SignupService::from_context(context),
         }
     }
 

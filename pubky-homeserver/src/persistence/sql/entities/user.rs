@@ -4,7 +4,7 @@ use sea_query_binder::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::persistence::sql::UnifiedExecutor;
-use crate::shared::user_quota::UserQuota;
+use crate::shared::quota::UserQuota;
 
 pub const USER_TABLE: &str = "users";
 
@@ -543,8 +543,8 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_set_quota() {
-        use crate::data_directory::quota_config::BandwidthQuota;
-        use crate::shared::user_quota::QuotaOverride;
+        use crate::shared::quota::user_quota::QuotaOverride;
+        use crate::shared::quota::BandwidthQuota;
         use std::str::FromStr;
 
         let db = SqlDb::test().await;
@@ -609,8 +609,8 @@ mod tests {
 
     #[test]
     fn test_limits_mixed_null_and_values() {
-        use crate::data_directory::quota_config::BandwidthQuota;
-        use crate::shared::user_quota::QuotaOverride;
+        use crate::shared::quota::user_quota::QuotaOverride;
+        use crate::shared::quota::BandwidthQuota;
         use std::str::FromStr;
 
         let user = UserEntity {
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn test_limits_unlimited_values() {
-        use crate::shared::user_quota::QuotaOverride;
+        use crate::shared::quota::user_quota::QuotaOverride;
 
         let user = UserEntity {
             id: 1,
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_limits_invalid_rate_string_treated_as_default() {
-        use crate::shared::user_quota::QuotaOverride;
+        use crate::shared::quota::user_quota::QuotaOverride;
 
         let user = UserEntity {
             id: 1,
