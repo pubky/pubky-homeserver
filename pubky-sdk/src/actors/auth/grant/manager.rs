@@ -10,7 +10,7 @@ use reqwest::Method;
 use std::sync::Arc;
 
 use crate::actors::session::credential::SessionCredential;
-use crate::actors::storage::resource::resolve_pubky;
+use crate::client::user_endpoint_url;
 use crate::errors::{RequestError, Result};
 use crate::util::check_http_status;
 use crate::{PubkyHttpClient, PubkySession};
@@ -68,9 +68,8 @@ impl GrantManager {
     /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
     ///   auth or missing root capability).
     pub async fn list(&self) -> Result<Vec<GrantInfo>> {
-        let url = format!("pubky://{}/auth/grant/sessions", self.user.z32());
-        let resolved = resolve_pubky(&url)?;
-        let rb = self.client.cross_request(Method::GET, resolved).await?;
+        let url = user_endpoint_url(&self.user, "/auth/grant/sessions")?;
+        let rb = self.client.cross_request(Method::GET, url).await?;
         let resp = self
             .credential
             .attach(rb, &self.client)
@@ -93,13 +92,9 @@ impl GrantManager {
     /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
     ///   auth or missing root capability).
     pub async fn revoke(&self, grant_id: &GrantId) -> Result<()> {
-        let url = format!(
-            "pubky://{}/auth/grant/session/{}",
-            self.user.z32(),
-            grant_id.as_str()
-        );
-        let resolved = resolve_pubky(&url)?;
-        let rb = self.client.cross_request(Method::DELETE, resolved).await?;
+        let path = format!("/auth/grant/session/{}", grant_id.as_str());
+        let url = user_endpoint_url(&self.user, &path)?;
+        let rb = self.client.cross_request(Method::DELETE, url).await?;
         let resp = self
             .credential
             .attach(rb, &self.client)

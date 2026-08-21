@@ -16,6 +16,12 @@ pub mod storage {
     pub const PUBLIC_ROOT: &str = "/pub/";
 }
 
+/// Features advertised by the homeserver client API.
+pub mod features {
+    /// Homeserver supports storage URLs containing the resource owner in the path.
+    pub const PATH_ADDRESSED_STORAGE: &str = "path-addressed-storage";
+}
+
 /// Local test network's hardcoded port numbers for local development.
 pub mod testnet_ports {
     /// The local test network's hardcoded DHT bootstrapping node's port number.

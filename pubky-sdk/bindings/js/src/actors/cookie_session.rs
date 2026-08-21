@@ -1,11 +1,17 @@
+#![allow(
+    deprecated,
+    reason = "JS bindings preserve deprecated cookie compatibility APIs"
+)]
+
 use wasm_bindgen::prelude::*;
 
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 
 /// Cookie-only view over a cookie-backed `Session`.
 ///
-/// Grant-backed sessions do not expose this view; use `session.cookie` and
-/// check for `undefined` before calling cookie-specific methods.
+/// New applications should use `session.grant` and `GrantSession`.
+///
+/// @deprecated Use `GrantSession` instead.
 #[wasm_bindgen]
 pub struct CookieSession(pub(crate) pubky::PubkySession);
 
@@ -17,6 +23,7 @@ impl CookieSession {
     /// still hold the HTTP-only cookie.
     ///
     /// @returns {string}
+    /// @deprecated Use `GrantSession.exportLocalSecret()` instead.
     pub fn export(&self) -> JsResult<String> {
         let cookie = self.as_cookie()?;
         Ok(cookie.export())
@@ -28,6 +35,7 @@ impl CookieSession {
     /// Node.js. Browser sessions cannot read HTTP-only Set-Cookie values.
     ///
     /// @returns {Promise<string>}
+    /// @deprecated Use `GrantSession.exportLocalSecret()` instead.
     #[wasm_bindgen(js_name = "exportSecret")]
     pub async fn export_secret(&self) -> JsResult<String> {
         let cookie = self.as_cookie()?;

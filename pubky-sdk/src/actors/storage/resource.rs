@@ -21,6 +21,7 @@
 use std::{fmt, str::FromStr};
 
 use crate::PublicKey;
+use percent_encoding::percent_decode_str;
 use url::Url;
 
 use crate::{Error, errors::RequestError};
@@ -133,6 +134,11 @@ impl ResourcePath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[inline]
+    fn as_root_relative_str(&self) -> &str {
+        self.as_str().trim_start_matches('/')
+    }
 }
 
 impl FromStr for ResourcePath {
@@ -206,60 +212,76 @@ impl PubkyResource {
     /// is always normalized.
     #[must_use]
     pub fn to_pubky_url(&self) -> String {
-        let rel = self.path.as_str().trim_start_matches('/');
-        format!("pubky://{}/{}", self.owner.z32(), rel)
+        let path = self.path.as_root_relative_str();
+        format!("pubky://{}/{path}", self.owner.z32())
     }
 
-    /// Render as `https://_pubky.<owner>/<abs-path>` for transport.
+    /// Render as the canonical path-addressed transport URL:
+    /// `https://_pubky.<owner>/storage/<owner>/<abs-path>`.
     ///
-    /// This converts the addressed resource into the actual homeserver URL used
-    /// by the transport layer. It is the same mapping performed by
-    /// [`resolve_pubky`].
+    /// It is the same mapping performed by [`resolve_pubky`].
     ///
     /// # Errors
     /// - Returns [`Error::Request`] if the constructed transport URL is invalid.
     pub fn to_transport_url(&self) -> Result<Url, Error> {
-        let rel = self.path.as_str().trim_start_matches('/');
-        let https = format!("https://_pubky.{}/{}", self.owner.z32(), rel);
+        let owner = self.owner.z32();
+        let path = self.path.as_root_relative_str();
+        let https = format!("https://_pubky.{owner}/storage/{owner}/{path}");
         Ok(Url::parse(&https)?)
     }
 
-    /// Construct a [`PubkyResource`] from a homeserver transport URL.
-    ///
-    /// Accepts either `https://_pubky.<owner>/...` or `http://_pubky.<owner>/...`
-    /// (the latter is mainly useful in local testnets).
+    /// Parse canonical `/storage/<owner>/...` and legacy `_pubky.<owner>/...` URLs.
+    /// Canonical URLs take the owner from the path; legacy URLs use the host.
     ///
     /// # Errors
-    /// - Returns [`Error::Request`] if the URL is missing the expected `_pubky.<owner>` host.
-    /// - Returns [`Error::Request`] if the host does not contain a valid public key.
+    /// Returns [`Error::Request`] when the owner or path is malformed.
     pub fn from_transport_url(url: &Url) -> Result<Self, Error> {
-        let host = url
-            .host_str()
-            .ok_or_else(|| invalid("transport URL missing host"))?;
-        let owner = host
-            .strip_prefix("_pubky.")
-            .ok_or_else(|| invalid("transport URL host must start with '_pubky.'"))?;
-        if PublicKey::is_pubky_prefixed(owner) {
-            return Err(invalid(
-                "transport URL host must use raw z32 without `pubky` prefix",
-            ));
-        }
-        let public_key = PublicKey::try_from_z32(owner)
-            .map_err(|_err| invalid("transport URL host does not contain a valid public key"))?;
+        let (owner, path) = if let Some(path) = url.path().strip_prefix("/storage/") {
+            let (owner, path) = path
+                .split_once('/')
+                .ok_or_else(|| invalid("storage transport URL is missing a resource path"))?;
+            let owner = parse_transport_owner(owner)?;
 
-        let path = if url.path().is_empty() {
-            "/"
+            if let Some(host_owner) = url.host_str().and_then(|host| host.strip_prefix("_pubky."))
+                && parse_transport_owner(host_owner)? != owner
+            {
+                return Err(invalid(
+                    "storage transport URL owner does not match its `_pubky` host",
+                ));
+            }
+
+            (owner, path)
         } else {
-            url.path()
+            let owner = url
+                .host_str()
+                .and_then(|host| host.strip_prefix("_pubky."))
+                .ok_or_else(|| invalid("legacy transport URL is missing a `_pubky` host"))?;
+            (parse_transport_owner(owner)?, url.path())
         };
-        Self::new(public_key, path)
+
+        let path = if path.is_empty() { "/" } else { path };
+        let decoded_path = percent_decode_str(path)
+            .decode_utf8()
+            .map_err(|_err| invalid("transport URL path is not valid UTF-8"))?;
+        Self::new(owner, decoded_path.as_ref())
     }
 
     /// Render as the identifier form `pubky<owner>/<abs-path>`.
     pub(crate) fn to_identifier(&self) -> String {
-        let rel = self.path.as_str().trim_start_matches('/');
-        format!("{}/{}", self.owner, rel)
+        let path = self.path.as_root_relative_str();
+        format!("{}/{path}", self.owner)
     }
+}
+
+fn parse_transport_owner(owner: &str) -> Result<PublicKey, Error> {
+    if PublicKey::is_pubky_prefixed(owner) {
+        return Err(invalid(
+            "transport URL owner must use raw z32 without `pubky` prefix",
+        ));
+    }
+
+    PublicKey::try_from_z32(owner)
+        .map_err(|_err| invalid("transport URL contains an invalid owner"))
 }
 
 impl FromStr for PubkyResource {
@@ -576,11 +598,12 @@ mod tests {
     fn resolve_identifiers() {
         let kp = Keypair::random();
         let user = kp.public_key();
+        let user_raw = user.z32();
         let base = format!("pubky://{}/pub/site/index.html", user.z32());
         let resolved = resolve_pubky(&base).unwrap();
         assert_eq!(
             resolved.as_str(),
-            format!("https://_pubky.{}/pub/site/index.html", user.z32())
+            format!("https://_pubky.{user_raw}/storage/{user_raw}/pub/site/index.html")
         );
 
         let prefixed = format!("pubky{}/pub/site/index.html", user.z32());
@@ -593,9 +616,68 @@ mod tests {
         let parsed = PubkyResource::from_transport_url(&resolved).unwrap();
         assert_eq!(parsed, resource);
 
+        let homeserver = Keypair::random().public_key();
+        let explicit_homeserver = Url::parse(&format!(
+            "https://{}/storage/{user_raw}/pub/site/index.html",
+            homeserver.z32()
+        ))
+        .unwrap();
+        assert_eq!(
+            PubkyResource::from_transport_url(&explicit_homeserver).unwrap(),
+            resource
+        );
+
+        let legacy = Url::parse(&format!("https://_pubky.{user_raw}/pub/site/index.html")).unwrap();
+        assert_eq!(
+            PubkyResource::from_transport_url(&legacy).unwrap(),
+            resource
+        );
+
         let http_url =
             Url::parse(&format!("http://_pubky.{}/pub/site/index.html", user.z32())).unwrap();
         let parsed_http = PubkyResource::from_transport_url(&http_url).unwrap();
         assert_eq!(parsed_http, resource);
+    }
+
+    #[test]
+    fn canonical_transport_rejects_a_conflicting_pubky_host() {
+        let host_owner = Keypair::random().public_key();
+        let path_owner = Keypair::random().public_key();
+        let url = Url::parse(&format!(
+            "https://_pubky.{}/storage/{}/pub/My%20File.txt",
+            host_owner.z32(),
+            path_owner.z32()
+        ))
+        .unwrap();
+
+        let error = PubkyResource::from_transport_url(&url).unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn canonical_transport_accepts_an_icann_homeserver_authority() {
+        let owner = Keypair::random().public_key();
+        let url = Url::parse(&format!(
+            "https://example.com/storage/{}/pub/My%20File.txt",
+            owner.z32()
+        ))
+        .unwrap();
+
+        let resource = PubkyResource::from_transport_url(&url).unwrap();
+        assert_eq!(resource.owner, owner);
+        assert_eq!(resource.path.as_str(), "/pub/My%20File.txt");
+    }
+
+    #[test]
+    fn transport_owner_rejects_the_pubky_prefix() {
+        let owner = Keypair::random().public_key();
+        let url = Url::parse(&format!(
+            "https://example.com/storage/pubky{}/pub/file.txt",
+            owner.z32()
+        ))
+        .unwrap();
+
+        let error = PubkyResource::from_transport_url(&url).unwrap_err();
+        assert!(error.to_string().contains("must use raw z32"));
     }
 }

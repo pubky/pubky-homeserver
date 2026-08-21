@@ -1,3 +1,8 @@
+#![allow(
+    deprecated,
+    reason = "JS bindings preserve deprecated cookie compatibility APIs"
+)]
+
 use wasm_bindgen::prelude::*;
 
 use super::{pkdns::Pkdns, session::Session};

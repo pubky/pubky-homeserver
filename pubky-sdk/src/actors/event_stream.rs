@@ -651,6 +651,10 @@ fn decode_content_hash(content_hash_base64: Option<&str>) -> Result<Hash> {
 }
 
 #[cfg(test)]
+#[allow(
+    deprecated,
+    reason = "These tests verify legacy cookie session event-stream compatibility"
+)]
 mod tests {
     use super::*;
     use crate::actors::auth::cookie::credential::CookieCredential;

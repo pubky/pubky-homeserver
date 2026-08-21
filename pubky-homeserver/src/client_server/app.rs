@@ -305,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn info_is_public_and_reports_no_features() {
+    async fn info_is_public_and_reports_features() {
         let context = AppContext::test_with_config(|c| {
             c.drive.rate_limits = vec![PathLimit {
                 path: GlobPattern::new("/info"),
@@ -325,7 +325,9 @@ mod tests {
         response.assert_status(StatusCode::OK);
         response.assert_header(header::CONTENT_TYPE, "application/json");
         response.assert_header(header::CACHE_CONTROL, "no-store");
-        response.assert_json(&serde_json::json!({ "features": [] }));
+        response.assert_json(&serde_json::json!({
+            "features": ["path-addressed-storage"]
+        }));
     }
 
     async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {

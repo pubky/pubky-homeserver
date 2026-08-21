@@ -18,7 +18,7 @@ impl PubkySession {
     /// # Panics
     /// Panics if the session is not cookie-backed.
     #[must_use]
-    #[deprecated(note = "Use `session.as_cookie().map(|cookie| cookie.export())` instead")]
+    #[deprecated(note = "Use GrantSessionView::export_local_secret instead.")]
     pub fn export(&self) -> String {
         self.as_cookie()
             .expect("export() is only valid for cookie sessions")
@@ -32,6 +32,7 @@ impl PubkySession {
     /// # Errors
     /// - Returns [`crate::errors::RequestError::Validation`] if the export string is malformed.
     /// - On native, returns an error because exports are only supported on WASM.
+    #[deprecated(note = "Use Pubky::restore_session with a grant secret instead.")]
     pub async fn import(export: &str, client: Option<PubkyHttpClient>) -> Result<Self> {
         super::secret::import_session(export, client).await
     }
@@ -43,6 +44,7 @@ impl PubkySession {
     /// # Errors
     /// - Returns [`crate::errors::RequestError::Validation`] if the token is malformed.
     /// - Propagates transport failures while validating the session.
+    #[deprecated(note = "Use Pubky::restore_session with a grant secret instead.")]
     pub async fn import_secret(token: &str, client: Option<PubkyHttpClient>) -> Result<Self> {
         super::secret::import_session_secret(token, client).await
     }
@@ -55,6 +57,7 @@ impl PubkySession {
     /// - Returns [`crate::errors::RequestError::Validation`] when the file extension is not `.sess`.
     /// - Propagates errors from the stored token validation.
     #[cfg(not(target_arch = "wasm32"))]
+    #[deprecated(note = "Read the grant secret and pass it to Pubky::restore_session instead.")]
     pub async fn from_secret_file(
         path: &std::path::Path,
         client: Option<PubkyHttpClient>,
@@ -74,7 +77,7 @@ impl PubkySession {
     ///   permissions cannot be set.
     #[cfg(not(target_arch = "wasm32"))]
     #[deprecated(
-        note = "Use `session.as_cookie().map(|cookie| cookie.write_secret_file(path))` instead"
+        note = "Use GrantSessionView::export_local_secret and persist that grant secret instead."
     )]
     pub fn write_secret_file<P: AsRef<std::path::Path>>(
         &self,

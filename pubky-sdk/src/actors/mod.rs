@@ -8,6 +8,7 @@ pub mod storage;
 pub use auth::AuthFlowKind;
 #[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use auth::cookie::PubkyCookieAuthFlow;
+#[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use auth::cookie::{CookieCredential, CookieSessionView};
 pub use auth::deep_links;
 #[doc(hidden)]

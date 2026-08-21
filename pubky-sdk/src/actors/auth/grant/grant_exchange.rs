@@ -19,7 +19,6 @@ use super::{
     credential::{GrantCredential, sign_pop_for_grant},
     pop_signer::GrantPopSigner,
 };
-use crate::actors::storage::resource::resolve_pubky;
 use crate::errors::{RequestError, Result};
 use crate::util::check_http_status;
 use crate::{PubkyHttpClient, cross_log};
@@ -106,10 +105,13 @@ async fn post_grant_session(
     let pop_jws = sign_pop_for_grant(client_signer, homeserver_pk, &grant_claims.jti).await?;
     let body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
 
-    let url = format!("pubky://{}/auth/grant/session", grant_claims.iss.z32());
-    let resolved = resolve_pubky(&url)?;
     let resp = client
-        .cross_request(Method::POST, resolved)
+        .cross_request_via_homeserver(
+            Method::POST,
+            homeserver_pk,
+            &grant_claims.iss,
+            "/auth/grant/session",
+        )
         .await?
         .json(&body)
         .send()
