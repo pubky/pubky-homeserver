@@ -84,7 +84,6 @@ let caps = Capabilities::builder()
 const caps = "/pub/my-cool-app/:rw";
 ```
 
-
 ## Event Stream Path Filters
 
 Event streams without a `path` filter return only public (`/pub/`) events.
