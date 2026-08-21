@@ -3,12 +3,14 @@
 //! Enforces per-path request-count quotas (`[[drive.rate_limits]]` in config).
 //! Each path+method pattern has a governor rate limiter keyed by IP or user.
 
+use axum::http::header::RETRY_AFTER;
 use axum::response::{IntoResponse, Response};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use futures_util::future::BoxFuture;
+use governor::clock::Clock;
 use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
 
@@ -122,16 +124,19 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
             continue;
         }
         if let Err(e) = limit.limiter.check_key(&key) {
+            let retry_after = e.wait_time_from(limit.limiter.clock().now());
+            let retry_after_secs = retry_after.as_secs().max(1);
             tracing::debug!(
-                "Rate limit of {} exceeded for {key}: {}",
+                "Rate limit of {} exceeded for {key}: {e}. Retry after {retry_after_secs}s",
                 limit.limit.quota,
-                e
             );
-            return Err(HttpError::new_with_message(
+
+            let response = (
                 StatusCode::TOO_MANY_REQUESTS,
+                [(RETRY_AFTER, retry_after_secs)],
                 "Rate limit exceeded",
-            )
-            .into_response());
+            );
+            return Err(response.into_response());
         }
     }
     Ok(())
@@ -142,6 +147,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use axum::http::Method;
+    use axum::response::IntoResponse;
     use axum::{
         middleware,
         routing::{get, post},
@@ -158,7 +164,6 @@ mod tests {
     use crate::shared::HttpResult;
 
     use super::*;
-    use axum::response::IntoResponse;
 
     async fn upload_handler() -> HttpResult<impl IntoResponse> {
         Ok((StatusCode::CREATED, ()))
@@ -309,6 +314,43 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// A `429 Too Many Requests` response must carry a `Retry-After: <seconds>` header whose value
+    /// reflects the configured quota (here `1r/m`, so callers should wait ~60 seconds) and is at
+    /// least one second.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn rate_limited_response_includes_retry_after_header() {
+        let path_limit = PathLimit {
+            path: GlobPattern::new("/upload"),
+            method: HttpMethod(Method::POST),
+            quota: "1r/m".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let socket = start_server(vec![path_limit]).await;
+        let path = format!("http://{}/upload", socket);
+
+        // First request consumes the only allowed cell for this minute.
+        let first_req = Client::new().post(&path).send().await.unwrap();
+        assert_eq!(first_req.status(), StatusCode::CREATED);
+
+        // Second request is rate-limited and must report how long to wait.
+        let second_req = Client::new().post(&path).send().await.unwrap();
+        assert_eq!(second_req.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let retry_after = second_req
+            .headers()
+            .get(RETRY_AFTER)
+            .expect("429 response must include a Retry-After header");
+        let delay_secs: u64 = String::from_utf8_lossy(retry_after.as_bytes())
+            .parse()
+            .expect("Retry-After should be an integer number of seconds");
+
+        assert!(delay_secs >= 1, "Retry-After must be at least one second");
+        assert!(delay_secs <= 60, "Retry-After should not exceed the quota");
     }
 
     #[test]
