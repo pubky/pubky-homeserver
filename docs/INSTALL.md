@@ -141,6 +141,8 @@ pubky-homeserver --data-dir /path/to/pubky-data init
 
 The homeserver requires a running PostgreSQL instance with an empty database.
 
+> **Note:** The examples below use a simple password for quick local setup. If your server is public-facing then you may wish to use a strong password and review the [Docker security best practices](https://docs.docker.com/build/building/best-practices/#security).
+
 ### Docker
 
 Requires [Docker Engine](https://docs.docker.com/engine/install/ubuntu/).
@@ -243,7 +245,7 @@ Create a service file:
 sudo nano /etc/systemd/system/pubky-homeserver.service
 ```
 
-Paste the following:
+Paste the following, replacing `YOUR_USER` in both lines with your Linux username (the output of `whoami`):
 
 ```ini
 [Unit]
