@@ -103,7 +103,7 @@ jobs:
             pubky-common,
             pubky-homeserver,
             pubky-testnet,
-            homeserver-cli,
+            homeservercli,
             e2e,
           ]
     runs-on: ubuntu-latest
@@ -128,7 +128,7 @@ jobs:
         run: |
           set -e
           # nextest does not support doctests yet.
-          if [ "${{ matrix.crate }}" != "homeserver-cli" ]; then
+          if [ "${{ matrix.crate }}" != "homeservercli" ]; then
             cargo test --doc -p ${{ matrix.crate }} --all-features
           fi
 

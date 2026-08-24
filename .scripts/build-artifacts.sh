@@ -43,7 +43,7 @@ TARGETS=(
 )
 
 # List of binaries to build.
-ARTIFACTS=("pubky-homeserver" "homeserver-cli")
+ARTIFACTS=("pubky-homeserver" "homeservercli")
 
 echo "Create the github-release directory..."
 rm -rf target/github-release
