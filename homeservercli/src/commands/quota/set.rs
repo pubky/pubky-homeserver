@@ -18,19 +18,22 @@ pub struct SetArgs {
     pub public_key: PublicKey,
 
     /// Storage quota in MB. Use a number (e.g. 500) or "unlimited".
+    /// System default is defined in the homeserver config.
     #[arg(long, value_name = "MB")]
     pub storage_quota_mb: Option<Quota>,
 
     /// Read bandwidth limit (e.g. 100mb/s, 1gb/h). Use "unlimited" to remove the limit.
+    /// System default is defined in the homeserver config.
     #[arg(long, value_name = "RATE")]
     pub rate_read: Option<RateLimit>,
 
     /// Write bandwidth limit (e.g. 10mb/s, 500kb/m). Use "unlimited" to remove the limit.
+    /// System default is defined in the homeserver config.
     #[arg(long, value_name = "RATE")]
     pub rate_write: Option<RateLimit>,
 
     /// Read burst size in the rate's unit (e.g. 50 for "50mb" when rate is mb/s).
-    /// Defaults to the rate value when not set.
+    /// System default is defined in the homeserver config.
     #[arg(long, value_name = "N")]
     pub rate_read_burst: Option<u32>,
 
