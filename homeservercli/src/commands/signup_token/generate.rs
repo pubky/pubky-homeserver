@@ -1,31 +1,26 @@
-use crate::commands::admin::context::AdminContext;
-use crate::commands::admin::quota::error::map_http;
+use crate::commands::context::AdminContext;
+use crate::commands::signup_token::error::map_http;
 use crate::helpers::quota::{Quota, QuotaUpdate, RateLimit};
-use anyhow::Result;
-use clap::{ArgGroup, Args};
-use pubky::PublicKey;
+use anyhow::{Context, Result};
+use clap::Args;
 
 #[derive(Args, Debug)]
-#[command(about = "Override quota settings for a specific user")]
-#[command(group(
-    ArgGroup::new("quota_fields")
-        .required(true)
-        .multiple(true)
-        .args(["storage_quota_mb", "rate_read", "rate_write", "rate_read_burst", "rate_write_burst", "allowed_write_paths"]),
-))]
-pub struct SetArgs {
-    /// Public key of the user to update (z-base-32 encoded).
-    pub pubky: PublicKey,
-
-    /// Storage quota in MB. Use a number (e.g. 500) or "unlimited".
+#[command(about = "Generate a signup invite token with optional quota overrides")]
+pub struct GenerateArgs {
+    /// Storage quota in MB for the invited user. Use a number (e.g. 500) or "unlimited".
+    /// Omit to apply the system default which is defined in the homeserver config.
     #[arg(long, value_name = "MB")]
     pub storage_quota_mb: Option<Quota>,
 
-    /// Read bandwidth limit (e.g. 100mb/s, 1gb/h). Use "unlimited" to remove the limit.
+    /// Read bandwidth limit for the invited user (e.g. 100mb/s, 1gb/h).
+    /// Use "unlimited" to remove the limit.
+    /// Omit to apply the system default which is defined in the homeserver config.
     #[arg(long, value_name = "RATE")]
     pub rate_read: Option<RateLimit>,
 
-    /// Write bandwidth limit (e.g. 10mb/s, 500kb/m). Use "unlimited" to remove the limit.
+    /// Write bandwidth limit for the invited user (e.g. 10mb/s, 500kb/m).
+    /// Use "unlimited" to remove the limit.
+    /// Omit to apply the system default which is defined in the homeserver config.
     #[arg(long, value_name = "RATE")]
     pub rate_write: Option<RateLimit>,
 
@@ -38,16 +33,14 @@ pub struct SetArgs {
     #[arg(long, value_name = "N")]
     pub rate_write_burst: Option<u32>,
 
-    /// Restrict which paths the user may write to. Repeatable.
+    /// Restrict which paths the invited user may write to. Repeatable.
     /// Trailing slash = directory prefix match; no slash = exact file match.
     /// Example: --allowed-write-paths /pub/tokens/ --allowed-write-paths /pub/profile.json
     #[arg(long, value_name = "PATH")]
     pub allowed_write_paths: Vec<String>,
 }
 
-pub fn run(context: AdminContext, args: &SetArgs) -> Result<()> {
-    let pk = args.pubky.z32();
-
+pub fn run(context: AdminContext, args: &GenerateArgs) -> Result<()> {
     let body = QuotaUpdate {
         storage_quota_mb: args.storage_quota_mb,
         rate_read: args.rate_read.clone(),
@@ -57,12 +50,13 @@ pub fn run(context: AdminContext, args: &SetArgs) -> Result<()> {
         allowed_write_paths: args.allowed_write_paths.clone(),
     };
 
-    context
+    let token = context
         .client
-        .patch_json(&format!("users/{}/quota", pk), &body)
-        .map_err(map_http)?;
+        .post_json("generate_signup_token", &body)
+        .map_err(map_http)?
+        .text()
+        .context("failed to read signup token response")?;
 
-    println!("updated quota for user: {}", pk);
-
+    println!("invite code: {token}");
     Ok(())
 }

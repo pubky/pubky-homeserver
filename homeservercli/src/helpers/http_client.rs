@@ -42,6 +42,7 @@ impl HttpClient {
         }
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!(
                 env!("CARGO_PKG_NAME"),
                 "/",

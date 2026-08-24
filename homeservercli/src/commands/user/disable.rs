@@ -1,5 +1,5 @@
-use crate::commands::admin::context::AdminContext;
-use crate::commands::admin::user::error::map_http;
+use crate::commands::context::AdminContext;
+use crate::commands::user::error::map_http;
 use anyhow::Result;
 use clap::Args;
 use pubky::PublicKey;

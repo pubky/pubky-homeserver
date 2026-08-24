@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 pub mod disable;
 pub mod enable;
-use crate::commands::admin::context::AdminContext;
+use crate::commands::context::AdminContext;
 pub mod error;
 
 #[derive(Args, Debug)]

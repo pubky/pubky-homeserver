@@ -1,4 +1,4 @@
-use crate::commands::admin::error as admin_error;
+use crate::commands::error as admin_error;
 use crate::helpers::errors::ApiError;
 use crate::helpers::http_client::http_status;
 

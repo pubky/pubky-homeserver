@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use url::Url;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -12,6 +12,12 @@ pub struct AdminToml {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ConfigToml {
     pub admin: AdminToml,
+}
+
+/// Default directory to look for `config.toml` when no data dir is provided
+/// via `--data-dir` or `PUBKY_HOMESERVER_DATA_DIR`: `~/.config`.
+pub fn default_config_dir_path() -> Option<PathBuf> {
+    Some(dirs::home_dir().unwrap_or_default().join(".pubky"))
 }
 
 impl ConfigToml {

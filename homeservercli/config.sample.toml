@@ -1,0 +1,10 @@
+# By default the CLI looks for this file at ~/.pubky/config.toml.
+# Use --data-dir (or PUBKY_HOMESERVER_DATA_DIR) to point at another directory.
+#
+# Each setting can also be overridden, in order of precedence, by a
+# command-line flag or an environment variable:
+#   admin_password -> --admin-password / PUBKY_HOMESERVER_ADMIN_PASSWORD
+#   admin_endpoint -> --admin-endpoint / PUBKY_HOMESERVER_ADMIN_ENDPOINT
+[admin]
+admin_password="admin"
+admin_endpoint="http://127.0.0.1:6288"
