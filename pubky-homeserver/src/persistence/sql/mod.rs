@@ -6,6 +6,7 @@
 //! both pooled connections and explicit transactions.
 
 mod connection_string;
+mod database_mode;
 pub(crate) mod entities;
 mod migration;
 pub(crate) mod migrations;
@@ -15,11 +16,10 @@ mod sql_db;
 mod unified_executor;
 
 pub use connection_string::ConnectionString;
-pub use entities::entry;
-pub use entities::signup_code;
-pub(crate) use entities::user;
+pub use database_mode::DatabaseMode;
+pub use entities::*;
 pub use migrator::Migrator;
 pub(crate) use pg_event_listener::PgEventListener;
-pub use sql_db::{SqlDb, SqlDbConnectError};
+pub use sql_db::SqlDb;
 pub(crate) use unified_executor::uexecutor;
 pub(crate) use unified_executor::UnifiedExecutor;

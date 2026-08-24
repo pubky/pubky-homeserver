@@ -13,7 +13,7 @@ use crate::{
     observability::{Metrics, MetricsInitError},
     persistence::{
         files::{events::EventsService, FileIoError, FileService},
-        sql::{Migrator, PgEventListener, SqlDb},
+        sql::{DatabaseMode, Migrator, PgEventListener, SqlDb},
     },
     ConfigToml, DataDir,
 };
@@ -35,7 +35,10 @@ pub enum AppContextConversionError {
     Keypair(anyhow::Error),
     /// Failed to open SQL DB.
     #[error("Failed to open SQL DB: {0}")]
-    SqlDb(crate::persistence::sql::SqlDbConnectError),
+    SqlDb(sqlx::Error),
+    /// No database URL was configured (production builds require an explicit URL).
+    #[error("No database_url configured. Set [general].database_url in config.toml.")]
+    NoDatabaseUrl,
     /// Failed to run migrations.
     #[error("Failed to run migrations: {0}")]
     Migrations(anyhow::Error),
@@ -151,7 +154,8 @@ impl AppContext {
             .read_or_create_keypair()
             .map_err(AppContextConversionError::Keypair)?;
 
-        let sql_db = SqlDb::connect(conf.general.database_url.clone())
+        let db_mode = Self::resolve_database_mode(&conf)?;
+        let sql_db = SqlDb::connect(db_mode)
             .await
             .map_err(AppContextConversionError::SqlDb)?;
         Migrator::new(&sql_db)
@@ -201,18 +205,36 @@ impl AppContext {
 }
 
 impl AppContext {
+    /// Resolve the [`DatabaseMode`] from config.
+    ///
+    /// - Production: `database_url` must be `Some`; always [`DatabaseMode::Direct`].
+    /// - Test builds: delegates to [`DatabaseMode::resolve_test`] which resolves
+    ///   `None` via env var or default, always returning [`DatabaseMode::EphemeralTest`].
+    fn resolve_database_mode(conf: &ConfigToml) -> Result<DatabaseMode, AppContextConversionError> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            Ok(DatabaseMode::resolve_test(
+                conf.general.database_url.clone(),
+            ))
+        }
+
+        #[cfg(not(any(test, feature = "testing")))]
+        {
+            conf.general
+                .database_url
+                .clone()
+                .map(DatabaseMode::Direct)
+                .ok_or(AppContextConversionError::NoDatabaseUrl)
+        }
+    }
+
     /// Build the pkarr client builder based on the config.
     fn build_pkarr_builder_from_config(config_toml: &ConfigToml) -> pkarr::ClientBuilder {
         let mut builder = pkarr::ClientBuilder::default();
         #[cfg(any(test, feature = "testing"))]
-        // None (no explicit URL) or a `?pubky-test=true` URL both indicate a test
-        // environment where we must avoid contacting the public DHT.
-        if config_toml
-            .general
-            .database_url
-            .as_ref()
-            .is_none_or(|url| url.is_test_db())
-        {
+        // In test builds, no explicit database_url means we're in a test environment
+        // where we must avoid contacting the public DHT.
+        if config_toml.general.database_url.is_none() {
             builder
                 .no_default_network()
                 // Keep the client buildable without contacting the public DHT.
@@ -250,12 +272,16 @@ impl AppContext {
 mod tests {
     use super::*;
 
-    /// Verifies that the test pkarr builder doesn't contact the public DHT.
-    /// Uses Debug output because pkarr::ClientBuilder has no config getters.
+    /// Verifies that the test pkarr builder doesn't contact the public DHT
+    /// when database_url is None (the default test config).
     #[test]
     fn pkarr_builder_does_not_use_default_network() {
-        let builder =
-            AppContext::build_pkarr_builder_from_config(&ConfigToml::default_test_config());
+        let config = ConfigToml::default_test_config();
+        assert!(
+            config.general.database_url.is_none(),
+            "default_test_config should have database_url = None"
+        );
+        let builder = AppContext::build_pkarr_builder_from_config(&config);
         let builder_debug = format!("{builder:?}");
 
         assert!(

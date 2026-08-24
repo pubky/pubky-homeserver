@@ -431,23 +431,15 @@ impl DataDir for TestnetDataDir {
     fn read_or_create_config_file(&self) -> anyhow::Result<ConfigToml> {
         let mut config = self.inner.read_or_create_config_file()?;
         apply_static_testnet_overrides(&mut config, self.dht_bootstrap_nodes.clone());
-        if let Some(connection_string) = &self.postgres_connection_string {
-            config.general.database_url = Some(connection_string.clone());
-        }
-        match &config.general.database_url {
-            None => {
-                anyhow::bail!(
-                    "Persistent testnet requires an explicit database URL. \
-                     Set `database_url` in config.toml under [general]."
-                );
-            }
-            Some(url) if url.is_test_db() => {
-                anyhow::bail!(
-                    "Persistent testnet requires a real database. \
-                     Remove `?pubky-test=true` from the connection string to use a persistent database."
-                );
-            }
-            Some(_) => {}
+        config.general.database_url = self
+            .postgres_connection_string
+            .clone()
+            .or(config.general.database_url);
+        if config.general.database_url.is_none() {
+            anyhow::bail!(
+                "Persistent testnet requires an explicit database URL. \
+                 Set `database_url` in config.toml under [general]."
+            );
         }
         Ok(config)
     }
