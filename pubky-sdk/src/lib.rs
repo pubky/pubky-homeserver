@@ -46,6 +46,7 @@ pub use actors::SessionInfo;
 #[doc(inline)]
 pub use actors::deep_links;
 #[doc(inline)]
+#[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use actors::{
     CookieCredential, CookieSessionView, DelegatedGrantCredentialState, GrantCredential,
     GrantManager, GrantSessionView,
@@ -85,6 +86,9 @@ pub use pkarr;
 
 // Re-exports
 #[doc(inline)]
+#[deprecated(note = "Use SessionInfo or GrantSessionInfo instead.")]
+pub use pubky_common::session::CookieSessionRecord;
+#[doc(inline)]
 pub use pubky_common::{
     StoragePath, StoragePathError,
     auth::{
@@ -97,7 +101,6 @@ pub use pubky_common::{
     capabilities::{Capabilities, Capability},
     crypto::{Keypair, PublicKey},
     recovery_file,
-    session::CookieSessionRecord,
 };
 pub use reqwest::{Method, StatusCode};
 

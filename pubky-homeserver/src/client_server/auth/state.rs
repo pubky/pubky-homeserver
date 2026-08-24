@@ -1,12 +1,11 @@
 //! Auth-specific sub-state for the auth module.
 
-use super::cookie::verifier::CookieAuthVerifier;
 use crate::app_context::AppContext;
 use crate::observability::Metrics;
 use crate::shared::HttpResult;
 
 use super::cookie::service::CookieAuthService;
-use super::{AuthSession, GrantAuthService, RevocationListener, SignupService};
+use super::{AuthSession, GrantAuthService, RevocationListener};
 
 /// Auth-specific state. Auth route handlers extract this instead of the
 /// global `AppState`, keeping the auth module fully self-contained.
@@ -21,25 +20,9 @@ pub struct AuthState {
 
 impl AuthState {
     pub fn new(context: &AppContext) -> Self {
-        let signup_service = SignupService::new(
-            context.sql_db.clone(),
-            context.config_toml.general.signup_mode.clone(),
-            context.user_service.clone(),
-        );
-
         Self {
-            grant_auth_service: GrantAuthService::new(
-                context.sql_db.clone(),
-                context.keypair.public_key(),
-                signup_service.clone(),
-                context.user_service.clone(),
-            ),
-            cookie_auth_service: CookieAuthService::new(
-                context.sql_db.clone(),
-                context.user_service.clone(),
-                CookieAuthVerifier::default(),
-                signup_service,
-            ),
+            grant_auth_service: GrantAuthService::from_context(context),
+            cookie_auth_service: CookieAuthService::from_context(context),
             metrics: context.metrics.clone(),
             revocation_listener: context.revocation_listener.clone(),
         }

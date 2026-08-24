@@ -13,7 +13,7 @@ use axum::response::Response;
 use futures_util::StreamExt;
 use governor::Jitter;
 
-use crate::quota_config::LimitKey;
+use crate::shared::quota::LimitKey;
 
 use super::limiter_pool::KeyedRateLimiter;
 

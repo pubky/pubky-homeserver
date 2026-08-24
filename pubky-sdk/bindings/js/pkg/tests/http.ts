@@ -1,5 +1,5 @@
 import test from "tape";
-import { Client } from "../index.js";
+import { Client, Keypair } from "../index.js";
 import type { PubkyError } from "../index.js";
 import { hasNetwork } from "./utils.js";
 
@@ -135,6 +135,146 @@ test("fetch merges plain object headers", async (t) => {
   t.equal(headers.get("pubky-host"), TLD, "pubky-host header appended");
   t.equal(response.status, 200, "fetch responded with success");
 
+  t.end();
+});
+
+test("ordinary HTTP storage paths remain untouched", async (t) => {
+  const client = Client.testnet();
+  const owner = Keypair.random().publicKey.z32();
+  const originalFetch = globalThis.fetch;
+  const requests: Request[] = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    requests.push(request);
+    const response = new Response(null, { status: 204 });
+    Object.defineProperty(response, "url", { value: request.url });
+    return response;
+  }) as typeof fetch;
+
+  try {
+    await client.fetch("https://example.com/storage/images/logo.png");
+    await client.fetch(`https://example.com/storage/${owner}/pub/file.txt`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  t.equal(requests.length, 2, "only the requested resources were fetched");
+  t.equal(
+    requests[0].url,
+    "https://example.com/storage/images/logo.png",
+    "ordinary storage path preserved",
+  );
+  t.equal(
+    requests[1].url,
+    `https://example.com/storage/${owner}/pub/file.txt`,
+    "z32 storage segment preserved on an ordinary host",
+  );
+  t.equal(requests[0].headers.get("pubky-host"), null, "pubky-host omitted");
+  t.equal(requests[1].headers.get("pubky-host"), null, "pubky-host omitted for z32 path");
+  t.end();
+});
+
+test("path-addressed storage omits pubky-host", async (t) => {
+  const client = Client.testnet();
+  const owner = Keypair.random().publicKey.z32();
+  const originalFetch = globalThis.fetch;
+  let infoRequest: Request | undefined;
+  let seenRequest: Request | undefined;
+  let storageRequests = 0;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const path = new URL(request.url).pathname;
+
+    if (path === "/info") {
+      infoRequest = request;
+      const response = new Response(JSON.stringify({ features: ["path-addressed-storage"] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+      Object.defineProperty(response, "url", { value: request.url });
+      return response;
+    } else if (path.startsWith("/storage/")) {
+      seenRequest = request;
+      storageRequests += 1;
+      const response = new Response(null, { status: 404 });
+      Object.defineProperty(response, "url", { value: request.url });
+      return response;
+    }
+
+    return originalFetch(input as RequestInfo | URL, init);
+  }) as typeof fetch;
+
+  try {
+    await client.fetch(
+      `https://${TLD}/storage/${owner}/pub/missing.txt?cursor=hello%20world`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  t.ok(infoRequest, "feature discovery requested /info");
+  t.equal(infoRequest!.credentials, "omit", "feature discovery omitted credentials");
+  t.equal(infoRequest!.headers.get("pubky-host"), null, "feature discovery omitted pubky-host");
+  t.ok(seenRequest, "fetch preserved the path-addressed storage request");
+  t.equal(storageRequests, 1, "storage response did not trigger a fallback retry");
+  t.equal(seenRequest!.headers.get("pubky-host"), null, "pubky-host omitted");
+  t.equal(seenRequest!.credentials, "include", "cookie credentials preserved");
+  t.equal(
+    new URL(seenRequest!.url).search,
+    "?cursor=hello%20world",
+    "query parameters preserved",
+  );
+  t.end();
+});
+
+test("storage falls back when homeserver info is unavailable", async (t) => {
+  const client = Client.testnet();
+  const owner = Keypair.random().publicKey.z32();
+  const originalFetch = globalThis.fetch;
+  let infoRequest: Request | undefined;
+  let storageRequest: Request | undefined;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const path = new URL(request.url).pathname;
+
+    if (path === "/info") {
+      infoRequest = request;
+      const response = new Response(null, { status: 404 });
+      Object.defineProperty(response, "url", { value: request.url });
+      return response;
+    }
+    if (path === "/pub/fallback.txt") {
+      storageRequest = request;
+      const response = new Response(null, { status: 404 });
+      Object.defineProperty(response, "url", { value: request.url });
+      return response;
+    }
+
+    return originalFetch(input as RequestInfo | URL, init);
+  }) as typeof fetch;
+
+  try {
+    await client.fetch(
+      `https://${TLD}/storage/${owner}/pub/fallback.txt?cursor=hello%20world`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  t.ok(infoRequest, "feature discovery requested /info");
+  t.equal(infoRequest!.credentials, "omit", "feature discovery omitted credentials");
+  t.equal(infoRequest!.headers.get("pubky-host"), null, "feature discovery omitted pubky-host");
+  t.ok(storageRequest, "storage used the legacy path");
+  t.equal(storageRequest!.headers.get("pubky-host"), owner, "legacy owner header attached");
+  t.equal(storageRequest!.credentials, "include", "storage credentials preserved");
+  t.equal(
+    new URL(storageRequest!.url).search,
+    "?cursor=hello%20world",
+    "query parameters preserved",
+  );
   t.end();
 });
 

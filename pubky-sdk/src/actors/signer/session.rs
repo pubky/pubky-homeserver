@@ -1,3 +1,8 @@
+#![allow(
+    deprecated,
+    reason = "This module preserves deprecated cookie signer compatibility methods"
+)]
+
 use std::sync::Arc;
 
 use pubky_common::auth::{
@@ -156,6 +161,7 @@ impl PubkySigner {
     /// - Returns [`crate::errors::Error::Parse`] if the homeserver URL cannot be constructed.
     /// - Propagates transport failures while creating the account or publishing the homeserver record.
     /// - Propagates validation errors while hydrating the cookie session.
+    #[deprecated(note = "Use PubkySigner::signup followed by PubkySigner::signin instead.")]
     pub async fn signup_cookie(
         &self,
         homeserver: &PublicKey,
@@ -181,6 +187,7 @@ impl PubkySigner {
     /// # Errors
     /// - Propagates transport failures during the session exchange.
     /// - Propagates validation errors while creating the cookie credential.
+    #[deprecated(note = "Use PubkySigner::signin instead.")]
     pub async fn signin_cookie(&self) -> Result<PubkySession> {
         self.signin_cookie_with_publish(PublishMode::Background)
             .await
@@ -191,6 +198,7 @@ impl PubkySigner {
     /// # Errors
     /// - Propagates transport failures during the session exchange.
     /// - Propagates failures while refreshing the homeserver record.
+    #[deprecated(note = "Use PubkySigner::signin_blocking instead.")]
     pub async fn signin_cookie_blocking(&self) -> Result<PubkySession> {
         self.signin_cookie_with_publish(PublishMode::Blocking).await
     }

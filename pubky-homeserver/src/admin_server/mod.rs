@@ -11,3 +11,16 @@ mod routes;
 mod trace;
 
 pub use app::{AdminServer, AdminServerBuildError};
+
+/// Extension trait to add the default admin password header to test requests.
+#[cfg(test)]
+pub(crate) trait AdminAuthExt {
+    fn admin_auth(self) -> Self;
+}
+
+#[cfg(test)]
+impl AdminAuthExt for axum_test::TestRequest {
+    fn admin_auth(self) -> Self {
+        self.add_header("X-Admin-Password", "admin")
+    }
+}

@@ -1,4 +1,4 @@
-use super::{limit_key::LimitKey, GlobPattern, HttpMethod, LimitKeyType, RequestCountQuota};
+use super::{GlobPattern, HttpMethod, LimitKey, LimitKeyType, RequestCountQuota};
 use serde::{Deserialize, Serialize};
 use serde_valid::Validate;
 use std::num::NonZeroU32;

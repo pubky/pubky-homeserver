@@ -30,10 +30,9 @@ mod tests {
     use tower_cookies::CookieManagerLayer;
 
     use crate::client_server::middleware::request_tenant::RequestTenant;
-    use crate::data_directory::quota_config::BandwidthQuota;
     use crate::persistence::sql::SqlDb;
-    use crate::quota_config::{GlobPattern, HttpMethod, LimitKeyType, PathLimit};
     use crate::services::user_service::UserService;
+    use crate::shared::quota::{BandwidthQuota, GlobPattern, HttpMethod, LimitKeyType, PathLimit};
     use crate::shared::HttpResult;
 
     use super::{BandwidthQuotaLimitLayer, RequestRateLimitLayer};

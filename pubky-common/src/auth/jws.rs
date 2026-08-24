@@ -114,7 +114,7 @@ impl RandomId {
 
     /// Parse and validate an existing ID string.
     ///
-    /// Must be non-empty and at most 22 characters.
+    /// Must be non-empty, at most 22 characters, and contain only base64url characters.
     pub fn parse(s: &str) -> Result<Self, Error> {
         if s.is_empty() {
             return Err(Error::InvalidFormat("RandomId must not be empty"));
@@ -122,6 +122,14 @@ impl RandomId {
         if s.len() > RANDOM_ID_MAX_LENGTH {
             return Err(Error::InvalidFormat(
                 "RandomId must be at most 22 characters",
+            ));
+        }
+        if !s
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(Error::InvalidFormat(
+                "RandomId must contain only base64url characters",
             ));
         }
         Ok(Self(s.to_string()))
@@ -262,7 +270,25 @@ mod tests {
     #[test]
     fn random_id_parse_valid() {
         RandomId::parse("abc123").unwrap();
+        RandomId::parse("AZaz09-_").unwrap();
         RandomId::parse("a").unwrap(); // min length
+    }
+
+    #[test]
+    fn random_id_parse_rejects_non_base64url_characters() {
+        for value in [
+            ".",
+            "..",
+            "../../../pub/a.txt",
+            "a/b",
+            "a?b",
+            "a#b",
+            "a+b",
+            "a=b",
+            "a b",
+        ] {
+            assert!(RandomId::parse(value).is_err(), "accepted {value:?}");
+        }
     }
 
     #[test]

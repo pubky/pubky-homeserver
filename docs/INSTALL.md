@@ -27,7 +27,7 @@ Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), 
 Pick a version and platform from the [releases page](https://github.com/pubky/pubky-homeserver/releases). The commands below use these variables, so set them first:
 
 ```bash
-PUBKY_VERSION=0.x
+PUBKY_VERSION=0.11.0
 PUBKY_PLATFORM=linux-amd64  # or linux-arm64. Alternatively: osx-arm64, osx-amd64, windows-amd64
 ```
 
@@ -141,6 +141,8 @@ pubky-homeserver --data-dir /path/to/pubky-data init
 
 The homeserver requires a running PostgreSQL instance with an empty database.
 
+> **Note:** The examples below use a simple password for quick local setup. If your server is public-facing then you may wish to use a strong password and review the [Docker security best practices](https://docs.docker.com/build/building/best-practices/#security).
+
 ### Docker
 
 Requires [Docker Engine](https://docs.docker.com/engine/install/ubuntu/).
@@ -219,23 +221,32 @@ sed -i 's|^# \[general\]|[general]|; s|^# database_url = .*|database_url = "post
 ### Docker
 
 ```bash
-docker run -d --restart unless-stopped --network=host -v ~/.pubky:/root/.pubky pubky-homeserver homeserver
+docker run -d --name pubky-homeserver --restart unless-stopped --network=host -v ~/.pubky:/root/.pubky pubky-homeserver homeserver
 ```
 
 `--network=host` lets the container reach PostgreSQL on the host and expose its endpoints. The volume mount shares the data directory (config and keypair) with the container. `--restart unless-stopped` ensures the homeserver starts automatically after a reboot.
 
+Managing the container:
 
-### Native
+```bash
+docker logs -f pubky-homeserver        # view logs
+docker restart pubky-homeserver        # restart (e.g. after editing config.toml)
+docker stop pubky-homeserver           # stop
+```
 
-Start the homeserver:
+### Native (foreground)
+
+Start the homeserver in the foreground (useful for testing, does not survive reboots):
 
 ```bash
 pubky-homeserver
 ```
 
+Press `Ctrl+C` to stop. For production use, set up a [systemd service](#systemd-service) instead.
+
 ### systemd Service
 
-Below is an example setup using systemd, which is available on most Linux distributions. This will run the homeserver in the background, start it on boot, and restart it automatically on failure.
+systemd is available on most Linux distributions. It runs the homeserver in the background, starts it on boot, and restarts it automatically on failure.
 
 Create a service file:
 
@@ -243,7 +254,7 @@ Create a service file:
 sudo nano /etc/systemd/system/pubky-homeserver.service
 ```
 
-Paste the following:
+Paste the following, replacing `YOUR_USER` in both lines with your Linux username (the output of `whoami`):
 
 ```ini
 [Unit]
@@ -276,16 +287,13 @@ sudo systemctl enable pubky-homeserver
 sudo systemctl start pubky-homeserver
 ```
 
-Check that it is running:
+Managing the service:
 
 ```bash
-systemctl status pubky-homeserver
-```
-
-View logs:
-
-```bash
-journalctl -u pubky-homeserver -f
+systemctl status pubky-homeserver              # check status
+sudo systemctl restart pubky-homeserver        # restart (e.g. after editing config.toml)
+journalctl -u pubky-homeserver -f              # view logs
+sudo systemctl stop pubky-homeserver           # stop
 ```
  
 ## Next Steps

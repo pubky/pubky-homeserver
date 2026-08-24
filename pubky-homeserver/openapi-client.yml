@@ -90,7 +90,8 @@ paths:
               schema:
                 "$ref": "#/components/schemas/ClientInfoResponse"
               example:
-                features: []
+                features:
+                - path-addressed-storage
   "/signup_tokens/{token}":
     get:
       tags:

@@ -18,8 +18,8 @@ See [config.sample.toml](config.sample.toml) for all configuration options.
 
 When an SDK change requires homeserver behavior that older versions do not
 support, such as a new endpoint, add a stable feature identifier to the client
-`GET /info` response. SDKs must check that identifier before using the new
-behavior.
+`GET /info` response. SDKs must check it before using the new behavior and
+ignore unknown identifiers.
 
 ## API Specifications
 
@@ -29,6 +29,7 @@ behavior.
 ## Architecture
 
 - [PKARR republishing](../docs/REPUBLISHING.md) — cache-first resolution, network fallback, and retry behavior.
+- [Storage-addressing migration](../docs/STORAGE_ADDRESSING_MIGRATION.md) — adoption metrics, migration clock, and legacy-removal review.
 
 ## Library Usage
 

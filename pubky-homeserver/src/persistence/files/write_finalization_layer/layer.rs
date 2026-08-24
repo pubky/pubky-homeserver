@@ -221,9 +221,9 @@ impl Finalizer {
     }
 
     pub(super) fn notify_event(&self) {
-        let pool = self.sql_db.pool().clone();
+        let events_service = self.events_service.clone();
         drop(tokio::spawn(async move {
-            EventsService::notify_event(&pool).await;
+            events_service.notify_event().await;
         }));
     }
 }
@@ -244,7 +244,7 @@ pub(super) mod test_support {
         Finalizer::new(
             UserService::new(db.clone()),
             db.clone(),
-            EventsService::new(100),
+            EventsService::new(db.clone(), 100),
             None,
             CollisionPolicy::Enforce,
         )
@@ -254,7 +254,7 @@ pub(super) mod test_support {
         get_memory_operator().layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
-            EventsService::new(100),
+            EventsService::new(db.clone(), 100),
             None,
             true,
         ))

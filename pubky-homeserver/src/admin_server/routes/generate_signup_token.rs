@@ -2,7 +2,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 use crate::{
     persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
-    shared::{user_quota::UserQuota, HttpError, HttpResult},
+    shared::{quota::UserQuota, HttpError, HttpResult},
 };
 
 use super::super::app_state::AppState;
@@ -12,7 +12,7 @@ async fn create_signup_code(state: &AppState, limits: &UserQuota) -> HttpResult<
     let code = SignupCodeRepository::create(
         &SignupCode::random(),
         limits,
-        &mut state.sql_db.pool().into(),
+        &mut state.context.sql_db.pool().into(),
     )
     .await?;
     Ok((StatusCode::OK, code.id.0))

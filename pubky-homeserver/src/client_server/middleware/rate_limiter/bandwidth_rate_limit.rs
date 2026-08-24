@@ -17,8 +17,8 @@ use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
 
 use crate::client_server::middleware::request_tenant::RequestTenant;
-use crate::quota_config::LimitKey;
 use crate::services::user_service::UserService;
+use crate::shared::quota::LimitKey;
 use crate::shared::HttpError;
 use crate::DefaultQuotasToml;
 
@@ -43,6 +43,16 @@ pub struct BandwidthQuotaLimitLayer {
 }
 
 impl BandwidthQuotaLimitLayer {
+    /// Creates the layer from the application context.
+    pub fn from_context(context: &crate::AppContext) -> Self {
+        Self {
+            user_service: context.user_service.clone(),
+            defaults: context.config_toml.default_quotas.clone(),
+        }
+    }
+
+    /// Creates the layer with explicit services (test-only).
+    #[cfg(test)]
     pub fn new(user_service: UserService, defaults: DefaultQuotasToml) -> Self {
         Self {
             user_service,
@@ -257,10 +267,10 @@ mod tests {
     use crate::client_server::auth::grant::session::GrantSession;
     use crate::client_server::auth::AuthSession;
     use crate::client_server::middleware::request_tenant::RequestTenant;
-    use crate::data_directory::quota_config::BandwidthQuota;
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
-    use crate::shared::user_quota::{QuotaOverride, UserQuota};
+    use crate::shared::quota::user_quota::QuotaOverride;
+    use crate::shared::quota::{BandwidthQuota, UserQuota};
     use crate::shared::HttpResult;
 
     use super::*;

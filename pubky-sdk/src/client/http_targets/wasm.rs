@@ -1,8 +1,8 @@
 //! HTTP methods that support `https://` with Pkarr domains, including `_pubky.<pk>` URLs
 
-use super::homeserver_url;
+use super::{TransportHost, classify_transport_host, homeserver_url};
 use crate::PublicKey;
-use crate::errors::{PkarrError, RequestError, Result};
+use crate::errors::{PkarrError, Result};
 use crate::{PubkyHttpClient, cross_log};
 use futures_lite::StreamExt;
 use pkarr::dns::rdata::SVCParam;
@@ -17,7 +17,7 @@ enum AmbientCredentials {
 }
 
 impl PubkyHttpClient {
-    /// A wrapper around [`PubkyHttpClient::request`], with the same signature between native and WASM.
+    /// Platform implementation for [`PubkyHttpClient::request_async`].
     pub(crate) async fn cross_request<T: IntoUrl>(
         &self,
         method: Method,
@@ -37,7 +37,7 @@ impl PubkyHttpClient {
             .await
     }
 
-    /// Route through `homeserver` while addressing `pubky_host`.
+    /// Route an authority-addressed endpoint through `homeserver` for `pubky_host`.
     pub(crate) async fn cross_request_via_homeserver(
         &self,
         method: Method,
@@ -46,13 +46,24 @@ impl PubkyHttpClient {
         path: &str,
     ) -> Result<RequestBuilder> {
         let mut url = homeserver_url(homeserver, path)?;
-        self.prepare_request(&mut url).await?;
+        self.prepare_transport_request(&mut url).await?;
 
         Ok(self
             .http
-            .request(method, url)
+            .request(method, url.clone())
             .fetch_credentials_include()
             .header("pubky-host", pubky_host.z32()))
+    }
+
+    pub(super) async fn homeserver_info_request(
+        &self,
+        homeserver: &PublicKey,
+    ) -> Result<RequestBuilder> {
+        // Bypass cross_request so discovery cannot recursively trigger itself.
+        let mut url = homeserver_url(homeserver, "/info")?;
+        self.prepare_transport_request(&mut url).await?;
+
+        Ok(self.http.request(Method::GET, url).fetch_credentials_omit())
     }
 
     async fn cross_request_with_credentials<T: IntoUrl>(
@@ -64,60 +75,30 @@ impl PubkyHttpClient {
         let original_url = url.as_str();
         let mut url = Url::parse(original_url)?;
 
-        let pubky_host = self.prepare_request(&mut url).await?;
+        let prepared = self.prepare_fetch(&mut url).await?;
 
         let request = self.http.request(method, url.clone());
-        let builder = match credentials {
+        let request = match credentials {
             AmbientCredentials::Include => request.fetch_credentials_include(),
             AmbientCredentials::Omit => request.fetch_credentials_omit(),
         };
 
-        let builder = if let Some(pubky_host) = pubky_host {
-            builder.header("pubky-host", pubky_host)
-        } else {
-            builder
-        };
-
-        Ok(builder)
+        Ok(match prepared.pubky_host_header {
+            Some(pubky_host) => request.header("pubky-host", pubky_host),
+            None => request,
+        })
     }
 
-    /// - Resolves a clearnet host to call with fetch
-    /// - Returns the `pubky-host` value if available
-    ///
-    /// # Errors
-    /// - Returns [`crate::errors::PkarrError`] when PKARR resolution fails or produces invalid endpoints.
-    pub async fn prepare_request(&self, url: &mut Url) -> Result<Option<String>> {
-        let host = url.host_str().unwrap_or("").to_string();
+    pub(super) async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
+        let public_key = match classify_transport_host(url.host_str().unwrap_or_default())? {
+            TransportHost::PubkyQname(public_key) | TransportHost::BarePublicKey(public_key) => {
+                public_key
+            }
+            TransportHost::Other => return Ok(None),
+        };
 
-        let mut pubky_host = None;
-
-        if let Some(stripped) = host.strip_prefix("_pubky.") {
-            if PublicKey::is_pubky_prefixed(stripped) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(stripped).is_ok() {
-                self.transform_url(url).await?;
-                pubky_host = Some(stripped.to_string());
-            }
-        } else {
-            if PublicKey::is_pubky_prefixed(&host) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(&host).is_ok() {
-                self.transform_url(url).await?;
-                pubky_host = Some(host);
-            }
-        }
-
-        Ok(pubky_host)
+        self.transform_url(url).await?;
+        Ok(Some(public_key.z32()))
     }
 
     async fn transform_url(&self, url: &mut Url) -> Result<()> {

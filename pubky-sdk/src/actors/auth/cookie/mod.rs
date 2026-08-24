@@ -4,6 +4,11 @@
 //! Cookie-backed sessions lack the self-refreshing, mirror-friendly properties
 //! of grant-backed sessions.
 
+#![allow(
+    deprecated,
+    reason = "This module implements the deprecated cookie compatibility API"
+)]
+
 pub(crate) mod approval;
 pub(crate) mod builder;
 pub(crate) mod credential;

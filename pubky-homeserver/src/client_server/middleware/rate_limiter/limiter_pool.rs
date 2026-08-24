@@ -13,8 +13,7 @@ use governor::clock::QuantaClock;
 use governor::state::keyed::DashMapStateStore;
 use governor::{Quota, RateLimiter};
 
-use crate::data_directory::quota_config::BandwidthQuota;
-use crate::quota_config::{LimitKey, LimitKeyType, PathLimit};
+use crate::shared::quota::{BandwidthQuota, LimitKey, LimitKeyType, PathLimit};
 
 use super::extract_ip::extract_ip;
 use super::CLEANUP_INTERVAL_SECS;

@@ -18,6 +18,7 @@ use crate::actors::session::core::PubkySession;
 
 /// Cookie-only operations on a [`PubkySession`].
 #[derive(Debug)]
+#[deprecated(note = "Use GrantSessionView instead.")]
 pub struct CookieSessionView<'a> {
     session: &'a PubkySession,
     credential: &'a CookieCredential,
@@ -31,6 +32,7 @@ impl PubkySession {
     /// runtime is whether the cookie secret is *capturable*: see
     /// [`CookieSessionView::export_secret`].
     #[must_use]
+    #[deprecated(note = "Use PubkySession::as_grant instead.")]
     pub fn as_cookie(&self) -> Option<CookieSessionView<'_>> {
         self.try_downcast_credential::<CookieCredential>()
             .map(|c| CookieSessionView::new(self, c))
@@ -53,6 +55,7 @@ impl<'a> CookieSessionView<'a> {
     /// [`PubkySession::info`](crate::actors::session::core::PubkySession::info)
     /// accessor.
     #[must_use]
+    #[deprecated(note = "Use GrantSessionView::session_info instead.")]
     pub fn session_info(&self) -> CookieSessionRecord {
         self.credential.cookie_record()
     }
@@ -64,6 +67,7 @@ impl<'a> CookieSessionView<'a> {
     /// HTTP-only session cookie; `export()` merely captures the metadata needed to
     /// reconstruct a `PubkySession` handle.
     #[must_use]
+    #[deprecated(note = "Use GrantSessionView::export_local_secret instead.")]
     pub fn export(&self) -> String {
         let record = self.session_info();
         crate::cross_log!(info, "Exporting session for {}", record.public_key());
@@ -86,6 +90,7 @@ impl<'a> CookieSessionView<'a> {
     ///   JavaScript by the WHATWG fetch spec — only the browser cookie
     ///   jar holds the value.
     #[must_use]
+    #[deprecated(note = "Use GrantSessionView::export_local_secret instead.")]
     pub fn export_secret(&self) -> Option<String> {
         let public_key = self.session.info().public_key().z32();
         let cookie = self.credential.cookie_secret()?;
@@ -108,6 +113,9 @@ impl<'a> CookieSessionView<'a> {
     ///   permissions cannot be set. On native the secret is always
     ///   present, so this never errors with `NotFound` for that reason.
     #[cfg(not(target_arch = "wasm32"))]
+    #[deprecated(
+        note = "Use GrantSessionView::export_local_secret and persist that grant secret instead."
+    )]
     pub fn write_secret_file<P: AsRef<std::path::Path>>(
         &self,
         secret_file_path: P,

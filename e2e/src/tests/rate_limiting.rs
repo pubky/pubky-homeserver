@@ -5,8 +5,7 @@ use pubky_testnet::pubky::{
 };
 use pubky_testnet::{
     pubky_homeserver::{
-        quota_config::{GlobPattern, HttpMethod, LimitKey, LimitKeyType, PathLimit},
-        ConfigToml, SignupMode,
+        ConfigToml, GlobPattern, HttpMethod, LimitKey, LimitKeyType, PathLimit, SignupMode,
     },
     EphemeralTestnet,
 };

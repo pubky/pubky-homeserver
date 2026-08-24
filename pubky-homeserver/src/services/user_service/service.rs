@@ -7,7 +7,7 @@ use pubky_common::crypto::PublicKey;
 
 use crate::persistence::sql::user::{UserEntity, UserOverview, UserRepository};
 use crate::persistence::sql::{uexecutor, SqlDb, UnifiedExecutor};
-use crate::shared::user_quota::{UserQuota, UserQuotaPatch};
+use crate::shared::quota::{UserQuota, UserQuotaPatch};
 use crate::shared::{HttpError, HttpResult};
 
 use super::quota_cache::{CachedEntry, QuotaCache};
@@ -249,7 +249,7 @@ impl UserService {
 
     /// Test helper: create a user with a storage quota in MB.
     pub async fn create_with_quota_mb(&self, pubkey: &PublicKey, quota_mb: u64) -> UserEntity {
-        use crate::shared::user_quota::QuotaOverride;
+        use crate::shared::quota::user_quota::QuotaOverride;
         let user = self.create(pubkey).await.unwrap();
         let config = UserQuota {
             storage_quota_mb: QuotaOverride::Value(quota_mb),
@@ -410,7 +410,8 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_patch_quota_invalidates_cache() {
-        use crate::shared::user_quota::{QuotaOverride, UserQuotaPatch};
+        use crate::shared::quota::user_quota::QuotaOverride;
+        use crate::shared::quota::UserQuotaPatch;
 
         let svc = service().await;
         let pubkey = Keypair::random().public_key();

@@ -2,11 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use super::homeserver_url;
+use super::{TransportHost, classify_transport_host, homeserver_url};
 use futures_util::StreamExt;
 use tokio::net::TcpStream;
 
-use crate::errors::RequestError;
 use crate::{PubkyHttpClient, PublicKey, Result, cross_log};
 use reqwest::{IntoUrl, Method, RequestBuilder};
 use url::Url;
@@ -18,6 +17,19 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 pub(crate) enum ResolvedTransport {
     PubkyTls,
     Icann { domain: String, port: Option<u16> },
+}
+
+#[derive(Debug)]
+enum RequestTransport {
+    Standard,
+    Pubky(ResolvedTransport),
+}
+
+#[derive(Debug)]
+struct ResolvedRequest {
+    url: Url,
+    transport: RequestTransport,
+    pubky_host: Option<String>,
 }
 
 /// Resolves and caches per-host transport decisions (`PubkyTLS` vs ICANN).
@@ -162,20 +174,9 @@ impl PubkyHttpClient {
     ///
     /// Returns a [`Result`] containing the prepared `RequestBuilder`, or a URL/transport
     /// parsing error if the supplied `url` is invalid.
-    pub(crate) async fn cross_request(
-        &self,
-        method: Method,
-        mut url: Url,
-    ) -> Result<RequestBuilder> {
-        let Some(pk) = self.prepare_request(&mut url).await? else {
-            return Ok(self.request(method, &url));
-        };
-        // Resolve the transport with the full host: for `_pubky.<pk>` hosts the
-        // endpoints live under that qname, not the bare key apex. `pk` is only
-        // the `pubky-host` header value.
-        let qname = url.host_str().unwrap_or(&pk).to_string();
-        let transport = self.transport.resolve(&qname, &self.pkarr).await;
-        self.build_pubky_request(method, &url, &pk, &transport)
+    pub(crate) async fn cross_request(&self, method: Method, url: Url) -> Result<RequestBuilder> {
+        let request = self.resolve_request(url).await?;
+        self.build_request(method, request)
     }
 
     /// Native has no ambient browser cookie jar, so this is `cross_request`.
@@ -187,7 +188,7 @@ impl PubkyHttpClient {
         self.cross_request(method, url).await
     }
 
-    /// Route through `homeserver` while addressing `pubky_host`.
+    /// Route an authority-addressed endpoint through `homeserver` for `pubky_host`.
     pub(crate) async fn cross_request_via_homeserver(
         &self,
         method: Method,
@@ -200,23 +201,31 @@ impl PubkyHttpClient {
         let pubky_host_z32 = pubky_host.z32();
         let transport = self.transport.resolve(&homeserver_z32, &self.pkarr).await;
 
-        match transport {
-            ResolvedTransport::PubkyTls => Ok(self
-                .http
-                .request(method, url.as_str())
-                .header("pubky-host", pubky_host_z32)),
-            ResolvedTransport::Icann { .. } => {
-                self.build_pubky_request(method, &url, &pubky_host_z32, &transport)
-            }
-        }
+        self.build_request(
+            method,
+            ResolvedRequest {
+                url,
+                transport: RequestTransport::Pubky(transport),
+                pubky_host: Some(pubky_host_z32),
+            },
+        )
     }
 
-    /// Build a [`RequestBuilder`] for a resolved pubky host transport.
-    fn build_pubky_request(
+    pub(super) async fn homeserver_info_request(
+        &self,
+        homeserver: &PublicKey,
+    ) -> Result<RequestBuilder> {
+        // Bypass cross_request so discovery cannot recursively trigger itself.
+        let url = homeserver_url(homeserver, "/info")?;
+        let transport = self.transport.resolve(&homeserver.z32(), &self.pkarr).await;
+
+        self.build_transport_request(Method::GET, &url, &transport)
+    }
+
+    fn build_transport_request(
         &self,
         method: Method,
         url: &Url,
-        pk: &str,
         transport: &ResolvedTransport,
     ) -> Result<RequestBuilder> {
         match transport {
@@ -224,59 +233,70 @@ impl PubkyHttpClient {
             ResolvedTransport::Icann { domain, port } => {
                 let mut icann_url = url.clone();
                 icann_url.set_host(Some(domain))?;
-                if let Some(p) = port {
+                if let Some(port) = port {
                     icann_url
-                        .set_port(Some(*p))
+                        .set_port(Some(*port))
                         .map_err(|_err| url::ParseError::InvalidPort)?;
                 }
-                cross_log!(debug, "ICANN fallback for {pk} via {domain}");
-                Ok(self
-                    .icann_http
-                    .request(method, icann_url.as_str())
-                    .header("pubky-host", pk))
+                cross_log!(debug, "ICANN fallback via {domain}");
+                Ok(self.icann_http.request(method, icann_url.as_str()))
             }
         }
     }
 
-    /// Detect pubky hosts and return the z32 public key when applicable.
-    ///
-    /// Native builds do not rewrite URLs; we only detect pubky hosts and return the
-    /// `pubky-host` value when applicable.
-    ///
-    /// # Errors
-    /// Returns [`RequestError::Validation`] if the host uses a `pubky` prefix.
-    #[allow(
+    fn build_request(&self, method: Method, resolved: ResolvedRequest) -> Result<RequestBuilder> {
+        let request = match &resolved.transport {
+            RequestTransport::Standard => self.request(method, &resolved.url),
+            RequestTransport::Pubky(transport) => {
+                self.build_transport_request(method, &resolved.url, transport)?
+            }
+        };
+
+        Ok(match resolved.pubky_host {
+            Some(pubky_host) => request.header("pubky-host", pubky_host),
+            None => request,
+        })
+    }
+
+    async fn resolve_request(&self, mut url: Url) -> Result<ResolvedRequest> {
+        let (addressing, transport_pubky_host) = self.prepare_request_parts(&mut url).await?;
+        let Some(pubky_host) = transport_pubky_host else {
+            let pubky_host = addressing.into_pubky_host(None);
+
+            return Ok(ResolvedRequest {
+                url,
+                transport: RequestTransport::Standard,
+                pubky_host,
+            });
+        };
+
+        // `_pubky.<pk>` endpoints live under the full qname, not the bare key apex.
+        let qname = url.host_str().unwrap_or(&pubky_host).to_string();
+        let transport = self.transport.resolve(&qname, &self.pkarr).await;
+        let standard_pubky_host =
+            matches!(&transport, ResolvedTransport::Icann { .. }).then_some(pubky_host);
+        let pubky_host = addressing.into_pubky_host(standard_pubky_host);
+
+        Ok(ResolvedRequest {
+            url,
+            transport: RequestTransport::Pubky(transport),
+            pubky_host,
+        })
+    }
+
+    #[expect(
         clippy::unused_async,
         reason = "keep async signature aligned with WASM build"
     )]
-    pub async fn prepare_request(&self, url: &mut Url) -> Result<Option<String>> {
-        let host = url.host_str().unwrap_or("");
+    pub(super) async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
+        let public_key = match classify_transport_host(url.host_str().unwrap_or_default())? {
+            TransportHost::PubkyQname(public_key) | TransportHost::BarePublicKey(public_key) => {
+                public_key
+            }
+            TransportHost::Other => return Ok(None),
+        };
 
-        if let Some(stripped) = host.strip_prefix("_pubky.") {
-            if PublicKey::is_pubky_prefixed(stripped) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(stripped).is_ok() {
-                return Ok(Some(stripped.to_string()));
-            }
-        } else {
-            if PublicKey::is_pubky_prefixed(host) {
-                return Err(RequestError::Validation {
-                    message: "pubky prefix is not allowed in transport hosts; use raw z32"
-                        .to_string(),
-                }
-                .into());
-            }
-            if PublicKey::try_from_z32(host).is_ok() {
-                return Ok(Some(host.to_string()));
-            }
-        }
-
-        Ok(None)
+        Ok(Some(public_key.z32()))
     }
 
     /// Start building a `Request` with the `Method` and `Url` (native-only).
@@ -284,15 +304,15 @@ impl PubkyHttpClient {
     /// Returns a `RequestBuilder`, which will allow setting headers and
     /// the request body before sending.
     ///
+    /// This synchronous method does not negotiate storage addressing or resolve ICANN
+    /// fallback endpoints. Use [`Self::request_async`] for Pubky and PKDNS URLs.
+    ///
     /// Differs from [`reqwest::Client::request`], in that it can make requests to:
     /// 1. HTTPS URLs with a [`crate::PublicKey`] as top-level domain, by resolving
     ///    corresponding endpoints, and verifying TLS certificates accordingly.
     ///    (example: `https://o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy`)
     /// 2. `_pubky.<public-key>` URLs like `https://_pubky.o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy`
     ///
-    /// # Errors
-    ///
-    /// This method fails whenever the supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: &U) -> RequestBuilder {
         let url_str = url.as_str();
 
@@ -325,6 +345,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use super::*;
+    use crate::Keypair as PubkyKeypair;
     use pkarr::dns::rdata::SVCB;
     use pkarr::{Cache, InMemoryCache, Keypair, SignedPacket};
 
@@ -359,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn build_pubky_request_icann_rewrites_url_and_sets_header() {
+    fn build_request_uses_the_resolved_icann_target_and_header() {
         let client = PubkyHttpClient::builder()
             .isolated_pkarr_test()
             .build()
@@ -372,7 +393,14 @@ mod tests {
         };
 
         let req = client
-            .build_pubky_request(Method::GET, &url, z32, &transport)
+            .build_request(
+                Method::GET,
+                ResolvedRequest {
+                    url,
+                    transport: RequestTransport::Pubky(transport),
+                    pubky_host: Some(z32.to_string()),
+                },
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -381,6 +409,73 @@ mod tests {
         assert_eq!(req.url().port(), Some(8443));
         assert_eq!(req.url().path(), "/pub/app/file.txt");
         assert_eq!(req.headers().get("pubky-host").unwrap(), z32);
+    }
+
+    #[test]
+    fn build_request_retains_path_addressing_without_a_header() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let z32 = "o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy";
+        let url = Url::parse(&format!(
+            "https://_pubky.{z32}/storage/{z32}/pub/app/file.txt?cursor=hello%20world"
+        ))
+        .unwrap();
+        let transport = ResolvedTransport::Icann {
+            domain: "example.com".to_string(),
+            port: Some(8443),
+        };
+
+        let req = client
+            .build_request(
+                Method::GET,
+                ResolvedRequest {
+                    url,
+                    transport: RequestTransport::Pubky(transport),
+                    pubky_host: None,
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(req.url().host_str(), Some("example.com"));
+        assert_eq!(req.url().port(), Some(8443));
+        assert_eq!(req.url().path(), format!("/storage/{z32}/pub/app/file.txt"));
+        assert_eq!(req.url().query(), Some("cursor=hello%20world"));
+        assert!(!req.headers().contains_key("pubky-host"));
+    }
+
+    #[tokio::test]
+    async fn legacy_storage_attaches_the_path_owner_on_pubky_tls() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let homeserver = PubkyKeypair::random().public_key();
+        let owner = PubkyKeypair::random().public_key();
+        client.features.insert(&homeserver, &[]);
+        client.transport.cache.write().unwrap().insert(
+            homeserver.z32(),
+            (Instant::now(), ResolvedTransport::PubkyTls),
+        );
+        let url = Url::parse(&format!(
+            "https://{}/storage/{}/pub/file.txt",
+            homeserver.z32(),
+            owner.z32()
+        ))
+        .unwrap();
+
+        let request = client
+            .cross_request(Method::GET, url)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(request.url().path(), "/pub/file.txt");
+        assert_eq!(request.headers().get("pubky-host").unwrap(), &owner.z32());
     }
 
     #[tokio::test]
@@ -416,12 +511,8 @@ mod tests {
         }
     }
 
-    /// Regression test: requests to `https://_pubky.<user>/...` must apply the
-    /// ICANN fallback. The user's endpoints are published under the
-    /// `_pubky.<user>` qname (an alias to the homeserver key), so the
-    /// transport must be resolved with the full host, not the bare key.
     #[tokio::test]
-    async fn cross_request_pubky_host_falls_back_to_icann_when_direct_unreachable() {
+    async fn request_async_resolves_icann_path_addressed_storage() {
         // Homeserver apex: unreachable direct endpoint + reachable ICANN domain.
         let homeserver = Keypair::random();
         let mut direct = SVCB::new(1, ".".try_into().unwrap());
@@ -454,9 +545,17 @@ mod tests {
         cache.put(&user.public_key().into(), &user_packet);
 
         let user_z32 = user.public_key().to_string();
-        let url = Url::parse(&format!("https://_pubky.{user_z32}/session")).unwrap();
+        let homeserver_pk = PublicKey::try_from_z32(&homeserver_z32).unwrap();
+        client.features.insert(
+            &homeserver_pk,
+            &[pubky_common::constants::features::PATH_ADDRESSED_STORAGE],
+        );
+        let url = Url::parse(&format!(
+            "https://_pubky.{user_z32}/storage/{user_z32}/pub/file.txt"
+        ))
+        .unwrap();
         let req = client
-            .cross_request(Method::POST, url)
+            .request_async(Method::GET, url)
             .await
             .unwrap()
             .build()
@@ -468,7 +567,11 @@ mod tests {
             "expected ICANN fallback for _pubky host, got {}",
             req.url()
         );
-        assert_eq!(req.headers().get("pubky-host").unwrap(), &user_z32);
+        assert_eq!(
+            req.url().path(),
+            format!("/storage/{user_z32}/pub/file.txt")
+        );
+        assert!(!req.headers().contains_key("pubky-host"));
     }
 
     #[tokio::test]

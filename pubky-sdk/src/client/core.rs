@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fmt::Debug;
 use std::time::Duration;
 
+use super::http_targets::HomeserverFeatures;
 use crate::{cross_log, errors::BuildError};
 
 const DEFAULT_USER_AGENT: &str = concat!("pubky.org", "@", env!("CARGO_PKG_VERSION"),);
@@ -259,9 +260,15 @@ impl PubkyHttpClientBuilder {
             icann_http_builder = icann_http_builder.pool_max_idle_per_host(max);
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let features = HomeserverFeatures::new(self.native_http.request_timeout);
+        #[cfg(target_arch = "wasm32")]
+        let features = HomeserverFeatures::default();
+
         Ok(PubkyHttpClient {
             pkarr,
             http: http_builder.build()?,
+            features,
 
             #[cfg(not(target_arch = "wasm32"))]
             icann_http: icann_http_builder.build()?,
@@ -338,8 +345,8 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 ///
 /// ### What it does
 /// - Detects pkarr public-key hosts and resolves them to concrete endpoints.
-/// - Internally, uses a unified `cross_request(..)` that works the same on native rust and
-///   WASM (WASM performs endpoint resolution & header injection; native is a thin wrapper).
+/// - [`PubkyHttpClient::request_async`] resolves Pubky transport and storage compatibility
+///   on native Rust and WASM.
 ///
 /// ### What it *doesn’t* do
 /// - It is **not** session/identity aware. No cookies, no per-user scoping.
@@ -362,9 +369,9 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 ///     target public key—no CA chain involved.
 /// - **WASM:**
 ///   - All requests use the browser’s standard X.509 TLS stack.
-///   - For Pubky/PKDNS hosts, private method `cross_request(..)` resolves the
-///     endpoint via PKARR, rewrites the URL (including testnet/localhost mapping),
-///     and may add a `pubky-host` header to convey the intended public-key host.
+///   - For Pubky/PKDNS hosts, [`PubkyHttpClient::request_async`] resolves the endpoint
+///     via PKARR, rewrites the URL (including testnet/localhost mapping), and may add a
+///     `pubky-host` header to convey the intended public-key host.
 ///
 /// ### Examples
 /// Basic construction. Works out of the box for mainline DHT pkarr endpoints.
@@ -392,32 +399,36 @@ fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
 /// # Ok(()) }
 /// ```
 ///
-/// Note: `request(..)` is available on native targets. On WASM, use the high-level
-/// actors (e.g., `Pubky`, `SessionStorage`, `PublicStorage`) or the JS bindings’
-/// `client.fetch(..)` provided in `bindings/js`.
+/// Note: `request(..)` is available only on native targets. `request_async(..)` is
+/// available on native Rust and WASM. JavaScript callers use `client.fetch(..)` from
+/// `bindings/js`.
 ///
-/// Fetching a Pubky resource via its transport URL:
+/// Fetching a Pubky resource via its transport URL, including legacy homeserver support:
 /// ```no_run
 /// # use pubky::{PubkyHttpClient, Result};
 /// # use reqwest::Method;
+/// # use url::Url;
 /// # async fn run() -> Result<()> {
 /// # #[cfg(doctest)]
 /// # return Ok(());
 /// let client = PubkyHttpClient::new()?;
 /// // Pubky App profile of user Pubky https://pubky.app/profile/ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y
 /// let user = "ihaqcthsdbk751sxctk849bdr7yz7a934qen5gmpcbwcur49i97y";
-/// let url = format!("https://_pubky.{user}/pub/pubky.app/profile.json");
-/// let resp = client.request(Method::GET, &url).send().await?;
+/// let url = Url::parse(&format!(
+///     "https://_pubky.{user}/storage/{user}/pub/pubky.app/profile.json"
+/// ))?;
+/// let resp = client.request_async(Method::GET, url).await?.send().await?;
 /// let info = resp.text().await?;
 /// # Ok(()) }
 /// ```
 ///
 /// > Tip: For authenticated reads/writes, prefer `session.storage().get(...)`, which
-/// > automatically scopes paths and attaches the right session cookie.
+/// > automatically scopes paths and attaches the right session credential.
 #[derive(Clone, Debug)]
 pub struct PubkyHttpClient {
     pub(crate) http: reqwest::Client,
     pub(crate) pkarr: pkarr::Client,
+    pub(crate) features: HomeserverFeatures,
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) icann_http: reqwest::Client,
@@ -429,6 +440,19 @@ pub struct PubkyHttpClient {
     /// The hostname to use for testnet URL transformations (WASM only).
     #[cfg(target_arch = "wasm32")]
     pub(crate) testnet_host: Option<String>,
+}
+
+/// Prepared browser-fetch metadata used by the JavaScript bindings.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFetch {
+    /// The `pubky-host` header to attach, if any.
+    #[doc(hidden)]
+    pub pubky_host_header: Option<String>,
+
+    /// Whether the original request targeted a Pubky authority.
+    #[doc(hidden)]
+    pub is_pubky_target: bool,
 }
 
 impl PubkyHttpClient {
