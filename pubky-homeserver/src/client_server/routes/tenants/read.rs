@@ -286,7 +286,7 @@ mod tests {
         crypto::{Keypair, PublicKey},
     };
 
-    use crate::app_context::AppContext;
+    use crate::app_context::{AppContext, TempAppContext};
     use crate::client_server::ClientServer;
 
     async fn create_user_with_capabilities(
@@ -343,7 +343,7 @@ mod tests {
     }
 
     async fn create_environment_with_keypair(
-    ) -> anyhow::Result<(Arc<AppContext>, Router, TestServer, Keypair, String)> {
+    ) -> anyhow::Result<(TempAppContext, Router, TestServer, Keypair, String)> {
         let context = AppContext::test().await;
         let router = ClientServer::create_router(Arc::clone(&context))?;
         let server = axum_test::TestServer::new(router.clone()).unwrap();
@@ -355,7 +355,7 @@ mod tests {
     }
 
     pub async fn create_environment(
-    ) -> anyhow::Result<(Arc<AppContext>, Router, TestServer, PublicKey, String)> {
+    ) -> anyhow::Result<(TempAppContext, Router, TestServer, PublicKey, String)> {
         let (context, router, server, keypair, cookie) = create_environment_with_keypair().await?;
         let public_key = keypair.public_key();
 

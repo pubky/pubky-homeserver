@@ -49,7 +49,6 @@ thiserror.workspace = true
 dirs = "6"
 hostname-validator = "1"
 tempfile.workspace = true
-dyn-clone = "1"
 reqwest = { workspace = true, features = [
     "rustls",
 ] }

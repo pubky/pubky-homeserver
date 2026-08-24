@@ -1,4 +1,4 @@
-use super::{data_dir::DataDir, ConfigToml};
+use super::ConfigToml;
 
 use std::{
     fs::{copy, create_dir_all},
@@ -45,6 +45,11 @@ impl PersistentDataDir {
         PathBuf::from(path)
     }
 
+    /// Returns the full path to the data directory.
+    pub fn path(&self) -> &Path {
+        &self.expanded_path
+    }
+
     /// Returns the config file path in this directory.
     pub fn get_config_file_path(&self) -> PathBuf {
         self.expanded_path.join("config.toml")
@@ -81,44 +86,15 @@ impl PersistentDataDir {
     /// Creates the directory, writes a sample config file (if absent),
     /// and generates a server keypair (if absent).
     pub fn init(&self) -> anyhow::Result<()> {
-        self.ensure_data_dir_exists_and_is_writable()?;
+        self.ensure_exists_and_is_writable()?;
         self.read_or_create_config_file()?;
         self.read_or_create_keypair()?;
         Ok(())
     }
-}
-
-impl Default for PersistentDataDir {
-    fn default() -> Self {
-        Self::new(PathBuf::from("~/.pubky"))
-    }
-}
-
-impl DataDir for PersistentDataDir {
-    /// Returns the full path to the data directory.
-    fn path(&self) -> &Path {
-        &self.expanded_path
-    }
-
-    /// Connects to the configured URL with [`DatabaseMode::Direct`](crate::persistence::sql::DatabaseMode::Direct).
-    fn resolve_database_mode(
-        &self,
-        conf: &ConfigToml,
-    ) -> anyhow::Result<crate::persistence::sql::DatabaseMode> {
-        conf.general
-            .database_url
-            .clone()
-            .map(crate::persistence::sql::DatabaseMode::Direct)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No database_url configured. Set [general].database_url in config.toml."
-                )
-            })
-    }
 
     /// Makes sure the data directory exists.
     /// Create the directory if it doesn't exist.
-    fn ensure_data_dir_exists_and_is_writable(&self) -> anyhow::Result<()> {
+    pub fn ensure_exists_and_is_writable(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.expanded_path)?;
 
         // Check if we can write to the data directory
@@ -134,7 +110,7 @@ impl DataDir for PersistentDataDir {
 
     /// Reads the config file from the data directory.
     /// Creates a default config file if it doesn't exist.
-    fn read_or_create_config_file(&self) -> anyhow::Result<ConfigToml> {
+    pub fn read_or_create_config_file(&self) -> anyhow::Result<ConfigToml> {
         let config_file_path = self.get_config_file_path();
         if !config_file_path.exists() {
             self.write_sample_config_file()?;
@@ -144,7 +120,7 @@ impl DataDir for PersistentDataDir {
     }
 
     /// Reads the secret file. Creates a new secret file if it doesn't exist.
-    fn read_or_create_keypair(&self) -> anyhow::Result<pubky_common::crypto::Keypair> {
+    pub fn read_or_create_keypair(&self) -> anyhow::Result<pubky_common::crypto::Keypair> {
         let secret_file_path = self.get_secret_file_path();
         if !secret_file_path.exists() {
             // Create a new secret file
@@ -154,6 +130,41 @@ impl DataDir for PersistentDataDir {
         // Read the secret file
         let keypair = pubky_common::crypto::Keypair::from_secret_key_file(&secret_file_path)?;
         Ok(keypair)
+    }
+
+    /// Seed a specific keypair if no secret file exists yet.
+    /// This is a no-op if the secret file already exists on disk.
+    pub fn seed_keypair_if_missing(
+        &self,
+        keypair: &pubky_common::crypto::Keypair,
+    ) -> anyhow::Result<()> {
+        let secret_file = self.get_secret_file_path();
+        if !secret_file.exists() {
+            keypair.write_secret_key_file(&secret_file)?;
+            tracing::info!(
+                "Seeded keypair (pubkey {}) at {}",
+                keypair.public_key(),
+                secret_file.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Bootstrap the data directory: ensure it exists, read config and keypair.
+    /// Returns the resolved `(PathBuf, ConfigToml, Keypair)` ready for `AppContext::new`.
+    pub fn bootstrap(
+        &self,
+    ) -> anyhow::Result<(PathBuf, ConfigToml, pubky_common::crypto::Keypair)> {
+        self.ensure_exists_and_is_writable()?;
+        let config = self.read_or_create_config_file()?;
+        let keypair = self.read_or_create_keypair()?;
+        Ok((self.expanded_path.clone(), config, keypair))
+    }
+}
+
+impl Default for PersistentDataDir {
+    fn default() -> Self {
+        Self::new(PathBuf::from("~/.pubky"))
     }
 }
 
@@ -180,7 +191,7 @@ mod tests {
         let test_path = temp_dir.path().join(".pubky");
         let data_dir = PersistentDataDir::new(test_path.clone());
 
-        data_dir.ensure_data_dir_exists_and_is_writable().unwrap();
+        data_dir.ensure_exists_and_is_writable().unwrap();
         assert!(test_path.exists());
         // temp_dir will be automatically cleaned up when it goes out of scope
     }
@@ -190,7 +201,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let test_path = temp_dir.path().join(".pubky");
         let data_dir = PersistentDataDir::new(test_path.clone());
-        data_dir.ensure_data_dir_exists_and_is_writable().unwrap();
+        data_dir.ensure_exists_and_is_writable().unwrap();
         let config_file_path = data_dir.get_config_file_path();
         assert!(!config_file_path.exists()); // Should not exist yet
 
@@ -205,7 +216,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let test_path = temp_dir.path().join(".pubky");
         let data_dir = PersistentDataDir::new(test_path.clone());
-        data_dir.ensure_data_dir_exists_and_is_writable().unwrap();
+        data_dir.ensure_exists_and_is_writable().unwrap();
         let _ = data_dir.read_or_create_config_file().unwrap(); // Should create a default config file
         assert!(data_dir.get_config_file_path().exists());
 
@@ -218,7 +229,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let test_path = temp_dir.path().join(".pubky");
         let data_dir = PersistentDataDir::new(test_path.clone());
-        data_dir.ensure_data_dir_exists_and_is_writable().unwrap();
+        data_dir.ensure_exists_and_is_writable().unwrap();
 
         // Write a broken config file
         let config_file_path = data_dir.get_config_file_path();
@@ -239,7 +250,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let test_path = temp_dir.path().join(".pubky");
         let data_dir = PersistentDataDir::new(test_path.clone());
-        data_dir.ensure_data_dir_exists_and_is_writable().unwrap();
+        data_dir.ensure_exists_and_is_writable().unwrap();
 
         let _ = data_dir.read_or_create_keypair().unwrap();
         assert!(data_dir.get_secret_file_path().exists());
@@ -250,7 +261,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let test_path = temp_dir.path().join(".pubky");
         let data_dir = PersistentDataDir::new(test_path.clone());
-        data_dir.ensure_data_dir_exists_and_is_writable().unwrap();
+        data_dir.ensure_exists_and_is_writable().unwrap();
 
         // Create a secret file
         let secret_file_path = data_dir.get_secret_file_path();
@@ -264,42 +275,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_database_mode_returns_direct_when_url_set() {
-        use crate::persistence::sql::{ConnectionString, DatabaseMode};
-
-        let mut conf = ConfigToml::default();
-        conf.general.database_url =
-            Some(ConnectionString::new("postgres://localhost:5432/mydb").unwrap());
-
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = PersistentDataDir::new(temp_dir.path().to_path_buf());
-        let mode = data_dir.resolve_database_mode(&conf).unwrap();
-        assert!(
-            matches!(mode, DatabaseMode::Direct(_)),
-            "PersistentDataDir should resolve to Direct"
-        );
-    }
-
-    #[test]
-    fn resolve_database_mode_errors_when_no_url() {
-        let mut conf = ConfigToml::default();
-        conf.general.database_url = None;
-
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = PersistentDataDir::new(temp_dir.path().to_path_buf());
-        let result = data_dir.resolve_database_mode(&conf);
-        assert!(
-            result.is_err(),
-            "PersistentDataDir should error when database_url is None"
-        );
-    }
-
-    #[test]
     pub fn test_trim_secret_file_content() {
         let temp_dir = TempDir::new().unwrap();
         let test_path = temp_dir.path().join(".pubky");
         let data_dir = PersistentDataDir::new(test_path.clone());
-        data_dir.ensure_data_dir_exists_and_is_writable().unwrap();
+        data_dir.ensure_exists_and_is_writable().unwrap();
 
         // Create a secret file
         let keypair = pubky_common::crypto::Keypair::random();

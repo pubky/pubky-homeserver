@@ -12,8 +12,7 @@ use crate::Testnet;
 use http_relay::HttpRelay;
 use pubky_common::constants::testnet_ports;
 use pubky_homeserver::{
-    AppContext, ConfigToml, ConnectionString, DataDir, DomainPort, HomeserverApp, MockDataDir,
-    PersistentDataDir,
+    AppContext, ConfigToml, DhtMode, DomainPort, HomeserverApp, PersistentDataDir,
 };
 
 /// The bind address used for all static testnet listeners.
@@ -373,21 +372,25 @@ impl StaticTestnet {
             )?;
         }
 
-        // Don't call persistent_dir.init() here — it would create a random
-        // keypair before TestnetDataDir gets a chance to seed the deterministic
-        // one. AppContext::read_from() below will call the DataDir methods on
-        // our TestnetDataDir wrapper, which seeds the correct keypair.
-        persistent_dir.ensure_data_dir_exists_and_is_writable()?;
+        persistent_dir.ensure_exists_and_is_writable()?;
+        persistent_dir.seed_keypair_if_missing(&testnet_keypair())?;
 
-        // Wrap the persistent dir so the homeserver joins the testnet's local DHT
-        // instead of the mainnet bootstrap nodes from the on-disk config.
-        let testnet_dir = TestnetDataDir {
-            inner: persistent_dir,
-            dht_bootstrap_nodes: self.parse_bootstrap_nodes()?,
-            postgres_connection_string: self.testnet.postgres_connection_string.clone(),
-        };
+        // Read config and keypair from disk, then apply testnet overrides.
+        let mut config = persistent_dir.read_or_create_config_file()?;
+        let keypair = persistent_dir.read_or_create_keypair()?;
 
-        let context = AppContext::read_from(testnet_dir).await?;
+        apply_static_testnet_overrides(&mut config, self.parse_bootstrap_nodes()?);
+        config.general.database_url = self
+            .testnet
+            .postgres_connection_string
+            .clone()
+            .or(config.general.database_url);
+        let db_mode =
+            pubky_homeserver::DatabaseMode::require_direct(config.general.database_url.clone())?;
+
+        let data_path = persistent_dir.path().to_path_buf();
+        let context =
+            AppContext::new(data_path, config, keypair, db_mode, DhtMode::Isolated).await?;
         let homeserver = HomeserverApp::start(context).await?;
         self.testnet.homeservers.push(homeserver);
         Ok(())
@@ -400,71 +403,10 @@ impl StaticTestnet {
             ConfigToml::default_test_config()
         };
         apply_static_testnet_overrides(&mut config, self.parse_bootstrap_nodes()?);
-        let mock = MockDataDir::new(config, Some(testnet_keypair()))?;
 
-        let homeserver = HomeserverApp::start_with_mock_data_dir(mock).await?;
-        self.testnet.homeservers.push(homeserver);
+        let (context, temp_dir) = AppContext::new_ephemeral(config, testnet_keypair()).await?;
+        self.testnet.start_homeserver(context, temp_dir).await?;
         Ok(())
-    }
-}
-
-/// A [`PersistentDataDir`] wrapper that overrides DHT config for testnet use.
-///
-/// This ensures the homeserver connects to the testnet's local DHT bootstrap
-/// nodes rather than mainnet, while still using persistent on-disk storage.
-#[derive(Debug, Clone)]
-struct TestnetDataDir {
-    inner: PersistentDataDir,
-    dht_bootstrap_nodes: Vec<DomainPort>,
-    postgres_connection_string: Option<ConnectionString>,
-}
-
-impl DataDir for TestnetDataDir {
-    fn path(&self) -> &Path {
-        self.inner.path()
-    }
-
-    fn resolve_database_mode(
-        &self,
-        conf: &ConfigToml,
-    ) -> anyhow::Result<pubky_homeserver::DatabaseMode> {
-        self.inner.resolve_database_mode(conf)
-    }
-
-    fn ensure_data_dir_exists_and_is_writable(&self) -> anyhow::Result<()> {
-        self.inner.ensure_data_dir_exists_and_is_writable()
-    }
-
-    fn read_or_create_config_file(&self) -> anyhow::Result<ConfigToml> {
-        let mut config = self.inner.read_or_create_config_file()?;
-        apply_static_testnet_overrides(&mut config, self.dht_bootstrap_nodes.clone());
-        config.general.database_url = self
-            .postgres_connection_string
-            .clone()
-            .or(config.general.database_url);
-        if config.general.database_url.is_none() {
-            anyhow::bail!(
-                "Persistent testnet requires an explicit database URL. \
-                 Set `database_url` in config.toml under [general]."
-            );
-        }
-        Ok(config)
-    }
-
-    fn read_or_create_keypair(&self) -> anyhow::Result<pubky_common::crypto::Keypair> {
-        let secret_file = self.inner.get_secret_file_path();
-        if !secret_file.exists() {
-            // Seed the deterministic keypair so the persistent testnet uses the
-            // same well-known identity as the in-memory one.
-            let keypair = testnet_keypair();
-            keypair.write_secret_key_file(&secret_file)?;
-            tracing::info!(
-                "Seeded deterministic keypair (pubkey {}) at {}",
-                keypair.public_key(),
-                secret_file.display()
-            );
-        }
-        self.inner.read_or_create_keypair()
     }
 }
 
@@ -474,85 +416,61 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn testnet_data_dir_overrides_dht_config() {
+    fn static_overrides_apply_to_config() {
         let temp = TempDir::new().unwrap();
         let persistent = PersistentDataDir::new(temp.path().to_path_buf());
         persistent.init().unwrap();
 
         let bootstrap = vec![DomainPort::from_str("127.0.0.1:6881").unwrap()];
-        let testnet_dir = TestnetDataDir {
-            inner: persistent.clone(),
-            dht_bootstrap_nodes: bootstrap.clone(),
-            postgres_connection_string: None,
-        };
+        let mut config = persistent.read_or_create_config_file().unwrap();
+        apply_static_testnet_overrides(&mut config, bootstrap.clone());
 
-        let config = testnet_dir.read_or_create_config_file().unwrap();
         assert_eq!(config.pkdns.dht_bootstrap_nodes, Some(bootstrap));
         assert_eq!(config.pkdns.dht_relay_nodes, None);
     }
 
     #[test]
-    fn testnet_data_dir_delegates_path() {
+    fn persistent_testnet_seeds_deterministic_keypair() {
         let temp = TempDir::new().unwrap();
         let persistent = PersistentDataDir::new(temp.path().to_path_buf());
-        let testnet_dir = TestnetDataDir {
-            inner: persistent.clone(),
-            dht_bootstrap_nodes: vec![],
-            postgres_connection_string: None,
-        };
+        persistent.ensure_exists_and_is_writable().unwrap();
 
-        assert_eq!(testnet_dir.path(), persistent.path());
-    }
-
-    #[test]
-    fn testnet_data_dir_seeds_deterministic_keypair() {
-        let temp = TempDir::new().unwrap();
-        let persistent = PersistentDataDir::new(temp.path().to_path_buf());
-        persistent.init().unwrap();
-
-        // Remove the random keypair that init() created so TestnetDataDir
-        // seeds the deterministic one instead.
-        std::fs::remove_file(persistent.get_secret_file_path()).unwrap();
-
-        let testnet_dir = TestnetDataDir {
-            inner: persistent.clone(),
-            dht_bootstrap_nodes: vec![],
-            postgres_connection_string: None,
-        };
+        // No keypair file yet — seeding should create the deterministic one.
+        persistent
+            .seed_keypair_if_missing(&testnet_keypair())
+            .unwrap();
 
         let expected = testnet_keypair();
-        let kp = testnet_dir.read_or_create_keypair().unwrap();
+        let kp = persistent.read_or_create_keypair().unwrap();
         assert_eq!(
             kp.public_key(),
             expected.public_key(),
-            "TestnetDataDir should seed the deterministic keypair"
+            "Should seed the deterministic keypair"
         );
 
-        // Second call should return the same key (read from disk).
-        let kp2 = testnet_dir.read_or_create_keypair().unwrap();
+        // Second read should return the same key.
+        let kp2 = persistent.read_or_create_keypair().unwrap();
         assert_eq!(kp.public_key(), kp2.public_key());
     }
 
     #[test]
-    fn testnet_data_dir_preserves_existing_keypair() {
+    fn persistent_testnet_preserves_existing_keypair() {
         let temp = TempDir::new().unwrap();
         let persistent = PersistentDataDir::new(temp.path().to_path_buf());
         persistent.init().unwrap();
 
-        // init() created a random keypair — TestnetDataDir should NOT overwrite it.
+        // init() created a random keypair — seeding should NOT overwrite it.
         let existing_kp = persistent.read_or_create_keypair().unwrap();
 
-        let testnet_dir = TestnetDataDir {
-            inner: persistent,
-            dht_bootstrap_nodes: vec![],
-            postgres_connection_string: None,
-        };
+        persistent
+            .seed_keypair_if_missing(&testnet_keypair())
+            .unwrap();
 
-        let kp = testnet_dir.read_or_create_keypair().unwrap();
+        let kp = persistent.read_or_create_keypair().unwrap();
         assert_eq!(
             kp.public_key(),
             existing_kp.public_key(),
-            "TestnetDataDir should not overwrite an existing keypair"
+            "Should not overwrite an existing keypair"
         );
     }
 
@@ -653,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn seeded_config_is_readable_by_testnet_data_dir() {
+    fn seeded_config_has_testnet_overrides() {
         let temp = TempDir::new().unwrap();
         let data_dir = temp.path().join("testnet");
         let persistent = PersistentDataDir::new(data_dir);
@@ -668,21 +586,17 @@ mod tests {
         std::fs::copy(&source, persistent.get_config_file_path()).unwrap();
         persistent.init().unwrap();
 
-        // Wrap in TestnetDataDir and read config
+        // Read config and apply testnet overrides (as run_persistent_homeserver does)
         let bootstrap = vec![DomainPort::from_str("127.0.0.1:6881").unwrap()];
-        let testnet_dir = TestnetDataDir {
-            inner: persistent,
-            dht_bootstrap_nodes: bootstrap.clone(),
-            postgres_connection_string: None,
-        };
+        let mut config = persistent.read_or_create_config_file().unwrap();
+        apply_static_testnet_overrides(&mut config, bootstrap.clone());
 
-        let config = testnet_dir.read_or_create_config_file().unwrap();
         // Seeded value should be preserved
         assert_eq!(
             config.general.signup_mode,
             pubky_homeserver::SignupMode::TokenRequired
         );
-        // DHT bootstrap should be overridden by TestnetDataDir
+        // DHT bootstrap should be overridden
         assert_eq!(config.pkdns.dht_bootstrap_nodes, Some(bootstrap));
         assert_eq!(config.pkdns.dht_relay_nodes, None);
         // Fixed ports should be applied
@@ -708,42 +622,38 @@ mod tests {
         let bootstrap = vec![DomainPort::from_str("127.0.0.1:6881").unwrap()];
         let expected_key = testnet_keypair();
 
-        // First "run": seed config, let TestnetDataDir create the keypair
+        // First "run": seed config, seed deterministic keypair
         let source = temp.path().join("seed.toml");
         std::fs::write(&source, "[general]\nsignup_mode = \"token_required\"\n").unwrap();
 
         let persistent1 = PersistentDataDir::new(data_dir.clone());
         persistent1.seed_config(&source).unwrap();
-        // Only init the dir structure + config, but NOT the keypair — let
-        // TestnetDataDir seed the deterministic one.
-        persistent1
-            .ensure_data_dir_exists_and_is_writable()
-            .unwrap();
+        persistent1.ensure_exists_and_is_writable().unwrap();
         persistent1.read_or_create_config_file().unwrap();
 
-        let dir1 = TestnetDataDir {
-            inner: persistent1,
-            dht_bootstrap_nodes: bootstrap.clone(),
-            postgres_connection_string: None,
-        };
-        let kp1 = dir1.read_or_create_keypair().unwrap();
-        let config1 = dir1.read_or_create_config_file().unwrap();
+        // Seed the deterministic keypair (as run_persistent_homeserver does)
+        persistent1
+            .seed_keypair_if_missing(&testnet_keypair())
+            .unwrap();
+
+        let kp1 = persistent1.read_or_create_keypair().unwrap();
+        let mut config1 = persistent1.read_or_create_config_file().unwrap();
+        apply_static_testnet_overrides(&mut config1, bootstrap.clone());
         assert_eq!(
             kp1.public_key(),
             expected_key.public_key(),
             "First run should use the deterministic keypair"
         );
-        drop(dir1);
+        drop(persistent1);
 
         // Second "run": same dir, no seeding — simulates restart
         let persistent2 = PersistentDataDir::new(data_dir);
-        let dir2 = TestnetDataDir {
-            inner: persistent2,
-            dht_bootstrap_nodes: bootstrap,
-            postgres_connection_string: None,
-        };
-        let kp2 = dir2.read_or_create_keypair().unwrap();
-        let config2 = dir2.read_or_create_config_file().unwrap();
+        persistent2
+            .seed_keypair_if_missing(&testnet_keypair())
+            .unwrap(); // Should be a no-op
+        let kp2 = persistent2.read_or_create_keypair().unwrap();
+        let mut config2 = persistent2.read_or_create_config_file().unwrap();
+        apply_static_testnet_overrides(&mut config2, bootstrap);
 
         assert_eq!(
             kp1.public_key(),

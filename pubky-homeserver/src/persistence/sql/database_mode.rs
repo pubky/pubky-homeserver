@@ -25,6 +25,18 @@ pub enum DatabaseMode {
 }
 
 impl DatabaseMode {
+    /// Require an explicit database URL, returning `Direct` mode.
+    ///
+    /// Returns an error when the URL is `None` — use this for production
+    /// and persistent-testnet paths where a database URL must be configured.
+    pub fn require_direct(url: Option<ConnectionString>) -> anyhow::Result<Self> {
+        url.map(Self::Direct).ok_or_else(|| {
+            anyhow::anyhow!(
+                "No database_url configured. Set [general].database_url in config.toml."
+            )
+        })
+    }
+
     /// Returns the underlying connection string, regardless of mode.
     #[cfg(test)]
     pub fn connection_string(&self) -> &ConnectionString {
@@ -47,15 +59,13 @@ impl DatabaseMode {
     /// 1. Explicitly provided URL (e.g. from Docker Postgres or config) → `EphemeralTest`
     /// 2. `TEST_PUBKY_CONNECTION_STRING` environment variable → `EphemeralTest`
     /// 3. [`DEFAULT_TEST_SERVER`] fallback → `EphemeralTest`
-    ///
-    /// Tests always get ephemeral databases — the decision is encoded here,
-    /// not in a URL query parameter.
     pub fn resolve_test(explicit: Option<ConnectionString>) -> anyhow::Result<Self> {
         let env_val = std::env::var("TEST_PUBKY_CONNECTION_STRING").ok();
         Self::resolve_test_inner(explicit, env_val)
     }
 
     /// Pure resolution logic, separated from env access for testability.
+    /// Tests always get ephemeral databases.
     fn resolve_test_inner(
         explicit: Option<ConnectionString>,
         env_val: Option<String>,
@@ -108,6 +118,26 @@ mod tests {
         let env_val = Some("not-a-valid-url".to_string());
         let result = DatabaseMode::resolve_test_inner(None, env_val);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_direct_returns_direct_when_url_set() {
+        let url = ConnectionString::new("postgres://localhost:5432/mydb").unwrap();
+        let mode = DatabaseMode::require_direct(Some(url.clone())).unwrap();
+        assert!(
+            matches!(mode, DatabaseMode::Direct(_)),
+            "require_direct should return Direct"
+        );
+        assert_eq!(mode.connection_string(), &url);
+    }
+
+    #[test]
+    fn require_direct_errors_when_no_url() {
+        let result = DatabaseMode::require_direct(None);
+        assert!(
+            result.is_err(),
+            "require_direct should error when url is None"
+        );
     }
 
     #[test]
