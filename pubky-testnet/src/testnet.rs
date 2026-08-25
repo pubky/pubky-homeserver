@@ -238,6 +238,7 @@ impl Testnet {
 mod test {
     use crate::Testnet;
     use pubky::Keypair;
+    use pubky_common::auth::jws::ClientId;
 
     /// Make sure the components are kept alive even when dropped.
     #[tokio::test]
@@ -272,7 +273,8 @@ mod test {
 
         let signer = sdk.signer(Keypair::random());
 
-        let session = signer.signup_cookie(&hs.public_key(), None).await.unwrap();
+        signer.signup(&hs.public_key(), None).await.unwrap();
+        let session = signer.signin(ClientId::new("test").unwrap()).await.unwrap();
         assert_eq!(session.info().public_key(), &signer.public_key());
     }
 

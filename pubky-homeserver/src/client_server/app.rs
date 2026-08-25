@@ -259,6 +259,7 @@ mod tests {
     use crate::{
         app_context::AppContext,
         client_server::ClientServer,
+        data_directory::{ConfigToml, MockDataDir},
         shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
         ConfigToml, MockDataDir,
     };
@@ -335,9 +336,9 @@ mod tests {
     #[pubky_test_utils::test]
     async fn storage_metrics_only_count_resolved_requests_with_low_cardinality_labels() {
         let data_dir = MockDataDir::new(ConfigToml::minimal_test_config(), None).unwrap();
-        let context = AppContext::read_from(data_dir).await.unwrap();
+        let context = Arc::new(AppContext::read_from(data_dir).await.unwrap());
         let metrics = context.metrics.clone();
-        let router = ClientServer::create_router(Arc::new(context)).unwrap();
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router).unwrap();
         let user = Keypair::random();
         let cookie = signup_cookie(&server, &user).await;
@@ -380,25 +381,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(samples.len(), 4, "unexpected metric samples:\n{output}");
-        assert!(samples.iter().any(|sample| {
+        assert!(samples.iter().any(|sample: &&str| {
             sample.contains("addressing_mode=\"path\"")
                 && sample.contains("auth_method=\"cookie\"")
                 && sample.contains("pubky_host_header=\"matching\"")
                 && sample.contains("pubky_host_query=\"true\"")
         }));
-        assert!(samples.iter().any(|sample| {
+        assert!(samples.iter().any(|sample: &&str| {
             sample.contains("addressing_mode=\"legacy\"")
                 && sample.contains("auth_method=\"none\"")
                 && sample.contains("pubky_host_header=\"matching\"")
                 && sample.contains("pubky_host_query=\"false\"")
         }));
-        assert!(samples.iter().any(|sample| {
+        assert!(samples.iter().any(|sample: &&str| {
             sample.contains("addressing_mode=\"path\"")
                 && sample.contains("auth_method=\"none\"")
                 && sample.contains("pubky_host_header=\"other\"")
                 && sample.contains("pubky_host_query=\"false\"")
         }));
-        assert!(samples.iter().any(|sample| {
+        assert!(samples.iter().any(|sample: &&str| {
             sample.contains("addressing_mode=\"legacy\"")
                 && sample.contains("auth_method=\"none\"")
                 && sample.contains("pubky_host_header=\"absent\"")

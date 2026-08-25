@@ -128,6 +128,7 @@ mod tests {
     use super::DockerPostgres;
     use crate::EphemeralTestnet;
     use pubky::Keypair;
+    use pubky_common::auth::jws::ClientId;
 
     const CONTAINER_ID_PREFIX: &str = "CONTAINER_ID=";
 
@@ -181,10 +182,14 @@ mod tests {
         let keypair = Keypair::random();
         let signer = pubky.signer(keypair);
 
-        let session = signer
-            .signup_cookie(&testnet.homeserver_app().public_key(), None)
+        signer
+            .signup(&testnet.homeserver_app().public_key(), None)
             .await
             .expect("Failed to signup user");
+        let session = signer
+            .signin(ClientId::new("test").unwrap())
+            .await
+            .expect("Failed to signin user");
 
         // Store and retrieve data
         let path = "/pub/test.txt";
@@ -315,7 +320,7 @@ mod tests {
         let sdk_a = testnet_a.sdk().expect("Failed to create SDK A");
         let signer_a = sdk_a.signer(keypair.clone());
         signer_a
-            .signup_cookie(&testnet_a.homeserver_app().public_key(), None)
+            .signup(&testnet_a.homeserver_app().public_key(), None)
             .await
             .expect("Signup on testnet A should succeed");
 
@@ -324,7 +329,7 @@ mod tests {
         let sdk_b = testnet_b.sdk().expect("Failed to create SDK B");
         let signer_b = sdk_b.signer(keypair);
         signer_b
-            .signup_cookie(&testnet_b.homeserver_app().public_key(), None)
+            .signup(&testnet_b.homeserver_app().public_key(), None)
             .await
             .expect("Signup on testnet B should succeed (proves DB isolation)");
     }
