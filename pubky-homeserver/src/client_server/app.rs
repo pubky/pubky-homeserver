@@ -232,7 +232,7 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         .layer(BandwidthQuotaLimitLayer::from_context(&state.context));
 
     let app = base()
-        .merge(tenants::router(context.metrics.clone()))
+        .merge(tenants::router(state.context.metrics.clone()))
         .with_state(state)
         .merge(auth::base_router(auth_state.clone()))
         .merge(auth::tenant_router(auth_state))
@@ -260,6 +260,7 @@ mod tests {
         app_context::AppContext,
         client_server::ClientServer,
         shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
+        ConfigToml, MockDataDir,
     };
 
     #[tokio::test]
@@ -336,7 +337,7 @@ mod tests {
         let data_dir = MockDataDir::new(ConfigToml::minimal_test_config(), None).unwrap();
         let context = AppContext::read_from(data_dir).await.unwrap();
         let metrics = context.metrics.clone();
-        let router = ClientServer::create_router(&context).unwrap();
+        let router = ClientServer::create_router(Arc::new(context)).unwrap();
         let server = TestServer::new(router).unwrap();
         let user = Keypair::random();
         let cookie = signup_cookie(&server, &user).await;
