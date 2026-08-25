@@ -71,7 +71,7 @@ homeservercli [OPTIONS] <SUBCOMMAND>
 
 ### `info`
 
-Print homeserver statistics.
+Print homeserver statistics (users, disk usage, signup codes, version).
 
 ```sh
 homeservercli info
@@ -79,25 +79,30 @@ homeservercli info
 
 ---
 
-### `signup-token generate`
+### `signup-tokens generate`
 
-Generate a signup invite token, optionally with custom quota limits.
+Generate a signup invite token, optionally with custom quota overrides for the
+invited user. Omitted flags fall back to the system defaults defined in the
+homeserver config.
 
 ```sh
-homeservercli signup-token generate \
+homeservercli signup-tokens generate \
   [--storage-quota-mb <MB|unlimited>] \
   [--rate-read <rate>] \
-  [--rate-write <rate>]
+  [--rate-write <rate>] \
+  [--rate-read-burst <N>] \
+  [--rate-write-burst <N>] \
+  [--allowed-write-paths <PATH>]...
 ```
 
 **Examples:**
 
 ```sh
 # Unlimited storage, default rates
-homeservercli signup-token generate --storage-quota-mb unlimited
+homeservercli signup-tokens generate --storage-quota-mb unlimited
 
 # 500 MB storage, 10 MB/s read, 1 MB/s write
-homeservercli signup-token generate \
+homeservercli signup-tokens generate \
   --storage-quota-mb 500 \
   --rate-read 10mb/s \
   --rate-write 1mb/s
@@ -105,58 +110,66 @@ homeservercli signup-token generate \
 
 ---
 
-### `user enable <PUBKY>`
+### `users enable <PUBKY>`
 
 Re-enable a previously disabled user account.
 
 ```sh
-homeservercli user enable <PUBKY>
+homeservercli users enable <PUBKY>
 ```
 
 ---
 
-### `user disable <PUBKY>`
+### `users disable <PUBKY>`
 
 Disable a user account.
 
 ```sh
-homeservercli user disable <PUBKY>
+homeservercli users disable <PUBKY>
 ```
 
 ---
 
-### `quota get <PUBKY>`
+### `users quota-get <PUBKY>`
 
-Show the effective quota for a user.
+Show the effective quota for a user. The result is printed as JSON.
 
 ```sh
-homeservercli quota get <PUBKY>
+homeservercli users quota-get <PUBKY>
 ```
 
 ---
 
-### `quota set <PUBKY>`
+### `users quota-set <PUBKY>`
 
 Override quota settings for a specific user. At least one quota flag is required.
 
 ```sh
-homeservercli quota set <PUBKY> \
+homeservercli users quota-set <PUBKY> \
   [--storage-quota-mb <MB|unlimited>] \
   [--rate-read <rate>] \
-  [--rate-write <rate>]
+  [--rate-write <rate>] \
+  [--rate-read-burst <N>] \
+  [--rate-write-burst <N>] \
+  [--allowed-write-paths <PATH>]...
 ```
 
 **Examples:**
 
 ```sh
 # Set storage limit to 1 GB
-homeservercli quota set <PUBKY> --storage-quota-mb 1024
+homeservercli users quota-set <PUBKY> --storage-quota-mb 1024
 
 # Remove storage limit
-homeservercli quota set <PUBKY> --storage-quota-mb unlimited
+homeservercli users quota-set <PUBKY> --storage-quota-mb unlimited
 
 # Set read rate to 5 MB/s
-homeservercli quota set <PUBKY> --rate-read 5mb/s
+homeservercli users quota-set <PUBKY> --rate-read 5mb/s
+
+# Restrict writes to specific paths (repeatable)
+homeservercli users quota-set <PUBKY> \
+  --allowed-write-paths /pub/tokens/ \
+  --allowed-write-paths /pub/profile.json
 ```
 
 ---
