@@ -2,7 +2,7 @@ use pubky::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow}
 use pubky_common::auth::jws::ClientId;
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, rc::Rc};
-use tsify::Tsify;
+use tsify::{Ts, Tsify};
 use url::Url;
 
 use wasm_bindgen::JsValue;
@@ -14,13 +14,12 @@ use super::{
     deep_links::XCallbackParams, in_flight::InFlightGuard, session::Session,
 };
 use crate::{
-    js_error::{JsResult, PubkyError, PubkyErrorName},
+    js_error::{JsResult, PubkyError, PubkyErrorName, deserialize_ts},
     wrappers::capabilities::parse_capabilities,
 };
 
 /// Options for starting a grant-backed pubkyauth flow.
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct GrantAuthFlowOptions {
     /// App identifier shown in the user's grant/session list, typically a domain.
@@ -79,8 +78,9 @@ impl GrantAuthFlow {
     pub fn start(
         #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
         kind: AuthFlowKind,
-        options: GrantAuthFlowOptions,
+        options: Ts<GrantAuthFlowOptions>,
     ) -> JsResult<GrantAuthFlow> {
+        let options = deserialize_ts(&options)?;
         Self::start_with_client(capabilities, kind, options, None)
     }
 
@@ -130,8 +130,9 @@ impl GrantAuthFlow {
     pub async fn start_delegated(
         #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
         kind: AuthFlowKind,
-        options: GrantAuthFlowOptions,
+        options: Ts<GrantAuthFlowOptions>,
     ) -> JsResult<GrantAuthFlow> {
+        let options = deserialize_ts(&options)?;
         Self::start_delegated_with_client(capabilities, kind, options, None).await
     }
 

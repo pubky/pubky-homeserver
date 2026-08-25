@@ -1,11 +1,12 @@
 // js/src/client/storage/session.rs
 use js_sys::Uint8Array;
 use serde::Serialize;
+use tsify::Ts;
 use wasm_bindgen::prelude::*;
 use web_sys::Response;
 
 use super::stats::ResourceStats;
-use crate::js_error::JsResult;
+use crate::js_error::{JsResult, serialize_ts};
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_PATH: &'static str = r#"export type Path = `/pub/${string}` | `/priv/${string}`;"#;
@@ -112,9 +113,9 @@ impl SessionStorage {
     pub async fn stats(
         &self,
         #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
-    ) -> JsResult<Option<ResourceStats>> {
+    ) -> JsResult<Option<Ts<ResourceStats>>> {
         match self.0.stats(path).await? {
-            Some(stats) => Ok(Some(ResourceStats::from(stats))),
+            Some(stats) => Ok(Some(serialize_ts(&ResourceStats::from(stats))?)),
             None => Ok(None),
         }
     }

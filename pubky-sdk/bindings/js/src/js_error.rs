@@ -1,10 +1,10 @@
 use std::fmt::Display;
 
 use js_sys::{Error as JsError, Reflect};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use serde_wasm_bindgen::Serializer;
-use tsify::Tsify;
+use tsify::{Ts, Tsify};
 use wasm_bindgen::convert::IntoWasmAbi;
 use wasm_bindgen::describe::WasmDescribe;
 use wasm_bindgen::prelude::*;
@@ -21,6 +21,23 @@ use pubky_common::recovery_file::Error as RecoveryFileError;
 /// that can be caught on the JS side.
 pub type JsResult<T> = Result<T, PubkyError>;
 
+pub(crate) fn deserialize_ts<T>(value: &Ts<T>) -> JsResult<T>
+where
+    T: Tsify + DeserializeOwned,
+    T::JsType: Clone,
+{
+    value
+        .to_rust()
+        .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))
+}
+
+pub(crate) fn serialize_ts<T>(value: &T) -> JsResult<Ts<T>>
+where
+    T: Tsify + Serialize,
+{
+    Ts::from_rust(value).map_err(|error| PubkyError::new(PubkyErrorName::InternalError, error))
+}
+
 // --- TypeScript Documentation & Schema ---
 
 /// A union type of all possible machine-readable codes for the `name` property
@@ -29,7 +46,6 @@ pub type JsResult<T> = Result<T, PubkyError>;
 /// Provides a simplified, actionable set of error categories for developers
 /// to handle in their code.
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "PascalCase")]
 pub enum PubkyErrorName {
     /// A network or server request failed. Check the network connection or retry.

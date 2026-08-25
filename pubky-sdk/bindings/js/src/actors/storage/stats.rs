@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
-use wasm_bindgen::prelude::*;
 
 /// Resource metadata returned by `SessionStorage.stats()` and `PublicStorage.stats()`.
 ///
@@ -21,7 +20,6 @@ use wasm_bindgen::prelude::*;
 /// - `etag` may be absent and is opaque; compare values to detect updates.
 /// - `lastModifiedMs` increases when the resource is updated.
 #[derive(Tsify, Serialize, Deserialize)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceStats {
     /// Size in bytes of the stored object.
