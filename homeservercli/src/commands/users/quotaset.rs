@@ -1,5 +1,5 @@
 use crate::commands::context::AdminContext;
-use crate::commands::quota::error::map_http;
+use crate::commands::users::error::map_http;
 use crate::helpers::quota::{Quota, QuotaUpdate, RateLimit};
 use anyhow::Result;
 use clap::{ArgGroup, Args};

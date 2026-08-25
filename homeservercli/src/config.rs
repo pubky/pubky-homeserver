@@ -4,14 +4,24 @@ use std::path::{Path, PathBuf};
 use url::Url;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ConfigToml {
+    #[serde(default)]
+    pub admin: AdminToml,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AdminToml {
     pub admin_password: Option<String>,
     pub admin_endpoint: Option<Url>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct ConfigToml {
-    pub admin: AdminToml,
+impl Default for AdminToml {
+    fn default() -> Self {
+        Self {
+            admin_password: Some("admin".to_string()),
+            admin_endpoint: Some(Url::parse("http://localhost:6288").unwrap()),
+        }
+    }
 }
 
 /// Default directory to look for `config.toml` when no data dir is provided

@@ -1,5 +1,5 @@
 use crate::commands::context::AdminContext;
-use crate::commands::signup_token::error::map_http;
+use crate::commands::signup_tokens::error::map_http;
 use crate::helpers::quota::{Quota, QuotaUpdate, RateLimit};
 use anyhow::{Context, Result};
 use clap::Args;

@@ -13,7 +13,7 @@ fn validate_config_dir_path(path: &str) -> Result<PathBuf, String> {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, flatten_help = true)]
 pub struct Cli {
     #[clap(short, long, env = "PUBKY_HOMESERVER_DATA_DIR", value_parser = validate_config_dir_path)]
     pub data_dir: Option<PathBuf>,

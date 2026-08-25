@@ -1,9 +1,8 @@
 mod context;
 pub mod error;
 pub mod info;
-pub mod quota;
-pub mod signup_token;
-pub mod user;
+pub mod signup_tokens;
+pub mod users;
 
 use crate::cli::Cli;
 use crate::config::ConfigToml;
@@ -14,9 +13,8 @@ use context::AdminContext;
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     Info(info::InfoArgs),
-    SignupToken(signup_token::SignupTokenCmd),
-    User(user::UserCmd),
-    Quota(quota::QuotaCmd),
+    SignupTokens(signup_tokens::SignupTokensCmd),
+    Users(users::UsersCmd),
 }
 
 pub fn execute(cli: Cli, config: Option<ConfigToml>) -> Result<()> {
@@ -24,9 +22,8 @@ pub fn execute(cli: Cli, config: Option<ConfigToml>) -> Result<()> {
 
     match cli.command {
         Commands::Info(args) => info::run(context, &args)?,
-        Commands::SignupToken(cmd) => cmd.run(context)?,
-        Commands::User(cmd) => cmd.run(context)?,
-        Commands::Quota(cmd) => cmd.run(context)?,
+        Commands::SignupTokens(cmd) => cmd.run(context)?,
+        Commands::Users(cmd) => cmd.run(context)?,
     };
     Ok(())
 }

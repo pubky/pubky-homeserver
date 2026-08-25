@@ -99,12 +99,12 @@ pub struct QuotaUpdate {
     pub allowed_write_paths: Vec<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct UserQuota {
     pub effective: UserQuotaFields,
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct UserQuotaFields {
     #[serde(default)]
     pub storage_quota_mb: Option<Quota>,
@@ -118,49 +118,6 @@ pub struct UserQuotaFields {
     pub rate_write_burst: Option<u32>,
     #[serde(default)]
     pub allowed_write_paths: Option<Vec<String>>,
-}
-
-impl UserQuotaFields {
-    pub fn display_storage(&self) -> String {
-        self.storage_quota_mb
-            .as_ref()
-            .map(|q| q.to_string())
-            .unwrap_or_else(|| "(system default)".to_string())
-    }
-
-    pub fn display_rate_read(&self) -> String {
-        self.rate_read
-            .as_ref()
-            .map(|r| r.to_string())
-            .unwrap_or_else(|| "(system default)".to_string())
-    }
-
-    pub fn display_rate_write(&self) -> String {
-        self.rate_write
-            .as_ref()
-            .map(|r| r.to_string())
-            .unwrap_or_else(|| "(system default)".to_string())
-    }
-
-    pub fn display_rate_read_burst(&self) -> String {
-        self.rate_read_burst
-            .map(|b| b.to_string())
-            .unwrap_or_else(|| "(same as rate)".to_string())
-    }
-
-    pub fn display_rate_write_burst(&self) -> String {
-        self.rate_write_burst
-            .map(|b| b.to_string())
-            .unwrap_or_else(|| "(same as rate)".to_string())
-    }
-
-    pub fn display_allowed_write_paths(&self) -> String {
-        match &self.allowed_write_paths {
-            None => "unrestricted".to_string(),
-            Some(paths) if paths.is_empty() => "(read-only)".to_string(),
-            Some(paths) => paths.join(", "),
-        }
-    }
 }
 
 #[cfg(test)]

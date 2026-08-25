@@ -4,21 +4,21 @@ use crate::commands::context::AdminContext;
 pub mod error;
 
 #[derive(Args, Debug)]
-#[command(about = "Manage signup invite tokens")]
-pub struct SignupTokenCmd {
+#[command(about = "Manage signup invite tokens", flatten_help = true)]
+pub struct SignupTokensCmd {
     #[command(subcommand)]
-    pub subcommand: SignupTokenSubcommands,
+    pub subcommand: SignupTokensSubcommands,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum SignupTokenSubcommands {
+pub enum SignupTokensSubcommands {
     Generate(generate::GenerateArgs),
 }
 
-impl SignupTokenCmd {
+impl SignupTokensCmd {
     pub fn run(&self, context: AdminContext) -> anyhow::Result<()> {
         match &self.subcommand {
-            SignupTokenSubcommands::Generate(sbu_args) => {
+            SignupTokensSubcommands::Generate(sbu_args) => {
                 generate::run(context, sbu_args)?;
             }
         }
