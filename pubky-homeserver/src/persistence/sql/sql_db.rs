@@ -33,7 +33,8 @@ impl SqlDb {
     ///
     /// - [`DatabaseMode::Direct`]: connects to the database identified by the URL.
     /// - [`DatabaseMode::EphemeralTest`]: creates a fresh `pubky_test_{uuid}` database
-    ///   on the server, connects to it, and drops it when this `SqlDb` is dropped.
+    ///   on the server and connects to it. Dropping this `SqlDb` registers the
+    ///   database for cleanup; see [`DatabaseMode::EphemeralTest`] for details.
     pub async fn connect(mode: DatabaseMode) -> Result<Self, sqlx::Error> {
         match mode {
             DatabaseMode::Direct(url) => Self::connect_inner(&url).await,
@@ -60,7 +61,11 @@ impl SqlDb {
     }
 }
 
-/// Helper struct to drop the postgres test database after the db connection is dropped.
+/// Registers an ephemeral test database for cleanup when dropped.
+///
+/// Dropping this struct does **not** delete the database immediately — it
+/// queues it for later removal by [`drop_test_databases()`](pubky_test_utils::drop_test_databases),
+/// which is called automatically by the `#[pubky_testnet::test]` macro.
 #[cfg(any(test, feature = "testing"))]
 struct TestDbDropper {
     db_name: String,
@@ -94,7 +99,8 @@ impl SqlDb {
     /// Creates an ephemeral `pubky_test_{uuid}` database and connects to it.
     ///
     /// `admin_con_string` is used for the initial admin connection that creates
-    /// the database. The returned `SqlDb` will drop its database on scope exit.
+    /// the database. The returned `SqlDb` registers the database for cleanup
+    /// on drop (see [`TestDbDropper`]).
     async fn create_ephemeral_test_db(
         admin_con_string: ConnectionString,
     ) -> Result<Self, sqlx::Error> {

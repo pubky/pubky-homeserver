@@ -261,7 +261,6 @@ mod tests {
         client_server::ClientServer,
         data_directory::{ConfigToml, MockDataDir},
         shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
-        ConfigToml, MockDataDir,
     };
 
     #[tokio::test]

@@ -100,6 +100,7 @@ impl DataDir for PersistentDataDir {
         &self.expanded_path
     }
 
+    /// Connects to the configured URL with [`DatabaseMode::Direct`](crate::persistence::sql::DatabaseMode::Direct).
     fn resolve_database_mode(
         &self,
         conf: &ConfigToml,

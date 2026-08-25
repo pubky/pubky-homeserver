@@ -386,6 +386,7 @@ mod test {
     /// This is to prevent the case where the testnet is not cleaned up properly.
     /// For example, if the port is not released after the testnet is stopped.
     #[tokio::test]
+    #[crate::test]
     async fn test_two_testnet_in_a_row() {
         {
             let _ = EphemeralTestnet::builder().build().await.unwrap();
@@ -397,6 +398,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_homeserver_with_random_keypair() {
         // Start with just DHT + http relay, no homeserver
         let mut testnet = Testnet::new().await.unwrap();
@@ -420,6 +422,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_builder_default() {
         // Verify builder creates homeserver with minimal config (admin disabled)
         let network = EphemeralTestnet::builder().build().await.unwrap();
@@ -437,6 +440,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_builder_with_custom_config() {
         // Verify custom config is used (e.g., metrics enabled)
         let mut config = ConfigToml::minimal_test_config();
@@ -460,6 +464,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_builder_with_custom_keypair() {
         // Verify custom keypair is used
         let keypair = Keypair::random();

@@ -24,9 +24,7 @@ pub trait DataDir: std::fmt::Debug + DynClone + Send + Sync {
 
     /// Resolve how the homeserver should connect to its database.
     ///
-    /// Each implementation decides its own strategy:
-    /// - [`PersistentDataDir`](super::PersistentDataDir): [`DatabaseMode::Direct`] — connects to the configured URL.
-    /// - [`MockDataDir`](super::MockDataDir): [`DatabaseMode::EphemeralTest`] — creates a temporary database.
+    /// Each implementation selects the appropriate database lifecycle.
     fn resolve_database_mode(&self, conf: &ConfigToml) -> anyhow::Result<DatabaseMode>;
 }
 

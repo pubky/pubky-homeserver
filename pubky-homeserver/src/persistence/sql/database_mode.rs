@@ -11,8 +11,13 @@ pub enum DatabaseMode {
     Direct(ConnectionString),
 
     /// Create an ephemeral `pubky_test_{uuid}` database on the server
-    /// identified by the URL, then connect to it. The database is dropped
-    /// when the [`SqlDb`](super::SqlDb) is dropped.
+    /// identified by the URL, then connect to it.
+    ///
+    /// Dropping the [`SqlDb`](super::SqlDb) **registers** the database for
+    /// cleanup but does not delete it immediately. Actual deletion requires
+    /// the `#[pubky_testnet::test]` macro or an explicit call to
+    /// [`drop_test_databases()`](pubky_test_utils::drop_test_databases).
+    /// Without either, the database will be leaked.
     ///
     /// Only available in test / testing builds.
     #[cfg(any(test, feature = "testing"))]

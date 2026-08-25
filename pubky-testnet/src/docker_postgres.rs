@@ -163,6 +163,7 @@ mod tests {
     /// Basic integration test: start a testnet with docker postgres + http relay,
     /// signup a user, store and retrieve data.
     #[tokio::test]
+    #[crate::test]
     async fn test_docker_postgres_with_testnet() {
         let testnet = EphemeralTestnet::builder()
             .with_docker_postgres()
@@ -295,6 +296,7 @@ mod tests {
     /// `create_ephemeral_test_db()`. Without that, it would fall back to
     /// `localhost:5432` and fail to connect.
     #[tokio::test]
+    #[crate::test]
     async fn test_shared_docker_postgres_provides_db_isolation() {
         let pg = DockerPostgres::start()
             .await

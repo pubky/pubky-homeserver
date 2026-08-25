@@ -56,6 +56,7 @@ impl DataDir for MockDataDir {
         self.temp_dir.path()
     }
 
+    /// Creates a temporary database with [`DatabaseMode::EphemeralTest`](crate::persistence::sql::DatabaseMode::EphemeralTest).
     fn resolve_database_mode(
         &self,
         conf: &super::ConfigToml,

@@ -288,6 +288,7 @@ mod test {
 
     /// If everything is linked correctly, the hs_pubky should be resolvable from the pkarr client.
     #[tokio::test]
+    #[crate::test]
     async fn test_homeserver_resolvable() {
         let mut testnet = Testnet::new().await.unwrap();
         let hs_pubky = testnet.create_homeserver().await.unwrap().public_key();

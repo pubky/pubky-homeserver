@@ -38,9 +38,30 @@ impl ConnectionString {
         self.0.path().trim_start_matches("/")
     }
 
-    /// Set the database name
+    /// Set the database name, clearing any `dbname` query parameter that would
+    /// otherwise override the path. See
+    /// <https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS>
     pub fn set_database_name(&mut self, db_name: &str) {
         self.0.set_path(db_name);
+        self.remove_query_param("dbname");
+    }
+
+    /// Remove all occurrences of a query parameter by key.
+    fn remove_query_param(&mut self, key: &str) {
+        if self.0.query().is_none() {
+            return;
+        }
+        let pairs: Vec<_> = self
+            .0
+            .query_pairs()
+            .filter(|(k, _)| k != key)
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if pairs.is_empty() {
+            self.0.set_query(None);
+        } else {
+            self.0.query_pairs_mut().clear().extend_pairs(&pairs);
+        }
     }
 }
 
@@ -100,5 +121,46 @@ mod tests {
     fn test_non_postgres_url_rejected() {
         let result: Result<ConnectionString, _> = "sqlite:///path/to/sqlite.db".parse();
         assert!(result.is_err(), "sqlite URLs should be rejected");
+    }
+
+    #[test]
+    fn set_database_name_changes_path() {
+        let mut cs = ConnectionString::new("postgres://user:pass@localhost:5432/original").unwrap();
+        cs.set_database_name("new_db");
+        assert_eq!(cs.database_name(), "new_db");
+    }
+
+    #[test]
+    fn set_database_name_strips_dbname_query_param() {
+        let mut cs =
+            ConnectionString::new("postgres://user:pass@localhost:5432/postgres?dbname=postgres")
+                .unwrap();
+        cs.set_database_name("pubky_test_abc123");
+        assert_eq!(cs.database_name(), "pubky_test_abc123");
+        assert!(
+            !cs.as_str().contains("dbname="),
+            "dbname query param should be removed, got: {}",
+            cs.as_str()
+        );
+    }
+
+    #[test]
+    fn set_database_name_preserves_other_query_params() {
+        let mut cs = ConnectionString::new(
+            "postgres://user:pass@localhost:5432/postgres?dbname=postgres&sslmode=require",
+        )
+        .unwrap();
+        cs.set_database_name("pubky_test_abc123");
+        assert_eq!(cs.database_name(), "pubky_test_abc123");
+        assert!(
+            !cs.as_str().contains("dbname="),
+            "dbname should be removed, got: {}",
+            cs.as_str()
+        );
+        assert!(
+            cs.as_str().contains("sslmode=require"),
+            "other params should be preserved, got: {}",
+            cs.as_str()
+        );
     }
 }
