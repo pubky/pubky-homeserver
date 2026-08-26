@@ -11,7 +11,7 @@ use axum::{
 };
 use futures_util::future::BoxFuture;
 use governor::clock::Clock;
-use std::{convert::Infallible, task::Poll};
+use std::{convert::Infallible, task::Poll, time::Duration};
 use tower::{Layer, Service};
 
 use crate::shared::quota::PathLimit;
@@ -31,8 +31,35 @@ pub struct RequestRateLimitLayer {
     limits: Vec<LimitTuple>,
 }
 
+/// Orders overlapping request-count limits deterministically for evaluation.
+///
+/// Shorter declared quota windows are evaluated first. All remaining fields are
+/// part of a canonical tie-breaker so TOML array order cannot affect evaluation.
+fn sort_path_limits_for_evaluation(limits: &mut [PathLimit]) {
+    limits.sort_by_cached_key(|limit| {
+        let mut whitelist = limit
+            .whitelist
+            .iter()
+            .map(|key| key.to_string())
+            .collect::<Vec<_>>();
+        whitelist.sort_unstable();
+
+        (
+            Duration::from(limit.quota.time_unit),
+            limit.path.0.clone(),
+            limit.method.to_string(),
+            limit.key.to_string(),
+            limit.quota.rate.get(),
+            limit.burst.map(|burst| burst.get()),
+            whitelist,
+        )
+    });
+}
+
 impl RequestRateLimitLayer {
-    pub fn from_path_limits(limits: Vec<PathLimit>) -> Result<Self, String> {
+    pub fn from_path_limits(mut limits: Vec<PathLimit>) -> Result<Self, String> {
+        sort_path_limits_for_evaluation(&mut limits);
+
         if limits.is_empty() {
             tracing::info!("No path-based request-count rate limits configured ([[drive.rate_limits]] is empty).");
         } else {
@@ -41,7 +68,7 @@ impl RequestRateLimitLayer {
                 .map(|limit| format!("\"{limit}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::info!("Path-based rate limits configured: {limits_str}");
+            tracing::info!("Path-based rate limits evaluated in canonical order: {limits_str}");
         }
         let limits = limits
             .into_iter()
@@ -144,7 +171,10 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
     use axum::http::Method;
     use axum::response::IntoResponse;
@@ -351,6 +381,85 @@ mod tests {
 
         assert!(delay_secs >= 1, "Retry-After must be at least one second");
         assert!(delay_secs <= 60, "Retry-After should not exceed the quota");
+    }
+
+    #[test]
+    fn path_limits_are_canonically_sorted_for_evaluation() {
+        let limits = vec![
+            PathLimit {
+                path: GlobPattern::new("/upload/z"),
+                method: HttpMethod(Method::POST),
+                quota: "2r/m".parse().unwrap(),
+                key: LimitKeyType::Ip,
+                burst: None,
+                whitelist: Vec::new(),
+            },
+            PathLimit {
+                path: GlobPattern::new("/upload"),
+                method: HttpMethod(Method::POST),
+                quota: "1r/s".parse().unwrap(),
+                key: LimitKeyType::Ip,
+                burst: None,
+                whitelist: Vec::new(),
+            },
+            PathLimit {
+                path: GlobPattern::new("/upload/a"),
+                method: HttpMethod(Method::POST),
+                quota: "2r/m".parse().unwrap(),
+                key: LimitKeyType::Ip,
+                burst: None,
+                whitelist: Vec::new(),
+            },
+        ];
+        let mut first_order = limits.clone();
+        let mut reversed_order = limits.into_iter().rev().collect::<Vec<_>>();
+
+        sort_path_limits_for_evaluation(&mut first_order);
+        sort_path_limits_for_evaluation(&mut reversed_order);
+
+        assert_eq!(first_order, reversed_order);
+        assert_eq!(
+            first_order
+                .iter()
+                .map(|limit| limit.quota.time_unit.to_string())
+                .collect::<Vec<_>>(),
+            vec!["s", "m", "m"],
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn short_window_rejection_does_not_consume_long_window_quota() {
+        let long_window = PathLimit {
+            path: GlobPattern::new("/upload"),
+            method: HttpMethod(Method::POST),
+            quota: "2r/m".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let short_window = PathLimit {
+            path: GlobPattern::new("/upload"),
+            method: HttpMethod(Method::POST),
+            quota: "1r/s".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let socket = start_server(vec![long_window, short_window]).await;
+        let client = Client::new();
+        let url = format!("http://{socket}/upload");
+
+        let first = client.post(&url).send().await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = client.post(&url).send().await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let third = client.post(&url).send().await.unwrap();
+        assert_eq!(third.status(), StatusCode::CREATED);
     }
 
     #[test]
