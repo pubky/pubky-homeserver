@@ -21,8 +21,8 @@ pub struct Cli {
     #[arg(long, global = true, env = "PUBKY_HOMESERVER_ADMIN_PASSWORD")]
     pub admin_password: Option<String>,
 
-    #[arg(long, global = true, env = "PUBKY_HOMESERVER_LISTEN_SOCKET")]
-    pub listen_socket: Option<Url>,
+    #[arg(long, global = true, env = "PUBKY_HOMESERVER_ADMIN_ENDPOINT")]
+    pub admin_endpoint: Option<Url>,
 
     #[command(subcommand)]
     pub command: Commands,

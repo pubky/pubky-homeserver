@@ -20,8 +20,14 @@ Create a `config.toml`:
 ```toml
 [admin]
 admin_password = "your-admin-password"
-listen_socket = "https://your-homeserver.example.com"
+listen_socket = "127.0.0.1:6288"
 ```
+
+The `[admin]` section is compatible with the [pubky-homeserver](../pubky-homeserver)
+config format, so you can point the CLI directly at a homeserver's own
+`config.toml` (its `data_dir`) instead of maintaining a separate file. `listen_socket`
+accepts a bare socket address (`host:port`), which defaults to the `http` scheme, or a
+full URL (`https://your-homeserver.example.com`) when the admin API is behind TLS.
 
 By default the CLI looks for `config.toml` in `~/.pubky`. Point it at a different
 directory with `--data-dir` (or the `PUBKY_HOMESERVER_DATA_DIR` environment variable):
@@ -34,7 +40,7 @@ homeservercli --data-dir /path/to/config/dir info
 
 ```sh
 export PUBKY_HOMESERVER_ADMIN_PASSWORD="your-admin-password"
-export PUBKY_HOMESERVER_LISTEN_SOCKET="https://your-homeserver.example.com"
+export PUBKY_HOMESERVER_ADMIN_ENDPOINT="https://your-homeserver.example.com"
 export PUBKY_HOMESERVER_DATA_DIR="/path/to/config/dir"
 
 homeservercli info
@@ -44,7 +50,7 @@ homeservercli info
 
 ```sh
 homeservercli \
-  --listen-socket https://your-homeserver.example.com \
+  --admin-endpoint https://your-homeserver.example.com \
   --admin-password your-admin-password \
   info
 ```
@@ -64,7 +70,7 @@ homeservercli [OPTIONS] <SUBCOMMAND>
 |------|----------------------|-------------|
 | `-d, --data-dir <PATH>` | `PUBKY_HOMESERVER_DATA_DIR` | Directory containing `config.toml` (default: `~/.pubky`) |
 | `--admin-password <PASSWORD>` | `PUBKY_HOMESERVER_ADMIN_PASSWORD` | Admin API password |
-| `--listen-socket <URL>` | `PUBKY_HOMESERVER_LISTEN_SOCKET` | Admin API base URL |
+| `--admin-endpoint <URL>` | `PUBKY_HOMESERVER_ADMIN_ENDPOINT` | Admin API base URL |
 | `-v` / `-q` | | Increase / decrease log verbosity |
 
 ---

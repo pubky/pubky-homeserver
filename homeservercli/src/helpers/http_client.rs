@@ -18,6 +18,16 @@ pub struct HttpClient {
     auth: Auth,
 }
 
+pub fn transform_to_url(socket: &str) -> Option<Url> {
+    if socket.contains("://") {
+        socket.to_string()
+    } else {
+        format!("http://{socket}")
+    }
+    .parse()
+    .ok()
+}
+
 pub fn http_status(err: &Error) -> Option<u16> {
     err.downcast_ref::<HttpStatusError>().map(|e| e.status)
 }
@@ -111,5 +121,39 @@ impl HttpClient {
             Auth::None => request,
             Auth::AdminPassword(password) => request.header("X-Admin-Password", password),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_socket_defaults_to_http() {
+        assert_eq!(
+            transform_to_url("localhost:6288"),
+            Some(Url::parse("http://localhost:6288").unwrap())
+        );
+        assert_eq!(
+            transform_to_url("127.0.0.1:6288"),
+            Some(Url::parse("http://127.0.0.1:6288").unwrap())
+        );
+    }
+
+    #[test]
+    fn explicit_scheme_is_preserved() {
+        assert_eq!(
+            transform_to_url("https://homeserver.example.com"),
+            Some(Url::parse("https://homeserver.example.com").unwrap())
+        );
+        assert_eq!(
+            transform_to_url("http://127.0.0.1:6288"),
+            Some(Url::parse("http://127.0.0.1:6288").unwrap())
+        );
+    }
+
+    #[test]
+    fn invalid_socket_returns_none() {
+        assert_eq!(transform_to_url(""), None);
     }
 }

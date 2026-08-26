@@ -4,7 +4,12 @@
 # Each setting can also be overridden, in order of precedence, by a
 # command-line flag or an environment variable:
 #   admin_password -> --admin-password / PUBKY_HOMESERVER_ADMIN_PASSWORD
-#   listen_socket -> --listen-socket / PUBKY_HOMESERVER_LISTEN_SOCKET
+#   listen_socket  -> --admin-endpoint / PUBKY_HOMESERVER_ADMIN_ENDPOINT
+#
+# The [admin] section is compatible with the pubky-homeserver config format, so
+# the CLI can read a homeserver's own config.toml directly. listen_socket accepts
+# a bare socket address (host:port, defaults to the http scheme) or a full URL
+# such as "https://your-homeserver.example.com" when the admin API is behind TLS.
 [admin]
-admin_password="admin"
-listen_socket="http://127.0.0.1:6288"
+admin_password = "admin"
+listen_socket = "127.0.0.1:6288"
