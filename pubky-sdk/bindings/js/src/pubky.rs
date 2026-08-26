@@ -260,13 +260,13 @@ impl Pubky {
 
     /// Public, unauthenticated storage API.
     ///
-    /// Use for **read-only** public access via addressed paths:
-    /// `"pubky<user>/pub/…"`.
+    /// Use for **read-only** public access via Pubky URLs:
+    /// `"pubky://<user>/pub/…"`.
     ///
     /// @returns {PublicStorage}
     ///
     /// @example
-    /// const text = await pubky.publicStorage.getText(`${userPk.toString()}/pub/example.com/hello.txt`);
+    /// const text = await pubky.publicStorage.getText(`pubky://${userPk}/pub/example.com/hello.txt`);
     #[wasm_bindgen(js_name = "publicStorage", getter)]
     pub fn public_storage(&self) -> PublicStorage {
         PublicStorage(self.0.public_storage())

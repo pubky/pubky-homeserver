@@ -499,7 +499,7 @@ test("Auth: multi-user host isolation + stale-handle safety", async (t) => {
     user: string,
     relPath: Path,
   ): Promise<string> => {
-    const address = `pubky${user}${relPath}` as Address;
+    const address = `pubky://${user}${relPath}` as Address;
     return sdk.publicStorage.getText(address);
   };
 
@@ -612,7 +612,7 @@ test("Auth: signup/signout loops keep cookies and host in sync", async (t) => {
 
   const u1 = await signupAndMark("user#1:hello");
   t.equal(
-    await sdk.publicStorage.getText(`pubky${u1.user}${P}` as Address),
+    await sdk.publicStorage.getText(`pubky://${u1.user}${P}` as Address),
     "user#1:hello",
     "first user marked",
   );
@@ -631,7 +631,7 @@ test("Auth: signup/signout loops keep cookies and host in sync", async (t) => {
 
   const u2 = await signupAndMark("user#2:hello");
   t.equal(
-    await sdk.publicStorage.getText(`pubky${u2.user}${P}` as Address),
+    await sdk.publicStorage.getText(`pubky://${u2.user}${P}` as Address),
     "user#2:hello",
     "second user marked",
   );
@@ -654,7 +654,7 @@ test("Auth: signup/signout loops keep cookies and host in sync", async (t) => {
     t.ok(r.ok, "low-level client PUT for user#2 ok");
   }
   t.equal(
-    await sdk.publicStorage.getText(`pubky${u2.user}${P}` as Address),
+    await sdk.publicStorage.getText(`pubky://${u2.user}${P}` as Address),
     "user#2:via-client",
     "low-level client wrote under user#2",
   );

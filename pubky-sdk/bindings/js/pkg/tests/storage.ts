@@ -32,16 +32,16 @@ type _StorageDelete = Assert<
 >;
 
 const toAddress = (user: string, relPath: Path): Address =>
-  `pubky${user}${relPath}` as Address;
+  `pubky://${user}${relPath}` as Address;
 
 test("resolvePubky helper", (t) => {
   const pk = HOMESERVER_PUBLICKEY.z32();
-  const preferred = `pubky${pk}/pub/example.com/data.txt`;
-  const deeplink = `pubky://${pk}/pub/example.com/data.txt`;
+  const canonical = `pubky://${pk}/pub/example.com/data.txt`;
+  const legacy = `pubky${pk}/pub/example.com/data.txt`;
   const expected = `https://_pubky.${pk}/storage/${pk}/pub/example.com/data.txt`;
 
-  t.equal(resolvePubky(preferred), expected, "preferred format resolves");
-  t.equal(resolvePubky(deeplink), expected, "deeplink format resolves");
+  t.equal(resolvePubky(canonical), expected, "canonical URL resolves");
+  t.equal(resolvePubky(legacy), expected, "legacy identifier resolves");
   t.end();
 });
 
@@ -240,7 +240,7 @@ test("list (public dir listing with limit/cursor/reverse)", async (t) => {
   await mk(`/pub/example.wrong/d.txt` as Path);
   await mk(`/pub/z.wrong/a.txt` as Path);
 
-  const dir: Address = `pubky${userPk}/pub/example.com/` as Address;
+  const dir: Address = `pubky://${userPk}/pub/example.com/` as Address;
 
   {
     const list = await sdk.publicStorage.list(dir);
@@ -467,7 +467,7 @@ test("not found", async (t) => {
   const session = await signer.signin("storage.test");
 
   const userPk = session.info.publicKey.z32();
-  const addr = `pubky${userPk}/pub/example.com/definitely-missing.json` as Address;
+  const addr = `pubky://${userPk}/pub/example.com/definitely-missing.json` as Address;
 
   t.equal(
     await sdk.publicStorage.exists(addr),

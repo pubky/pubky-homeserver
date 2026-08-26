@@ -42,7 +42,7 @@ assert_eq!(&body, "hello");
 let txt = pubky
     .public_storage()
     .get(format!(
-        "{}/pub/my-cool-app/hello.txt",
+        "pubky://{}/pub/my-cool-app/hello.txt",
         session.info().public_key()
     ))
     .await?
@@ -70,14 +70,11 @@ println!("Your current homeserver: {:?}", resolved);
 # Ok(()) }
 ```
 
-## Key formats (display vs transport)
+## Public-key format
 
-`PublicKey` has two string representations:
+`PublicKey` uses raw z-base-32.
 
-- **Display format**: `pubky<z32>` (used for logs/UI and human-facing identifiers).
-- **Transport/storage format**: raw `z32` (used for hostnames, storage owner path segments, legacy headers, query params, serde/JSON, and database storage).
-
-Use `.z32()` whenever you are building hostnames or transport values (for example `_pubky.<z32>`, `/storage/<z32>/...`, or the legacy `pubky-host` header). Use `Display`/`.to_string()` when you want the prefixed identifier for people.
+Use `.to_string()` or `.z32()` to obtain the key. `pubky://` remains the scheme for addressed resources.
 
 ### Reuse a single facade across your app
 
@@ -131,13 +128,13 @@ let pubky = Pubky::new()?;
 let public = pubky.public_storage();
 
 let file = public
-    .get(format!("{user_id}/pub/example.com/file.bin"))
+    .get(format!("pubky://{user_id}/pub/example.com/file.bin"))
     .await?
     .bytes()
     .await?;
 
 let entries = public
-    .list(format!("{user_id}/pub/example.com/"))?
+    .list(format!("pubky://{user_id}/pub/example.com/"))?
     .limit(10)
     .send()
     .await?;
@@ -153,7 +150,7 @@ See the [Public Storage example](https://github.com/pubky/pubky-homeserver/tree/
 Path rules:
 
 - Session storage uses **absolute** paths under `/pub/` or `/priv/`.
-- Public storage uses **addressed** form `pubky<user>/pub/app/file.txt` (preferred) or `pubky://<user>/...`.
+- Public storage uses `pubky://<user>/pub/app/file.txt`.
 - A storage path cannot be both an exact file and an implicit folder prefix. For example:
   - if `/pub/app/foo` exists, writing `/pub/app/foo/bar.json` returns `409 Conflict`.
   - if descendants under `/pub/app/foo/` exist, writing `/pub/app/foo` returns `409 Conflict`.
@@ -171,7 +168,7 @@ Use [`resolve_pubky`] to turn a public resource identifier into its canonical HT
 # use reqwest::Method;
 # async fn run() -> pubky::Result<()> {
 let client = PubkyHttpClient::new()?;
-let url = resolve_pubky("pubkyoperrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG")?;
+let url = resolve_pubky("pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG")?;
 assert_eq!(
     url.as_str(),
     "https://_pubky.operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/storage/operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG"

@@ -123,7 +123,7 @@ impl SessionStorage {
 //
 
 impl PublicStorage {
-    /// HTTP `GET` for an **addressed resource** (`pubky://<pk>/<path>`, `pubky<pk>/<path>`, or `(PublicKey, path)` tuple).
+    /// HTTP `GET` for an **addressed resource** (`pubky://<pk>/<path>` or `(PublicKey, path)` tuple).
     ///
     /// # Examples
     /// ```no_run

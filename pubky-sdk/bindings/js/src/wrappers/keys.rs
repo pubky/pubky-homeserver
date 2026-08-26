@@ -33,9 +33,7 @@ impl Keypair {
 
     /// Returns the [PublicKey] of this keypair.
     ///
-    /// Use `.toString()` on the returned `PublicKey` to get the string form
-    /// or `.z32()` to get the z32 string form without prefix.
-    /// Transport/storage (query params, headers, persistence) should use `.z32()`.
+    /// Use `.toString()` or `.z32()` on the returned `PublicKey` to get its z-base32 encoding.
     ///
     /// @example
     /// const who = keypair.publicKey.toString();
@@ -92,8 +90,7 @@ impl PublicKey {
     }
 
     #[wasm_bindgen(js_name = "toString")]
-    /// Returns the identifier form with the `pubky` prefix.
-    /// Use for display only; transport/storage should use `.z32()`.
+    /// Returns the canonical z-base32 encoding.
     pub fn to_string_js(&self) -> String {
         self.0.to_string()
     }
@@ -104,7 +101,7 @@ impl PublicKey {
         if value.starts_with("pubky://") {
             return Err(PubkyError::new(
                 PubkyErrorName::InvalidInput,
-                "public key must be raw z32 or pubky<z32>; pubky:// is not supported",
+                "public key must be raw z32 or legacy pubky<z32>; pubky:// is not supported",
             ));
         }
         let value = if NativePublicKey::is_pubky_prefixed(&value) {

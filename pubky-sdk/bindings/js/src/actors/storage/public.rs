@@ -9,10 +9,9 @@ use web_sys::Response;
 use crate::js_error::{JsResult, serialize_ts};
 
 #[wasm_bindgen(typescript_custom_section)]
-const TS_ADDRESS: &'static str =
-    r#"export type Address = `pubky${string}/pub/${string}` | `pubky://${string}/pub/${string}`;"#;
+const TS_ADDRESS: &'static str = r#"export type Address = `pubky://${string}/pub/${string}`;"#;
 
-/// Read-only public storage using addressed paths (`"pubky<user>/pub/..."`).
+/// Read-only public storage using Pubky URLs (`"pubky://<user>/pub/..."`).
 #[wasm_bindgen]
 pub struct PublicStorage(pub(crate) pubky::PublicStorage);
 
@@ -87,7 +86,7 @@ impl PublicStorage {
 
     /// Fetch JSON from an addressed path.
     ///
-    /// @param {Address} address `"pubky<user>/pub/.../file.json"` (preferred) or `pubky://<user>/pub/...`.
+    /// @param {Address} address `"pubky://<user>/pub/.../file.json"`.
     /// @returns {Promise<any>}
     #[wasm_bindgen(js_name = "getJson")]
     pub async fn get_json(
@@ -113,7 +112,7 @@ impl PublicStorage {
 
     /// Get metadata for an address
     ///
-    /// @param {Address} address `"pubky<user>/pub/.../file.json"` (preferred) or `pubky://<user>/pub/...`.
+    /// @param {Address} address `"pubky://<user>/pub/.../file.json"`.
     /// @returns {Promise<ResourceStats|undefined>} `undefined` if the resource does not exist.
     /// @throws {PubkyError} On invalid input or transport/server errors.
     #[wasm_bindgen(js_name = "stats")]

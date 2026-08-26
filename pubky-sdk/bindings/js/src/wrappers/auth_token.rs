@@ -99,8 +99,7 @@ impl AuthToken {
 
     /// Returns the **public key** that authenticated with this token.
     ///
-    /// Use `.toString()` on the returned `PublicKey` to get the `pubky<z32>` identifier.
-    /// Call `.z32()` when you specifically need the raw z-base32 value (e.g. hostnames).
+    /// Use `.toString()` or `.z32()` on the returned `PublicKey` to get its z-base32 encoding.
     ///
     /// @example
     /// const who = token.publicKey.toString();

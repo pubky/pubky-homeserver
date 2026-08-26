@@ -10,7 +10,7 @@ use tsify::Tsify;
 /// @property {string=} etag           Opaque server ETag for the current version.
 ///
 /// @example
-/// const stats = await pubky.publicStorage.stats(`${user}/pub/app/file.json`);
+/// const stats = await pubky.publicStorage.stats(`pubky://${user}/pub/app/file.json`);
 /// if (stats) {
 ///   console.log(stats.contentLength, stats.contentType, stats.lastModifiedMs);
 /// }

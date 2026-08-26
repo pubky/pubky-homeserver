@@ -113,15 +113,15 @@ See [**2-auth-flow**](./2-auth-flow/README.md) for the browser app details. The 
 
 ### 3) Public storage read (no auth)
 
-Reads a public resource via the **addressed** form: `pubky<z32>/pub/my-cool-app/path/to/file.txt`.
+Reads a public resource via the Pubky URL form: `pubky://<z32>/pub/my-cool-app/path/to/file.txt`.
 This requires a public resource whose Pubky key is already resolvable. It is not the best first smoke test for a fresh local testnet user because PKDNS publication can lag or fail independently of authenticated storage.
 
 ```bash
 node 3-storage.mjs <pubky>/<absolute-path> [--testnet]
 
 # examples
-node 3-storage.mjs pubkyq5oo7ma.../pub/my-cool-app/hello.txt --testnet
-node 3-storage.mjs pubkyoperrr8w.../pub/pubky.app/posts/0033X02JAN0SG
+node 3-storage.mjs pubky://q5oo7ma.../pub/my-cool-app/hello.txt --testnet
+node 3-storage.mjs pubky://operrr8w.../pub/pubky.app/posts/0033X02JAN0SG
 ```
 
 Shows **exists**, **stats**, and downloads the content.

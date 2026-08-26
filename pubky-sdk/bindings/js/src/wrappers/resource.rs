@@ -26,7 +26,7 @@ impl PubkyResource {
     ///
     /// Accepts:
     /// - `pubky://<public_key>/<path>` (URL form)
-    /// - `pubky<public_key>/<path>` (identifier form)
+    /// - legacy `pubky<public_key>/<path>` (identifier form)
     ///
     /// @param {string} value - The resource string to parse
     /// @returns {PubkyResource} - The parsed resource
@@ -55,7 +55,7 @@ impl PubkyResource {
         self.0.to_pubky_url()
     }
 
-    /// Render as `pubky<owner>/<path>` (identifier form).
+    /// Render as `pubky://<owner>/<path>`.
     #[wasm_bindgen(js_name = "toString")]
     pub fn to_string_js(&self) -> String {
         self.0.to_string()
