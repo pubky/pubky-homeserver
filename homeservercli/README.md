@@ -20,7 +20,7 @@ Create a `config.toml`:
 ```toml
 [admin]
 admin_password = "your-admin-password"
-admin_endpoint = "https://your-homeserver.example.com"
+listen_socket = "https://your-homeserver.example.com"
 ```
 
 By default the CLI looks for `config.toml` in `~/.pubky`. Point it at a different
@@ -34,7 +34,7 @@ homeservercli --data-dir /path/to/config/dir info
 
 ```sh
 export PUBKY_HOMESERVER_ADMIN_PASSWORD="your-admin-password"
-export PUBKY_HOMESERVER_ADMIN_ENDPOINT="https://your-homeserver.example.com"
+export PUBKY_HOMESERVER_LISTEN_SOCKET="https://your-homeserver.example.com"
 export PUBKY_HOMESERVER_DATA_DIR="/path/to/config/dir"
 
 homeservercli info
@@ -44,7 +44,7 @@ homeservercli info
 
 ```sh
 homeservercli \
-  --admin-endpoint https://your-homeserver.example.com \
+  --listen-socket https://your-homeserver.example.com \
   --admin-password your-admin-password \
   info
 ```
@@ -64,7 +64,7 @@ homeservercli [OPTIONS] <SUBCOMMAND>
 |------|----------------------|-------------|
 | `-d, --data-dir <PATH>` | `PUBKY_HOMESERVER_DATA_DIR` | Directory containing `config.toml` (default: `~/.pubky`) |
 | `--admin-password <PASSWORD>` | `PUBKY_HOMESERVER_ADMIN_PASSWORD` | Admin API password |
-| `--admin-endpoint <URL>` | `PUBKY_HOMESERVER_ADMIN_ENDPOINT` | Admin API base URL |
+| `--listen-socket <URL>` | `PUBKY_HOMESERVER_LISTEN_SOCKET` | Admin API base URL |
 | `-v` / `-q` | | Increase / decrease log verbosity |
 
 ---

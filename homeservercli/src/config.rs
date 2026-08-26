@@ -12,14 +12,14 @@ pub struct ConfigToml {
 pub struct AdminToml {
     #[serde(default = "default_admin_password")]
     pub admin_password: Option<String>,
-    #[serde(default = "default_admin_endpoint")]
-    pub admin_endpoint: Option<Url>,
+    #[serde(default = "default_listen_socket")]
+    pub listen_socket: Option<Url>,
 }
 
 fn default_admin_password() -> Option<String> {
     Some("admin".to_string())
 }
-fn default_admin_endpoint() -> Option<Url> {
+fn default_listen_socket() -> Option<Url> {
     Some(Url::parse("http://localhost:6288").unwrap())
 }
 

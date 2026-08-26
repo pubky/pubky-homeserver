@@ -50,13 +50,13 @@ pub fn run(context: AdminContext, args: &GenerateArgs) -> Result<()> {
         allowed_write_paths: args.allowed_write_paths.clone(),
     };
 
-    let token = context
+    let response = context
         .client
         .post_json("generate_signup_token", &body)
         .map_err(map_http)?
         .text()
         .context("failed to read signup token response")?;
 
-    println!("invite code: {token}");
+    println!("{}", response);
     Ok(())
 }

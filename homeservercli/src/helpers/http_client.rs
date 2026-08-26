@@ -99,6 +99,7 @@ impl HttpClient {
             return Err(HttpStatusError {
                 status: status.as_u16(),
                 url: url.clone(),
+                body: response.text()?,
             }
             .into());
         }

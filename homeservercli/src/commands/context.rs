@@ -12,11 +12,11 @@ pub struct AdminContext {
 impl AdminContext {
     pub fn resolve(
         admin_password: Option<String>,
-        admin_endpoint: Option<Url>,
+        listen_socket: Option<Url>,
         config: Option<&ConfigToml>,
     ) -> Result<Self> {
         let password = resolve_password(admin_password, config)?;
-        let endpoint = resolve_endpoint(admin_endpoint, config)?;
+        let endpoint = resolve_endpoint(listen_socket, config)?;
         Ok(Self {
             client: HttpClient::new(endpoint, Auth::AdminPassword(password))?,
         })
@@ -29,8 +29,8 @@ fn resolve_password(admin_password: Option<String>, config: Option<&ConfigToml>)
         .context("Missing admin password. Provide it via '--admin-password', the PUBKY_HOMESERVER_ADMIN_PASSWORD environment variable, or in the config file.")
 }
 
-fn resolve_endpoint(admin_endpoint: Option<Url>, config: Option<&ConfigToml>) -> Result<Url> {
-    admin_endpoint
-        .or_else(|| config.and_then(|c| c.admin.admin_endpoint.clone()))
-        .context("Missing admin endpoint. Provide it via '--admin-endpoint' or in the config file.")
+fn resolve_endpoint(listen_socket: Option<Url>, config: Option<&ConfigToml>) -> Result<Url> {
+    listen_socket
+        .or_else(|| config.and_then(|c| c.admin.listen_socket.clone()))
+        .context("Missing admin endpoint. Provide it via '--listen-socket' or in the config file.")
 }

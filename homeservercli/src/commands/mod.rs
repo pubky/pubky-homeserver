@@ -18,7 +18,7 @@ pub enum Commands {
 }
 
 pub fn execute(cli: Cli, config: Option<ConfigToml>) -> Result<()> {
-    let context = AdminContext::resolve(cli.admin_password, cli.admin_endpoint, config.as_ref())?;
+    let context = AdminContext::resolve(cli.admin_password, cli.listen_socket, config.as_ref())?;
 
     match cli.command {
         Commands::Info(args) => info::run(context, &args)?,

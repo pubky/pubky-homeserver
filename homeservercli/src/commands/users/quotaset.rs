@@ -15,7 +15,7 @@ use pubky::PublicKey;
 ))]
 pub struct SetArgs {
     /// Public key of the user to update (z-base-32 encoded).
-    pub public_key: PublicKey,
+    pub pubky: PublicKey,
 
     /// Storage quota in MB. Use a number (e.g. 500) or "unlimited".
     /// System default is defined in the homeserver config.
@@ -49,7 +49,7 @@ pub struct SetArgs {
 }
 
 pub fn run(context: AdminContext, args: &SetArgs) -> Result<()> {
-    let public_key = args.public_key.z32();
+    let pubky = args.pubky.z32();
 
     let body = QuotaUpdate {
         storage_quota_mb: args.storage_quota_mb,
@@ -62,11 +62,11 @@ pub fn run(context: AdminContext, args: &SetArgs) -> Result<()> {
 
     let response = context
         .client
-        .patch_json(&format!("users/{}/quota", public_key), &body)
-        .map_err(map_http)?;
-    let body = response.text()?;
+        .patch_json(&format!("users/{}/quota", pubky), &body)
+        .map_err(map_http)?
+        .text()?;
 
-    println!("updated quota for user: {}\n{}", public_key, body);
+    println!("{}", response);
 
     Ok(())
 }

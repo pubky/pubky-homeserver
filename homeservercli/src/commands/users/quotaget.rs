@@ -8,15 +8,16 @@ use pubky::PublicKey;
 #[derive(Args, Debug)]
 #[command(about = "Show the effective quota for a user")]
 pub struct GetArgs {
-    pub public_key: PublicKey,
+    /// Public key of the user (z-base-32 encoded).
+    pub pubky: PublicKey,
 }
 
 pub fn run(context: AdminContext, args: &GetArgs) -> Result<()> {
-    let public_key = args.public_key.z32();
+    let pubky = args.pubky.z32();
 
     let response = context
         .client
-        .get(&format!("users/{}/quota", public_key))
+        .get(&format!("users/{}/quota", pubky))
         .map_err(map_http)?;
 
     let quota: UserQuota = response.json().context("failed to parse quota response")?;

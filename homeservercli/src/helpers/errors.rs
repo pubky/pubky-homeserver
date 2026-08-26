@@ -2,10 +2,11 @@ use thiserror::Error;
 use url::Url;
 
 #[derive(Error, Debug)]
-#[error("{url} returned {status}")]
+#[error("{url} returned {status} {body}")]
 pub struct HttpStatusError {
     pub status: u16,
     pub url: Url,
+    pub body: String,
 }
 
 #[derive(Error, Debug)]
