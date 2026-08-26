@@ -5,6 +5,7 @@ use url::Url;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ConfigToml {
+    #[serde(default)]
     pub admin: AdminToml,
 }
 
@@ -14,6 +15,15 @@ pub struct AdminToml {
     pub admin_password: Option<String>,
     #[serde(default = "default_listen_socket")]
     pub listen_socket: Option<Url>,
+}
+
+impl Default for AdminToml {
+    fn default() -> Self {
+        Self {
+            admin_password: default_admin_password(),
+            listen_socket: default_listen_socket(),
+        }
+    }
 }
 
 fn default_admin_password() -> Option<String> {
