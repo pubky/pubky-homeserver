@@ -174,7 +174,7 @@ impl fmt::Display for ResourcePath {
 /// // Build from parts
 /// let pk = Keypair::random().public_key();
 /// let r = PubkyResource::new(pk.clone(), "/pub/site/index.html")?;
-/// assert_eq!(r.to_string(), format!("{pk}/pub/site/index.html"));
+/// assert_eq!(r.to_string(), format!("pubky://{pk}/pub/site/index.html"));
 ///
 /// // Parse from string
 /// // `pubky://` form
