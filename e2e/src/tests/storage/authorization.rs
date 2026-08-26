@@ -18,7 +18,7 @@ async fn unauthorized_put_delete() {
 
     // Someone tries to write to owner's namespace -> 401 Unauthorized
     let owner_url = format!(
-        "{}/{}",
+        "pubky://{}/{}",
         owner_session.info().public_key(),
         path.trim_start_matches('/')
     );

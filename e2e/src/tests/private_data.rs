@@ -41,7 +41,7 @@ async fn grant_session(
 
 /// Transport URL for `path` in `owner`'s namespace.
 fn owner_url(owner: &PublicKey, path: &str) -> String {
-    format!("{}/{}", owner, path.trim_start_matches('/'))
+    format!("pubky://{owner}/{}", path.trim_start_matches('/'))
         .into_pubky_resource()
         .unwrap()
         .to_transport_url()
