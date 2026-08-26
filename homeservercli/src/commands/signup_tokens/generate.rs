@@ -1,6 +1,6 @@
 use crate::commands::context::AdminContext;
 use crate::commands::signup_tokens::error::map_http;
-use crate::helpers::quota::{Quota, QuotaUpdate, RateLimit};
+use crate::helpers::quota::{FieldUpdate, Quota, QuotaUpdate, RateLimit};
 use anyhow::{Context, Result};
 use clap::Args;
 
@@ -42,11 +42,11 @@ pub struct GenerateArgs {
 
 pub fn run(context: AdminContext, args: &GenerateArgs) -> Result<()> {
     let body = QuotaUpdate {
-        storage_quota_mb: args.storage_quota_mb,
-        rate_read: args.rate_read.clone(),
-        rate_write: args.rate_write.clone(),
-        rate_read_burst: args.rate_read_burst,
-        rate_write_burst: args.rate_write_burst,
+        storage_quota_mb: args.storage_quota_mb.map(FieldUpdate::Set),
+        rate_read: args.rate_read.clone().map(FieldUpdate::Set),
+        rate_write: args.rate_write.clone().map(FieldUpdate::Set),
+        rate_read_burst: args.rate_read_burst.map(FieldUpdate::Set),
+        rate_write_burst: args.rate_write_burst.map(FieldUpdate::Set),
         allowed_write_paths: args.allowed_write_paths.clone(),
     };
 

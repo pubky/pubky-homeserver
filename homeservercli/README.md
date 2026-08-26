@@ -144,13 +144,16 @@ homeservercli users quota-get <PUBKY>
 
 Override quota settings for a specific user. At least one quota flag is required.
 
+Each scalar flag accepts `default` to remove the override and restore the
+system default defined in the homeserver config.
+
 ```sh
 homeservercli users quota-set <PUBKY> \
-  [--storage-quota-mb <MB|unlimited>] \
-  [--rate-read <rate>] \
-  [--rate-write <rate>] \
-  [--rate-read-burst <N>] \
-  [--rate-write-burst <N>] \
+  [--storage-quota-mb <MB|unlimited|default>] \
+  [--rate-read <rate|default>] \
+  [--rate-write <rate|default>] \
+  [--rate-read-burst <N|default>] \
+  [--rate-write-burst <N|default>] \
   [--allowed-write-paths <PATH>]...
 ```
 
@@ -162,6 +165,9 @@ homeservercli users quota-set <PUBKY> --storage-quota-mb 1024
 
 # Remove storage limit
 homeservercli users quota-set <PUBKY> --storage-quota-mb unlimited
+
+# Reset the storage override back to the system default
+homeservercli users quota-set <PUBKY> --storage-quota-mb default
 
 # Set read rate to 5 MB/s
 homeservercli users quota-set <PUBKY> --rate-read 5mb/s

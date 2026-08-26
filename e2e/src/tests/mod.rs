@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod cli;
 mod events;
 mod http;
 mod metrics;

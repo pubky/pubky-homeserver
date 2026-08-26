@@ -83,18 +83,44 @@ fn err_msg(s: &str) -> String {
     )
 }
 
+#[derive(Debug, Clone)]
+pub enum FieldUpdate<T> {
+    Default,
+    Set(T),
+}
+
+impl<T: Serialize> Serialize for FieldUpdate<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            FieldUpdate::Default => serializer.serialize_none(),
+            FieldUpdate::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<T: FromStr> FromStr for FieldUpdate<T> {
+    type Err = T::Err;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("default") {
+            Ok(FieldUpdate::Default)
+        } else {
+            T::from_str(s).map(FieldUpdate::Set)
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 pub struct QuotaUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage_quota_mb: Option<Quota>,
+    pub storage_quota_mb: Option<FieldUpdate<Quota>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_read: Option<RateLimit>,
+    pub rate_read: Option<FieldUpdate<RateLimit>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_write: Option<RateLimit>,
+    pub rate_write: Option<FieldUpdate<RateLimit>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_read_burst: Option<u32>,
+    pub rate_read_burst: Option<FieldUpdate<u32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_write_burst: Option<u32>,
+    pub rate_write_burst: Option<FieldUpdate<u32>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allowed_write_paths: Vec<String>,
 }
@@ -261,7 +287,7 @@ mod tests {
     #[test]
     fn quota_update_omits_none_and_empty_fields() {
         let body = QuotaUpdate {
-            storage_quota_mb: Some(Quota::Limit(500)),
+            storage_quota_mb: Some(FieldUpdate::Set(Quota::Limit(500))),
             ..Default::default()
         };
         let json = serde_json::to_string(&body).unwrap();
@@ -271,7 +297,7 @@ mod tests {
     #[test]
     fn quota_update_empty_paths_are_omitted() {
         let body = QuotaUpdate {
-            rate_read_burst: Some(50),
+            rate_read_burst: Some(FieldUpdate::Set(50)),
             allowed_write_paths: vec![],
             ..Default::default()
         };
@@ -283,11 +309,11 @@ mod tests {
     #[test]
     fn quota_update_serializes_all_fields() {
         let body = QuotaUpdate {
-            storage_quota_mb: Some(Quota::Unlimited(UnlimitedTag::Unlimited)),
+            storage_quota_mb: Some(FieldUpdate::Set(Quota::Unlimited(UnlimitedTag::Unlimited))),
             rate_read: Some("100mb/s".parse().unwrap()),
             rate_write: Some("unlimited".parse().unwrap()),
-            rate_read_burst: Some(50),
-            rate_write_burst: Some(25),
+            rate_read_burst: Some(FieldUpdate::Set(50)),
+            rate_write_burst: Some(FieldUpdate::Set(25)),
             allowed_write_paths: vec!["/pub/tokens/".to_string()],
         };
         let v: serde_json::Value = serde_json::to_value(&body).unwrap();
@@ -300,6 +326,45 @@ mod tests {
             v["allowed_write_paths"],
             serde_json::json!(["/pub/tokens/"])
         );
+    }
+
+    #[test]
+    fn field_update_parses_default_case_insensitive() {
+        assert!(matches!(
+            "default".parse::<FieldUpdate<Quota>>(),
+            Ok(FieldUpdate::Default)
+        ));
+        assert!(matches!(
+            "DEFAULT".parse::<FieldUpdate<RateLimit>>(),
+            Ok(FieldUpdate::Default)
+        ));
+    }
+
+    #[test]
+    fn field_update_parses_value_and_unlimited() {
+        assert!(matches!(
+            "500".parse::<FieldUpdate<Quota>>(),
+            Ok(FieldUpdate::Set(Quota::Limit(500)))
+        ));
+        assert!(matches!(
+            "unlimited".parse::<FieldUpdate<Quota>>(),
+            Ok(FieldUpdate::Set(Quota::Unlimited(_)))
+        ));
+    }
+
+    #[test]
+    fn quota_update_reset_serializes_field_as_null() {
+        let body = QuotaUpdate {
+            storage_quota_mb: Some(FieldUpdate::Default),
+            rate_read: Some(FieldUpdate::Default),
+            rate_read_burst: Some(FieldUpdate::Default),
+            ..Default::default()
+        };
+        let v: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["storage_quota_mb"], serde_json::Value::Null);
+        assert_eq!(v["rate_read"], serde_json::Value::Null);
+        assert_eq!(v["rate_read_burst"], serde_json::Value::Null);
+        assert!(v.get("rate_write").is_none());
     }
 
     // --- UserQuota deserialization ---

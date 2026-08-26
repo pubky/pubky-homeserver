@@ -12,10 +12,12 @@ publish = false
 [dev-dependencies]
 base64.workspace = true
 bytes.workspace = true
+escargot = "0.5"
 eventsource-stream.workspace = true
 futures = "0.3"
 pubky-testnet.workspace = true
 rand = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
