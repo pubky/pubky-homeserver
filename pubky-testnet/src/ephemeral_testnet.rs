@@ -195,9 +195,10 @@ impl EphemeralTestnetBuilder {
             .homeserver_config
             .unwrap_or_else(ConfigToml::minimal_test_config);
 
-        if let Some(connection_string) = testnet.postgres_connection_string.as_ref() {
-            config.general.database_url = connection_string.clone();
-        }
+        config.general.database_url = testnet
+            .postgres_connection_string
+            .clone()
+            .or(config.general.database_url);
 
         let keypair = self
             .homeserver_keypair
@@ -328,9 +329,11 @@ impl EphemeralTestnet {
     ) -> anyhow::Result<&HomeserverApp> {
         let mut config = config.unwrap_or_else(ConfigToml::minimal_test_config);
 
-        if let Some(connection_string) = self.testnet.postgres_connection_string.as_ref() {
-            config.general.database_url = connection_string.clone();
-        }
+        config.general.database_url = self
+            .testnet
+            .postgres_connection_string
+            .clone()
+            .or(config.general.database_url);
 
         let mock_dir = MockDataDir::new(config, Some(Keypair::random()))?;
         self.testnet.create_homeserver_app_with_mock(mock_dir).await
@@ -383,6 +386,7 @@ mod test {
     /// This is to prevent the case where the testnet is not cleaned up properly.
     /// For example, if the port is not released after the testnet is stopped.
     #[tokio::test]
+    #[crate::test]
     async fn test_two_testnet_in_a_row() {
         {
             let _ = EphemeralTestnet::builder().build().await.unwrap();
@@ -394,6 +398,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_homeserver_with_random_keypair() {
         // Start with just DHT + http relay, no homeserver
         let mut testnet = Testnet::new().await.unwrap();
@@ -417,6 +422,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_builder_default() {
         // Verify builder creates homeserver with minimal config (admin disabled)
         let network = EphemeralTestnet::builder().build().await.unwrap();
@@ -434,6 +440,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_builder_with_custom_config() {
         // Verify custom config is used (e.g., metrics enabled)
         let mut config = ConfigToml::minimal_test_config();
@@ -457,6 +464,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[crate::test]
     async fn test_builder_with_custom_keypair() {
         // Verify custom keypair is used
         let keypair = Keypair::random();

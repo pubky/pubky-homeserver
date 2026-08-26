@@ -11,11 +11,16 @@ impl ConnectionString {
     /// Create a new connection string from a string.
     /// This function validates that the connection string is a postgres connection string.
     pub fn new(con_string: &str) -> anyhow::Result<Self> {
-        let con = Self(url::Url::parse(con_string)?);
-        if !con.is_postgres() {
+        Self::validated(url::Url::parse(con_string)?)
+    }
+
+    /// Shared validation: ensures the URL uses a postgres scheme.
+    fn validated(url: url::Url) -> anyhow::Result<Self> {
+        let cs = Self(url);
+        if !cs.is_postgres() {
             anyhow::bail!("Only postgres database urls are supported");
         }
-        Ok(con)
+        Ok(cs)
     }
 
     /// Get the connection string as a str.
@@ -29,45 +34,50 @@ impl ConnectionString {
 
     /// Get the database name
     /// For postgres, this is the database name directly
-    /// For sqlite, this is the path to the database file
     pub fn database_name(&self) -> &str {
         self.0.path().trim_start_matches("/")
     }
 
-    /// Set the database name
+    /// Set the database name, clearing any `dbname` query parameter that would
+    /// otherwise override the path. See
+    /// <https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS>
     pub fn set_database_name(&mut self, db_name: &str) {
         self.0.set_path(db_name);
-    }
-}
-
-#[cfg(any(test, feature = "testing"))]
-impl ConnectionString {
-    /// Returns a connection string for a test database.
-    /// This is a postgres database that is not real.
-    /// It is used as an indicator for a empheral test database.
-    pub fn default_test_db() -> Self {
-        Self::new("postgres://postgres:postgres@localhost:5432/postgres?pubky-test=true").unwrap()
+        self.remove_query_param("dbname");
     }
 
-    /// Returns true if the connection string is for a test database.
-    pub fn is_test_db(&self) -> bool {
-        self.0
+    /// Remove all occurrences of a query parameter by key.
+    fn remove_query_param(&mut self, key: &str) {
+        if self.0.query().is_none() {
+            return;
+        }
+        let pairs: Vec<_> = self
+            .0
             .query_pairs()
-            .any(|(key, value)| key == "pubky-test" && value == "true")
+            .filter(|(k, _)| k != key)
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if pairs.is_empty() {
+            self.0.set_query(None);
+        } else {
+            self.0.query_pairs_mut().clear().extend_pairs(&pairs);
+        }
     }
 }
 
-impl From<url::Url> for ConnectionString {
-    fn from(url: url::Url) -> Self {
-        Self(url)
+impl TryFrom<url::Url> for ConnectionString {
+    type Error = anyhow::Error;
+
+    fn try_from(url: url::Url) -> Result<Self, Self::Error> {
+        Self::validated(url)
     }
 }
 
 impl FromStr for ConnectionString {
-    type Err = url::ParseError;
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(url::Url::parse(s)?))
+        Self::new(s)
     }
 }
 
@@ -96,25 +106,61 @@ impl<'de> Deserialize<'de> for ConnectionString {
     }
 }
 
-impl Default for ConnectionString {
-    fn default() -> Self {
-        Self::new("postgres://localhost:5432/pubky_homeserver").unwrap()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_create_db() {
-        let con_strings = vec![
-            "postgres://localhost:5432/pubky_homeserver",
-            "sqlite:///path/to/sqlite.db",
-        ];
-        for con_string in con_strings {
-            let _: ConnectionString = con_string.parse().unwrap();
-        }
+    #[test]
+    fn test_valid_postgres_url() {
+        let _: ConnectionString = "postgres://localhost:5432/pubky_homeserver"
+            .parse()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_non_postgres_url_rejected() {
+        let result: Result<ConnectionString, _> = "sqlite:///path/to/sqlite.db".parse();
+        assert!(result.is_err(), "sqlite URLs should be rejected");
+    }
+
+    #[test]
+    fn set_database_name_changes_path() {
+        let mut cs = ConnectionString::new("postgres://user:pass@localhost:5432/original").unwrap();
+        cs.set_database_name("new_db");
+        assert_eq!(cs.database_name(), "new_db");
+    }
+
+    #[test]
+    fn set_database_name_strips_dbname_query_param() {
+        let mut cs =
+            ConnectionString::new("postgres://user:pass@localhost:5432/postgres?dbname=postgres")
+                .unwrap();
+        cs.set_database_name("pubky_test_abc123");
+        assert_eq!(cs.database_name(), "pubky_test_abc123");
+        assert!(
+            !cs.as_str().contains("dbname="),
+            "dbname query param should be removed, got: {}",
+            cs.as_str()
+        );
+    }
+
+    #[test]
+    fn set_database_name_preserves_other_query_params() {
+        let mut cs = ConnectionString::new(
+            "postgres://user:pass@localhost:5432/postgres?dbname=postgres&sslmode=require",
+        )
+        .unwrap();
+        cs.set_database_name("pubky_test_abc123");
+        assert_eq!(cs.database_name(), "pubky_test_abc123");
+        assert!(
+            !cs.as_str().contains("dbname="),
+            "dbname should be removed, got: {}",
+            cs.as_str()
+        );
+        assert!(
+            cs.as_str().contains("sslmode=require"),
+            "other params should be preserved, got: {}",
+            cs.as_str()
+        );
     }
 }

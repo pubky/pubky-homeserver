@@ -36,29 +36,11 @@ extern "C" fn cleanup_shared_container() {
 
 /// A containerized PostgreSQL instance for testing.
 ///
-/// This wraps a testcontainers `Postgres` container and manages its lifecycle.
-/// The container is automatically stopped and removed when this struct is dropped.
+/// The container is automatically cleaned up on drop, on Ctrl+C/SIGTERM,
+/// and (for the shared instance) on normal process exit via an `atexit` hook.
 ///
-/// # Sharing Across Tests (Recommended)
-///
-/// Each `DockerPostgres::start()` starts a **separate** PostgreSQL container.
-/// Use [`DockerPostgres::shared()`] to start **one** instance and share it across tests:
-///
-/// ```ignore
-/// use pubky_testnet::docker_postgres::DockerPostgres;
-/// use pubky_testnet::EphemeralTestnet;
-///
-/// #[tokio::test]
-/// async fn my_test() {
-///     let pg = DockerPostgres::shared().await;
-///     let testnet = EphemeralTestnet::builder()
-///         .postgres(pg.connection_string().unwrap())
-///         .build()
-///         .await
-///         .unwrap();
-///     // Each testnet gets its own ephemeral database — tests remain isolated.
-/// }
-/// ```
+/// Multiple testnets can safely share one container — each gets its own
+/// isolated database. See [`Self::connection_string()`] for details.
 pub struct DockerPostgres {
     _container: ContainerAsync<Postgres>,
     host: String,
@@ -70,14 +52,10 @@ pub struct DockerPostgres {
 pub type EmbeddedPostgres = DockerPostgres;
 
 impl DockerPostgres {
-    /// Return a shared Docker PostgreSQL instance, starting it on first call.
+    /// Return a shared Docker PostgreSQL container, starting it on first call.
     ///
-    /// This is the recommended way to share a single PostgreSQL container across
-    /// multiple tests. Docker handles all cleanup automatically.
-    ///
-    /// An `atexit` hook is registered to ensure the container is removed even on
-    /// normal process exit (Rust never drops statics, so the testcontainers
-    /// `Drop` impl alone is not sufficient).
+    /// Avoids the overhead of starting a separate container per test.
+    /// Each testnet still gets its own isolated database.
     ///
     /// # Panics
     ///
@@ -127,6 +105,10 @@ impl DockerPostgres {
     }
 
     /// Get the connection string for this Docker PostgreSQL instance.
+    ///
+    /// The [`DatabaseMode`](pubky_homeserver::DatabaseMode) enum — not the URL
+    /// itself — controls whether the homeserver creates an ephemeral
+    /// `pubky_test_{uuid}` database.
     pub fn connection_string(&self) -> anyhow::Result<ConnectionString> {
         let url = format!(
             "postgres://postgres:postgres@{}:{}/postgres",
@@ -146,6 +128,7 @@ mod tests {
     use super::DockerPostgres;
     use crate::EphemeralTestnet;
     use pubky::Keypair;
+    use pubky_common::auth::jws::ClientId;
 
     const CONTAINER_ID_PREFIX: &str = "CONTAINER_ID=";
 
@@ -180,6 +163,7 @@ mod tests {
     /// Basic integration test: start a testnet with docker postgres + http relay,
     /// signup a user, store and retrieve data.
     #[tokio::test]
+    #[crate::test]
     async fn test_docker_postgres_with_testnet() {
         let testnet = EphemeralTestnet::builder()
             .with_docker_postgres()
@@ -199,10 +183,14 @@ mod tests {
         let keypair = Keypair::random();
         let signer = pubky.signer(keypair);
 
-        let session = signer
-            .signup_cookie(&testnet.homeserver_app().public_key(), None)
+        signer
+            .signup(&testnet.homeserver_app().public_key(), None)
             .await
             .expect("Failed to signup user");
+        let session = signer
+            .signin(ClientId::new("test").unwrap())
+            .await
+            .expect("Failed to signin user");
 
         // Store and retrieve data
         let path = "/pub/test.txt";
@@ -296,6 +284,56 @@ mod tests {
             pg2.container_id(),
             "shared() should return the same container on repeated calls"
         );
+    }
+
+    /// Verify that two testnets sharing a `DockerPostgres` get isolated databases.
+    ///
+    /// Signs up a user on testnet A, then verifies that same keypair can sign up
+    /// on testnet B (proving it has a separate, empty database).
+    ///
+    /// This also validates that the configured connection string (random Docker
+    /// port) flows through `DatabaseMode::resolve_test` → `EphemeralTest` →
+    /// `create_ephemeral_test_db()`. Without that, it would fall back to
+    /// `localhost:5432` and fail to connect.
+    #[tokio::test]
+    #[crate::test]
+    async fn test_shared_docker_postgres_provides_db_isolation() {
+        let pg = DockerPostgres::start()
+            .await
+            .expect("Failed to start docker postgres");
+
+        let keypair = Keypair::random();
+
+        // Build two independent testnets sharing the same Postgres container.
+        let testnet_a = EphemeralTestnet::builder()
+            .postgres(pg.connection_string().unwrap())
+            .build()
+            .await
+            .expect("Failed to start testnet A");
+
+        let testnet_b = EphemeralTestnet::builder()
+            .postgres(pg.connection_string().unwrap())
+            .keypair(Keypair::random()) // different homeserver identity
+            .build()
+            .await
+            .expect("Failed to start testnet B");
+
+        // Sign up the user on testnet A.
+        let sdk_a = testnet_a.sdk().expect("Failed to create SDK A");
+        let signer_a = sdk_a.signer(keypair.clone());
+        signer_a
+            .signup(&testnet_a.homeserver_app().public_key(), None)
+            .await
+            .expect("Signup on testnet A should succeed");
+
+        // The same keypair should be able to sign up on testnet B,
+        // proving it has its own isolated database.
+        let sdk_b = testnet_b.sdk().expect("Failed to create SDK B");
+        let signer_b = sdk_b.signer(keypair);
+        signer_b
+            .signup(&testnet_b.homeserver_app().public_key(), None)
+            .await
+            .expect("Signup on testnet B should succeed (proves DB isolation)");
     }
 
     /// Test that specifying both docker postgres and a custom connection string fails.

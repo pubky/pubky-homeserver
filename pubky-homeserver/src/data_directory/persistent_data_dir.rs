@@ -100,6 +100,22 @@ impl DataDir for PersistentDataDir {
         &self.expanded_path
     }
 
+    /// Connects to the configured URL with [`DatabaseMode::Direct`](crate::persistence::sql::DatabaseMode::Direct).
+    fn resolve_database_mode(
+        &self,
+        conf: &ConfigToml,
+    ) -> anyhow::Result<crate::persistence::sql::DatabaseMode> {
+        conf.general
+            .database_url
+            .clone()
+            .map(crate::persistence::sql::DatabaseMode::Direct)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No database_url configured. Set [general].database_url in config.toml."
+                )
+            })
+    }
+
     /// Makes sure the data directory exists.
     /// Create the directory if it doesn't exist.
     fn ensure_data_dir_exists_and_is_writable(&self) -> anyhow::Result<()> {
@@ -245,6 +261,37 @@ mod tests {
         assert!(data_dir.get_secret_file_path().exists());
         let content = std::fs::read_to_string(secret_file_path).unwrap();
         assert_eq!(content, "test");
+    }
+
+    #[test]
+    fn resolve_database_mode_returns_direct_when_url_set() {
+        use crate::persistence::sql::{ConnectionString, DatabaseMode};
+
+        let mut conf = ConfigToml::default();
+        conf.general.database_url =
+            Some(ConnectionString::new("postgres://localhost:5432/mydb").unwrap());
+
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = PersistentDataDir::new(temp_dir.path().to_path_buf());
+        let mode = data_dir.resolve_database_mode(&conf).unwrap();
+        assert!(
+            matches!(mode, DatabaseMode::Direct(_)),
+            "PersistentDataDir should resolve to Direct"
+        );
+    }
+
+    #[test]
+    fn resolve_database_mode_errors_when_no_url() {
+        let mut conf = ConfigToml::default();
+        conf.general.database_url = None;
+
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = PersistentDataDir::new(temp_dir.path().to_path_buf());
+        let result = data_dir.resolve_database_mode(&conf);
+        assert!(
+            result.is_err(),
+            "PersistentDataDir should error when database_url is None"
+        );
     }
 
     #[test]

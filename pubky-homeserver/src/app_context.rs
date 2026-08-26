@@ -36,6 +36,9 @@ pub enum AppContextConversionError {
     /// Failed to open SQL DB.
     #[error("Failed to open SQL DB: {0}")]
     SqlDb(sqlx::Error),
+    /// Failed to resolve the database mode (e.g. missing URL or invalid TEST_PUBKY_CONNECTION_STRING).
+    #[error("Failed to resolve database mode: {0}")]
+    DatabaseResolution(anyhow::Error),
     /// Failed to run migrations.
     #[error("Failed to run migrations: {0}")]
     Migrations(anyhow::Error),
@@ -151,7 +154,12 @@ impl AppContext {
             .read_or_create_keypair()
             .map_err(AppContextConversionError::Keypair)?;
 
-        let sql_db = Self::connect_to_sql_db(&conf).await?;
+        let db_mode = dir
+            .resolve_database_mode(&conf)
+            .map_err(AppContextConversionError::DatabaseResolution)?;
+        let sql_db = SqlDb::connect(db_mode)
+            .await
+            .map_err(AppContextConversionError::SqlDb)?;
         Migrator::new(&sql_db)
             .run()
             .await
@@ -203,7 +211,9 @@ impl AppContext {
     fn build_pkarr_builder_from_config(config_toml: &ConfigToml) -> pkarr::ClientBuilder {
         let mut builder = pkarr::ClientBuilder::default();
         #[cfg(any(test, feature = "testing"))]
-        if config_toml.general.database_url.is_test_db() {
+        // In test builds, no explicit database_url means we're in a test environment
+        // where we must avoid contacting the public DHT.
+        if config_toml.general.database_url.is_none() {
             builder
                 .no_default_network()
                 // Keep the client buildable without contacting the public DHT.
@@ -235,50 +245,33 @@ impl AppContext {
         }
         builder
     }
-
-    /// Connect to the SQL database.
-    /// If we are in a test environment and it's a test db connection string,
-    /// we use an empheral test db.
-    /// Otherwise, we use the normal db connection.
-    async fn connect_to_sql_db(
-        config_toml: &ConfigToml,
-    ) -> Result<SqlDb, AppContextConversionError> {
-        #[cfg(any(test, feature = "testing"))]
-        {
-            // If we are in a test environment and it's a test db connection string,
-            // we use an empheral test db.
-            return if config_toml.general.database_url.is_test_db() {
-                Ok(SqlDb::test().await)
-            } else {
-                SqlDb::connect(&config_toml.general.database_url)
-                    .await
-                    .map_err(AppContextConversionError::SqlDb)
-            };
-        }
-
-        #[cfg(not(any(test, feature = "testing")))]
-        {
-            // If we are not in a test environment, we use the normal db connection.
-            return SqlDb::connect(&config_toml.general.database_url)
-                .await
-                .map_err(AppContextConversionError::SqlDb);
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Verifies that the test pkarr builder doesn't contact the public DHT
+    /// when database_url is None (the default test config).
     #[test]
-    fn test_pkarr_builder_does_not_use_default_network() {
-        let builder =
-            AppContext::build_pkarr_builder_from_config(&ConfigToml::default_test_config());
+    fn pkarr_builder_does_not_use_default_network() {
+        let config = ConfigToml::default_test_config();
+        assert!(
+            config.general.database_url.is_none(),
+            "default_test_config should have database_url = None"
+        );
+        let builder = AppContext::build_pkarr_builder_from_config(&config);
         let builder_debug = format!("{builder:?}");
 
-        assert!(builder_debug.contains("127.0.0.1:9"));
+        assert!(
+            builder_debug.contains("127.0.0.1:9"),
+            "expected sentinel bootstrap node in builder: {builder_debug}"
+        );
         for relay in pkarr::DEFAULT_RELAYS {
-            assert!(!builder_debug.contains(relay));
+            assert!(
+                !builder_debug.contains(relay),
+                "default relay {relay} should not appear in test builder: {builder_debug}"
+            );
         }
         builder.build().expect("isolated pkarr client should build");
     }

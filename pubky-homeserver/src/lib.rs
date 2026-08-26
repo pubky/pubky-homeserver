@@ -36,7 +36,7 @@ pub use data_directory::{
 };
 pub use homeserver_app::{HomeserverApp, HomeserverAppBuildError};
 pub use metrics_server::{MetricsServer, MetricsServerBuildError};
-pub use persistence::sql::ConnectionString;
+pub use persistence::sql::{ConnectionString, DatabaseMode};
 pub use shared::quota::{
     BandwidthQuota, DefaultQuotasToml, GlobPattern, HttpMethod, LimitKey, LimitKeyType, PathLimit,
     RequestCountQuota, TimeUnit,
