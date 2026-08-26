@@ -7,6 +7,7 @@ use pubky::PubkyCookieAuthFlow;
 use std::{cell::RefCell, rc::Rc};
 use url::Url;
 
+use tsify::Ts;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -14,7 +15,7 @@ use wasm_bindgen_futures::JsFuture;
 use super::deep_links::XCallbackParams;
 use super::{in_flight::InFlightGuard, session::Session};
 use crate::{
-    js_error::{JsResult, PubkyError, PubkyErrorName},
+    js_error::{JsResult, PubkyError, PubkyErrorName, deserialize_ts},
     wrappers::{auth_token::AuthToken, capabilities::parse_capabilities, keys::PublicKey},
 };
 
@@ -76,8 +77,9 @@ impl AuthFlow {
         #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
         kind: AuthFlowKind,
         relay: Option<String>,
-        x_callback: Option<XCallbackParams>,
+        x_callback: Option<Ts<XCallbackParams>>,
     ) -> JsResult<AuthFlow> {
+        let x_callback = x_callback.as_ref().map(deserialize_ts).transpose()?;
         Self::start_with_client(capabilities, kind, relay, x_callback, None)
     }
 

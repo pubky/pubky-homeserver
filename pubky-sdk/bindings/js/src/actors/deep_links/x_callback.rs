@@ -6,7 +6,6 @@ use tsify::Tsify;
 /// Callback destinations are untrusted navigation hints. Authentication still
 /// completes through the encrypted relay.
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct XCallbackParams {
     /// Human-readable name of the requesting application.

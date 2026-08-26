@@ -1,9 +1,10 @@
 use std::str::FromStr;
 
+use tsify::Ts;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    js_error::{JsResult, PubkyError, PubkyErrorName},
+    js_error::{JsResult, PubkyError, PubkyErrorName, serialize_ts},
     wrappers::keys::PublicKey,
 };
 
@@ -42,8 +43,8 @@ impl DirectSignupDeepLink {
 
     /// Optional x-callback-url metadata carried by this deep link.
     #[wasm_bindgen(js_name = "xCallback", getter)]
-    pub fn x_callback(&self) -> XCallbackParams {
-        self.0.x_callback().into()
+    pub fn x_callback(&self) -> JsResult<Ts<XCallbackParams>> {
+        serialize_ts(&XCallbackParams::from(self.0.x_callback()))
     }
 
     #[allow(

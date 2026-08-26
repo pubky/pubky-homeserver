@@ -2,10 +2,10 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tsify::Tsify;
+use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
-use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
+use crate::js_error::{JsResult, PubkyError, PubkyErrorName, deserialize_ts};
 
 // ------------------------------------------------------------------------------------------------
 // JS style config objects for the client.
@@ -13,7 +13,6 @@ use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 
 /// Pkarr Config
 #[derive(Tsify, Serialize, Deserialize, Debug)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct PkarrConfig {
     /// The list of relays to access the DHT with.
@@ -27,7 +26,6 @@ pub struct PkarrConfig {
 
 /// Pubky Client Config
 #[derive(Tsify, Serialize, Deserialize, Debug)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct PubkyClientConfig {
     /// Configuration on how to access pkarr packets on the mainline DHT.
@@ -70,7 +68,8 @@ impl Client {
     /// });
     /// const pubky = Pubky.withClient(client);
     #[wasm_bindgen(constructor)]
-    pub fn new(config_opt: Option<PubkyClientConfig>) -> JsResult<Self> {
+    pub fn new(config_opt: Option<Ts<PubkyClientConfig>>) -> JsResult<Self> {
+        let config_opt = config_opt.as_ref().map(deserialize_ts).transpose()?;
         let mut builder = pubky::PubkyHttpClient::builder();
 
         if let Some(config) = config_opt

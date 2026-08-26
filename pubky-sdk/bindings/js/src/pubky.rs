@@ -3,6 +3,7 @@
     reason = "JS bindings preserve deprecated cookie compatibility APIs"
 )]
 
+use tsify::Ts;
 use wasm_bindgen::prelude::*;
 
 use crate::actors::{
@@ -17,7 +18,11 @@ use crate::actors::{
     storage::PublicStorage,
 };
 use crate::wrappers::keys::PublicKey;
-use crate::{client::constructor::Client, js_error::JsResult, wrappers::keys::Keypair};
+use crate::{
+    client::constructor::Client,
+    js_error::{JsResult, deserialize_ts},
+    wrappers::keys::Keypair,
+};
 
 /// High-level entrypoint to the Pubky SDK.
 #[wasm_bindgen]
@@ -113,8 +118,9 @@ impl Pubky {
         #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
         kind: AuthFlowKind,
         relay: Option<String>,
-        x_callback: Option<XCallbackParams>,
+        x_callback: Option<Ts<XCallbackParams>>,
     ) -> JsResult<AuthFlow> {
+        let x_callback = x_callback.as_ref().map(deserialize_ts).transpose()?;
         let flow = AuthFlow::start_with_client(
             capabilities,
             kind,
@@ -149,8 +155,9 @@ impl Pubky {
         &self,
         #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
         kind: AuthFlowKind,
-        options: GrantAuthFlowOptions,
+        options: Ts<GrantAuthFlowOptions>,
     ) -> JsResult<GrantAuthFlow> {
+        let options = deserialize_ts(&options)?;
         if BrowserGrantKeyStore::can_use_delegation().await {
             let delegated = GrantAuthFlow::start_delegated_with_client(
                 capabilities.clone(),

@@ -2,10 +2,11 @@
 use super::stats::ResourceStats;
 use js_sys::Uint8Array;
 use serde::Serialize;
+use tsify::Ts;
 use wasm_bindgen::prelude::*;
 use web_sys::Response;
 
-use crate::js_error::JsResult;
+use crate::js_error::{JsResult, serialize_ts};
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_ADDRESS: &'static str =
@@ -119,9 +120,9 @@ impl PublicStorage {
     pub async fn stats(
         &self,
         #[wasm_bindgen(unchecked_param_type = "Address")] address: String,
-    ) -> JsResult<Option<ResourceStats>> {
+    ) -> JsResult<Option<Ts<ResourceStats>>> {
         match self.0.stats(address).await? {
-            Some(stats) => Ok(Some(ResourceStats::from(stats))),
+            Some(stats) => Ok(Some(serialize_ts(&ResourceStats::from(stats))?)),
             None => Ok(None),
         }
     }
