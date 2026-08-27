@@ -207,6 +207,9 @@ impl From<pubky::Error> for PubkyError {
         if let pubky::Error::Request(RequestError::Server { status, .. }) = &err {
             return Self::new_with_status(name, &err, status.as_u16());
         }
+        if let pubky::Error::Request(RequestError::UnsupportedFeature { feature }) = &err {
+            return Self::new(name, &err).with_data(json!({ "feature": feature }));
+        }
         Self::new(name, err)
     }
 }
@@ -331,5 +334,20 @@ impl IntoWasmAbi for PubkyError {
 impl WasmDescribe for PubkyError {
     fn describe() {
         JsValue::describe();
+    }
+}
+
+#[cfg(test)]
+mod pubky_error_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_feature_includes_the_feature_identifier() {
+        let error = PubkyError::from(pubky::Error::Request(RequestError::UnsupportedFeature {
+            feature: "conditional-writes".to_string(),
+        }));
+
+        assert!(matches!(error.name, PubkyErrorName::RequestError));
+        assert_eq!(error.data, Some(json!({ "feature": "conditional-writes" })));
     }
 }
