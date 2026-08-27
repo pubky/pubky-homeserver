@@ -1,7 +1,16 @@
 use pubky_common::crypto::{Hash, Hasher};
 
+use base64::Engine;
+
 /// Fallback content type if no content type is detected.
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
+
+pub(crate) fn content_hash_etag(hash: &Hash) -> String {
+    format!(
+        "\"{}\"",
+        base64::engine::general_purpose::STANDARD.encode(hash.as_bytes())
+    )
+}
 
 /// Metadata of a file.
 #[derive(Debug, Clone)]

@@ -10,3 +10,4 @@ mod writes;
 
 pub(crate) use cleanup_task::BlobCleanupTask;
 pub use service::FileService;
+pub use writes::WriteOutcome;

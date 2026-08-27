@@ -1,6 +1,6 @@
 use crate::{
     persistence::{
-        files::{FileIoError, WriteStreamError},
+        files::{FileIoError, WritePreconditions, WriteStreamError},
         sql::{
             entities::blob::BlobRepository,
             entry::{EntryEntity, EntryRepository},
@@ -23,7 +23,8 @@ const UNREFERENCED_BLOB_GRACE_SECONDS: i64 = 60 * 60;
 // Bound physical data to the active version, one retained version, and one replacement upload.
 const PHYSICAL_STORAGE_QUOTA_MULTIPLIER: u64 = 3;
 
-enum CommitWriteError {
+#[derive(Debug)]
+pub(super) enum CommitWriteError {
     BeforeCommit(FileIoError),
     CommitOutcomeUnknown(FileIoError),
 }
@@ -32,6 +33,13 @@ struct UploadReservation {
     user_id: i32,
     tracked_length: u64,
     max_blob_length: Option<u64>,
+}
+
+/// Whether a committed write created or replaced its logical resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Created,
+    Replaced,
 }
 
 #[derive(Clone, Copy)]
@@ -57,23 +65,51 @@ impl WriteMode {
 
 impl FileService {
     /// Write a streamed file and atomically publish its logical entry.
+    #[cfg(test)]
     pub async fn write_stream(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, None)
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::Client,
+            None,
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     /// Write a streamed file with a trusted upper-bound hint for upload reservation.
+    #[cfg(test)]
     pub async fn write_stream_with_size_hint(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: u64,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, Some(size_hint))
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::Client,
+            Some(size_hint),
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
+    }
+
+    /// Write a streamed file when its current entity tag satisfies `preconditions`.
+    pub(crate) async fn write_stream_with_preconditions(
+        &self,
+        path: &EntryPath,
+        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        size_hint: Option<u64>,
+        preconditions: WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), FileIoError> {
+        self.write_stream_inner(path, stream, WriteMode::Client, size_hint, preconditions)
             .await
     }
 
@@ -88,7 +124,8 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         mode: WriteMode,
         size_hint: Option<u64>,
-    ) -> Result<EntryEntity, FileIoError> {
+        preconditions: WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), FileIoError> {
         if mode.enforces_write_path() {
             self.check_write_path_allowed(path).await?;
         }
@@ -137,7 +174,9 @@ impl FileService {
             return Err(FileIoError::UploadLeaseLost);
         }
 
-        let result = self.commit_write(path, &blob_key, &metadata, mode).await;
+        let result = self
+            .commit_write(path, &blob_key, &metadata, mode, &preconditions)
+            .await;
         match result {
             Ok(entry) => {
                 self.events_service.notify_event().await;
@@ -226,13 +265,14 @@ impl FileService {
         }
     }
 
-    async fn commit_write(
+    pub(super) async fn commit_write(
         &self,
         path: &EntryPath,
         blob_key: &str,
         metadata: &crate::persistence::files::FileMetadata,
         mode: WriteMode,
-    ) -> Result<EntryEntity, CommitWriteError> {
+        preconditions: &WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), CommitWriteError> {
         let mut tx = self
             .db
             .pool()
@@ -257,9 +297,15 @@ impl FileService {
                 Err(sqlx::Error::RowNotFound) => None,
                 Err(error) => return Err(error.into()),
             };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
             if mode.requires_missing_destination() && existing.is_some() {
                 return Err(FileIoError::PathCollision);
             }
+            let outcome = if existing.is_some() {
+                WriteOutcome::Replaced
+            } else {
+                WriteOutcome::Created
+            };
             let existing_bytes = existing.as_ref().map_or(0, |entry| entry.content_length);
             let metadata_bytes = if existing.is_none() {
                 FILE_METADATA_SIZE as i64
@@ -337,6 +383,7 @@ impl FileService {
 
             EntryRepository::get_by_path(path, &mut executor)
                 .await
+                .map(|entry| (entry, outcome))
                 .map_err(Into::into)
         }
         .await;
