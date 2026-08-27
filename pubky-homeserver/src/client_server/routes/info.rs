@@ -5,10 +5,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use pubky_common::constants::features::PATH_ADDRESSED_STORAGE;
+use pubky_common::constants::features::{CONDITIONAL_WRITES, PATH_ADDRESSED_STORAGE};
 use serde::Serialize;
 
-const FEATURES: &[&str] = &[PATH_ADDRESSED_STORAGE];
+const FEATURES: &[&str] = &[PATH_ADDRESSED_STORAGE, CONDITIONAL_WRITES];
 
 #[derive(Serialize)]
 struct InfoResponse {
