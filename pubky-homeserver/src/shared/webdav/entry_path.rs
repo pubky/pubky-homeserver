@@ -50,15 +50,6 @@ impl EntryPath {
     pub fn as_str(&self) -> &str {
         &self.key
     }
-
-    /// Parse a path string into an `EntryPath`, returning an [`opendal::Error`]
-    /// on failure. Convenience wrapper for use inside OpenDAL layers where the
-    /// trait methods receive `&str` and must return `opendal::Result`.
-    pub fn parse_opendal(path: &str) -> Result<Self, opendal::Error> {
-        path.parse().map_err(|e: EntryPathError| {
-            opendal::Error::new(opendal::ErrorKind::Unexpected, e.to_string())
-        })
-    }
 }
 
 impl AsRef<str> for EntryPath {
