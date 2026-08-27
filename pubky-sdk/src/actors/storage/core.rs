@@ -8,6 +8,7 @@ use crate::{
     PubkyHttpClient, PubkySession, cross_log,
     errors::{RequestError, Result},
 };
+use pubky_common::constants::features::CONDITIONAL_WRITES;
 
 /// Read and write **your own data** with simple path-based operations (authenticated).
 ///
@@ -89,11 +90,34 @@ impl SessionStorage {
         path: P,
     ) -> Result<RequestBuilder> {
         let path: ResourcePath = path.into_abs_path()?;
-        let resource = PubkyResource::new(self.user.clone(), path.as_str())?;
+        let resource = PubkyResource {
+            owner: self.user.clone(),
+            path,
+        };
         let url = resource.to_transport_url()?;
         cross_log!(debug, "Session storage {} request {}", method, url);
         let rb = self.client.cross_request(method, url).await?;
         self.attach_credential(rb).await
+    }
+
+    async fn require_homeserver_feature(&self, feature: &str) -> Result<PublicKey> {
+        self.client
+            .require_storage_feature(&self.user, feature)
+            .await
+    }
+
+    pub(crate) async fn conditional_request<P: IntoResourcePath>(
+        &self,
+        method: Method,
+        path: P,
+    ) -> Result<RequestBuilder> {
+        let path = path.into_abs_path()?;
+        let homeserver = self.require_homeserver_feature(CONDITIONAL_WRITES).await?;
+        let request = self
+            .client
+            .storage_request_via_homeserver(method, &homeserver, &self.user, path.as_str())
+            .await?;
+        self.attach_credential(request).await
     }
 
     /// Attach the session credential to a request builder.
