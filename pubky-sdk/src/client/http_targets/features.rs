@@ -6,11 +6,12 @@ use std::{
 
 use futures_util::StreamExt;
 use lru::LruCache;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use web_time::Instant;
 
-use crate::{PubkyHttpClient, PublicKey};
+use crate::{PubkyHttpClient, PublicKey, Result, errors::RequestError};
 
 const MAX_INFO_BYTES: usize = 16 * 1024;
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -67,6 +68,26 @@ impl HomeserverFeatures {
     ) -> bool {
         self.supports_for(homeserver, feature, || self.fetch(client, homeserver))
             .await
+            .unwrap_or(false)
+    }
+
+    pub(super) async fn require(
+        &self,
+        client: &PubkyHttpClient,
+        homeserver: &PublicKey,
+        feature: &str,
+    ) -> Result<()> {
+        if self
+            .supports_for(homeserver, feature, || self.fetch(client, homeserver))
+            .await?
+        {
+            return Ok(());
+        }
+
+        Err(RequestError::UnsupportedFeature {
+            feature: feature.to_string(),
+        }
+        .into())
     }
 
     fn cell(&self, homeserver: &PublicKey) -> FeatureCell {
@@ -80,49 +101,69 @@ impl HomeserverFeatures {
         cell
     }
 
-    async fn supports_for<F, Fut>(&self, homeserver: &PublicKey, feature: &str, fetch: F) -> bool
+    async fn supports_for<F, Fut>(
+        &self,
+        homeserver: &PublicKey,
+        feature: &str,
+        fetch: F,
+    ) -> Result<bool>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Option<Vec<String>>>,
+        Fut: Future<Output = Result<Vec<String>>>,
     {
         let cell = self.cell(homeserver);
         let mut cached = cell.lock().await;
         if let Some(features) = cached.as_ref().and_then(CachedFeatures::current) {
-            return features.iter().any(|candidate| candidate == feature);
+            return Ok(features.iter().any(|candidate| candidate == feature));
         }
 
-        let features = fetch().await.unwrap_or_default();
+        let features = fetch().await?;
         let supports = features.iter().any(|candidate| candidate == feature);
         *cached = Some(CachedFeatures {
             features,
             expires_at: Instant::now() + INFO_CACHE_TTL,
         });
-        supports
+        Ok(supports)
     }
 
-    async fn fetch(&self, client: &PubkyHttpClient, homeserver: &PublicKey) -> Option<Vec<String>> {
-        let Ok(request) = client.homeserver_info_request(homeserver).await else {
-            return None;
-        };
-        let Ok(response) = request.timeout(self.request_timeout).send().await else {
-            return None;
-        };
-        if !response.status().is_success() {
-            return None;
+    async fn fetch(&self, client: &PubkyHttpClient, homeserver: &PublicKey) -> Result<Vec<String>> {
+        let request = client.homeserver_info_request(homeserver).await?;
+        let response = request.timeout(self.request_timeout).send().await?;
+        if info_endpoint_missing(response.status()) {
+            return Ok(Vec::new());
+        }
+        let status = response.status();
+        let body = Self::read_body(response).await?;
+        if !status.is_success() {
+            return Err(RequestError::Server {
+                status,
+                message: String::from_utf8_lossy(&body).into_owned(),
+            }
+            .into());
         }
 
+        Self::decode(&body).ok_or_else(|| {
+            RequestError::DecodeJson {
+                message: "homeserver /info response is not a valid feature list".to_string(),
+            }
+            .into()
+        })
+    }
+
+    async fn read_body(response: reqwest::Response) -> Result<Vec<u8>> {
         let mut body = Vec::new();
         let mut chunks = response.bytes_stream();
         while let Some(chunk) = chunks.next().await {
-            let Ok(chunk) = chunk else {
-                return None;
-            };
+            let chunk = chunk?;
             if !Self::append_chunk(&mut body, &chunk) {
-                return None;
+                return Err(RequestError::DecodeJson {
+                    message: format!("homeserver /info response exceeds {MAX_INFO_BYTES} bytes"),
+                }
+                .into());
             }
         }
 
-        Self::decode(&body)
+        Ok(body)
     }
 
     fn append_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> bool {
@@ -155,6 +196,10 @@ impl HomeserverFeatures {
             expires_at: Instant::now() + INFO_CACHE_TTL,
         });
     }
+}
+
+fn info_endpoint_missing(status: StatusCode) -> bool {
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE)
 }
 
 #[cfg(test)]
@@ -200,6 +245,13 @@ mod tests {
     }
 
     #[test]
+    fn missing_info_endpoint_is_treated_as_no_features() {
+        assert!(info_endpoint_missing(StatusCode::NOT_FOUND));
+        assert!(info_endpoint_missing(StatusCode::GONE));
+        assert!(!info_endpoint_missing(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
     fn info_timeout_respects_a_shorter_client_timeout() {
         assert_eq!(
             HomeserverFeatures::new(Some(Duration::from_millis(100))).request_timeout,
@@ -235,7 +287,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn temporarily_stores_failures_and_coalesces_feature_fetches() {
+    async fn coalesces_successful_feature_fetches() {
         let discovery = HomeserverFeatures::default();
         let homeserver = crate::Keypair::random().public_key();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -244,28 +296,61 @@ mod tests {
         let first = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             first_calls.fetch_add(1, Ordering::Relaxed);
             tokio::task::yield_now().await;
-            None
+            Ok(vec![PATH_ADDRESSED_STORAGE.to_string()])
         });
         let second_calls = Arc::clone(&calls);
         let second = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             second_calls.fetch_add(1, Ordering::Relaxed);
-            Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
+            Ok(Vec::new())
         });
 
         let (first, second) = tokio::join!(first, second);
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert!(!first);
-        assert!(!second);
+        assert!(first.unwrap());
+        assert!(second.unwrap());
 
         let cached = discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
-                Some(Vec::new())
+                Ok(Vec::new())
             })
-            .await;
-        assert!(!cached);
+            .await
+            .unwrap();
+        assert!(cached);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_feature_fetch_failures() {
+        let discovery = HomeserverFeatures::default();
+        let homeserver = crate::Keypair::random().public_key();
+        let calls = AtomicUsize::new(0);
+
+        let error = discovery
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Err(RequestError::DecodeJson {
+                    message: "invalid feature response".to_string(),
+                }
+                .into())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::Request(RequestError::DecodeJson { .. })
+        ));
+
+        let supported = discovery
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![PATH_ADDRESSED_STORAGE.to_string()])
+            })
+            .await
+            .unwrap();
+        assert!(supported);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
@@ -280,9 +365,10 @@ mod tests {
 
         let supported = discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
-                Some(Vec::new())
+                Ok(Vec::new())
             })
-            .await;
+            .await
+            .unwrap();
 
         assert!(!supported);
     }
