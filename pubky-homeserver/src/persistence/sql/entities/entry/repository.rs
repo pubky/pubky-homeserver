@@ -19,9 +19,32 @@ pub struct EntryRepository;
 impl EntryRepository {
     /// Create a new entry.
     /// The executor can either be db.pool() or a transaction.
+    #[cfg(test)]
     pub async fn create<'a>(
         user_id: i32,
         path: &StoragePath,
+        content_hash: &pubky_common::crypto::Hash,
+        content_length: u64,
+        content_type: &str,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<i64, sqlx::Error> {
+        Self::create_with_blob_key(
+            user_id,
+            path,
+            None,
+            content_hash,
+            content_length,
+            content_type,
+            executor,
+        )
+        .await
+    }
+
+    /// Create an entry that points at an immutable backend blob.
+    pub async fn create_with_blob_key<'a>(
+        user_id: i32,
+        path: &StoragePath,
+        blob_key: Option<&str>,
         content_hash: &pubky_common::crypto::Hash,
         content_length: u64,
         content_type: &str,
@@ -32,6 +55,7 @@ impl EntryRepository {
             .columns([
                 EntryIden::User,
                 EntryIden::Path,
+                EntryIden::BlobKey,
                 EntryIden::ContentHash,
                 EntryIden::ContentLength,
                 EntryIden::ContentType,
@@ -39,6 +63,7 @@ impl EntryRepository {
             .values(vec![
                 SimpleExpr::Value(user_id.into()),
                 SimpleExpr::Value(path.as_str().into()),
+                SimpleExpr::Value(blob_key.map(str::to_owned).into()),
                 SimpleExpr::Value(content_hash.as_bytes().to_vec().into()),
                 SimpleExpr::Value(content_length.into()),
                 SimpleExpr::Value(content_type.to_string().into()),
@@ -67,6 +92,7 @@ impl EntryRepository {
                 (ENTRY_TABLE, EntryIden::Id),
                 (ENTRY_TABLE, EntryIden::User),
                 (ENTRY_TABLE, EntryIden::Path),
+                (ENTRY_TABLE, EntryIden::BlobKey),
                 (ENTRY_TABLE, EntryIden::ContentHash),
                 (ENTRY_TABLE, EntryIden::ContentLength),
                 (ENTRY_TABLE, EntryIden::ContentType),
@@ -87,6 +113,109 @@ impl EntryRepository {
         Ok(entry)
     }
 
+    /// Get existing file entries for one user in a single query.
+    pub async fn get_by_paths<'a>(
+        public_key: &pubky_common::crypto::PublicKey,
+        paths: &[EntryPath],
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<EntryEntity>, sqlx::Error> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let paths = paths
+            .iter()
+            .map(|path| path.path().as_str().to_string())
+            .collect::<Vec<_>>();
+        let con = executor.get_con().await?;
+        sqlx::query_as(
+            r#"
+            SELECT
+                entries.id,
+                entries."user",
+                entries.path,
+                entries.blob_key,
+                entries.content_hash,
+                entries.content_length,
+                entries.content_type,
+                entries.modified_at,
+                entries.created_at,
+                users.public_key
+            FROM entries
+            JOIN users ON users.id = entries."user"
+            WHERE users.public_key = $1
+              AND entries.path = ANY($2)
+            "#,
+        )
+        .bind(public_key.z32())
+        .bind(paths)
+        .fetch_all(con)
+        .await
+    }
+
+    /// Get every file below a logical directory.
+    pub async fn list_descendants<'a>(
+        path: &EntryPath,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<EntryEntity>, sqlx::Error> {
+        let prefix = format!("{}/", path.path().as_str().trim_end_matches('/'));
+        let con = executor.get_con().await?;
+        sqlx::query_as(
+            r#"
+            SELECT
+                entries.id,
+                entries."user",
+                entries.path,
+                entries.blob_key,
+                entries.content_hash,
+                entries.content_length,
+                entries.content_type,
+                entries.modified_at,
+                entries.created_at,
+                users.public_key
+            FROM entries
+            JOIN users ON users.id = entries."user"
+            WHERE users.public_key = $1
+              AND substr(entries.path, 1, length($2)) = $2
+            ORDER BY entries.path COLLATE "C"
+            "#,
+        )
+        .bind(path.pubkey().z32())
+        .bind(prefix)
+        .fetch_all(con)
+        .await
+    }
+
+    /// Move one logical entry while preserving its backend blob pointer.
+    pub async fn move_to<'a>(
+        entry_id: i64,
+        user_id: i32,
+        path: &StoragePath,
+        blob_key: &str,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<(), sqlx::Error> {
+        let statement = Query::update()
+            .table(ENTRY_TABLE)
+            .values(vec![
+                (EntryIden::User, SimpleExpr::Value(user_id.into())),
+                (
+                    EntryIden::Path,
+                    SimpleExpr::Value(path.as_str().to_string().into()),
+                ),
+                (
+                    EntryIden::BlobKey,
+                    SimpleExpr::Value(Some(blob_key.to_string()).into()),
+                ),
+                (EntryIden::ModifiedAt, Expr::current_timestamp().into()),
+            ])
+            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).eq(entry_id))
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        sqlx::query_with(&query, values)
+            .execute(executor.get_con().await?)
+            .await?;
+        Ok(())
+    }
+
     pub async fn update<'a>(
         entry: &EntryEntity,
         executor: &mut UnifiedExecutor<'a>,
@@ -94,6 +223,10 @@ impl EntryRepository {
         let statement = Query::update()
             .table(ENTRY_TABLE)
             .values(vec![
+                (
+                    EntryIden::BlobKey,
+                    SimpleExpr::Value(entry.blob_key.clone().into()),
+                ),
                 (
                     EntryIden::ContentHash,
                     SimpleExpr::Value(entry.content_hash.as_bytes().to_vec().into()),
@@ -444,6 +577,7 @@ impl EntryRepository {
 pub enum EntryIden {
     Id,
     Path,
+    BlobKey,
     User,
     ContentHash,
     ContentLength,

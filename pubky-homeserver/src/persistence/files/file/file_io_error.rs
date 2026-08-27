@@ -1,5 +1,3 @@
-use crate::persistence::files::layer_domain_error::LayerDomainError;
-
 /// Error type for file operations.
 #[derive(Debug, thiserror::Error)]
 pub enum FileIoError {
@@ -9,8 +7,8 @@ pub enum FileIoError {
     SqlDb(#[from] sqlx::Error),
     #[error("OpenDAL error: {0}")]
     OpenDAL(opendal::Error),
-    #[error("Temp file error: {0}")]
-    TempFile(#[from] std::io::Error),
+    #[error("File system error: {0}")]
+    FileSystem(#[from] std::io::Error),
     #[error(transparent)]
     StreamBroken(#[from] WriteStreamError),
     #[error("Disk space quota exceeded")]
@@ -19,22 +17,14 @@ pub enum FileIoError {
     WritePathForbidden,
     #[error("File/folder path collision")]
     PathCollision,
+    #[error("Upload ownership was lost during streaming")]
+    UploadLeaseLost,
+    #[error("Read ownership was lost during streaming")]
+    ReadLeaseLost,
 }
 
 impl From<opendal::Error> for FileIoError {
     fn from(e: opendal::Error) -> Self {
-        use std::error::Error as _;
-        // Recover domain-specific errors embedded by our custom OpenDAL layers.
-        if let Some(domain) = e
-            .source()
-            .and_then(|s| s.downcast_ref::<LayerDomainError>())
-        {
-            return match domain {
-                LayerDomainError::WritePathForbidden => FileIoError::WritePathForbidden,
-                LayerDomainError::DiskSpaceQuotaExceeded => FileIoError::DiskSpaceQuotaExceeded,
-                LayerDomainError::PathCollision => FileIoError::PathCollision,
-            };
-        }
         match e.kind() {
             opendal::ErrorKind::NotFound => FileIoError::NotFound,
             _ => FileIoError::OpenDAL(e),

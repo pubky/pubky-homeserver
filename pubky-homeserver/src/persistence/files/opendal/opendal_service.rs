@@ -1,170 +1,187 @@
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
+use opendal::Operator;
 #[cfg(test)]
-use crate::AppContext;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
+
 use crate::{
-    persistence::{
-        files::{
-            events::EventsService, write_finalization_layer::WriteFinalizationLayer,
-            write_path_layer::WritePathLayer,
-        },
-        sql::SqlDb,
-    },
-    services::user_service::UserService,
     shared::webdav::EntryPath,
     storage_config::{StorageConfigToml, StorageToml},
 };
-use bytes::Bytes;
-use futures_util::{stream::StreamExt, Stream};
+
 #[cfg(test)]
-use opendal::Buffer;
-use opendal::Operator;
+use crate::AppContext;
 
 use super::super::{FileIoError, FileMetadata, FileMetadataBuilder, FileStream, WriteStreamError};
 
-/// Build storage operators with one transactional finalization layer and an
-/// app-facing operator that additionally enforces write paths and collisions.
-///
-/// Both operators share the same underlying storage backend, which is
-/// important for backends like `InMemory` where separate instances would
-/// have independent data.
-pub fn build_storage_operators(
+fn build_backend_operator(
     storage_config: &StorageToml,
     data_directory: &Path,
-    sql_db: SqlDb,
-    events_service: EventsService,
-    user_service: UserService,
-) -> Result<(Operator, Operator), FileIoError> {
-    let backend_operator = match &storage_config.backend {
+) -> Result<(Operator, Option<PathBuf>), FileIoError> {
+    let backend = match &storage_config.backend {
         StorageConfigToml::FileSystem => {
-            let files_dir = match data_directory.join("data/files").to_str() {
-                Some(path) => path.to_string(),
-                None => {
-                    return Err(FileIoError::OpenDAL(opendal::Error::new(
+            let files_dir = data_directory.join("data/files");
+            let blob_dir = files_dir.join("__pubky/blobs");
+            std::fs::create_dir_all(&blob_dir)?;
+            sync_directory_tree(data_directory, &blob_dir)?;
+            let files_dir_string = files_dir
+                .to_str()
+                .ok_or_else(|| {
+                    FileIoError::OpenDAL(opendal::Error::new(
                         opendal::ErrorKind::Unexpected,
-                        "Invalid path",
-                    )))
-                }
-            };
-            let builder = opendal::services::Fs::default().root(files_dir.as_str());
-            opendal::Operator::new(builder)?.finish()
+                        "Invalid storage path",
+                    ))
+                })?
+                .to_string();
+            (
+                opendal::Operator::new(opendal::services::Fs::default().root(&files_dir_string))?
+                    .finish(),
+                Some(files_dir),
+            )
         }
         #[cfg(feature = "storage-gcs")]
         StorageConfigToml::GoogleBucket(config) => {
             tracing::info!(
-                "Store files in a Google Cloud Storage bucket: {}",
-                config.bucket_name
+                bucket = config.bucket_name,
+                "Store files in Google Cloud Storage"
             );
-            let builder = config.to_builder()?;
-            opendal::Operator::new(builder)?.finish()
+            tracing::warn!(
+                bucket = config.bucket_name,
+                "Google Cloud Storage requires soft delete and Object Versioning to be disabled, plus an AbortIncompleteMultipartUpload lifecycle rule for __pubky/blobs/"
+            );
+            (opendal::Operator::new(config.to_builder()?)?.finish(), None)
         }
         #[cfg(any(feature = "storage-memory", test))]
         StorageConfigToml::InMemory => {
             tracing::info!("Store files in memory");
-            let builder = opendal::services::Memory::default();
-            opendal::Operator::new(builder)?.finish()
+            (
+                opendal::Operator::new(opendal::services::Memory::default())?.finish(),
+                None,
+            )
         }
     };
-
-    // Collision checks apply only to app-facing mutations, so each operator
-    // needs its own finalization layer.
-    let admin_operator = backend_operator.clone().layer(WriteFinalizationLayer::new(
-        user_service.clone(),
-        sql_db.clone(),
-        events_service.clone(),
-        storage_config.default_quota_mb,
-        false,
-    ));
-    let operator = backend_operator
-        .layer(WriteFinalizationLayer::new(
-            user_service.clone(),
-            sql_db,
-            events_service,
-            storage_config.default_quota_mb,
-            true,
-        ))
-        .layer(WritePathLayer::new(user_service));
-    Ok((operator, admin_operator))
+    Ok(backend)
 }
 
-/// Build the storage operators from an `AppContext` (test-only convenience).
-#[cfg(test)]
-pub fn build_storage_operators_from_context(
-    context: &AppContext,
-) -> Result<(Operator, Operator), FileIoError> {
-    build_storage_operators(
-        &context.config_toml.storage,
-        context.data_dir.path(),
-        context.sql_db.clone(),
-        context.events_service.clone(),
-        context.user_service.clone(),
-    )
+fn sync_directory_tree(root: &Path, leaf: &Path) -> Result<(), std::io::Error> {
+    let mut current = leaf.to_path_buf();
+    loop {
+        sync_directory(&current)?;
+        if current == root {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent.to_path_buf();
+        if !current.starts_with(root) {
+            break;
+        }
+    }
+    Ok(())
 }
 
-/// The chunk size to use for reading and writing files.
-/// This is used to avoid reading and writing the entire file at once.
-/// Important: Not all opendal providers will respect this chunk size.
-/// For example, Google Cloud Buckets will deliver chunks anything from
-/// 200B to 16KB but max CHUNK_SIZE.
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()
+}
+
+/// Chunk size used when streaming backend objects.
 const CHUNK_SIZE: usize = 16 * 1024;
+const WRITER_ABORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The service to write and read files to and from the configured opendal storage.
+/// Reads and writes immutable backend objects through the configured OpenDAL backend.
 #[derive(Debug, Clone)]
 pub struct OpendalService {
-    /// Operator with all layers including `WritePathLayer` (for user-facing operations).
-    pub(crate) operator: Operator,
-    /// Operator without `WritePathLayer` (for admin operations that bypass write-path restrictions).
-    pub(crate) admin_operator: Operator,
+    operator: Operator,
+    filesystem_root: Option<Arc<PathBuf>>,
+    #[cfg(test)]
+    fail_next_delete: Arc<AtomicBool>,
 }
 
 impl OpendalService {
     pub fn new_from_config(
         storage_config: &StorageToml,
         data_directory: &Path,
-        sql_db: SqlDb,
-        events_service: EventsService,
-        user_service: UserService,
     ) -> Result<Self, FileIoError> {
-        let (operator, admin_operator) = build_storage_operators(
-            storage_config,
-            data_directory,
-            sql_db,
-            events_service,
-            user_service,
-        )?;
+        let (operator, filesystem_root) = build_backend_operator(storage_config, data_directory)?;
         Ok(Self {
             operator,
-            admin_operator,
+            filesystem_root: filesystem_root.map(Arc::new),
+            #[cfg(test)]
+            fail_next_delete: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    /// Delete a file.
-    /// Deleting a non-existing file will NOT return an error.
-    pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        Ok(self.operator.delete(path.as_str()).await?)
-    }
-
-    /// Delete a file bypassing write-path restrictions.
-    /// Used by `FileService::admin_delete` for the admin `/webdav` REST route.
-    pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        Ok(self.admin_operator.delete(path.as_str()).await?)
-    }
-
-    /// Write a stream to the storage.
-    pub async fn write_stream(
+    /// Write an immutable internal blob.
+    #[cfg(test)]
+    pub async fn write_blob_stream(
         &self,
-        path: &EntryPath,
-        mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        blob_key: &str,
+        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        content_path: &EntryPath,
     ) -> Result<FileMetadata, FileIoError> {
-        let mut writer = self.operator.writer(path.as_str()).await?;
+        self.write_blob_stream_guarded(
+            blob_key,
+            stream,
+            content_path,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Write an immutable blob while enforcing its reservation and upload lease.
+    pub async fn write_blob_stream_guarded(
+        &self,
+        blob_key: &str,
+        mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        content_path: &EntryPath,
+        max_length: Option<u64>,
+        cancellation: &CancellationToken,
+    ) -> Result<FileMetadata, FileIoError> {
+        let mut writer = self.operator.writer(blob_key).await?;
         let mut metadata_builder = FileMetadataBuilder::default();
-        metadata_builder.guess_mime_type_from_path(path.path().as_str());
+        metadata_builder.guess_mime_type_from_path(content_path.path().as_str());
+        let mut written = 0u64;
 
         let write_result: Result<(), FileIoError> = async {
-            while let Some(chunk_result) = stream.next().await {
+            loop {
+                let chunk_result = tokio::select! {
+                    _ = cancellation.cancelled() => return Err(FileIoError::UploadLeaseLost),
+                    chunk = stream.next() => chunk,
+                };
+                let Some(chunk_result) = chunk_result else {
+                    break;
+                };
                 let chunk = chunk_result?;
+                written = written.saturating_add(chunk.len() as u64);
+                if max_length.is_some_and(|max_length| written > max_length) {
+                    return Err(FileIoError::DiskSpaceQuotaExceeded);
+                }
                 metadata_builder.update(&chunk);
-                writer.write(chunk).await?;
+                tokio::select! {
+                    _ = cancellation.cancelled() => return Err(FileIoError::UploadLeaseLost),
+                    result = writer.write(chunk) => result?,
+                }
             }
             Ok(())
         }
@@ -172,245 +189,266 @@ impl OpendalService {
 
         match write_result {
             Ok(()) => {
-                writer.close().await?;
+                if cancellation.is_cancelled() {
+                    Self::abort_writer(&mut writer, blob_key).await;
+                    return Err(FileIoError::UploadLeaseLost);
+                }
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        Self::abort_writer(&mut writer, blob_key).await;
+                        return Err(FileIoError::UploadLeaseLost);
+                    }
+                    result = writer.close() => {
+                        if let Err(error) = result {
+                            Self::abort_writer(&mut writer, blob_key).await;
+                            return Err(error.into());
+                        }
+                    },
+                }
+                self.sync_blob_parent(blob_key).await?;
                 Ok(metadata_builder.finalize())
             }
-            Err(e) => {
-                writer.abort().await?;
-                Err(e)
+            Err(error) => {
+                Self::abort_writer(&mut writer, blob_key).await;
+                Err(error)
             }
         }
     }
 
-    /// Get the stream of a file.
-    /// Helper method because the NOT_FOUND error can happen in two different places.
-    async fn get_stream_inner(&self, path: &EntryPath) -> Result<FileStream, opendal::Error> {
-        let reader = self
+    async fn abort_writer(writer: &mut opendal::Writer, blob_key: &str) {
+        match tokio::time::timeout(WRITER_ABORT_TIMEOUT, writer.abort()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(blob_key, %error, "Backend could not abort incomplete blob write");
+            }
+            Err(_) => {
+                tracing::warn!(blob_key, "Timed out aborting incomplete blob write");
+            }
+        }
+    }
+
+    /// Stream a backend object by its immutable or legacy key.
+    pub async fn get_stream_by_key(&self, key: &str) -> Result<FileStream, FileIoError> {
+        let reader = self.operator.reader_with(key).chunk(CHUNK_SIZE).await?;
+        Ok(Box::new(reader.into_bytes_stream(0..).await?))
+    }
+
+    /// Read one byte range from a backend object.
+    pub async fn get_range_by_key(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes, FileIoError> {
+        Ok(Bytes::from(
+            self.operator.read_with(key).range(range).await?.to_vec(),
+        ))
+    }
+
+    /// Delete a backend object by its immutable or legacy key.
+    pub async fn delete_by_key(&self, key: &str) -> Result<(), FileIoError> {
+        #[cfg(test)]
+        if self.fail_next_delete.swap(false, Ordering::SeqCst) {
+            return Err(FileIoError::OpenDAL(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "injected delete failure",
+            )));
+        }
+        self.operator.delete(key).await?;
+        self.sync_blob_parent(key).await?;
+        Ok(())
+    }
+
+    /// List immutable backend objects for orphan reconciliation.
+    pub(crate) async fn blob_lister(&self) -> Result<opendal::Lister, FileIoError> {
+        Ok(self
             .operator
-            .reader_with(path.as_str())
-            .chunk(CHUNK_SIZE)
-            .await?;
-
-        let stream = reader.into_bytes_stream(0..).await?;
-        Ok(Box::new(stream))
+            .lister_with("__pubky/blobs/")
+            .recursive(true)
+            .await?)
     }
 
-    /// Get the content of a file as a stream of bytes.
-    /// The stream is chunked by the CHUNK_SIZE.
-    pub async fn get_stream(&self, path: &EntryPath) -> Result<FileStream, FileIoError> {
-        Ok(self.get_stream_inner(path).await?)
+    async fn sync_blob_parent(&self, key: &str) -> Result<(), FileIoError> {
+        let Some(root) = self.filesystem_root.as_ref() else {
+            return Ok(());
+        };
+        let parent = root
+            .join(key.trim_start_matches('/'))
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| std::io::Error::other("blob key has no parent directory"))?;
+        tokio::task::spawn_blocking(move || sync_directory(&parent))
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("directory sync task failed: {error}"))
+            })??;
+        Ok(())
     }
 
-    /// Check if a file exists.
-    pub async fn exists(&self, path: &EntryPath) -> Result<bool, opendal::Error> {
-        self.operator.exists(path.as_str()).await
+    #[cfg(test)]
+    pub async fn blob_exists(&self, key: &str) -> Result<bool, opendal::Error> {
+        self.operator.exists(key).await
     }
 }
 
 #[cfg(test)]
 impl OpendalService {
     pub fn new(context: &AppContext) -> Result<Self, FileIoError> {
-        let (operator, admin_operator) = build_storage_operators_from_context(context)?;
-        Ok(Self {
-            operator,
-            admin_operator,
-        })
+        Self::new_from_config(&context.config_toml.storage, context.data_dir.path())
     }
 
-    /// Create a new opendal service from an existing operator.
-    /// This is useful for testing.
     pub fn new_from_operator(operator: Operator) -> Self {
         Self {
-            admin_operator: operator.clone(),
             operator,
+            filesystem_root: None,
+            fail_next_delete: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Get the content of a file as a single Bytes object.
-    /// This is useful for small files or when you want to avoid the overhead of streaming.
-    #[cfg(test)]
-    pub async fn get(&self, path: &EntryPath) -> Result<Bytes, FileIoError> {
-        let mut stream = self.get_stream(path).await?;
-        let mut content = Vec::new();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            content.extend_from_slice(&chunk);
-        }
-        Ok(Bytes::from(content))
-    }
-
-    /// Write the content of a file to the storage.
-    /// This is useful for small files or when you want to avoid the overhead of streaming.
-    /// Use streamed writes for large files.
-    #[cfg(test)]
-    pub async fn write(
-        &self,
-        path: &EntryPath,
-        buffer: impl Into<Buffer>,
-    ) -> Result<FileMetadata, FileIoError> {
-        let buffer: Buffer = buffer.into();
-        let bytes = Bytes::from(buffer.to_vec());
-        // Create a single-item stream from the buffer
-        let stream = Box::pin(futures_util::stream::once(async move { Ok(bytes) }));
-        // Use the existing streaming implementation
-        self.write_stream(path, stream).await
+    pub fn fail_next_delete(&self) {
+        self.fail_next_delete.store(true, Ordering::SeqCst);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
-    use crate::shared::webdav::StoragePath;
+    use crate::{
+        persistence::files::opendal::opendal_test_operators::OpendalTestOperators,
+        shared::webdav::StoragePath,
+    };
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_build_storage_operator_from_config_file_system() {
-        let context = AppContext::test_with_config(|c| {
-            c.storage.backend = StorageConfigToml::FileSystem;
+    async fn test_build_backend_operator_from_filesystem_config() {
+        let context = AppContext::test_with_config(|config| {
+            config.storage.backend = StorageConfigToml::FileSystem;
         })
         .await;
+        let service = OpendalService::new(&context).unwrap();
 
-        let service =
-            OpendalService::new(&context).expect("Failed to create OpenDAL service for testing");
-        let pubky = pubky_common::crypto::Keypair::random().public_key();
-        context.user_service.create(&pubky).await.unwrap();
-        let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
-        assert!(!service.exists(&path).await.unwrap());
+        assert!(!service.blob_exists("__pubky/blobs/missing").await.unwrap());
     }
 
-    /// Make sure that the OpendalService returns a DiskSpaceQuotaExceeded error if the user has exceeded the quota.
-    /// This is important because write finalization returns a RateLimited error if the user has exceeded the quota.
     #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_quota_exceeded_error() {
-        let context = AppContext::test().await;
-        let service =
-            OpendalService::new(&context).expect("Failed to create OpenDAL service for testing");
-        let pubky = pubky_common::crypto::Keypair::random().public_key();
-        context.user_service.create_with_quota_mb(&pubky, 1).await;
-        let path = EntryPath::new(pubky, StoragePath::new("/test.txt").unwrap());
-        let write_result = service.write(&path, vec![42u8; 1024 * 1024]).await;
-        assert!(write_result.is_err());
+    async fn test_blob_stream_roundtrip_across_backends() {
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/test.bin").unwrap(),
+        );
+        for (_scheme, operator) in OpendalTestOperators::new().operators() {
+            let service = OpendalService::new_from_operator(operator);
+            let input_chunks = [
+                Bytes::from(vec![1; CHUNK_SIZE]),
+                Bytes::from(vec![2; CHUNK_SIZE]),
+                Bytes::from(vec![3; CHUNK_SIZE]),
+            ];
+            let data = input_chunks
+                .iter()
+                .flat_map(|chunk| chunk.iter().copied())
+                .collect::<Vec<_>>();
+            service
+                .write_blob_stream(
+                    "__pubky/blobs/test",
+                    futures_util::stream::iter(input_chunks.into_iter().map(Ok)),
+                    &path,
+                )
+                .await
+                .unwrap();
+
+            let mut stream = service
+                .get_stream_by_key("__pubky/blobs/test")
+                .await
+                .unwrap();
+            let mut received = Vec::new();
+            let mut received_chunks = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.unwrap();
+                assert!(chunk.len() <= CHUNK_SIZE);
+                received.extend_from_slice(&chunk);
+                received_chunks += 1;
+            }
+            assert_eq!(received, data);
+            assert!(received_chunks >= 3);
+            assert_eq!(
+                service
+                    .get_range_by_key("__pubky/blobs/test", 10..20)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                &data[10..20]
+            );
+
+            service.delete_by_key("__pubky/blobs/test").await.unwrap();
+            assert!(!service.blob_exists("__pubky/blobs/test").await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_guarded_blob_write_stops_when_upload_lease_is_lost() {
+        let operator = Operator::new(opendal::services::Memory::default())
+            .unwrap()
+            .finish();
+        let service = OpendalService::new_from_operator(operator);
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/test.bin").unwrap(),
+        );
+        let cancellation = CancellationToken::new();
+        let task_service = service.clone();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            task_service
+                .write_blob_stream_guarded(
+                    "__pubky/blobs/cancelled",
+                    futures_util::stream::pending::<Result<Bytes, WriteStreamError>>(),
+                    &path,
+                    None,
+                    &task_cancellation,
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
         assert!(matches!(
-            write_result,
-            Err(FileIoError::DiskSpaceQuotaExceeded)
+            task.await.unwrap(),
+            Err(FileIoError::UploadLeaseLost)
         ));
-    }
-
-    /// Test the chunked reading of a file.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_get_content_chunked() {
-        let operators = OpendalTestOperators::new();
-        for (_scheme, operator) in operators.operators() {
-            let file_service = OpendalService::new_from_operator(operator);
-
-            let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
-
-            // Write a 10KB file filled with test data
-            let should_chunk_count = 5;
-            let test_data = vec![42u8; should_chunk_count * CHUNK_SIZE];
-            file_service.write(&path, test_data.clone()).await.unwrap();
-
-            // Read the content back using the chunked stream
-            let mut stream = file_service.get_stream(&path).await.unwrap();
-
-            let mut collected_data = Vec::new();
-            let mut count = 0;
-            while let Some(chunk_result) = stream.next().await {
-                count += 1;
-                let chunk = chunk_result.unwrap();
-                collected_data.extend_from_slice(&chunk);
-            }
-
-            // Verify the data matches what we wrote
-            assert_eq!(
-                collected_data.len(),
-                test_data.len(),
-                "Total size should be 10KB"
-            );
-            assert_eq!(
-                collected_data, test_data,
-                "Content should match original data"
-            );
-
-            // Verify that we received multiple chunks according to the chunk count
-            assert!(count >= should_chunk_count, "Should have received x chunks");
-
-            // Verify that the chunks are of the correct size
-            assert_eq!(
-                collected_data.len(),
-                should_chunk_count * CHUNK_SIZE,
-                "Total size should be 10KB"
-            );
-            assert_eq!(
-                collected_data, test_data,
-                "Content should match original data"
-            );
-
-            file_service
-                .delete(&path)
-                .await
-                .expect("Should delete file");
-            assert!(
-                !file_service.exists(&path).await.unwrap(),
-                "File should not exist after deletion"
-            );
-        }
+        assert!(!service
+            .blob_exists("__pubky/blobs/cancelled")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_write_content_stream() {
-        let operators = OpendalTestOperators::new();
-        for (_scheme, operator) in operators.operators() {
-            let file_service = OpendalService::new_from_operator(operator);
+    async fn test_filesystem_abort_preserves_original_write_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = OpendalService::new_from_config(
+            &StorageToml {
+                backend: StorageConfigToml::FileSystem,
+                default_quota_mb: None,
+                admin_dav_spool_limit_mb: 1024,
+            },
+            directory.path(),
+        )
+        .unwrap();
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/test.bin").unwrap(),
+        );
 
-            let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
+        let error = service
+            .write_blob_stream_guarded(
+                "__pubky/blobs/too-large",
+                futures_util::stream::iter([Ok(Bytes::from_static(b"too large"))]),
+                &path,
+                Some(1),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
 
-            // Create test data - multiple chunks to test streaming
-            let chunk_count = 3;
-            let mut test_data = Vec::new();
-            let mut chunks = Vec::new();
-
-            // Create chunks with different patterns to verify order
-            for i in 0..chunk_count {
-                let chunk_data = vec![i as u8; CHUNK_SIZE];
-                test_data.extend_from_slice(&chunk_data);
-                chunks.push(Ok(Bytes::from(chunk_data)));
-            }
-
-            // Create a stream from the chunks
-            let stream = futures_util::stream::iter(chunks);
-
-            // Write the stream to storage
-            file_service.write_stream(&path, stream).await.unwrap();
-
-            // Read the content back and verify it matches
-            let read_content = file_service.get(&path).await.unwrap();
-
-            assert_eq!(
-                read_content.len(),
-                test_data.len(),
-                "Content length should match"
-            );
-            assert_eq!(
-                read_content.to_vec(),
-                test_data,
-                "Content should match original data"
-            );
-
-            file_service
-                .delete(&path)
-                .await
-                .expect("Should delete file");
-            assert!(
-                !file_service.exists(&path).await.unwrap(),
-                "File should not exist after deletion"
-            );
-        }
+        assert!(matches!(error, FileIoError::DiskSpaceQuotaExceeded));
     }
 }

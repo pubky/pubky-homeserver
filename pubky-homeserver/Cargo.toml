@@ -61,7 +61,6 @@ serde_valid = "2"
 opendal = { version = "0.54", features = ["services-fs"] }
 infer = "0.19"
 mime_guess = "2"
-dav-server-opendalfs = "0.6"
 dav-server = "0.8"
 sea-query = { version = "0.32", features = ["with-chrono", "postgres-array"] }
 sea-query-binder = { version = "0.7", features = [
@@ -78,6 +77,7 @@ sqlx = { version = "0.8", features = [
     "json",
 ] }
 dashmap = "6"
+lru = "0.14"
 async-trait.workspace = true
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }

@@ -16,7 +16,7 @@ pub enum StorageConfigToml {
     FileSystem,
 }
 
-/// The `[storage]` TOML section: backend selection and storage quota.
+/// The `[storage]` TOML section: backend selection and storage limits.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StorageToml {
     /// Which backend to use (file_system, google_bucket, in_memory).
@@ -25,4 +25,11 @@ pub struct StorageToml {
     /// Default per-user storage quota in MB.
     /// Omit for unlimited. `0` means zero storage (not unlimited).
     pub default_quota_mb: Option<u64>,
+    /// Maximum combined size of in-progress admin DAV uploads in MB.
+    #[serde(default = "default_admin_dav_spool_limit_mb")]
+    pub admin_dav_spool_limit_mb: u64,
+}
+
+const fn default_admin_dav_spool_limit_mb() -> u64 {
+    1024
 }

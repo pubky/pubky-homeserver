@@ -218,6 +218,15 @@ sed -i 's|^# \[general\]|[general]|; s|^# database_url = .*|database_url = "post
 
 ## Run
 
+Database migrations run automatically at startup. Stop all homeserver instances
+before upgrading, take a database and storage backup, then run one upgraded instance
+until migrations finish before starting the others. Mixed-version rolling upgrades
+are not supported because storage schema changes can alter how file bytes are
+addressed. After the upgraded server accepts its first file write, rolling back to a
+version that predates immutable blob storage is unsupported.
+Restoring an earlier version requires restoring PostgreSQL and blob storage from
+the same pre-upgrade snapshot.
+
 ### Docker
 
 ```bash
@@ -326,9 +335,15 @@ The generated `config.toml` works out of the box for local use. Here are a few s
 | `general.database_url` | PostgreSQL connection string. | `postgres://localhost:5432/pubky_homeserver` |
 | `general.signup_mode` | `"open"` or `"token_required"`. | `"token_required"` |
 | `storage.type` | Storage backend: `file_system`, `google_bucket`, or `in_memory`. | `file_system` |
+| `storage.admin_dav_spool_limit_mb` | Combined local disk limit for in-progress admin DAV uploads. | `1024` |
 | `admin.admin_password` | Password for the admin API. | `"admin"` |
 
 The full list of options is documented in [`pubky-homeserver/config.sample.toml`](../pubky-homeserver/config.sample.toml).
+
+When using `google_bucket`, disable bucket soft delete and Object Versioning so
+deletions reclaim storage. Also configure an `AbortIncompleteMultipartUpload`
+lifecycle rule for the `__pubky/blobs/` prefix; incomplete multipart uploads are
+not visible to the homeserver's completed-object reconciliation.
 
 ## Troubleshooting
 

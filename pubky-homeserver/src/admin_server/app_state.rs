@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use dav_server::{fakels::FakeLs, DavHandler};
-use dav_server_opendalfs::OpendalFs;
+use dav_server::{DavHandler, DavMethod, DavMethodSet};
 
-use crate::AppContext;
 use crate::ConfigToml;
+use crate::{admin_server::dav_file_system::AdminDavFileSystem, AppContext};
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -14,10 +13,33 @@ pub(crate) struct AppState {
 
 impl AppState {
     pub fn new(context: Arc<AppContext>) -> Self {
-        let webdavfs = OpendalFs::new(context.file_service.opendal.admin_operator.clone());
+        let spool_limit = context
+            .config_toml
+            .storage
+            .admin_dav_spool_limit_mb
+            .saturating_mul(1024 * 1024);
+        let webdavfs = Box::new(AdminDavFileSystem::new(
+            context.file_service.clone(),
+            context.data_dir.path().join("tmp/dav"),
+            spool_limit,
+        ));
+        let mut methods = DavMethodSet::none();
+        for method in [
+            DavMethod::Head,
+            DavMethod::Get,
+            DavMethod::Put,
+            DavMethod::Patch,
+            DavMethod::Options,
+            DavMethod::PropFind,
+            DavMethod::Copy,
+            DavMethod::Move,
+            DavMethod::Delete,
+        ] {
+            methods.add(method);
+        }
         let inner_dav_handler = DavHandler::builder()
             .filesystem(webdavfs)
-            .locksystem(FakeLs::new())
+            .methods(methods)
             .strip_prefix("/dav")
             .autoindex(true)
             .build_handler();

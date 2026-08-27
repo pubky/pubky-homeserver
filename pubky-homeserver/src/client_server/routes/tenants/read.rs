@@ -132,7 +132,7 @@ pub async fn get(
         }
     }
 
-    let stream = state.context.file_service.get_stream(&entry_path).await?;
+    let stream = state.context.file_service.get_entry_stream(&entry).await?;
     let body_stream = Body::from_stream(stream);
     let mut response = entry.to_response_headers().into_response();
     *response.body_mut() = body_stream;

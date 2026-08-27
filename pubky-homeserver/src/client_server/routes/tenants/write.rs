@@ -15,7 +15,7 @@ use crate::{
     },
     persistence::{
         files::{
-            write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
+            storage_quota::{resolve_storage_max_bytes, would_exceed_limit},
             WriteStreamError,
         },
         sql::{entry::EntryRepository, user::UserEntity, UnifiedExecutor},
@@ -107,11 +107,19 @@ pub async fn put(
     let converted_stream =
         body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
-    state
-        .context
-        .file_service
-        .write_stream(&entry_path, converted_stream)
-        .await?;
+    if let Some(content_length) = content_length {
+        state
+            .context
+            .file_service
+            .write_stream_with_size_hint(&entry_path, converted_stream, content_length)
+            .await?;
+    } else {
+        state
+            .context
+            .file_service
+            .write_stream(&entry_path, converted_stream)
+            .await?;
+    }
     Ok((StatusCode::CREATED, ()))
 }
 
