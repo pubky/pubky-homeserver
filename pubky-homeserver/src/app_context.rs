@@ -12,7 +12,7 @@ use crate::{
     client_server::auth::RevocationListener,
     observability::{Metrics, MetricsInitError},
     persistence::{
-        files::{events::EventsService, FileIoError, FileService},
+        files::{events::EventsService, BlobCleanupTask, FileIoError, FileService},
         sql::{Migrator, PgEventListener, SqlDb},
     },
     ConfigToml, DataDir,
@@ -72,6 +72,8 @@ pub struct AppContext {
     pub(crate) sql_db: SqlDb,
     /// The storage operator to store files.
     pub(crate) file_service: FileService,
+    /// Retries cleanup of abandoned and superseded immutable blobs.
+    _blob_cleanup_task: Arc<BlobCleanupTask>,
     pub(crate) config_toml: ConfigToml,
     /// Keep data_dir alive. The mock dir will cleanup on drop.
     pub(crate) data_dir: Arc<dyn DataDir>,
@@ -184,6 +186,11 @@ impl AppContext {
             user_service.clone(),
         )
         .map_err(AppContextConversionError::Storage)?;
+        file_service
+            .recover_blob_storage()
+            .await
+            .map_err(AppContextConversionError::Storage)?;
+        let blob_cleanup_task = Arc::new(BlobCleanupTask::start(file_service.clone()));
         let pkarr_builder = Self::build_pkarr_builder_from_config(&conf);
 
         Ok(Self {
@@ -193,6 +200,7 @@ impl AppContext {
                 .build()
                 .map_err(AppContextConversionError::Pkarr)?,
             file_service,
+            _blob_cleanup_task: blob_cleanup_task,
             pkarr_builder,
             config_toml: conf,
             keypair,

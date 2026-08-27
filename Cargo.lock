@@ -1243,19 +1243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dav-server-opendalfs"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3854e79b351f12bbeab0c53e72e88fcf5cebc07683014de572eed2144369bf4"
-dependencies = [
- "anyhow",
- "bytes",
- "dav-server",
- "futures",
- "opendal",
-]
-
-[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3020,6 +3007,15 @@ dependencies = [
 
 [[package]]
 name = "lru"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f8cc7106155f10bdf99a6f379688f543ad6596a415375b36a59a054ceda1198"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "lru"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
@@ -4065,7 +4061,6 @@ dependencies = [
  "clap",
  "dashmap",
  "dav-server",
- "dav-server-opendalfs",
  "dirs",
  "dyn-clone",
  "fast-glob",
@@ -4077,6 +4072,7 @@ dependencies = [
  "httpdate",
  "infer",
  "jsonwebtoken",
+ "lru 0.14.0",
  "mainline",
  "mime_guess",
  "opendal",
