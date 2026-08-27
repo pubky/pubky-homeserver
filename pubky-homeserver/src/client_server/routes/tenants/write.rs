@@ -1,4 +1,4 @@
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -15,8 +15,9 @@ use crate::{
     },
     persistence::{
         files::{
+            content_hash_etag,
             storage_quota::{resolve_storage_max_bytes, would_exceed_limit},
-            WriteStreamError,
+            WriteOutcome, WritePreconditions, WriteStreamError,
         },
         sql::{entry::EntryRepository, user::UserEntity, UnifiedExecutor},
     },
@@ -87,40 +88,52 @@ pub async fn put(
         .get_or_http_error(entry_path.pubkey(), true)
         .await?;
 
+    let preconditions =
+        WritePreconditions::from_headers(&headers).map_err(HttpError::bad_request)?;
+
     // Early fail: check Content-Length header against the user's storage quota
     // so we can reject before streaming the entire body.
     // We read from the header rather than body.size_hint() because middleware
     // layers (e.g. bandwidth throttling) may replace the body with a stream
     // that loses the size hint.
     let content_length = content_length_from_headers(&headers);
-    fail_if_size_hint_exceeds_quota(
-        content_length,
-        &user,
-        state.context.config_toml.storage.default_quota_mb,
-        &entry_path,
-        &mut state.context.sql_db.pool().into(),
-    )
-    .await?;
+    if preconditions.is_empty() {
+        fail_if_size_hint_exceeds_quota(
+            content_length,
+            &user,
+            state.context.config_toml.storage.default_quota_mb,
+            &entry_path,
+            &mut state.context.sql_db.pool().into(),
+        )
+        .await?;
+    }
 
     // Convert body stream to the format expected by file_service
     let body_stream = body.into_data_stream();
     let converted_stream =
         body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
-    if let Some(content_length) = content_length {
-        state
-            .context
-            .file_service
-            .write_stream_with_size_hint(&entry_path, converted_stream, content_length)
-            .await?;
-    } else {
-        state
-            .context
-            .file_service
-            .write_stream(&entry_path, converted_stream)
-            .await?;
-    }
-    Ok((StatusCode::CREATED, ()))
+    let (entry, outcome) = state
+        .context
+        .file_service
+        .write_stream_with_preconditions(
+            &entry_path,
+            converted_stream,
+            content_length,
+            preconditions,
+        )
+        .await?;
+    let status = match outcome {
+        WriteOutcome::Created => StatusCode::CREATED,
+        WriteOutcome::Replaced => StatusCode::OK,
+    };
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&content_hash_etag(&entry.content_hash))
+            .expect("content hash ETag is a valid header value"),
+    );
+    Ok((status, response_headers))
 }
 
 /// Parse the `Content-Length` header into a `u64`, returning `None` if absent or unparseable.
