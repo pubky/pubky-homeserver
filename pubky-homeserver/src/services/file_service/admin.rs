@@ -1,6 +1,6 @@
 use crate::{
     persistence::{
-        files::{FileIoError, WriteStreamError},
+        files::{FileIoError, WritePreconditions, WriteStreamError},
         sql::{
             entry::{EntryEntity, EntryRepository},
             user::UserEntity,
@@ -29,8 +29,15 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: Option<u64>,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, size_hint)
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::AdminOverwrite,
+            size_hint,
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     pub(crate) async fn admin_users(&self) -> Result<Vec<String>, FileIoError> {
@@ -103,6 +110,7 @@ impl FileService {
             }),
             WriteMode::AdminCreate,
             Some(source_length),
+            WritePreconditions::default(),
         )
         .await?;
         Ok(())
