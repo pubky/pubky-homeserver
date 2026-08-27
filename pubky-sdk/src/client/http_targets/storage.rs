@@ -1,3 +1,4 @@
+use reqwest::{Method, RequestBuilder};
 use url::Url;
 
 use super::{TransportHost, classify_transport_host};
@@ -22,6 +23,34 @@ impl StorageAddressing {
 }
 
 impl PubkyHttpClient {
+    pub(crate) async fn require_storage_feature(
+        &self,
+        owner: &PublicKey,
+        feature: &str,
+    ) -> Result<PublicKey> {
+        let homeserver = Pkdns::with_client(self.clone())
+            .require_homeserver_of(owner)
+            .await?;
+        self.features.require(self, &homeserver, feature).await?;
+        Ok(homeserver)
+    }
+
+    pub(crate) async fn storage_request_via_homeserver(
+        &self,
+        method: Method,
+        homeserver: &PublicKey,
+        owner: &PublicKey,
+        path: &str,
+    ) -> Result<RequestBuilder> {
+        let path = path.trim_start_matches('/');
+        let url = Url::parse(&format!(
+            "https://{}/storage/{}/{path}",
+            homeserver.z32(),
+            owner.z32()
+        ))?;
+        self.cross_request(method, url).await
+    }
+
     pub(super) async fn prepare_storage_addressing(
         &self,
         url: &mut Url,
@@ -80,6 +109,7 @@ impl PubkyHttpClient {
 mod tests {
     use super::*;
     use crate::Keypair;
+    use pubky_common::constants::features::CONDITIONAL_WRITES;
 
     #[tokio::test]
     async fn advertised_feature_keeps_the_storage_path() {
@@ -106,14 +136,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_feature_uses_legacy_path_and_preserves_the_url() {
+    async fn conditional_writes_without_path_addressing_use_the_legacy_path() {
         let client = PubkyHttpClient::builder()
             .isolated_pkarr_test()
             .build()
             .unwrap();
         let homeserver = Keypair::random().public_key();
         let owner = Keypair::random().public_key();
-        client.features.insert(&homeserver, &[]);
+        client.features.insert(&homeserver, &[CONDITIONAL_WRITES]);
         let mut url = Url::parse(&format!(
             "https://{}/storage/{}/pub/My%20File%252FName/?cursor=hello%20world",
             homeserver.z32(),
@@ -129,6 +159,64 @@ mod tests {
         );
         assert_eq!(url.path(), "/pub/My%20File%252FName/");
         assert_eq!(url.query(), Some("cursor=hello%20world"));
+    }
+
+    #[tokio::test]
+    async fn required_storage_features_fail_closed_when_not_advertised() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let homeserver = Keypair::random().public_key();
+        client.features.insert(&homeserver, &[]);
+
+        let error = client
+            .features
+            .require(&client, &homeserver, CONDITIONAL_WRITES)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::Error::Request(RequestError::UnsupportedFeature { feature })
+                if feature == CONDITIONAL_WRITES
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_homeserver_storage_request_stays_on_that_homeserver() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let checked_homeserver = Keypair::random().public_key();
+        let owner = Keypair::random().public_key();
+        client.features.insert(
+            &checked_homeserver,
+            &[PATH_ADDRESSED_STORAGE, CONDITIONAL_WRITES],
+        );
+
+        let request = client
+            .storage_request_via_homeserver(
+                Method::PUT,
+                &checked_homeserver,
+                &owner,
+                "/pub/file.txt",
+            )
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.url().host_str(),
+            Some(checked_homeserver.z32().as_str())
+        );
+        assert_eq!(
+            request.url().path(),
+            format!("/storage/{}/pub/file.txt", owner.z32())
+        );
+        assert!(!request.headers().contains_key("pubky-host"));
     }
 
     #[tokio::test]
