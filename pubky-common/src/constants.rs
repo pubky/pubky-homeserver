@@ -18,6 +18,8 @@ pub mod storage {
 
 /// Features advertised by the homeserver client API.
 pub mod features {
+    /// Homeserver enforces `If-Match` and `If-None-Match` on storage `PUT` requests.
+    pub const CONDITIONAL_WRITES: &str = "conditional-writes";
     /// Homeserver supports storage URLs containing the resource owner in the path.
     pub const PATH_ADDRESSED_STORAGE: &str = "path-addressed-storage";
 }

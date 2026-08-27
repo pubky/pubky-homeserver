@@ -32,9 +32,9 @@ async fn put_quota_applied() {
     let resp = session.storage().put(p1, data_600k.clone()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    // Overwrite same 600 KB → still 201
+    // Overwrite same 600 KB → 200
     let resp = session.storage().put(p1, data_600k.clone()).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Write 600 KB more through `/storage/{user_z32}/{path}` (total 1.2 MB) → 507.
     let storage_url = format!(

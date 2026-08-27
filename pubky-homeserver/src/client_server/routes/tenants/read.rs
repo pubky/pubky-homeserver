@@ -1,4 +1,7 @@
-use crate::persistence::sql::entry::{EntryEntity, EntryRepository};
+use crate::persistence::{
+    files::content_hash_etag,
+    sql::entry::{EntryEntity, EntryRepository},
+};
 use crate::shared::{HttpError, HttpResult};
 use crate::{
     client_server::{
@@ -106,13 +109,7 @@ pub async fn get(
         .get(header::IF_NONE_MATCH)
         .and_then(|h| h.to_str().ok())
     {
-        let current_etag = format!(
-            "\"{}\"",
-            base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                entry.content_hash.as_bytes()
-            )
-        );
+        let current_etag = content_hash_etag(&entry.content_hash);
         if request_etag
             .trim()
             .split(',')
@@ -212,16 +209,7 @@ fn parse_cursor(cursor: Option<String>) -> anyhow::Result<Option<EntryPath>> {
 fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<Body>> {
     Ok(Response::builder()
         .status(StatusCode::NOT_MODIFIED)
-        .header(
-            header::ETAG,
-            format!(
-                "\"{}\"",
-                base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    entry.content_hash.as_bytes()
-                )
-            ),
-        )
+        .header(header::ETAG, content_hash_etag(&entry.content_hash))
         .header(
             header::LAST_MODIFIED,
             to_http_date(&entry.modified_at).to_string().as_str(),
@@ -255,15 +243,9 @@ impl EntryEntity {
         );
         headers.insert(
             header::ETAG,
-            format!(
-                "\"{}\"",
-                base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    self.content_hash.as_bytes()
-                )
-            )
-            .try_into()
-            .expect("base64 string is valid"),
+            content_hash_etag(&self.content_hash)
+                .try_into()
+                .expect("content hash ETag is valid"),
         );
         headers.insert(
             header::CACHE_CONTROL,
