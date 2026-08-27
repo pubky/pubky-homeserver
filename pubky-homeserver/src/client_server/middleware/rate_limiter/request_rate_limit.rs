@@ -31,34 +31,10 @@ pub struct RequestRateLimitLayer {
     limits: Vec<LimitTuple>,
 }
 
-/// Orders overlapping request-count limits deterministically for evaluation.
-///
-/// Shorter declared quota windows are evaluated first. All remaining fields are
-/// part of a canonical tie-breaker so TOML array order cannot affect evaluation.
-fn sort_path_limits_for_evaluation(limits: &mut [PathLimit]) {
-    limits.sort_by_cached_key(|limit| {
-        let mut whitelist = limit
-            .whitelist
-            .iter()
-            .map(|key| key.to_string())
-            .collect::<Vec<_>>();
-        whitelist.sort_unstable();
-
-        (
-            Duration::from(limit.quota.time_unit),
-            limit.path.0.clone(),
-            limit.method.to_string(),
-            limit.key.to_string(),
-            limit.quota.rate.get(),
-            limit.burst.map(|burst| burst.get()),
-            whitelist,
-        )
-    });
-}
-
 impl RequestRateLimitLayer {
     pub fn from_path_limits(mut limits: Vec<PathLimit>) -> Result<Self, String> {
-        sort_path_limits_for_evaluation(&mut limits);
+        // Prevent a short-window rejection from consuming a longer-window quota.
+        limits.sort_by_key(|limit| Duration::from(limit.quota.time_unit));
 
         if limits.is_empty() {
             tracing::info!("No path-based request-count rate limits configured ([[drive.rate_limits]] is empty).");
@@ -68,7 +44,7 @@ impl RequestRateLimitLayer {
                 .map(|limit| format!("\"{limit}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::info!("Path-based rate limits evaluated in canonical order: {limits_str}");
+            tracing::info!("Path-based rate-limit evaluation order: {limits_str}");
         }
         let limits = limits
             .into_iter()
@@ -381,50 +357,6 @@ mod tests {
 
         assert!(delay_secs >= 1, "Retry-After must be at least one second");
         assert!(delay_secs <= 60, "Retry-After should not exceed the quota");
-    }
-
-    #[test]
-    fn path_limits_are_canonically_sorted_for_evaluation() {
-        let limits = vec![
-            PathLimit {
-                path: GlobPattern::new("/upload/z"),
-                method: HttpMethod(Method::POST),
-                quota: "2r/m".parse().unwrap(),
-                key: LimitKeyType::Ip,
-                burst: None,
-                whitelist: Vec::new(),
-            },
-            PathLimit {
-                path: GlobPattern::new("/upload"),
-                method: HttpMethod(Method::POST),
-                quota: "1r/s".parse().unwrap(),
-                key: LimitKeyType::Ip,
-                burst: None,
-                whitelist: Vec::new(),
-            },
-            PathLimit {
-                path: GlobPattern::new("/upload/a"),
-                method: HttpMethod(Method::POST),
-                quota: "2r/m".parse().unwrap(),
-                key: LimitKeyType::Ip,
-                burst: None,
-                whitelist: Vec::new(),
-            },
-        ];
-        let mut first_order = limits.clone();
-        let mut reversed_order = limits.into_iter().rev().collect::<Vec<_>>();
-
-        sort_path_limits_for_evaluation(&mut first_order);
-        sort_path_limits_for_evaluation(&mut reversed_order);
-
-        assert_eq!(first_order, reversed_order);
-        assert_eq!(
-            first_order
-                .iter()
-                .map(|limit| limit.quota.time_unit.to_string())
-                .collect::<Vec<_>>(),
-            vec!["s", "m", "m"],
-        );
     }
 
     #[tokio::test]
