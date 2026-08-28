@@ -12,7 +12,7 @@ use crate::Testnet;
 use http_relay::HttpRelay;
 use pubky_common::constants::testnet_ports;
 use pubky_homeserver::{
-    AppContext, ConfigToml, DhtMode, DomainPort, HomeserverApp, PersistentDataDir,
+    AppContext, ConfigToml, ConnectionString, DhtMode, DomainPort, HomeserverApp, PersistentDataDir,
 };
 
 /// The bind address used for all static testnet listeners.
@@ -380,11 +380,10 @@ impl StaticTestnet {
         let keypair = persistent_dir.read_or_create_keypair()?;
 
         apply_static_testnet_overrides(&mut config, self.parse_bootstrap_nodes()?);
-        config.general.database_url = self
-            .testnet
-            .postgres_connection_string
-            .clone()
-            .or(config.general.database_url);
+        config.general.database_url = resolve_persistent_database_url(
+            self.testnet.postgres_connection_string.clone(),
+            config.general.database_url,
+        )?;
         let db_mode =
             pubky_homeserver::DatabaseMode::require_direct(config.general.database_url.clone())?;
 
@@ -408,6 +407,32 @@ impl StaticTestnet {
         self.testnet.start_homeserver(context, temp_dir).await?;
         Ok(())
     }
+}
+
+/// Resolve the database URL for a persistent testnet homeserver.
+///
+/// Priority:
+/// 1. Programmatic override (e.g. from `Testnet::new_with_custom_postgres`)
+/// 2. On-disk config value (`config.toml` → `[general].database_url`)
+/// 3. `TEST_PUBKY_CONNECTION_STRING` environment variable
+fn resolve_persistent_database_url(
+    programmatic: Option<ConnectionString>,
+    from_config: Option<ConnectionString>,
+) -> anyhow::Result<Option<ConnectionString>> {
+    resolve_persistent_database_url_inner(
+        programmatic,
+        from_config,
+        ConnectionString::from_test_env()?,
+    )
+}
+
+/// Pure resolution logic, separated from env access for testability.
+fn resolve_persistent_database_url_inner(
+    programmatic: Option<ConnectionString>,
+    from_config: Option<ConnectionString>,
+    from_env: Option<ConnectionString>,
+) -> anyhow::Result<Option<ConnectionString>> {
+    Ok(programmatic.or(from_config).or(from_env))
 }
 
 #[cfg(test)]
@@ -668,5 +693,46 @@ mod tests {
             config2.general.signup_mode,
             pubky_homeserver::SignupMode::TokenRequired
         );
+    }
+
+    #[test]
+    fn persistent_db_url_programmatic_wins() {
+        let programmatic = ConnectionString::new("postgres://prog:5432/db").unwrap();
+        let from_config = ConnectionString::new("postgres://config:5432/db").unwrap();
+        let from_env = ConnectionString::new("postgres://env:5432/db").unwrap();
+
+        let result = resolve_persistent_database_url_inner(
+            Some(programmatic.clone()),
+            Some(from_config),
+            Some(from_env),
+        )
+        .unwrap();
+        assert_eq!(result.unwrap().as_str(), programmatic.as_str());
+    }
+
+    #[test]
+    fn persistent_db_url_config_used_when_no_programmatic() {
+        let from_config = ConnectionString::new("postgres://config:5432/db").unwrap();
+        let from_env = ConnectionString::new("postgres://env:5432/db").unwrap();
+
+        let result =
+            resolve_persistent_database_url_inner(None, Some(from_config.clone()), Some(from_env))
+                .unwrap();
+        assert_eq!(result.unwrap().as_str(), from_config.as_str());
+    }
+
+    #[test]
+    fn persistent_db_url_env_used_as_fallback() {
+        let from_env = ConnectionString::new("postgres://env:5432/db").unwrap();
+
+        let result =
+            resolve_persistent_database_url_inner(None, None, Some(from_env.clone())).unwrap();
+        assert_eq!(result.unwrap().as_str(), from_env.as_str());
+    }
+
+    #[test]
+    fn persistent_db_url_none_when_nothing_set() {
+        let result = resolve_persistent_database_url_inner(None, None, None).unwrap();
+        assert!(result.is_none());
     }
 }

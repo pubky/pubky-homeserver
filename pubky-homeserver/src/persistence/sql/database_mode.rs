@@ -60,24 +60,18 @@ impl DatabaseMode {
     /// 2. `TEST_PUBKY_CONNECTION_STRING` environment variable → `EphemeralTest`
     /// 3. [`DEFAULT_TEST_SERVER`] fallback → `EphemeralTest`
     pub fn resolve_test(explicit: Option<ConnectionString>) -> anyhow::Result<Self> {
-        let env_val = std::env::var("TEST_PUBKY_CONNECTION_STRING").ok();
-        Self::resolve_test_inner(explicit, env_val)
+        Self::resolve_test_inner(explicit, ConnectionString::from_test_env()?)
     }
 
     /// Pure resolution logic, separated from env access for testability.
-    /// Tests always get ephemeral databases.
     fn resolve_test_inner(
         explicit: Option<ConnectionString>,
-        env_val: Option<String>,
+        from_env: Option<ConnectionString>,
     ) -> anyhow::Result<Self> {
-        let url = match (explicit, env_val) {
-            (Some(url), _) => url,
-            (None, Some(raw)) => ConnectionString::new(&raw).map_err(|e| {
-                anyhow::anyhow!("Invalid TEST_PUBKY_CONNECTION_STRING: {raw}. Error: {e}")
-            })?,
-            (None, None) => ConnectionString::new(DEFAULT_TEST_SERVER)
-                .expect("Default test connection string is valid"),
-        };
+        let url = explicit.or(from_env).unwrap_or_else(|| {
+            ConnectionString::new(DEFAULT_TEST_SERVER)
+                .expect("Default test connection string is valid")
+        });
         Ok(Self::EphemeralTest(url))
     }
 }
@@ -87,37 +81,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_explicit_wins_over_env() {
+    fn resolve_test_explicit_wins_over_env() {
         let explicit = ConnectionString::new("postgres://custom:5432/mydb").unwrap();
-        let env_val = Some("postgres://envhost:5432/envdb".to_string());
-        let result = DatabaseMode::resolve_test_inner(Some(explicit.clone()), env_val).unwrap();
+        let from_env = ConnectionString::new("postgres://env:5432/envdb").unwrap();
+        let result =
+            DatabaseMode::resolve_test_inner(Some(explicit.clone()), Some(from_env)).unwrap();
         assert_eq!(result.connection_string(), &explicit);
         assert!(matches!(result, DatabaseMode::EphemeralTest(_)));
     }
 
     #[test]
-    fn resolve_env_var_used_when_no_explicit() {
-        let env_val = Some("postgres://envhost:5432/envdb".to_string());
-        let result = DatabaseMode::resolve_test_inner(None, env_val).unwrap();
-        assert_eq!(
-            result.connection_string().as_str(),
-            "postgres://envhost:5432/envdb"
-        );
+    fn resolve_test_env_used_when_no_explicit() {
+        let from_env = ConnectionString::new("postgres://env:5432/envdb").unwrap();
+        let result = DatabaseMode::resolve_test_inner(None, Some(from_env.clone())).unwrap();
+        assert_eq!(result.connection_string(), &from_env);
         assert!(matches!(result, DatabaseMode::EphemeralTest(_)));
     }
 
     #[test]
-    fn resolve_falls_back_to_default() {
+    fn resolve_test_falls_back_to_default() {
         let result = DatabaseMode::resolve_test_inner(None, None).unwrap();
         assert_eq!(result.connection_string().as_str(), DEFAULT_TEST_SERVER);
         assert!(matches!(result, DatabaseMode::EphemeralTest(_)));
-    }
-
-    #[test]
-    fn resolve_invalid_env_var_errors() {
-        let env_val = Some("not-a-valid-url".to_string());
-        let result = DatabaseMode::resolve_test_inner(None, env_val);
-        assert!(result.is_err());
     }
 
     #[test]
@@ -138,13 +123,5 @@ mod tests {
             result.is_err(),
             "require_direct should error when url is None"
         );
-    }
-
-    #[test]
-    fn resolve_old_style_url_with_pubky_test_param_still_works() {
-        let env_val =
-            Some("postgres://user:pass@localhost:5432/postgres?pubky-test=true".to_string());
-        let result = DatabaseMode::resolve_test_inner(None, env_val).unwrap();
-        assert!(matches!(result, DatabaseMode::EphemeralTest(_)));
     }
 }

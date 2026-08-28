@@ -269,6 +269,7 @@ impl AppContext {
                     // Sentinel bootstrap node so the builder stays valid even when
                     // no config-level bootstrap nodes are provided. Explicit testnet
                     // bootstrap nodes (from config) replace this via apply_config_to_pkarr.
+                    // Port 9 is the RFC 863 "discard" protocol — guaranteed unreachable as a DHT node.
                     .bootstrap(&["127.0.0.1:9"])
                     .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
                 Self::apply_config_to_pkarr(&mut builder, config);
