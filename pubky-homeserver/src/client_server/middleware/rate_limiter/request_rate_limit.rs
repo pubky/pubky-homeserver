@@ -11,7 +11,7 @@ use axum::{
 };
 use futures_util::future::BoxFuture;
 use governor::clock::Clock;
-use std::{convert::Infallible, task::Poll};
+use std::{convert::Infallible, task::Poll, time::Duration};
 use tower::{Layer, Service};
 
 use crate::shared::quota::PathLimit;
@@ -32,7 +32,10 @@ pub struct RequestRateLimitLayer {
 }
 
 impl RequestRateLimitLayer {
-    pub fn from_path_limits(limits: Vec<PathLimit>) -> Result<Self, String> {
+    pub fn from_path_limits(mut limits: Vec<PathLimit>) -> Result<Self, String> {
+        // Prevent a short-window rejection from consuming a longer-window quota.
+        limits.sort_by_key(|limit| Duration::from(limit.quota.time_unit));
+
         if limits.is_empty() {
             tracing::info!("No path-based request-count rate limits configured ([[drive.rate_limits]] is empty).");
         } else {
@@ -41,7 +44,7 @@ impl RequestRateLimitLayer {
                 .map(|limit| format!("\"{limit}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::info!("Path-based rate limits configured: {limits_str}");
+            tracing::info!("Path-based rate-limit evaluation order: {limits_str}");
         }
         let limits = limits
             .into_iter()
@@ -144,7 +147,10 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
     use axum::http::Method;
     use axum::response::IntoResponse;
@@ -351,6 +357,41 @@ mod tests {
 
         assert!(delay_secs >= 1, "Retry-After must be at least one second");
         assert!(delay_secs <= 60, "Retry-After should not exceed the quota");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn short_window_rejection_does_not_consume_long_window_quota() {
+        let long_window = PathLimit {
+            path: GlobPattern::new("/upload"),
+            method: HttpMethod(Method::POST),
+            quota: "2r/m".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let short_window = PathLimit {
+            path: GlobPattern::new("/upload"),
+            method: HttpMethod(Method::POST),
+            quota: "1r/s".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let socket = start_server(vec![long_window, short_window]).await;
+        let client = Client::new();
+        let url = format!("http://{socket}/upload");
+
+        let first = client.post(&url).send().await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = client.post(&url).send().await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let third = client.post(&url).send().await.unwrap();
+        assert_eq!(third.status(), StatusCode::CREATED);
     }
 
     #[test]
