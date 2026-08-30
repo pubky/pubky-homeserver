@@ -44,6 +44,8 @@ test("PublicKey from and toUint8Array", async (t) => {
   const z32 = "gcumbhd7sqit6nn457jxmrwqx9pyymqwamnarekgo3xppqo6a19o";
   const publicKey = PublicKey.from(z32);
   t.is(publicKey.z32(), z32);
+  t.is(publicKey.toString(), z32);
+  t.is(PublicKey.from(`pubky${z32}`).toString(), z32, "accepts legacy input");
   t.deepEqual(
     publicKey.toUint8Array(),
     Uint8Array.from([

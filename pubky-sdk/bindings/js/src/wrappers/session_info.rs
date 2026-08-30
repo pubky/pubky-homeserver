@@ -10,8 +10,7 @@ pub struct SessionInfo(pub(crate) pubky::SessionInfo);
 impl SessionInfo {
     /// The user’s public key for this session.
     ///
-    /// Use `.toString()` on the returned `PublicKey` to get the `pubky<z32>` identifier.
-    /// Call `.z32()` when you specifically need the raw z-base32 value (e.g. hostnames).
+    /// Use `.toString()` or `.z32()` on the returned `PublicKey` to get its z-base32 encoding.
     ///
     /// @returns {PublicKey}
     ///

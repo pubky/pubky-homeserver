@@ -11,7 +11,7 @@ use pubky::{Method, PubkyHttpClient};
 struct Cli {
     /// HTTP method to use (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
     method: Method,
-    /// Pubky or HTTPS URL (e.g. pubky<user>/pub/my-cool-app/file, pubky://<user>/..., or https://example.com)
+    /// Pubky or HTTPS URL (e.g. pubky://<user>/pub/my-cool-app/file or https://example.com)
     url: Url,
     /// Use testnet endpoints
     #[arg(long)]

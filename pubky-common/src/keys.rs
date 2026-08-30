@@ -8,16 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 type ParseError = <pkarr::PublicKey as TryFrom<String>>::Error;
 
-fn parse_public_key(value: &str) -> Result<pkarr::PublicKey, ParseError> {
-    let raw = if PublicKey::is_pubky_prefixed(value) {
-        value.strip_prefix("pubky").unwrap_or(value)
-    } else {
-        value
-    };
-    pkarr::PublicKey::try_from(raw.to_string())
-}
-
-/// Wrapper around [`pkarr::Keypair`] that customizes [`PublicKey`] rendering.
+/// Wrapper around [`pkarr::Keypair`].
 #[derive(Clone)]
 pub struct Keypair(pkarr::Keypair);
 
@@ -50,8 +41,8 @@ impl Keypair {
 
     /// Return the [`PublicKey`] associated with this [`Keypair`].
     ///
-    /// Display the returned key with `.to_string()` to get the `pubky<z32>` identifier or
-    /// [`PublicKey::z32()`] when you specifically need the bare z-base32 text (e.g. hostnames).
+    /// Display the returned key with `.to_string()` or [`PublicKey::z32()`] to get its z-base32
+    /// encoding.
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
         PublicKey(self.0.public_key())
@@ -108,15 +99,22 @@ impl From<Keypair> for pkarr::Keypair {
     }
 }
 
-/// Wrapper around [`pkarr::PublicKey`] that renders with the `pubky` prefix.
+/// Wrapper around [`pkarr::PublicKey`].
 ///
-/// Note: human-readable serde, transport, and database formats use raw z32 strings. Use
-/// [`PublicKey::z32()`] for hostnames, query parameters, storage, and wire formats.
+/// The canonical string representation is raw z-base32. Legacy `pubky<z32>` input remains
+/// accepted for compatibility.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PublicKey(pkarr::PublicKey);
 
 impl PublicKey {
-    /// Returns true if the value is in `pubky<z32>` form.
+    fn parse_legacy_compatible(value: &str) -> Result<pkarr::PublicKey, ParseError> {
+        let raw = value
+            .strip_prefix("pubky")
+            .filter(|_| Self::is_pubky_prefixed(value));
+        pkarr::PublicKey::try_from(raw.unwrap_or(value).to_string())
+    }
+
+    /// Returns true if the value is in the legacy `pubky<z32>` form.
     pub fn is_pubky_prefixed(value: &str) -> bool {
         matches!(value.strip_prefix("pubky"), Some(stripped) if stripped.len() == 52)
     }
@@ -133,7 +131,7 @@ impl PublicKey {
         self.0
     }
 
-    /// Return the raw z-base32 representation without the `pubky` prefix.
+    /// Return the canonical z-base32 representation.
     ///
     /// This is the canonical transport/storage form used for hostnames, query
     /// parameters, serde, and database persistence.
@@ -150,7 +148,7 @@ impl PublicKey {
 
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pubky{}", self.z32())
+        f.write_str(&self.z32())
     }
 }
 
@@ -217,7 +215,7 @@ impl TryFrom<&str> for PublicKey {
     type Error = ParseError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        parse_public_key(value).map(Self)
+        Self::parse_legacy_compatible(value).map(Self)
     }
 }
 
@@ -225,7 +223,7 @@ impl TryFrom<&String> for PublicKey {
     type Error = ParseError;
 
     fn try_from(value: &String) -> Result<Self, Self::Error> {
-        parse_public_key(value).map(Self)
+        Self::parse_legacy_compatible(value).map(Self)
     }
 }
 
@@ -233,7 +231,7 @@ impl TryFrom<String> for PublicKey {
     type Error = ParseError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        parse_public_key(&value).map(Self)
+        Self::parse_legacy_compatible(&value).map(Self)
     }
 }
 
@@ -241,7 +239,7 @@ impl FromStr for PublicKey {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        parse_public_key(s).map(Self)
+        Self::parse_legacy_compatible(s).map(Self)
     }
 }
 
@@ -269,9 +267,17 @@ mod tests {
     }
 
     #[test]
-    fn public_key_display_uses_pubky_prefix() {
+    fn public_key_display_uses_z32() {
         let public_key = Keypair::random().public_key();
 
-        assert_eq!(public_key.to_string(), format!("pubky{}", public_key.z32()));
+        assert_eq!(public_key.to_string(), public_key.z32());
+    }
+
+    #[test]
+    fn public_key_parses_legacy_prefixed_input() {
+        let public_key = Keypair::random().public_key();
+        let legacy = format!("pubky{public_key}");
+
+        assert_eq!(legacy.parse::<PublicKey>().unwrap(), public_key);
     }
 }

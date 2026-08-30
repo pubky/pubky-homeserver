@@ -8,9 +8,9 @@
 //!   operations that act “as me”. Example: `session.storage().get("/pub/my-cool-app/file")`.
 //!
 //! - [`PubkyResource`]: an **addressed resource** that pairs a user with an absolute path,
-//!   e.g. `"pubky<public_key>/pub/my-cool-app/file"` (preferred) or `pubky://<public_key>/pub/my-cool-app/file`.
+//!   e.g. `pubky://<public_key>/pub/my-cool-app/file`.
 //!   It is used by *public* (unauthenticated) operations and any API that must
-//!   target **another user’s** data. Example: `public.get("pubky<pk>/pub/site/index.html")`.
+//!   target **another user’s** data. Example: `public.get("pubky://<pk>/pub/site/index.html")`.
 //!
 //! Keeping these distinct eliminates ambiguity and makes IDE auto-completion
 //! tell you exactly what each method expects.
@@ -163,11 +163,9 @@ impl fmt::Display for ResourcePath {
 /// This is the unambiguous “user + absolute path” form used when acting on
 /// **another user’s** data (public reads, etc.).
 ///
-/// Accepted inputs for `FromStr`:
-/// - `pubky<public_key>/<abs-path>` (preferred)
-/// - `pubky://<public_key>/<abs-path>`
+/// Canonically renders as `pubky://<public_key>/<abs-path>`.
 ///
-/// Display renders as `pubky<public_key>/<abs-path>` for quick visual identification.
+/// Legacy `pubky<public_key>/<abs-path>` values remain accepted as input for compatibility.
 ///
 /// ### Examples
 /// ```
@@ -176,7 +174,7 @@ impl fmt::Display for ResourcePath {
 /// // Build from parts
 /// let pk = Keypair::random().public_key();
 /// let r = PubkyResource::new(pk.clone(), "/pub/site/index.html")?;
-/// assert_eq!(r.to_string(), format!("{pk}/pub/site/index.html"));
+/// assert_eq!(r.to_string(), format!("pubky://{pk}/pub/site/index.html"));
 ///
 /// // Parse from string
 /// // `pubky://` form
@@ -265,12 +263,6 @@ impl PubkyResource {
             .map_err(|_err| invalid("transport URL path is not valid UTF-8"))?;
         Self::new(owner, decoded_path.as_ref())
     }
-
-    /// Render as the identifier form `pubky<owner>/<abs-path>`.
-    pub(crate) fn to_identifier(&self) -> String {
-        let path = self.path.as_root_relative_str();
-        format!("{}/{path}", self.owner)
-    }
 }
 
 fn parse_transport_owner(owner: &str) -> Result<PublicKey, Error> {
@@ -303,7 +295,7 @@ impl FromStr for PubkyResource {
             return Self::new(user, path);
         }
 
-        // 2) pubky<user>/<path>
+        // 2) Legacy pubky<user>/<path>
         if let Some(rest) = s.strip_prefix("pubky") {
             if let Some((user_id, path)) = rest.split_once('/') {
                 if PublicKey::is_pubky_prefixed(user_id) {
@@ -329,11 +321,13 @@ impl FromStr for PubkyResource {
 
 impl fmt::Display for PubkyResource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_identifier())
+        f.write_str(&self.to_pubky_url())
     }
 }
 
-/// Resolve a Pubky identifier (either `pubky://` or `pubky<pk>/…`) into a transport URL.
+/// Resolve a Pubky URL into a transport URL.
+///
+/// Legacy `pubky<pk>/…` identifiers remain accepted for compatibility.
 ///
 /// Returns the same URL as [`PubkyResource::to_transport_url`], making it easy to
 /// bridge human-facing identifiers with low-level HTTP clients.
@@ -411,7 +405,7 @@ impl IntoResourcePath for &String {
 ///
 /// Implementations:
 /// - `PubkyResource` / `&PubkyResource` (pass-through / clone)
-/// - `&str`, `String`, `&String` parsed as `pubky<pk>/<abs-path>` or `pubky://<pk>/<abs-path>`
+/// - `&str`, `String`, `&String` parsed as `pubky://<pk>/<abs-path>`
 /// - `(PublicKey, P: AsRef<str>)` and `(&PublicKey, P: AsRef<str>)` to pair a key with a path
 ///
 /// This trait is used by *public* storage methods (`PublicStorage`) and any API that must
@@ -426,11 +420,8 @@ impl IntoResourcePath for &String {
 /// // Pair (pk, path)
 /// let r1 = (user.clone(), "/pub/site/index.html").into_pubky_resource()?;
 ///
-/// // Parse `<pk>/<path>`
-/// let r2: PubkyResource = format!("{}/pub/site/index.html", user).parse()?;
-///
 /// // Parse `pubky://`
-/// let r3: PubkyResource = format!("pubky://{}/pub/site/index.html", user.z32()).parse()?;
+/// let r2: PubkyResource = format!("pubky://{user}/pub/site/index.html").parse()?;
 /// # Ok::<(), pubky::Error>(())
 /// ```
 pub trait IntoPubkyResource {
@@ -509,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_addressed_user_both_forms() {
+    fn parses_legacy_identifier_but_renders_a_pubky_url() {
         let kp = Keypair::random();
         let user = kp.public_key();
         let user_raw = user.z32();
@@ -524,10 +515,8 @@ mod tests {
         assert_eq!(p1.path.as_str(), "/pub/my-cool-app/file");
         assert_eq!(p3.path.as_str(), "/pub/my-cool-app/file");
 
-        // Display: identifier form
-        assert_eq!(p1.to_string(), s3);
-        assert_eq!(p3.to_string(), s3);
-        // Deep-link rendering (no default needed; owner is known)
+        assert_eq!(p1.to_string(), s1);
+        assert_eq!(p3.to_string(), s1);
         assert_eq!(p1.to_pubky_url(), s1);
     }
 
@@ -565,7 +554,7 @@ mod tests {
         ));
 
         // Double-slash inside path
-        let s_bad = format!("{user}/pub//app");
+        let s_bad = format!("pubky://{user}/pub//app");
         assert!(matches!(
             PubkyResource::from_str(&s_bad),
             Err(Error::Request(RequestError::Validation { .. }))
@@ -611,6 +600,7 @@ mod tests {
         assert_eq!(resolved, resolved2);
 
         let resource = PubkyResource::from_str(&prefixed).unwrap();
+        assert_eq!(resource.to_string(), base);
         assert_eq!(resource.to_transport_url().unwrap(), resolved);
 
         let parsed = PubkyResource::from_transport_url(&resolved).unwrap();

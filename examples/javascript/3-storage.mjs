@@ -5,10 +5,10 @@ import { args } from "./_cli.mjs";
 
 const usage = `
 Usage:
-  node 3-storage.mjs pubky<user>/<absolute-path> [--testnet]
+  node 3-storage.mjs pubky://<user>/<absolute-path> [--testnet]
 
 Example:
-  node 3-storage.mjs pubkyq5oo7majwe3mbkj6p49osws8o748b186bbojdxdn3asnn63enk6y/pub/my-cool-app/hello.txt --testnet
+  node 3-storage.mjs pubky://q5oo7majwe3mbkj6p49osws8o748b186bbojdxdn3asnn63enk6y/pub/my-cool-app/hello.txt --testnet
   node 3-storage.mjs pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG
 `;
 
@@ -21,7 +21,7 @@ if (!resource) {
 
 const pubky = a.testnet ? Pubky.testnet() : new Pubky();
 
-// PublicStorage reads from addressed `pubky<pk>/<abs-path>` or `pubky://<pk>/<abs-path>` values
+// PublicStorage reads from `pubky://<pk>/<abs-path>` values.
 const exists = await pubky.publicStorage.exists(resource);
 console.log(`Exists: ${exists ? "yes" : "no"}`);
 

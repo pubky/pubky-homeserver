@@ -43,19 +43,19 @@ async fn list_deep() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/example.com/a.txt")
+                format!("pubky://{public_key}/pub/example.com/a.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/b.txt")
+                format!("pubky://{public_key}/pub/example.com/b.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/c.txt")
+                format!("pubky://{public_key}/pub/example.com/c.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/cc-nested/z.txt")
+                format!("pubky://{public_key}/pub/example.com/cc-nested/z.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/d.txt")
+                format!("pubky://{public_key}/pub/example.com/d.txt")
                     .parse()
                     .unwrap(),
             ],
@@ -76,10 +76,10 @@ async fn list_deep() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/example.com/a.txt")
+                format!("pubky://{public_key}/pub/example.com/a.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/b.txt")
+                format!("pubky://{public_key}/pub/example.com/b.txt")
                     .parse()
                     .unwrap(),
             ],
@@ -102,10 +102,10 @@ async fn list_deep() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/example.com/b.txt")
+                format!("pubky://{public_key}/pub/example.com/b.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/c.txt")
+                format!("pubky://{public_key}/pub/example.com/c.txt")
                     .parse()
                     .unwrap(),
             ],
@@ -127,10 +127,10 @@ async fn list_deep() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/example.com/b.txt")
+                format!("pubky://{public_key}/pub/example.com/b.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/c.txt")
+                format!("pubky://{public_key}/pub/example.com/c.txt")
                     .parse()
                     .unwrap(),
             ],
@@ -187,15 +187,19 @@ async fn list_shallow() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/a.com/").parse().unwrap(),
-                format!("{public_key}/pub/example.com/").parse().unwrap(),
-                format!("{public_key}/pub/example.con-file")
+                format!("pubky://{public_key}/pub/a.com/").parse().unwrap(),
+                format!("pubky://{public_key}/pub/example.com/")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.con/").parse().unwrap(),
-                format!("{public_key}/pub/file").parse().unwrap(),
-                format!("{public_key}/pub/file2").parse().unwrap(),
-                format!("{public_key}/pub/z.com/").parse().unwrap(),
+                format!("pubky://{public_key}/pub/example.con-file")
+                    .parse()
+                    .unwrap(),
+                format!("pubky://{public_key}/pub/example.con/")
+                    .parse()
+                    .unwrap(),
+                format!("pubky://{public_key}/pub/file").parse().unwrap(),
+                format!("pubky://{public_key}/pub/file2").parse().unwrap(),
+                format!("pubky://{public_key}/pub/z.com/").parse().unwrap(),
             ],
             "normal list shallow"
         );
@@ -216,8 +220,10 @@ async fn list_shallow() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/a.com/").parse().unwrap(),
-                format!("{public_key}/pub/example.com/").parse().unwrap(),
+                format!("pubky://{public_key}/pub/a.com/").parse().unwrap(),
+                format!("pubky://{public_key}/pub/example.com/")
+                    .parse()
+                    .unwrap(),
             ],
             "normal list shallow with limit but no cursor"
         );
@@ -238,14 +244,16 @@ async fn list_shallow() {
     assert_eq!(
         list1,
         vec![
-            format!("{public_key}/pub/example.con-file")
+            format!("pubky://{public_key}/pub/example.con-file")
                 .parse()
                 .unwrap(),
-            format!("{public_key}/pub/example.con/").parse().unwrap(),
+            format!("pubky://{public_key}/pub/example.con/")
+                .parse()
+                .unwrap(),
         ],
         "normal list shallow with limit and a file cursor"
     );
-    // Do the same again but without the pubky:// prefix
+    // Do the same again with a bare cursor.
     let list2 = owner_session
         .storage()
         .list(&url)
@@ -278,11 +286,13 @@ async fn list_shallow() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/example.con-file")
+                format!("pubky://{public_key}/pub/example.con-file")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.con/").parse().unwrap(),
-                format!("{public_key}/pub/file").parse().unwrap(),
+                format!("pubky://{public_key}/pub/example.con/")
+                    .parse()
+                    .unwrap(),
+                format!("pubky://{public_key}/pub/file").parse().unwrap(),
             ],
             "normal list shallow with limit and a directory cursor"
         );

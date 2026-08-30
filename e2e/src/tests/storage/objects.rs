@@ -298,7 +298,7 @@ async fn put_then_get_json_roundtrip() {
     // Read back as strongly-typed JSON and assert equality.
     let got: Payload = pubky
         .public_storage()
-        .get_json(format!("{public_key}/{path}"))
+        .get_json(format!("pubky://{public_key}/{path}"))
         .await
         .unwrap();
     assert_eq!(got, expected);

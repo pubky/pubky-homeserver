@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn rejects_pubky_prefixed_transport_hosts() {
-        let prefixed = crate::Keypair::random().public_key().to_string();
+        let prefixed = format!("pubky{}", crate::Keypair::random().public_key().z32());
 
         for host in [prefixed.clone(), format!("_pubky.{prefixed}")] {
             let error = classify_transport_host(&host).unwrap_err();

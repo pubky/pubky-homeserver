@@ -52,20 +52,18 @@ await session.storage.putJson(path, { hello: "world" });
 
 // 5) Read it publicly (no auth needed)
 const userPk = session.info.publicKey.toString();
-const addr = `${userPk}/pub/my-cool-app/hello.json`;
+const addr = `pubky://${userPk}/pub/my-cool-app/hello.json`;
 const json = await pubky.publicStorage.getJson(addr); // -> { hello: "world" }
 ```
 
 Find here [**ready-to-run examples**](https://github.com/pubky/pubky-homeserver/tree/main/examples).
 
-### Key formats (display vs transport)
+### Public-key format
 
-`PublicKey` has two string forms:
+`PublicKey` uses raw z-base-32.
 
-- **Display format**: `pubky<z32>` (for logs/UI/human-facing identifiers).
-- **Transport/storage format**: raw `z32` (for hostnames, headers, query params, serde/JSON, DB storage).
-
-Use `publicKey.z32()` for transport/storage. Use `publicKey.toString()` for display.
+Use `publicKey.toString()` or `publicKey.z32()` to obtain the key. `pubky://` remains the
+scheme for addressed resources.
 
 ### Initialization & events
 
@@ -116,9 +114,9 @@ import { Client, PublicKey, resolvePubky } from "@synonymdev/pubky";
 
 const client = new Client(); // or: pubky.client.fetch(); instead of constructing a client manually
 
-// Convert the identifier into a transport URL before fetching.
-const userId = PublicKey.from("pubky<z32>").toString();
-const url = resolvePubky(`${userId}/pub/my-cool-app/file.txt`);
+// Convert the Pubky URL into a transport URL before fetching.
+const userId = PublicKey.from("<z32>").toString();
+const url = resolvePubky(`pubky://${userId}/pub/my-cool-app/file.txt`);
 const res = await client.fetch(url);
 ```
 
@@ -134,7 +132,7 @@ const pubkey = keypair.publicKey;
 
 // z-base-32 roundtrip
 const parsed = PublicKey.from(pubkey.z32());
-const displayId = pubkey.toString(); // pubky<z32> (display only)
+const displayId = pubkey.toString(); // raw z-base-32
 ```
 
 #### Recovery file (encrypt/decrypt root secret)
@@ -178,7 +176,7 @@ await session1.signout(); // invalidates server session
 **Session details**
 
 ```js
-const userPk = session.info.publicKey.toString(); // -> pubky<z32> identifier
+const userPk = session.info.publicKey.toString(); // -> raw z-base-32
 const caps = session.info.capabilities; // -> string[] permissions and paths
 
 const storage = session.storage; // -> This User's storage API (absolute paths)
@@ -358,20 +356,20 @@ const pub = pubky.publicStorage;
 
 // Reads
 const response = await pub.get(
-  `${userPk}/pub/example.com/data.json`
+  `pubky://${userPk}/pub/example.com/data.json`
 ); // -> Response (stream it)
-await pub.getJson(`${userPk}/pub/example.com/data.json`);
-await pub.getText(`${userPk}/pub/example.com/readme.txt`);
-await pub.getBytes(`${userPk}/pub/example.com/icon.png`); // Uint8Array
+await pub.getJson(`pubky://${userPk}/pub/example.com/data.json`);
+await pub.getText(`pubky://${userPk}/pub/example.com/readme.txt`);
+await pub.getBytes(`pubky://${userPk}/pub/example.com/icon.png`); // Uint8Array
 
 // Metadata
-await pub.exists(`${userPk}/pub/example.com/foo`); // boolean
-await pub.stats(`${userPk}/pub/example.com/foo`); // { content_length, content_type, etag, last_modified } | null
+await pub.exists(`pubky://${userPk}/pub/example.com/foo`); // boolean
+await pub.stats(`pubky://${userPk}/pub/example.com/foo`); // { content_length, content_type, etag, last_modified } | null
 
-// List directory (addressed path "<pubky>/pub/.../") must include trailing `/`.
+// List directory (Pubky URL) must include a trailing `/`.
 // list(addr, cursor=null|suffix|fullUrl, reverse=false, limit?, shallow=false)
 await pub.list(
-  `${userPk}/pub/example.com/`,
+  `pubky://${userPk}/pub/example.com/`,
   null,
   false,
   100,
@@ -413,7 +411,7 @@ await s.delete("/pub/example.com/data.json");
 Path rules:
 
 - Session storage uses **absolute** paths under `/pub/` or `/priv/`.
-- Public storage uses **addressed** form `pubky<user>/pub/app/file.txt` (preferred) or `pubky://<user>/...`.
+- Public storage uses `pubky://<user>/pub/app/file.txt`.
 
 **Convention:** put your app’s public data under a domain-like folder in `/pub`, e.g. `/pub/my-new-app/`.
 
@@ -431,7 +429,7 @@ import { Pubky, PublicKey, Keypair } from "@synonymdev/pubky";
 const pubky = new Pubky();
 
 // Read-only resolver
-const homeserver = await pubky.getHomeserverOf(PublicKey.from("pubky<z32>")); // PublicKey | undefined
+const homeserver = await pubky.getHomeserverOf(PublicKey.from("<z32>")); // PublicKey | undefined
 // Rejects if PKARR resolution fails or the `_pubky` target is malformed.
 
 // With keys (signer-bound)
@@ -465,12 +463,13 @@ Use `resolvePubky()` when you need to feed an addressed resource into a raw HTTP
 import { resolvePubky } from "@synonymdev/pubky";
 
 const identifier =
-  "pubkyoperrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG";
+  "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG";
 const url = resolvePubky(identifier);
 // -> "https://_pubky.operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/storage/operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo/pub/pubky.app/posts/0033X02JAN0SG"
 ```
 
-Both `pubky<pk>/…` (preferred) and `pubky://<pk>/…` resolve to the same HTTPS endpoint.
+Legacy `pubky<pk>/…` identifiers remain accepted for compatibility, but new code should use
+`pubky://<pk>/…`.
 
 ---
 
@@ -501,7 +500,7 @@ Example:
 
 ```js
 try {
-  await publicStorage.getJson(`${pk}/pub/example.com/missing.json`);
+  await publicStorage.getJson(`pubky://${pk}/pub/example.com/missing.json`);
 } catch (e) {
   const error = e as PubkyError;
   if (

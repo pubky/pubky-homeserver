@@ -107,7 +107,7 @@ impl SessionStorage {
 /// No keys or session needed. Accepts **addressed resources** that pair a user's
 /// public key with an absolute path. Supported address formats:
 /// - `"pubky://<z32-pubkey>/pub/..."` (canonical)
-/// - `"pubky<z32-pubkey>/pub/..."` (compact)
+/// - legacy `"pubky<z32-pubkey>/pub/..."`
 /// - `(PublicKey, "/pub/...")` tuple
 ///
 /// Writes are not available — use [`SessionStorage`] for that.
