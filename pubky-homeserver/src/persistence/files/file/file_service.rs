@@ -112,6 +112,10 @@ impl WriteMode {
         matches!(self, Self::Client)
     }
 
+    fn enforces_path_collisions(self) -> bool {
+        matches!(self, Self::Client)
+    }
+
     fn requires_missing_destination(self) -> bool {
         matches!(self, Self::AdminCreate)
     }
@@ -615,9 +619,6 @@ impl FileService {
                 Err(sqlx::Error::RowNotFound) => {}
                 Err(error) => return Err(error.into()),
             }
-            if EntryRepository::has_file_folder_collision(to, &mut executor).await? {
-                return Err(FileIoError::PathCollision);
-            }
             let source_blob_key = Self::backend_key(&source_entry);
             EntryRepository::create_with_blob_key(
                 destination_user
@@ -728,10 +729,6 @@ impl FileService {
                 Err(sqlx::Error::RowNotFound) => {}
                 Err(error) => return Err(error.into()),
             }
-            if EntryRepository::has_file_folder_collision(to, &mut executor).await? {
-                return Err(FileIoError::PathCollision);
-            }
-
             let moved_bytes = entries.iter().fold(0u64, |total, entry| {
                 total.saturating_add(entry.content_length.saturating_add(FILE_METADATA_SIZE))
             });
@@ -1042,7 +1039,9 @@ impl FileService {
                 .get_for_no_key_update(path.pubkey(), &mut executor)
                 .await?;
 
-            if EntryRepository::has_file_folder_collision(path, &mut executor).await? {
+            if mode.enforces_path_collisions()
+                && EntryRepository::has_file_folder_collision(path, &mut executor).await?
+            {
                 return Err(FileIoError::PathCollision);
             }
 
@@ -2465,7 +2464,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_admin_overwrite_rejects_file_directory_collisions() {
+    async fn test_admin_overwrite_allows_legacy_file_directory_collisions() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
         let public_key = pubky_common::crypto::Keypair::random().public_key();
@@ -2479,15 +2478,13 @@ mod tests {
             .await
             .unwrap();
         let parent = EntryPath::new(public_key.clone(), StoragePath::new("/pub/dir").unwrap());
-        assert!(matches!(
-            file_service
-                .admin_write_stream(
-                    &parent,
-                    futures_util::stream::iter([Ok(Bytes::from_static(b"parent"))]),
-                )
-                .await,
-            Err(FileIoError::PathCollision)
-        ));
+        file_service
+            .admin_write_stream(
+                &parent,
+                futures_util::stream::iter([Ok(Bytes::from_static(b"parent"))]),
+            )
+            .await
+            .unwrap();
 
         let ancestor = EntryPath::new(public_key.clone(), StoragePath::new("/pub/file").unwrap());
         file_service
@@ -2495,15 +2492,19 @@ mod tests {
             .await
             .unwrap();
         let descendant = EntryPath::new(public_key, StoragePath::new("/pub/file/child").unwrap());
-        assert!(matches!(
-            file_service
-                .admin_write_stream(
-                    &descendant,
-                    futures_util::stream::iter([Ok(Bytes::from_static(b"child"))]),
-                )
-                .await,
-            Err(FileIoError::PathCollision)
-        ));
+        file_service
+            .admin_write_stream(
+                &descendant,
+                futures_util::stream::iter([Ok(Bytes::from_static(b"child"))]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(file_service.get(&parent).await.unwrap().as_ref(), b"parent");
+        assert_eq!(
+            file_service.get(&descendant).await.unwrap().as_ref(),
+            b"child"
+        );
     }
 
     #[tokio::test]
@@ -2875,7 +2876,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_admin_copy_and_rename_reject_destination_collisions() {
+    async fn test_admin_copy_and_rename_preserve_legacy_collision_policy() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -2911,12 +2912,18 @@ mod tests {
             pubkey.clone(),
             StoragePath::new("/pub/destination.txt/child.txt").unwrap(),
         );
-        assert!(matches!(
+        file_service
+            .admin_copy(&source, &destination_descendant)
+            .await
+            .unwrap();
+        assert_eq!(
             file_service
-                .admin_copy(&source, &destination_descendant)
-                .await,
-            Err(FileIoError::PathCollision)
-        ));
+                .get(&destination_descendant)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"source"
+        );
 
         let source_directory =
             EntryPath::new(pubkey.clone(), StoragePath::new("/pub/source").unwrap());
@@ -2944,36 +2951,41 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            file_service
-                .admin_copy(&source, &destination_directory)
-                .await,
-            Err(FileIoError::PathCollision)
-        ));
-        assert!(matches!(
-            file_service
-                .admin_rename(&source, &destination_directory)
-                .await,
-            Err(FileIoError::PathCollision)
-        ));
+        file_service
+            .admin_copy(&source, &destination_directory)
+            .await
+            .unwrap();
+        file_service
+            .admin_delete(&destination_directory)
+            .await
+            .unwrap();
+        file_service
+            .admin_rename(&source, &destination_directory)
+            .await
+            .unwrap();
         let directory_below_file = EntryPath::new(
-            pubkey,
+            pubkey.clone(),
             StoragePath::new("/pub/destination.txt/moved").unwrap(),
         );
-        assert!(matches!(
-            file_service
-                .admin_rename_directory(&source_directory, &directory_below_file)
-                .await,
-            Err(FileIoError::PathCollision)
-        ));
-        assert!(matches!(
-            file_service
-                .admin_rename_directory(&source_directory, &destination_directory)
-                .await,
-            Err(FileIoError::PathCollision)
-        ));
+        file_service
+            .admin_rename_directory(&source_directory, &directory_below_file)
+            .await
+            .unwrap();
+
+        let moved_child = EntryPath::new(
+            pubkey,
+            StoragePath::new("/pub/destination.txt/moved/child.txt").unwrap(),
+        );
         assert_eq!(
-            file_service.get(&source_child).await.unwrap().as_ref(),
+            file_service
+                .get(&destination_directory)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"source"
+        );
+        assert_eq!(
+            file_service.get(&moved_child).await.unwrap().as_ref(),
             b"source child"
         );
         assert_eq!(
