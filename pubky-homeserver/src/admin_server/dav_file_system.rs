@@ -89,6 +89,7 @@ impl AdminDavFileSystem {
     }
 
     async fn metadata_for_path(&self, path: &DavPath) -> Result<AdminDavMetadata, FsError> {
+        let directory_requested = path.as_bytes().ends_with(b"/");
         let path_string = Self::path_string(path)?;
         if path_string.is_empty() {
             return Ok(AdminDavMetadata::directory());
@@ -110,6 +111,18 @@ impl AdminDavFileSystem {
         }
 
         let entry_path = EntryPath::from_str(&path_string).map_err(|_| FsError::NotFound)?;
+        if directory_requested {
+            return if self
+                .file_service
+                .contains_directory(&entry_path)
+                .await
+                .map_err(map_file_error)?
+            {
+                Ok(AdminDavMetadata::directory())
+            } else {
+                Err(FsError::NotFound)
+            };
+        }
         match self
             .file_service
             .get_info(&entry_path, &mut self.file_service.db.pool().into())
@@ -289,7 +302,7 @@ impl DavFileSystem for AdminDavFileSystem {
                     })
                     .collect::<HashMap<_, _>>();
                 let mut entries = Vec::new();
-                let mut names = HashSet::new();
+                let mut resources = HashSet::new();
                 for child in children {
                     let relative = child
                         .path()
@@ -298,10 +311,11 @@ impl DavFileSystem for AdminDavFileSystem {
                         .unwrap_or(child.path().as_str())
                         .trim_end_matches('/');
                     let name = relative.split('/').next().unwrap_or(relative).to_string();
-                    if !names.insert(name.clone()) {
+                    let is_directory = child.path().as_str().ends_with('/');
+                    if !resources.insert((name.clone(), is_directory)) {
                         continue;
                     }
-                    let metadata = if child.path().as_str().ends_with('/') {
+                    let metadata = if is_directory {
                         AdminDavMetadata::directory()
                     } else {
                         file_metadata
