@@ -528,7 +528,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_dav_put_file_directory_collision_returns_conflict() {
+    async fn test_dav_put_allows_legacy_file_directory_collision() {
         let context = AppContext::test().await;
         let server = create_test_server(&context);
         let auth_value = auth_header();
@@ -547,9 +547,18 @@ mod tests {
             .put(&parent)
             .add_header("Authorization", auth_value.as_str())
             .bytes(b"parent".to_vec().into())
-            .expect_failure()
-            .await
-            .assert_status(axum::http::StatusCode::CONFLICT);
+            .expect_success()
+            .await;
+        assert_eq!(
+            server
+                .get(&parent)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"parent"
+        );
         assert_eq!(
             server
                 .get(&child)
@@ -560,6 +569,96 @@ mod tests {
                 .as_ref(),
             b"child"
         );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_traverses_legacy_file_directory_collision() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let source = format!("/dav/{}/pub/source/", public_key.z32());
+        let source_file = format!("{source}x");
+        let source_child = format!("{source}x/child.txt");
+        let destination = format!("/dav/{}/pub/destination/", public_key.z32());
+        let destination_file = format!("{destination}x");
+        let destination_child = format!("{destination}x/child.txt");
+
+        for (path, contents) in [
+            (&source_child, b"child".as_slice()),
+            (&source_file, b"file".as_slice()),
+        ] {
+            server
+                .put(path)
+                .add_header("Authorization", auth_value.as_str())
+                .bytes(contents.to_vec().into())
+                .expect_success()
+                .await;
+        }
+
+        let response = server
+            .method(Method::from_bytes(b"PROPFIND").unwrap(), &source)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Depth", "1")
+            .expect_success()
+            .await;
+        let body = response.text();
+        assert!(body.contains("/source/x</"), "exact file missing: {body}");
+        assert!(body.contains("/source/x/</"), "directory missing: {body}");
+
+        let response = server
+            .method(
+                Method::from_bytes(b"PROPFIND").unwrap(),
+                &format!("{source}x/"),
+            )
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Depth", "1")
+            .expect_success()
+            .await;
+        let body = response.text();
+        assert!(
+            body.contains("/source/x/child.txt</"),
+            "child missing: {body}"
+        );
+
+        server
+            .method(Method::from_bytes(b"COPY").unwrap(), &source)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &destination)
+            .add_header("Depth", "infinity")
+            .expect_success()
+            .await;
+        for (path, contents) in [
+            (&destination_file, b"file".as_slice()),
+            (&destination_child, b"child".as_slice()),
+        ] {
+            assert_eq!(
+                server
+                    .get(path)
+                    .add_header("Authorization", auth_value.as_str())
+                    .expect_success()
+                    .await
+                    .as_bytes()
+                    .as_ref(),
+                contents
+            );
+        }
+
+        server
+            .delete(&source)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await;
+        for path in [&source_file, &source_child] {
+            server
+                .get(path)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_failure()
+                .await
+                .assert_status(axum::http::StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]
