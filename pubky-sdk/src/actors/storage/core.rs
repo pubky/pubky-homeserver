@@ -15,6 +15,8 @@ use pubky_common::constants::features::CONDITIONAL_WRITES;
 /// Obtained via [`PubkySession::storage()`]. The user is implied by the session —
 /// you only supply **absolute paths** (e.g. `"/pub/my.app/file.txt"`).
 /// The SDK resolves the homeserver and attaches credentials automatically.
+/// Credentials are only attached to the homeserver that issued them; after an
+/// identity moves to another homeserver, establish a new session before using storage.
 ///
 /// # Path conventions
 ///
@@ -90,20 +92,38 @@ impl SessionStorage {
         path: P,
     ) -> Result<RequestBuilder> {
         let path: ResourcePath = path.into_abs_path()?;
-        let resource = PubkyResource {
-            owner: self.user.clone(),
-            path,
-        };
-        let url = resource.to_transport_url()?;
-        cross_log!(debug, "Session storage {} request {}", method, url);
-        let rb = self.client.cross_request(method, url).await?;
+        let homeserver = self.credential_homeserver().await?;
+        cross_log!(
+            debug,
+            "Session storage {} request pubky://{}{}",
+            method,
+            self.user,
+            path.as_str()
+        );
+        let rb = self
+            .client
+            .storage_request_via_homeserver(method, &homeserver, &self.user, path.as_str())
+            .await?;
         self.attach_credential(rb).await
     }
 
     async fn require_homeserver_feature(&self, feature: &str) -> Result<PublicKey> {
+        let homeserver = self.credential_homeserver().await?;
         self.client
-            .require_storage_feature(&self.user, feature)
-            .await
+            .require_storage_feature(&homeserver, feature)
+            .await?;
+        Ok(homeserver)
+    }
+
+    async fn credential_homeserver(&self) -> Result<PublicKey> {
+        let homeserver = self.client.storage_homeserver(&self.user).await?;
+        if !self.credential.can_attach_to(&homeserver).await {
+            return Err(RequestError::Validation {
+                message: "cannot attach session credential to target homeserver".into(),
+            }
+            .into());
+        }
+        Ok(homeserver)
     }
 
     pub(crate) async fn conditional_request<P: IntoResourcePath>(
