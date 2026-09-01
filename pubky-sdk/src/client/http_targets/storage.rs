@@ -23,16 +23,18 @@ impl StorageAddressing {
 }
 
 impl PubkyHttpClient {
+    pub(crate) async fn storage_homeserver(&self, owner: &PublicKey) -> Result<PublicKey> {
+        Pkdns::with_client(self.clone())
+            .require_homeserver_of(owner)
+            .await
+    }
+
     pub(crate) async fn require_storage_feature(
         &self,
-        owner: &PublicKey,
+        homeserver: &PublicKey,
         feature: &str,
-    ) -> Result<PublicKey> {
-        let homeserver = Pkdns::with_client(self.clone())
-            .require_homeserver_of(owner)
-            .await?;
-        self.features.require(self, &homeserver, feature).await?;
-        Ok(homeserver)
+    ) -> Result<()> {
+        self.features.require(self, homeserver, feature).await
     }
 
     pub(crate) async fn storage_request_via_homeserver(
