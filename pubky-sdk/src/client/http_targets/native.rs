@@ -284,8 +284,9 @@ impl PubkyHttpClient {
         })
     }
 
-    #[expect(
-        clippy::unused_async,
+    // Use the group because newer Clippy versions split this into a lint unknown to our MSRV.
+    #[allow(
+        clippy::pedantic,
         reason = "keep async signature aligned with WASM build"
     )]
     pub(super) async fn prepare_transport_request(&self, url: &mut Url) -> Result<Option<String>> {
@@ -372,7 +373,7 @@ mod tests {
         let mut builder = PubkyHttpClient::builder();
         builder
             .isolated_pkarr_test()
-            .pkarr(|b| b.cache(cache.clone()));
+            .pkarr(|b| b.cache(Arc::<InMemoryCache>::clone(&cache)));
         let client = builder.build().unwrap();
         let cache_key: pkarr::CacheKey = keypair.public_key().into();
         cache.put(&cache_key, packet);
@@ -539,7 +540,7 @@ mod tests {
         let mut builder = PubkyHttpClient::builder();
         builder
             .isolated_pkarr_test()
-            .pkarr(|b| b.cache(cache.clone()));
+            .pkarr(|b| b.cache(Arc::<InMemoryCache>::clone(&cache)));
         let client = builder.build().unwrap();
         cache.put(&homeserver.public_key().into(), &homeserver_packet);
         cache.put(&user.public_key().into(), &user_packet);
@@ -588,7 +589,7 @@ mod tests {
         let mut builder = PubkyHttpClient::builder();
         builder
             .isolated_pkarr_test()
-            .pkarr(|b| b.cache(cache.clone()));
+            .pkarr(|b| b.cache(Arc::<InMemoryCache>::clone(&cache)));
         let client = builder.build().unwrap();
         cache.put(&homeserver.public_key().into(), &homeserver_packet);
         let homeserver_pk = PublicKey::try_from_z32(&homeserver.public_key().to_string()).unwrap();

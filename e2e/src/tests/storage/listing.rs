@@ -16,14 +16,14 @@ async fn list_deep() {
     let public_key = owner_session.public_key();
     // Write files to the server
     let mut paths = vec![
-        format!("/pub/a.wrong/a.txt"),
-        format!("/pub/example.com/a.txt"),
-        format!("/pub/example.com/b.txt"),
-        format!("/pub/example.com/cc-nested/z.txt"),
-        format!("/pub/example.wrong/a.txt"),
-        format!("/pub/example.com/c.txt"),
-        format!("/pub/example.com/d.txt"),
-        format!("/pub/z.wrong/a.txt"),
+        "/pub/a.wrong/a.txt",
+        "/pub/example.com/a.txt",
+        "/pub/example.com/b.txt",
+        "/pub/example.com/cc-nested/z.txt",
+        "/pub/example.wrong/a.txt",
+        "/pub/example.com/c.txt",
+        "/pub/example.com/d.txt",
+        "/pub/z.wrong/a.txt",
     ];
     paths.shuffle(&mut rng()); // Shuffle randomly to test the order of the list
     for url in paths {
@@ -156,16 +156,16 @@ async fn list_shallow() {
 
     // Write files to the server
     let mut urls = vec![
-        format!("/pub/a.com/a.txt"),
-        format!("/pub/example.com/a.txt"),
-        format!("/pub/example.com/b.txt"),
-        format!("/pub/example.com/c.txt"),
-        format!("/pub/example.com/d.txt"),
-        format!("/pub/example.con/d.txt"),
-        format!("/pub/example.con-file"),
-        format!("/pub/file"),
-        format!("/pub/file2"),
-        format!("/pub/z.com/a.txt"),
+        "/pub/a.com/a.txt",
+        "/pub/example.com/a.txt",
+        "/pub/example.com/b.txt",
+        "/pub/example.com/c.txt",
+        "/pub/example.com/d.txt",
+        "/pub/example.con/d.txt",
+        "/pub/example.con-file",
+        "/pub/file",
+        "/pub/file2",
+        "/pub/z.com/a.txt",
     ];
     urls.shuffle(&mut rng()); // Shuffle randomly to test the order of the list
     for url in urls {

@@ -753,7 +753,7 @@ mod tests {
         let mut builder = PubkyHttpClient::builder();
         builder
             .isolated_pkarr_test()
-            .pkarr(|b| b.cache(cache.clone()));
+            .pkarr(|b| b.cache(Arc::<InMemoryCache>::clone(&cache)));
         let client = builder.build().unwrap();
         cache.put(&homeserver_keypair.public_key().into(), &homeserver_packet);
 

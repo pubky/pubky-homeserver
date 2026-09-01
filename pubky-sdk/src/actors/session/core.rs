@@ -133,6 +133,10 @@ impl PubkySession {
     /// # Errors
     /// - Returns the original [`crate::errors::Error`] alongside `self` when the transport
     ///   request fails or the homeserver responds with a non-success status.
+    #[allow(
+        clippy::result_large_err,
+        reason = "return the session alongside the error so callers can retry signout"
+    )]
     pub async fn signout(self) -> std::result::Result<(), (Error, Self)> {
         cross_log!(info, "Signing out session for {}", self.info().public_key());
         if let Err(e) = self.credential.signout(&self.client).await {
