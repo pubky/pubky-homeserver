@@ -155,11 +155,9 @@ impl PubkyCookieAuthFlow {
     /// The credential can be inspected, persisted, or lifted into a full
     /// [`PubkySession`] via [`PubkySession::from_cookie_credential`].
     ///
-    /// Signup credentials are bound immediately to the deep link homeserver.
-    /// Signin credentials are unbound because the signin deep link carries no
-    /// homeserver; call [`PubkySession::revalidate`](PubkySession::revalidate)
-    /// after constructing a session if it needs to authenticate private event
-    /// streams.
+    /// Signup credentials are bound to the deep link homeserver. For signin,
+    /// the SDK resolves the user's homeserver and binds the credential during
+    /// the session exchange.
     ///
     /// # Errors
     /// - See [`await_approval`](Self::await_approval).
@@ -239,9 +237,8 @@ impl PubkyCookieAuthFlow {
 
     /// Homeserver this flow targets, when the deep link names one.
     ///
-    /// Only signup links carry it. Signin links intentionally return `None`; a
-    /// signin cookie stays unbound and private event streams remain anonymous
-    /// until the resulting session successfully revalidates.
+    /// Only signup links carry it. Signin resolves the homeserver during the
+    /// session exchange.
     fn target_homeserver(&self) -> Option<crate::PublicKey> {
         match &self.auth_url {
             DeepLink::Signup(link) => Some(link.params().homeserver.clone()),
@@ -416,13 +413,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signin_flow_leaves_cookie_unbound() {
+    async fn signin_flow_has_no_deep_link_homeserver() {
         let flow = build_flow(AuthFlowKind::signin()).await;
 
         assert_eq!(
             flow.target_homeserver(),
             None,
-            "signin deep link names no homeserver; the cookie binds on revalidate"
+            "signin resolves and binds the homeserver during the session exchange"
         );
     }
 }

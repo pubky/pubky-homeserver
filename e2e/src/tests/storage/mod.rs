@@ -7,7 +7,9 @@ mod quotas;
 use super::build_full_testnet;
 use bytes::Bytes;
 use pubky_testnet::{
-    pubky::{errors::RequestError, Error, IntoPubkyResource, Keypair, Method, StatusCode},
+    pubky::{
+        errors::RequestError, ClientId, Error, IntoPubkyResource, Keypair, Method, StatusCode,
+    },
     pubky_homeserver::MockDataDir,
     Testnet,
 };
