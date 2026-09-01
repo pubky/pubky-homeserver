@@ -87,13 +87,11 @@ impl HomeserverApp {
 
         tracing::debug!("Homeserver data dir: {}", context.data_dir.path().display());
 
-        let mut pkarr_builder = context.pkarr_builder.clone();
-        pkarr_builder.no_relays(); // Disable relays to avoid their rate limiting.
         let republish_interval =
             Duration::from_secs(context.config_toml.pkdns.user_keys_republisher_interval);
         let user_keys_republisher_job = UserKeysRepublisherJob::start(
             context.user_service.clone(),
-            pkarr_builder,
+            context.pkarr_builder.clone(),
             context.keypair.public_key(),
             republish_interval,
         );
