@@ -114,9 +114,9 @@ mod tests {
     macro_rules! should_match {
         // 4-argument form with replace_arrays flag
         ($first:expr, $second:expr, $result:expr, $replace_arrays:expr) => {{
-            let first = $first.parse::<Value>().unwrap();
-            let second = $second.parse::<Value>().unwrap();
-            let result = $result.parse::<Value>().unwrap();
+            let first = toml::from_str::<Value>($first).unwrap();
+            let second = toml::from_str::<Value>($second).unwrap();
+            let result = toml::from_str::<Value>($result).unwrap();
             assert_eq!(
                 merge_with_options(first, second, ($replace_arrays)).unwrap(),
                 result
