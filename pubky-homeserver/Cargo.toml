@@ -29,6 +29,7 @@ base32.workspace = true
 base64.workspace = true
 bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
+dirs.workspace = true
 futures-lite = "2"
 futures-util.workspace = true
 httpdate.workspace = true
@@ -46,7 +47,6 @@ url = { workspace = true, features = ["serde"] }
 axum-server = { workspace = true, features = ["tls-rustls-no-provider"] }
 tower = "0.5"
 thiserror.workspace = true
-dirs = "6"
 hostname-validator = "1"
 tempfile.workspace = true
 dyn-clone = "1"

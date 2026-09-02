@@ -14,11 +14,11 @@ categories = ["web-programming", "authentication", "cryptography"]
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
+dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url = { workspace = true, features = ["serde"] }
 toml.workspace = true
-dirs = "6"
 reqwest = { workspace = true, features = ["blocking", "json"] }
 pubky = { version = "0.11.0", path = "../pubky-sdk" }
 thiserror.workspace = true
