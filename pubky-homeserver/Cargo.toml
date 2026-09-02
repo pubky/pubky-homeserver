@@ -82,9 +82,9 @@ async-trait.workspace = true
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }
 pubky_test_utils.workspace = true
-opentelemetry = "0.29"
-opentelemetry_sdk = { version = "0.29", features = ["rt-tokio", "metrics"] }
-opentelemetry-prometheus = "0.29"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics"] }
+opentelemetry-prometheus = "0.32"
 prometheus = "0.14"
 jsonwebtoken = "9"
 chrono = { version = "0.4", features = ["serde"] }
