@@ -28,6 +28,22 @@ impl ConnectionString {
         self.0.as_str()
     }
 
+    /// Read a connection string from the `TEST_PUBKY_CONNECTION_STRING` environment variable.
+    ///
+    /// Returns `Ok(None)` if the variable is unset.
+    /// Returns `Err` if the variable is set but contains an invalid URL.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn from_test_env() -> anyhow::Result<Option<Self>> {
+        let raw = match std::env::var("TEST_PUBKY_CONNECTION_STRING") {
+            Ok(val) => val,
+            Err(std::env::VarError::NotPresent) => return Ok(None),
+            Err(e) => anyhow::bail!("Invalid TEST_PUBKY_CONNECTION_STRING: {e}"),
+        };
+        let cs = Self::new(&raw)
+            .map_err(|e| anyhow::anyhow!("Invalid TEST_PUBKY_CONNECTION_STRING ({raw:?}): {e}"))?;
+        Ok(Some(cs))
+    }
+
     fn is_postgres(&self) -> bool {
         self.0.scheme() == "postgres" || self.0.scheme() == "postgresql"
     }

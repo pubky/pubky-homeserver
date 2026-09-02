@@ -26,12 +26,12 @@ mod shared;
 pub mod tracing;
 
 pub use admin_server::{AdminServer, AdminServerBuildError};
-pub use app_context::{AppContext, AppContextConversionError};
-pub use client_server::{ClientServer, ClientServerBuildError};
 #[cfg(any(test, feature = "testing"))]
-pub use data_directory::MockDataDir;
+pub use app_context::TempAppContext;
+pub use app_context::{AppContext, AppContextBuildError};
+pub use client_server::{ClientServer, ClientServerBuildError};
 pub use data_directory::{
-    storage_config, AdminToml, ConfigReadError, ConfigToml, DataDir, LoggingToml, MetricsToml,
+    storage_config, AdminToml, ConfigReadError, ConfigToml, LoggingToml, MetricsToml,
     PersistentDataDir,
 };
 pub use homeserver_app::{HomeserverApp, HomeserverAppBuildError};

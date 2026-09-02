@@ -2,37 +2,37 @@
 //! The application context shared between all components.
 //! Think of it as a simple Dependency Injection container.
 //!
-//! Create with a `DataDir` instance: `AppContext::try_from(data_dir)`
+//! Build via [`AppContext::new`] with independently resolved:
+//! - **Data path** — persistent directory or temp dir
+//! - **Database mode** — [`DatabaseMode::Direct`] or [`DatabaseMode::EphemeralTest`]
+//! - **pkarr builder** — a pre-configured [`pkarr::ClientBuilder`]
+//!
+//! Convenience constructors:
+//! - [`AppContext::from_persistent_dir`] — production (persistent dir, public DHT, direct DB)
+//! - [`AppContext::new_ephemeral`] — tests (temp dir, isolated DHT, test DB)
 //!
 
 use crate::services::user_service::UserService;
-#[cfg(any(test, feature = "testing"))]
-use crate::MockDataDir;
 use crate::{
     client_server::auth::RevocationListener,
     observability::{Metrics, MetricsInitError},
     persistence::{
         files::{events::EventsService, FileIoError, FileService},
-        sql::{Migrator, PgEventListener, SqlDb},
+        sql::{DatabaseMode, Migrator, PgEventListener, SqlDb},
     },
-    ConfigToml, DataDir,
+    ConfigToml,
 };
 use pubky_common::crypto::Keypair;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Errors that can occur when converting a `DataDir` to an `AppContext`.
+/// Errors that can occur when building an `AppContext`.
 #[derive(Debug, thiserror::Error)]
-pub enum AppContextConversionError {
-    /// Failed to ensure data directory exists and is writable.
-    #[error("Failed to ensure data directory exists and is writable: {0}")]
-    DataDir(anyhow::Error),
-    /// Failed to read or create config file.
-    #[error("Failed to read or create config file: {0}")]
-    Config(anyhow::Error),
-    /// Failed to read or create keypair.
-    #[error("Failed to read or create keypair: {0}")]
-    Keypair(anyhow::Error),
+pub enum AppContextBuildError {
+    /// Failed to bootstrap the data directory (ensure writable, read config/keypair).
+    #[error("Failed to bootstrap data directory: {0}")]
+    Bootstrap(anyhow::Error),
     /// Failed to open SQL DB.
     #[error("Failed to open SQL DB: {0}")]
     SqlDb(sqlx::Error),
@@ -62,8 +62,6 @@ pub enum AppContextConversionError {
 /// The application context shared between all components.
 /// Think of it as a simple Dependency Injection container.
 ///
-/// Create with a `DataDir` instance: `AppContext::read_from(data_dir)`
-///
 /// Implements `Clone` but prefer wrapping in `Arc<AppContext>` for
 /// hot paths like axum state (avoids deep-copying config strings).
 #[derive(Clone)]
@@ -73,8 +71,8 @@ pub struct AppContext {
     /// The storage operator to store files.
     pub(crate) file_service: FileService,
     pub(crate) config_toml: ConfigToml,
-    /// Keep data_dir alive. The mock dir will cleanup on drop.
-    pub(crate) data_dir: Arc<dyn DataDir>,
+    /// Path to the data directory (used by file storage).
+    pub(crate) data_path: PathBuf,
     pub(crate) keypair: Keypair,
     /// Main pkarr instance. This will automatically turn into a DHT server after 15 minutes after startup.
     /// We need to keep this alive.
@@ -97,153 +95,191 @@ pub struct AppContext {
     pub(crate) user_service: UserService,
 }
 
+/// An `Arc<AppContext>` paired with a temporary directory that is cleaned up on drop.
+///
+/// Use this in tests to ensure the temp dir lives as long as the context.
+/// The [`Deref`](std::ops::Deref) impl lets this be used anywhere `Arc<AppContext>` is expected by reference.
+#[cfg(any(test, feature = "testing"))]
+pub struct TempAppContext {
+    context: Arc<AppContext>,
+    _temp_dir: tempfile::TempDir,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl std::ops::Deref for TempAppContext {
+    type Target = Arc<AppContext>;
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
 impl AppContext {
-    /// Replace the pkarr client and builder (e.g. to point at a test DHT).
-    #[cfg(test)]
-    pub(crate) fn with_pkarr(
-        mut self,
-        client: pkarr::Client,
-        builder: pkarr::ClientBuilder,
-    ) -> Self {
-        self.pkarr_client = client;
-        self.pkarr_builder = builder;
-        self
+    /// Production shorthand: persistent data dir, public DHT, direct DB.
+    ///
+    /// Reads config and keypair from disk via [`PersistentDataDir::bootstrap`].
+    pub async fn from_persistent_dir(
+        dir: crate::PersistentDataDir,
+    ) -> Result<Self, AppContextBuildError> {
+        let (path, config, keypair) = dir.bootstrap().map_err(AppContextBuildError::Bootstrap)?;
+        let db_mode = DatabaseMode::require_direct(config.general.database_url.clone())
+            .map_err(AppContextBuildError::DatabaseResolution)?;
+        let mut pkarr_builder = pkarr::ClientBuilder::default();
+        Self::apply_config_to_pkarr(&mut pkarr_builder, &config);
+        Self::new(path, config, keypair, db_mode, pkarr_builder).await
     }
 
-    /// Replace the keypair (e.g. to test with a specific identity).
-    #[cfg(test)]
-    pub(crate) fn with_keypair(mut self, keypair: Keypair) -> Self {
-        self.keypair = keypair;
-        self
-    }
-
-    /// Create a new AppContext for testing, wrapped in Arc for use in AppState.
+    /// Quick test context with default config and a deterministic keypair.
     #[cfg(any(test, feature = "testing"))]
-    pub async fn test() -> Arc<Self> {
-        let data_dir = MockDataDir::test();
-        Arc::new(
-            Self::read_from(data_dir)
-                .await
-                .expect("failed to build AppContext from DataDirMock"),
-        )
+    pub async fn test() -> TempAppContext {
+        let config = ConfigToml::default_test_config();
+        let keypair = Keypair::from_secret(&[0; 32]);
+        let (ctx, temp_dir) = Self::new_ephemeral(config, keypair)
+            .await
+            .expect("failed to build test AppContext");
+        TempAppContext {
+            context: Arc::new(ctx),
+            _temp_dir: temp_dir,
+        }
     }
 
-    /// Create a new AppContext for testing with custom config overrides, wrapped in Arc.
+    /// Quick test context with a custom config modifier and a random keypair.
     #[cfg(any(test, feature = "testing"))]
-    pub async fn test_with_config(f: impl FnOnce(&mut ConfigToml)) -> Arc<Self> {
+    pub async fn test_with_config(f: impl FnOnce(&mut ConfigToml)) -> TempAppContext {
         let mut config = ConfigToml::default_test_config();
         f(&mut config);
-        let data_dir = MockDataDir::new(config, None).expect("failed to create MockDataDir");
-        Arc::new(
-            Self::read_from(data_dir)
-                .await
-                .expect("failed to build AppContext from DataDirMock"),
-        )
+        let (ctx, temp_dir) = Self::new_ephemeral(config, Keypair::random())
+            .await
+            .expect("failed to build test AppContext");
+        TempAppContext {
+            context: Arc::new(ctx),
+            _temp_dir: temp_dir,
+        }
     }
 
-    /// Create a new AppContext from a data directory.
-    pub async fn read_from<D: DataDir + 'static>(
-        dir: D,
-    ) -> Result<Self, AppContextConversionError> {
-        dir.ensure_data_dir_exists_and_is_writable()
-            .map_err(AppContextConversionError::DataDir)?;
-        let conf = dir
-            .read_or_create_config_file()
-            .map_err(AppContextConversionError::Config)?;
-        let keypair = dir
-            .read_or_create_keypair()
-            .map_err(AppContextConversionError::Keypair)?;
+    /// Test shorthand: temp data dir, isolated DHT, test DB.
+    ///
+    /// Returns the `AppContext` and the `TempDir` whose lifetime
+    /// keeps the data directory alive.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn new_ephemeral(
+        config: ConfigToml,
+        keypair: Keypair,
+    ) -> Result<(Self, tempfile::TempDir), AppContextBuildError> {
+        let temp_dir =
+            tempfile::TempDir::new().map_err(|e| AppContextBuildError::Bootstrap(e.into()))?;
+        let data_path = temp_dir.path().to_path_buf();
+        let db_mode = DatabaseMode::resolve_test(config.general.database_url.clone())
+            .map_err(AppContextBuildError::DatabaseResolution)?;
 
-        let db_mode = dir
-            .resolve_database_mode(&conf)
-            .map_err(AppContextConversionError::DatabaseResolution)?;
+        let pkarr_builder = Self::isolated_pkarr_builder(&config);
+        let ctx = Self::new(data_path, config, keypair, db_mode, pkarr_builder).await?;
+        Ok((ctx, temp_dir))
+    }
+
+    /// Create an `AppContext` from independently resolved components.
+    ///
+    /// Each parameter represents a separate concern:
+    /// - `data_path` — where file storage lives (persistent dir or temp dir)
+    /// - `config` — homeserver configuration
+    /// - `keypair` — server identity
+    /// - `db_mode` — database lifecycle ([`DatabaseMode::Direct`] or [`DatabaseMode::EphemeralTest`])
+    /// - `pkarr_builder` — a pre-configured [`pkarr::ClientBuilder`]
+    ///
+    /// See [`from_persistent_dir`](Self::from_persistent_dir) and
+    /// [`new_ephemeral`](Self::new_ephemeral) for common combinations.
+    pub async fn new(
+        data_path: PathBuf,
+        config: ConfigToml,
+        keypair: Keypair,
+        db_mode: DatabaseMode,
+        pkarr_builder: pkarr::ClientBuilder,
+    ) -> Result<Self, AppContextBuildError> {
         let sql_db = SqlDb::connect(db_mode)
             .await
-            .map_err(AppContextConversionError::SqlDb)?;
+            .map_err(AppContextBuildError::SqlDb)?;
         Migrator::new(&sql_db)
             .run()
             .await
-            .map_err(AppContextConversionError::Migrations)?;
+            .map_err(AppContextBuildError::Migrations)?;
 
         let events_service = EventsService::new(sql_db.clone(), 1000);
 
         let pg_event_listener = PgEventListener::start(sql_db.pool(), events_service.clone())
             .await
-            .map_err(AppContextConversionError::PgEventListener)?;
+            .map_err(AppContextBuildError::PgEventListener)?;
         let revocation_listener = RevocationListener::start(sql_db.pool())
             .await
-            .map_err(AppContextConversionError::RevocationListener)?;
+            .map_err(AppContextBuildError::RevocationListener)?;
 
         let user_service = UserService::new(sql_db.clone());
 
         let file_service = FileService::new_from_config(
-            &conf,
-            dir.path(),
+            &config,
+            &data_path,
             sql_db.clone(),
             events_service.clone(),
             user_service.clone(),
         )
-        .map_err(AppContextConversionError::Storage)?;
-        let pkarr_builder = Self::build_pkarr_builder_from_config(&conf);
+        .map_err(AppContextBuildError::Storage)?;
 
         Ok(Self {
             sql_db,
             pkarr_client: pkarr_builder
                 .clone()
                 .build()
-                .map_err(AppContextConversionError::Pkarr)?,
+                .map_err(AppContextBuildError::Pkarr)?,
             file_service,
             pkarr_builder,
-            config_toml: conf,
+            config_toml: config,
             keypair,
-            data_dir: Arc::new(dir),
+            data_path,
             events_service,
-            metrics: Metrics::new().map_err(AppContextConversionError::Metrics)?,
+            metrics: Metrics::new().map_err(AppContextBuildError::Metrics)?,
             _pg_event_listener: Arc::new(pg_event_listener),
             revocation_listener,
             user_service,
         })
     }
-}
 
-impl AppContext {
-    /// Build the pkarr client builder based on the config.
-    fn build_pkarr_builder_from_config(config_toml: &ConfigToml) -> pkarr::ClientBuilder {
+    /// Create a pkarr builder isolated from the public network, with config applied.
+    ///
+    /// Starts from a blank network (no default bootstrap nodes or relays, testnet
+    /// report policy). Config values are applied on top — used by testnets which
+    /// inject their own bootstrap/relay nodes via config.
+    pub fn isolated_pkarr_builder(config: &ConfigToml) -> pkarr::ClientBuilder {
         let mut builder = pkarr::ClientBuilder::default();
-        #[cfg(any(test, feature = "testing"))]
-        // In test builds, no explicit database_url means we're in a test environment
-        // where we must avoid contacting the public DHT.
-        if config_toml.general.database_url.is_none() {
-            builder
-                .no_default_network()
-                // Keep the client buildable without contacting the public DHT.
-                // Explicit testnet bootstrap nodes below replace this sentinel.
-                .bootstrap(&["127.0.0.1:9"])
-                .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
-        }
-        if let Some(bootstrap_nodes) = &config_toml.pkdns.dht_bootstrap_nodes {
+        builder
+            .no_default_network()
+            // Sentinel bootstrap node so the builder stays valid even when
+            // no config-level bootstrap nodes are provided. Explicit testnet
+            // bootstrap nodes (from config) replace this via apply_config_to_pkarr.
+            // Port 9 is the RFC 863 "discard" protocol — guaranteed unreachable as a DHT node.
+            .bootstrap(&["127.0.0.1:9"])
+            .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
+        Self::apply_config_to_pkarr(&mut builder, config);
+        builder
+    }
+
+    /// Apply DHT configuration (bootstrap nodes, relays, timeouts) from config
+    /// to a pkarr client builder.
+    fn apply_config_to_pkarr(builder: &mut pkarr::ClientBuilder, config: &ConfigToml) {
+        if let Some(bootstrap_nodes) = &config.pkdns.dht_bootstrap_nodes {
             let nodes = bootstrap_nodes
                 .iter()
                 .map(|node| node.to_string())
                 .collect::<Vec<String>>();
             builder.bootstrap(&nodes);
-
-            // If we set custom bootstrap nodes, we don't want to use the default pkarr relay nodes.
-            // Otherwise, we could end up with a DHT with testnet boostrap nodes and mainnet relays
-            // which would give very weird results.
-            builder.no_relays();
         }
 
-        if let Some(relays) = &config_toml.pkdns.dht_relay_nodes {
+        if let Some(relays) = &config.pkdns.dht_relay_nodes {
             builder
                 .relays(relays)
                 .expect("parameters are already urls and therefore valid.");
         }
-        if let Some(request_timeout) = &config_toml.pkdns.dht_request_timeout_ms {
+        if let Some(request_timeout) = &config.pkdns.dht_request_timeout_ms {
             let duration = Duration::from_millis(request_timeout.get());
             builder.request_timeout(duration);
         }
-        builder
     }
 }
 
@@ -251,26 +287,42 @@ impl AppContext {
 mod tests {
     use super::*;
 
-    /// Verifies that the test pkarr builder doesn't contact the public DHT
-    /// when database_url is None (the default test config).
+    /// Public (default) builder keeps default relays and applies config values.
     #[test]
-    fn pkarr_builder_does_not_use_default_network() {
-        let config = ConfigToml::default_test_config();
-        assert!(
-            config.general.database_url.is_none(),
-            "default_test_config should have database_url = None"
-        );
-        let builder = AppContext::build_pkarr_builder_from_config(&config);
-        let builder_debug = format!("{builder:?}");
+    fn public_builder_keeps_defaults_and_applies_config() {
+        use crate::DomainPort;
+        use std::str::FromStr;
+
+        let mut config = ConfigToml::default_test_config();
+        config.pkdns.dht_bootstrap_nodes =
+            Some(vec![DomainPort::from_str("127.0.0.1:6881").unwrap()]);
+
+        let mut builder = pkarr::ClientBuilder::default();
+        AppContext::apply_config_to_pkarr(&mut builder, &config);
+        let debug = format!("{builder:?}");
 
         assert!(
-            builder_debug.contains("127.0.0.1:9"),
-            "expected sentinel bootstrap node in builder: {builder_debug}"
+            debug.contains("127.0.0.1:6881"),
+            "bootstrap node from config should be present: {debug}"
         );
         for relay in pkarr::DEFAULT_RELAYS {
             assert!(
-                !builder_debug.contains(relay),
-                "default relay {relay} should not appear in test builder: {builder_debug}"
+                debug.contains(relay),
+                "default relay {relay} should still be present: {debug}"
+            );
+        }
+    }
+
+    /// Isolated builder excludes public DHT nodes.
+    #[test]
+    fn isolated_builder_excludes_public_dht() {
+        let builder = AppContext::isolated_pkarr_builder(&ConfigToml::default_test_config());
+        let debug = format!("{builder:?}");
+
+        for relay in pkarr::DEFAULT_RELAYS {
+            assert!(
+                !debug.contains(relay),
+                "default relay {relay} should not appear after no_default_network: {debug}"
             );
         }
         builder.build().expect("isolated pkarr client should build");

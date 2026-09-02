@@ -1,7 +1,7 @@
 use crate::Testnet;
 use http_relay::HttpRelay;
 use pubky::{Keypair, Pubky};
-use pubky_homeserver::{ConfigToml, ConnectionString, HomeserverApp, MockDataDir};
+use pubky_homeserver::{ConfigToml, ConnectionString, HomeserverApp};
 
 #[cfg(feature = "docker-postgres")]
 use crate::docker_postgres::DockerPostgres;
@@ -191,20 +191,14 @@ impl EphemeralTestnetBuilder {
             testnet.create_http_relay().await?;
         }
 
-        let mut config = self
+        let config = self
             .homeserver_config
             .unwrap_or_else(ConfigToml::minimal_test_config);
-
-        config.general.database_url = testnet
-            .postgres_connection_string
-            .clone()
-            .or(config.general.database_url);
 
         let keypair = self
             .homeserver_keypair
             .unwrap_or_else(crate::common::testnet_keypair);
-        let mock_dir = MockDataDir::new(config, Some(keypair))?;
-        testnet.create_homeserver_app_with_mock(mock_dir).await?;
+        testnet.create_homeserver_with(config, keypair).await?;
 
         Ok(EphemeralTestnet {
             testnet,
@@ -327,16 +321,11 @@ impl EphemeralTestnet {
         &mut self,
         config: Option<ConfigToml>,
     ) -> anyhow::Result<&HomeserverApp> {
-        let mut config = config.unwrap_or_else(ConfigToml::minimal_test_config);
+        let config = config.unwrap_or_else(ConfigToml::minimal_test_config);
 
-        config.general.database_url = self
-            .testnet
-            .postgres_connection_string
-            .clone()
-            .or(config.general.database_url);
-
-        let mock_dir = MockDataDir::new(config, Some(Keypair::random()))?;
-        self.testnet.create_homeserver_app_with_mock(mock_dir).await
+        self.testnet
+            .create_homeserver_with(config, Keypair::random())
+            .await
     }
 
     /// Create a new pubky client builder.

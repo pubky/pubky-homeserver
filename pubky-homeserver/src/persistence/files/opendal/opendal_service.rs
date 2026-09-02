@@ -94,7 +94,7 @@ pub fn build_storage_operators_from_context(
 ) -> Result<(Operator, Operator), FileIoError> {
     build_storage_operators(
         &context.config_toml.storage,
-        context.data_dir.path(),
+        &context.data_path,
         context.sql_db.clone(),
         context.events_service.clone(),
         context.user_service.clone(),

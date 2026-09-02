@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-For testing, use `MockDataDir` to create a temporary directory that is cleaned up on drop. Enable the `testing` feature:
+For testing, use `AppContext::new_ephemeral` to create a context backed by an auto-cleaning temporary directory. Enable the `testing` feature:
 
 ```toml
 [dev-dependencies]
@@ -72,11 +72,14 @@ pubky-homeserver = { version = "0.x", features = ["testing"] }
 ```
 
 ```rust,ignore
-use pubky_homeserver::{HomeserverApp, MockDataDir, ConfigToml};
+use pubky_homeserver::{AppContext, ConfigToml, HomeserverApp};
+use pubky_common::crypto::Keypair;
 
 let config = ConfigToml::default_test_config();
-let mock_dir = MockDataDir::new(config, None).unwrap();
-let app = HomeserverApp::start_with_mock_data_dir(mock_dir).await.unwrap();
+let (context, _temp_dir) = AppContext::new_ephemeral(config, Keypair::random())
+    .await.unwrap();
+let app = HomeserverApp::start(context).await.unwrap();
+// _temp_dir keeps the data directory alive until dropped
 ```
 
 ### Binary
