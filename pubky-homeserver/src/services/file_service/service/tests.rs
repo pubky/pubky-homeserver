@@ -206,6 +206,38 @@ async fn test_concurrent_if_match_update_commits_once() {
 
 #[tokio::test]
 #[pubky_test_utils::test]
+async fn test_delete_preconditions() {
+    let context = AppContext::test().await;
+    let service = FileService::new_from_context(&context).unwrap();
+    let pubkey = pubky_common::crypto::Keypair::random().public_key();
+    context.user_service.create(&pubkey).await.unwrap();
+    let path = EntryPath::new(pubkey, StoragePath::new("/pub/state.bin").unwrap());
+    let current = service
+        .write(&path, Buffer::from(b"current".to_vec()))
+        .await
+        .unwrap();
+    let etag = content_hash_etag(&current.content_hash);
+
+    let stale = service
+        .delete_with_preconditions(&path, write_preconditions(Some("\"stale\""), None))
+        .await;
+    assert!(matches!(stale, Err(FileIoError::PreconditionFailed)));
+    service.get(&path).await.unwrap();
+
+    service
+        .delete_with_preconditions(&path, write_preconditions(Some(&etag), None))
+        .await
+        .unwrap();
+    assert!(matches!(
+        service
+            .delete_with_preconditions(&path, write_preconditions(Some(&etag), None))
+            .await,
+        Err(FileIoError::PreconditionFailed)
+    ));
+}
+
+#[tokio::test]
+#[pubky_test_utils::test]
 async fn test_write_get_delete_db_and_opendal() {
     let context = AppContext::test().await;
     let file_service = FileService::new_from_context(&context).unwrap();

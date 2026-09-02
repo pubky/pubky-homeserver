@@ -253,6 +253,25 @@ impl SessionStorage {
         self.0.delete(path).await?;
         Ok(())
     }
+
+    /// Delete a resource only if its current `ETag` matches.
+    ///
+    /// @param {Path} path
+    /// @param {string} etag Strong `ETag` returned with the resource.
+    /// @returns {Promise<void>}
+    /// @throws {PubkyError} With status code `412` when the resource changed.
+    #[wasm_bindgen(js_name = "deleteIfMatch")]
+    pub async fn delete_if_match(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        etag: &str,
+    ) -> JsResult<()> {
+        self.0
+            .delete_if_match(path, etag)
+            .await
+            .map_err(conditional_write_error)?;
+        Ok(())
+    }
 }
 
 fn response_etag(response: &reqwest::Response) -> JsResult<String> {

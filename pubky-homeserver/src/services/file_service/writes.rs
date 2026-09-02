@@ -114,8 +114,19 @@ impl FileService {
     }
 
     /// Delete a file.
+    #[cfg(test)]
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, true).await
+        self.delete_inner(path, true, WritePreconditions::default())
+            .await
+    }
+
+    /// Delete a file when its current entity tag satisfies `preconditions`.
+    pub(crate) async fn delete_with_preconditions(
+        &self,
+        path: &EntryPath,
+        preconditions: WritePreconditions,
+    ) -> Result<(), FileIoError> {
+        self.delete_inner(path, true, preconditions).await
     }
 
     pub(super) async fn write_stream_inner(
@@ -408,29 +419,31 @@ impl FileService {
         &self,
         path: &EntryPath,
         enforce_write_policy: bool,
+        preconditions: WritePreconditions,
     ) -> Result<(), FileIoError> {
         if enforce_write_policy {
             self.check_write_path_allowed(path).await?;
         }
 
-        match EntryRepository::get_by_path(path, &mut self.db.pool().into()).await {
-            Ok(_) => {}
-            Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
-            Err(error) => return Err(error.into()),
-        }
-
         let mut tx = self.db.pool().begin().await?;
         let result = async {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            let mut user = self
+            let mut user = match self
                 .user_service
                 .get_for_no_key_update(path.pubkey(), &mut executor)
-                .await?;
-            let entry = match EntryRepository::get_by_path(path, &mut executor).await {
-                Ok(entry) => entry,
+                .await
+            {
+                Ok(user) => user,
                 Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
                 Err(error) => return Err(error.into()),
             };
+            let existing = match EntryRepository::get_by_path(path, &mut executor).await {
+                Ok(entry) => Some(entry),
+                Err(sqlx::Error::RowNotFound) => None,
+                Err(error) => return Err(error.into()),
+            };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
+            let entry = existing.ok_or(FileIoError::NotFound)?;
             EntryRepository::delete(entry.id, &mut executor).await?;
             self.events_service
                 .create_event(
