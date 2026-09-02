@@ -323,6 +323,7 @@ mod tests {
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());
         assert_eq!(c.storage.default_quota_mb, None);
+        assert_eq!(c.storage.admin_dav_spool_limit_mb, 1024);
         assert_eq!(c.storage.backend, StorageConfigToml::FileSystem);
         assert_eq!(
             c.logging,
