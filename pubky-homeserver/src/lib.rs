@@ -28,7 +28,7 @@ pub mod tracing;
 pub use admin_server::{AdminServer, AdminServerBuildError};
 #[cfg(any(test, feature = "testing"))]
 pub use app_context::TempAppContext;
-pub use app_context::{AppContext, AppContextBuildError, DhtMode};
+pub use app_context::{AppContext, AppContextBuildError};
 pub use client_server::{ClientServer, ClientServerBuildError};
 pub use data_directory::{
     storage_config, AdminToml, ConfigReadError, ConfigToml, LoggingToml, MetricsToml,

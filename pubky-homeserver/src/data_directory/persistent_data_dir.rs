@@ -86,10 +86,7 @@ impl PersistentDataDir {
     /// Creates the directory, writes a sample config file (if absent),
     /// and generates a server keypair (if absent).
     pub fn init(&self) -> anyhow::Result<()> {
-        self.ensure_exists_and_is_writable()?;
-        self.read_or_create_config_file()?;
-        self.read_or_create_keypair()?;
-        Ok(())
+        self.bootstrap().map(|_| ())
     }
 
     /// Makes sure the data directory exists.

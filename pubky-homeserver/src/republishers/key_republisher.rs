@@ -171,7 +171,6 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use super::*;
-    use crate::app_context::DhtMode;
     use crate::republishers::pkarr_republisher::test_client_builder;
 
     async fn test_context(
@@ -186,15 +185,9 @@ mod tests {
             config.general.database_url.clone(),
         )
         .unwrap();
-        let context = AppContext::new(
-            data_path,
-            config,
-            keypair,
-            db_mode,
-            DhtMode::Custom(pkarr_builder),
-        )
-        .await
-        .expect("failed to build test AppContext");
+        let context = AppContext::new(data_path, config, keypair, db_mode, pkarr_builder)
+            .await
+            .expect("failed to build test AppContext");
         (context, dht, temp_dir)
     }
 

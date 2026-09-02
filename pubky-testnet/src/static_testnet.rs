@@ -12,7 +12,7 @@ use crate::Testnet;
 use http_relay::HttpRelay;
 use pubky_common::constants::testnet_ports;
 use pubky_homeserver::{
-    AppContext, ConfigToml, ConnectionString, DhtMode, DomainPort, HomeserverApp, PersistentDataDir,
+    AppContext, ConfigToml, ConnectionString, DomainPort, HomeserverApp, PersistentDataDir,
 };
 
 /// The bind address used for all static testnet listeners.
@@ -388,8 +388,8 @@ impl StaticTestnet {
             pubky_homeserver::DatabaseMode::require_direct(config.general.database_url.clone())?;
 
         let data_path = persistent_dir.path().to_path_buf();
-        let context =
-            AppContext::new(data_path, config, keypair, db_mode, DhtMode::Isolated).await?;
+        let pkarr_builder = AppContext::isolated_pkarr_builder(&config);
+        let context = AppContext::new(data_path, config, keypair, db_mode, pkarr_builder).await?;
         let homeserver = HomeserverApp::start(context).await?;
         self.testnet.homeservers.push(homeserver);
         Ok(())
@@ -413,17 +413,17 @@ impl StaticTestnet {
 ///
 /// Priority:
 /// 1. Programmatic override (e.g. from `Testnet::new_with_custom_postgres`)
-/// 2. On-disk config value (`config.toml` → `[general].database_url`)
-/// 3. `TEST_PUBKY_CONNECTION_STRING` environment variable
+/// 2. `TEST_PUBKY_CONNECTION_STRING` environment variable
+/// 3. On-disk config value (`config.toml` → `[general].database_url`)
 fn resolve_persistent_database_url(
     programmatic: Option<ConnectionString>,
     from_config: Option<ConnectionString>,
 ) -> anyhow::Result<Option<ConnectionString>> {
-    resolve_persistent_database_url_inner(
+    Ok(resolve_persistent_database_url_inner(
         programmatic,
         from_config,
         ConnectionString::from_test_env()?,
-    )
+    ))
 }
 
 /// Pure resolution logic, separated from env access for testability.
@@ -431,8 +431,8 @@ fn resolve_persistent_database_url_inner(
     programmatic: Option<ConnectionString>,
     from_config: Option<ConnectionString>,
     from_env: Option<ConnectionString>,
-) -> anyhow::Result<Option<ConnectionString>> {
-    Ok(programmatic.or(from_config).or(from_env))
+) -> Option<ConnectionString> {
+    programmatic.or(from_env).or(from_config)
 }
 
 #[cfg(test)]
@@ -705,34 +705,31 @@ mod tests {
             Some(programmatic.clone()),
             Some(from_config),
             Some(from_env),
-        )
-        .unwrap();
+        );
         assert_eq!(result.unwrap().as_str(), programmatic.as_str());
     }
 
     #[test]
-    fn persistent_db_url_config_used_when_no_programmatic() {
+    fn persistent_db_url_env_wins_over_config() {
         let from_config = ConnectionString::new("postgres://config:5432/db").unwrap();
         let from_env = ConnectionString::new("postgres://env:5432/db").unwrap();
 
         let result =
-            resolve_persistent_database_url_inner(None, Some(from_config.clone()), Some(from_env))
-                .unwrap();
-        assert_eq!(result.unwrap().as_str(), from_config.as_str());
-    }
-
-    #[test]
-    fn persistent_db_url_env_used_as_fallback() {
-        let from_env = ConnectionString::new("postgres://env:5432/db").unwrap();
-
-        let result =
-            resolve_persistent_database_url_inner(None, None, Some(from_env.clone())).unwrap();
+            resolve_persistent_database_url_inner(None, Some(from_config), Some(from_env.clone()));
         assert_eq!(result.unwrap().as_str(), from_env.as_str());
     }
 
     #[test]
+    fn persistent_db_url_config_used_as_fallback() {
+        let from_config = ConnectionString::new("postgres://config:5432/db").unwrap();
+
+        let result = resolve_persistent_database_url_inner(None, Some(from_config.clone()), None);
+        assert_eq!(result.unwrap().as_str(), from_config.as_str());
+    }
+
+    #[test]
     fn persistent_db_url_none_when_nothing_set() {
-        let result = resolve_persistent_database_url_inner(None, None, None).unwrap();
+        let result = resolve_persistent_database_url_inner(None, None, None);
         assert!(result.is_none());
     }
 }

@@ -5,7 +5,7 @@
 //! Build via [`AppContext::new`] with independently resolved:
 //! - **Data path** — persistent directory or temp dir
 //! - **Database mode** — [`DatabaseMode::Direct`] or [`DatabaseMode::EphemeralTest`]
-//! - **DHT mode** — [`DhtMode::Public`], [`DhtMode::Isolated`], or [`DhtMode::Custom`]
+//! - **pkarr builder** — a pre-configured [`pkarr::ClientBuilder`]
 //!
 //! Convenience constructors:
 //! - [`AppContext::from_persistent_dir`] — production (persistent dir, public DHT, direct DB)
@@ -26,21 +26,6 @@ use pubky_common::crypto::Keypair;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// How the pkarr DHT client should be configured.
-///
-/// Controls whether the homeserver connects to the public DHT or an isolated testnet.
-#[non_exhaustive]
-pub enum DhtMode {
-    /// Public DHT with config values (bootstrap nodes, relays, timeouts) applied.
-    Public,
-    /// Isolated from the public DHT (no default network, testnet report policy),
-    /// with config values applied on top. Use this for testnets.
-    Isolated,
-    /// Fully custom pkarr client builder — config values are NOT applied automatically.
-    /// Use this when you need full control (e.g. a pre-configured testnet builder).
-    Custom(pkarr::ClientBuilder),
-}
 
 /// Errors that can occur when building an `AppContext`.
 #[derive(Debug, thiserror::Error)]
@@ -138,7 +123,9 @@ impl AppContext {
         let (path, config, keypair) = dir.bootstrap().map_err(AppContextBuildError::Bootstrap)?;
         let db_mode = DatabaseMode::require_direct(config.general.database_url.clone())
             .map_err(AppContextBuildError::DatabaseResolution)?;
-        Self::new(path, config, keypair, db_mode, DhtMode::Public).await
+        let mut pkarr_builder = pkarr::ClientBuilder::default();
+        Self::apply_config_to_pkarr(&mut pkarr_builder, &config);
+        Self::new(path, config, keypair, db_mode, pkarr_builder).await
     }
 
     /// Quick test context with default config and a deterministic keypair.
@@ -184,7 +171,8 @@ impl AppContext {
         let db_mode = DatabaseMode::resolve_test(config.general.database_url.clone())
             .map_err(AppContextBuildError::DatabaseResolution)?;
 
-        let ctx = Self::new(data_path, config, keypair, db_mode, DhtMode::Isolated).await?;
+        let pkarr_builder = Self::isolated_pkarr_builder(&config);
+        let ctx = Self::new(data_path, config, keypair, db_mode, pkarr_builder).await?;
         Ok((ctx, temp_dir))
     }
 
@@ -195,7 +183,7 @@ impl AppContext {
     /// - `config` — homeserver configuration
     /// - `keypair` — server identity
     /// - `db_mode` — database lifecycle ([`DatabaseMode::Direct`] or [`DatabaseMode::EphemeralTest`])
-    /// - `dht_mode` — DHT connectivity ([`DhtMode::Public`], [`DhtMode::Isolated`], or [`DhtMode::Custom`])
+    /// - `pkarr_builder` — a pre-configured [`pkarr::ClientBuilder`]
     ///
     /// See [`from_persistent_dir`](Self::from_persistent_dir) and
     /// [`new_ephemeral`](Self::new_ephemeral) for common combinations.
@@ -204,9 +192,8 @@ impl AppContext {
         config: ConfigToml,
         keypair: Keypair,
         db_mode: DatabaseMode,
-        dht_mode: DhtMode,
+        pkarr_builder: pkarr::ClientBuilder,
     ) -> Result<Self, AppContextBuildError> {
-        let pkarr_builder = Self::resolve_dht_mode(dht_mode, &config);
         let sql_db = SqlDb::connect(db_mode)
             .await
             .map_err(AppContextBuildError::SqlDb)?;
@@ -254,29 +241,23 @@ impl AppContext {
         })
     }
 
-    /// Resolve a [`DhtMode`] into a concrete pkarr client builder.
-    fn resolve_dht_mode(mode: DhtMode, config: &ConfigToml) -> pkarr::ClientBuilder {
-        match mode {
-            DhtMode::Public => {
-                let mut builder = pkarr::ClientBuilder::default();
-                Self::apply_config_to_pkarr(&mut builder, config);
-                builder
-            }
-            DhtMode::Isolated => {
-                let mut builder = pkarr::ClientBuilder::default();
-                builder
-                    .no_default_network()
-                    // Sentinel bootstrap node so the builder stays valid even when
-                    // no config-level bootstrap nodes are provided. Explicit testnet
-                    // bootstrap nodes (from config) replace this via apply_config_to_pkarr.
-                    // Port 9 is the RFC 863 "discard" protocol — guaranteed unreachable as a DHT node.
-                    .bootstrap(&["127.0.0.1:9"])
-                    .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
-                Self::apply_config_to_pkarr(&mut builder, config);
-                builder
-            }
-            DhtMode::Custom(builder) => builder,
-        }
+    /// Create a pkarr builder isolated from the public network, with config applied.
+    ///
+    /// Starts from a blank network (no default bootstrap nodes or relays, testnet
+    /// report policy). Config values are applied on top — used by testnets which
+    /// inject their own bootstrap/relay nodes via config.
+    pub fn isolated_pkarr_builder(config: &ConfigToml) -> pkarr::ClientBuilder {
+        let mut builder = pkarr::ClientBuilder::default();
+        builder
+            .no_default_network()
+            // Sentinel bootstrap node so the builder stays valid even when
+            // no config-level bootstrap nodes are provided. Explicit testnet
+            // bootstrap nodes (from config) replace this via apply_config_to_pkarr.
+            // Port 9 is the RFC 863 "discard" protocol — guaranteed unreachable as a DHT node.
+            .bootstrap(&["127.0.0.1:9"])
+            .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
+        Self::apply_config_to_pkarr(&mut builder, config);
+        builder
     }
 
     /// Apply DHT configuration (bootstrap nodes, relays, timeouts) from config
@@ -306,9 +287,9 @@ impl AppContext {
 mod tests {
     use super::*;
 
-    /// `DhtMode::Public` keeps default relays and applies config values.
+    /// Public (default) builder keeps default relays and applies config values.
     #[test]
-    fn public_mode_keeps_defaults_and_applies_config() {
+    fn public_builder_keeps_defaults_and_applies_config() {
         use crate::DomainPort;
         use std::str::FromStr;
 
@@ -316,7 +297,8 @@ mod tests {
         config.pkdns.dht_bootstrap_nodes =
             Some(vec![DomainPort::from_str("127.0.0.1:6881").unwrap()]);
 
-        let builder = AppContext::resolve_dht_mode(DhtMode::Public, &config);
+        let mut builder = pkarr::ClientBuilder::default();
+        AppContext::apply_config_to_pkarr(&mut builder, &config);
         let debug = format!("{builder:?}");
 
         assert!(
@@ -331,11 +313,10 @@ mod tests {
         }
     }
 
-    /// `DhtMode::Isolated` excludes public DHT nodes.
+    /// Isolated builder excludes public DHT nodes.
     #[test]
-    fn isolated_mode_excludes_public_dht() {
-        let builder =
-            AppContext::resolve_dht_mode(DhtMode::Isolated, &ConfigToml::default_test_config());
+    fn isolated_builder_excludes_public_dht() {
+        let builder = AppContext::isolated_pkarr_builder(&ConfigToml::default_test_config());
         let debug = format!("{builder:?}");
 
         for relay in pkarr::DEFAULT_RELAYS {
@@ -345,26 +326,5 @@ mod tests {
             );
         }
         builder.build().expect("isolated pkarr client should build");
-    }
-
-    /// `DhtMode::Custom` passes through the builder unchanged.
-    #[test]
-    fn custom_mode_passes_through_builder() {
-        let mut custom = pkarr::ClientBuilder::default();
-        custom.no_default_network();
-
-        let builder = AppContext::resolve_dht_mode(
-            DhtMode::Custom(custom),
-            &ConfigToml::default_test_config(),
-        );
-        let debug = format!("{builder:?}");
-
-        // Custom builder had no_default_network, so no default relays.
-        for relay in pkarr::DEFAULT_RELAYS {
-            assert!(
-                !debug.contains(relay),
-                "default relay {relay} should not appear in custom builder: {debug}"
-            );
-        }
     }
 }

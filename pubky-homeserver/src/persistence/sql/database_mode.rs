@@ -60,19 +60,22 @@ impl DatabaseMode {
     /// 2. `TEST_PUBKY_CONNECTION_STRING` environment variable → `EphemeralTest`
     /// 3. [`DEFAULT_TEST_SERVER`] fallback → `EphemeralTest`
     pub fn resolve_test(explicit: Option<ConnectionString>) -> anyhow::Result<Self> {
-        Self::resolve_test_inner(explicit, ConnectionString::from_test_env()?)
+        Ok(Self::resolve_test_inner(
+            explicit,
+            ConnectionString::from_test_env()?,
+        ))
     }
 
     /// Pure resolution logic, separated from env access for testability.
     fn resolve_test_inner(
         explicit: Option<ConnectionString>,
         from_env: Option<ConnectionString>,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let url = explicit.or(from_env).unwrap_or_else(|| {
             ConnectionString::new(DEFAULT_TEST_SERVER)
                 .expect("Default test connection string is valid")
         });
-        Ok(Self::EphemeralTest(url))
+        Self::EphemeralTest(url)
     }
 }
 
@@ -84,8 +87,7 @@ mod tests {
     fn resolve_test_explicit_wins_over_env() {
         let explicit = ConnectionString::new("postgres://custom:5432/mydb").unwrap();
         let from_env = ConnectionString::new("postgres://env:5432/envdb").unwrap();
-        let result =
-            DatabaseMode::resolve_test_inner(Some(explicit.clone()), Some(from_env)).unwrap();
+        let result = DatabaseMode::resolve_test_inner(Some(explicit.clone()), Some(from_env));
         assert_eq!(result.connection_string(), &explicit);
         assert!(matches!(result, DatabaseMode::EphemeralTest(_)));
     }
@@ -93,14 +95,14 @@ mod tests {
     #[test]
     fn resolve_test_env_used_when_no_explicit() {
         let from_env = ConnectionString::new("postgres://env:5432/envdb").unwrap();
-        let result = DatabaseMode::resolve_test_inner(None, Some(from_env.clone())).unwrap();
+        let result = DatabaseMode::resolve_test_inner(None, Some(from_env.clone()));
         assert_eq!(result.connection_string(), &from_env);
         assert!(matches!(result, DatabaseMode::EphemeralTest(_)));
     }
 
     #[test]
     fn resolve_test_falls_back_to_default() {
-        let result = DatabaseMode::resolve_test_inner(None, None).unwrap();
+        let result = DatabaseMode::resolve_test_inner(None, None);
         assert_eq!(result.connection_string().as_str(), DEFAULT_TEST_SERVER);
         assert!(matches!(result, DatabaseMode::EphemeralTest(_)));
     }

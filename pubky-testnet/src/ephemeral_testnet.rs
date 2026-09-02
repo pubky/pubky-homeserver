@@ -191,14 +191,9 @@ impl EphemeralTestnetBuilder {
             testnet.create_http_relay().await?;
         }
 
-        let mut config = self
+        let config = self
             .homeserver_config
             .unwrap_or_else(ConfigToml::minimal_test_config);
-
-        config.general.database_url = testnet
-            .postgres_connection_string
-            .clone()
-            .or(config.general.database_url);
 
         let keypair = self
             .homeserver_keypair
@@ -326,13 +321,7 @@ impl EphemeralTestnet {
         &mut self,
         config: Option<ConfigToml>,
     ) -> anyhow::Result<&HomeserverApp> {
-        let mut config = config.unwrap_or_else(ConfigToml::minimal_test_config);
-
-        config.general.database_url = self
-            .testnet
-            .postgres_connection_string
-            .clone()
-            .or(config.general.database_url);
+        let config = config.unwrap_or_else(ConfigToml::minimal_test_config);
 
         self.testnet
             .create_homeserver_with(config, Keypair::random())
