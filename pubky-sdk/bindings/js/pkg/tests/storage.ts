@@ -30,6 +30,30 @@ type PublicStorageType = Facade["publicStorage"];
 type _StorageDelete = Assert<
   IsExact<Parameters<SessionStorageType["delete"]>, [Path]>
 >;
+type _StoragePutBytesIfMatch = Assert<
+  IsExact<
+    Parameters<SessionStorageType["putBytesIfMatch"]>,
+    [Path, Uint8Array, string]
+  >
+>;
+type _StoragePutBytesIfMatchResult = Assert<
+  IsExact<ReturnType<SessionStorageType["putBytesIfMatch"]>, Promise<string>>
+>;
+type _StoragePutBytesIfAbsent = Assert<
+  IsExact<
+    Parameters<SessionStorageType["putBytesIfAbsent"]>,
+    [Path, Uint8Array]
+  >
+>;
+type _StoragePutBytesIfAbsentResult = Assert<
+  IsExact<ReturnType<SessionStorageType["putBytesIfAbsent"]>, Promise<string>>
+>;
+type _StorageGetBytesWithEtagResult = Assert<
+  IsExact<
+    ReturnType<SessionStorageType["getBytesWithEtag"]>,
+    Promise<{ bytes: Uint8Array; etag: string }>
+  >
+>;
 
 const toAddress = (user: string, relPath: Path): Address =>
   `pubky${user}${relPath}` as Address;
@@ -160,6 +184,55 @@ test("session: putBytes/getBytes/delete, public: getBytes", async (t) => {
     t.equal(getStatusCode(error), 404, "status code 404");
   }
 
+  t.end();
+});
+
+test("session: conditional byte writes reject stale state", async (t) => {
+  const sdk = Pubky.testnet();
+  const signer = sdk.signer(Keypair.random());
+  const signupToken = await createSignupToken();
+  await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await signer.signin("storage.test");
+  const path = `/pub/example.com/conditional-${Date.now()}.bin` as Path;
+  const initial = new Uint8Array([1]);
+  const updated = new Uint8Array([2]);
+
+  const initialEtag = await session.storage.putBytesIfAbsent(path, initial);
+  t.ok(initialEtag, "create-only write returns an ETag");
+
+  const updatedEtag = await session.storage.putBytesIfMatch(
+    path,
+    updated,
+    initialEtag,
+  );
+  t.ok(updatedEtag, "conditional update returns an ETag");
+  t.notEqual(updatedEtag, initialEtag, "updated content has a new ETag");
+  const current = await session.storage.getBytesWithEtag(path);
+  t.deepEqual([...current.bytes], [...updated], "versioned read returns the bytes");
+  t.equal(current.etag, updatedEtag, "versioned read returns the matching ETag");
+  t.deepEqual(
+    await session.storage.getBytes(path),
+    updated,
+    "matching ETag updates the resource",
+  );
+
+  try {
+    await session.storage.putBytesIfMatch(path, initial, initialEtag);
+    t.fail("stale ETag should fail");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(getStatusCode(error), 412, "stale ETag returns 412");
+  }
+
+  try {
+    await session.storage.putBytesIfAbsent(path, initial);
+    t.fail("existing resource should fail create-only write");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(getStatusCode(error), 412, "existing resource returns 412");
+  }
+
+  await session.storage.delete(path);
   t.end();
 });
 

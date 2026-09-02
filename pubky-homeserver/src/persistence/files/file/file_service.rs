@@ -30,7 +30,7 @@ use std::{
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::super::{FileIoError, FileStream, OpendalService, WriteStreamError};
+use super::super::{FileIoError, FileStream, OpendalService, WritePreconditions, WriteStreamError};
 
 const ABANDONED_UPLOAD_AGE_SECONDS: i64 = 60 * 60;
 const UPLOAD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
@@ -89,6 +89,7 @@ struct LeaseProtectedStream {
     terminated: bool,
 }
 
+#[derive(Debug)]
 enum CommitWriteError {
     BeforeCommit(FileIoError),
     CommitOutcomeUnknown(FileIoError),
@@ -98,6 +99,13 @@ struct UploadReservation {
     user_id: i32,
     tracked_length: u64,
     max_blob_length: Option<u64>,
+}
+
+/// Whether a committed write created or replaced its logical resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Created,
+    Replaced,
 }
 
 #[derive(Clone, Copy)]
@@ -428,35 +436,75 @@ impl FileService {
     }
 
     /// Write a streamed file and atomically publish its logical entry.
+    #[cfg(test)]
     pub async fn write_stream(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, None)
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::Client,
+            None,
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     /// Write a streamed file with a trusted upper-bound hint for upload reservation.
+    #[cfg(test)]
     pub async fn write_stream_with_size_hint(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: u64,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, Some(size_hint))
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::Client,
+            Some(size_hint),
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
+    }
+
+    /// Write a streamed file when its current entity tag satisfies `preconditions`.
+    pub(crate) async fn write_stream_with_preconditions(
+        &self,
+        path: &EntryPath,
+        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        size_hint: Option<u64>,
+        preconditions: WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), FileIoError> {
+        self.write_stream_inner(path, stream, WriteMode::Client, size_hint, preconditions)
             .await
     }
 
     /// Delete a file.
+    #[cfg(test)]
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, true).await
+        self.delete_inner(path, true, WritePreconditions::default())
+            .await
+    }
+
+    /// Delete a file when its current entity tag satisfies `preconditions`.
+    pub(crate) async fn delete_with_preconditions(
+        &self,
+        path: &EntryPath,
+        preconditions: WritePreconditions,
+    ) -> Result<(), FileIoError> {
+        self.delete_inner(path, true, preconditions).await
     }
 
     /// Delete a file bypassing write-path restrictions.
     /// Used by both admin file APIs.
     pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, false).await
+        self.delete_inner(path, false, WritePreconditions::default())
+            .await
     }
 
     /// Write through the admin interface without user write-path policy.
@@ -466,8 +514,15 @@ impl FileService {
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, None)
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::AdminOverwrite,
+            None,
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     pub(crate) async fn admin_write_stream_with_size_hint(
@@ -476,8 +531,15 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: u64,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, Some(size_hint))
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::AdminOverwrite,
+            Some(size_hint),
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     pub(crate) async fn admin_create_stream_with_size_hint(
@@ -486,8 +548,15 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: u64,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminCreate, Some(size_hint))
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::AdminCreate,
+            Some(size_hint),
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     pub(crate) async fn admin_users(&self) -> Result<Vec<String>, FileIoError> {
@@ -589,6 +658,7 @@ impl FileService {
             }),
             WriteMode::AdminCreate,
             Some(source_length),
+            WritePreconditions::default(),
         )
         .await?;
         Ok(())
@@ -897,7 +967,8 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         mode: WriteMode,
         size_hint: Option<u64>,
-    ) -> Result<EntryEntity, FileIoError> {
+        preconditions: WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), FileIoError> {
         if mode.enforces_write_path() {
             self.check_write_path_allowed(path).await?;
         }
@@ -946,7 +1017,9 @@ impl FileService {
             return Err(FileIoError::UploadLeaseLost);
         }
 
-        let result = self.commit_write(path, &blob_key, &metadata, mode).await;
+        let result = self
+            .commit_write(path, &blob_key, &metadata, mode, &preconditions)
+            .await;
         match result {
             Ok(entry) => {
                 self.events_service.notify_event().await;
@@ -1025,7 +1098,8 @@ impl FileService {
         blob_key: &str,
         metadata: &super::super::FileMetadata,
         mode: WriteMode,
-    ) -> Result<EntryEntity, CommitWriteError> {
+        preconditions: &WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), CommitWriteError> {
         let mut tx = self
             .db
             .pool()
@@ -1050,9 +1124,15 @@ impl FileService {
                 Err(sqlx::Error::RowNotFound) => None,
                 Err(error) => return Err(error.into()),
             };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
             if mode.requires_missing_destination() && existing.is_some() {
                 return Err(FileIoError::PathCollision);
             }
+            let outcome = if existing.is_some() {
+                WriteOutcome::Replaced
+            } else {
+                WriteOutcome::Created
+            };
             let existing_bytes = existing.as_ref().map_or(0, |entry| entry.content_length);
             let metadata_bytes = if existing.is_none() {
                 FILE_METADATA_SIZE as i64
@@ -1130,6 +1210,7 @@ impl FileService {
 
             EntryRepository::get_by_path(path, &mut executor)
                 .await
+                .map(|entry| (entry, outcome))
                 .map_err(Into::into)
         }
         .await;
@@ -1154,29 +1235,31 @@ impl FileService {
         &self,
         path: &EntryPath,
         enforce_write_policy: bool,
+        preconditions: WritePreconditions,
     ) -> Result<(), FileIoError> {
         if enforce_write_policy {
             self.check_write_path_allowed(path).await?;
         }
 
-        match EntryRepository::get_by_path(path, &mut self.db.pool().into()).await {
-            Ok(_) => {}
-            Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
-            Err(error) => return Err(error.into()),
-        }
-
         let mut tx = self.db.pool().begin().await?;
         let result = async {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            let mut user = self
+            let mut user = match self
                 .user_service
                 .get_for_no_key_update(path.pubkey(), &mut executor)
-                .await?;
-            let entry = match EntryRepository::get_by_path(path, &mut executor).await {
-                Ok(entry) => entry,
+                .await
+            {
+                Ok(user) => user,
                 Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
                 Err(error) => return Err(error.into()),
             };
+            let existing = match EntryRepository::get_by_path(path, &mut executor).await {
+                Ok(entry) => Some(entry),
+                Err(sqlx::Error::RowNotFound) => None,
+                Err(error) => return Err(error.into()),
+            };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
+            let entry = existing.ok_or(FileIoError::NotFound)?;
             EntryRepository::delete(entry.id, &mut executor).await?;
             self.events_service
                 .create_event(
@@ -1360,11 +1443,15 @@ impl FileService {
 #[cfg(test)]
 mod tests {
     use crate::{
+        persistence::files::{content_hash_etag, FileMetadata},
         services::user_service::FILE_METADATA_SIZE,
         shared::{quota::UserQuota, webdav::StoragePath},
         storage_config::StorageConfigToml,
     };
+    use axum::http::{header, HeaderMap, HeaderValue};
     use futures_lite::StreamExt;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     use super::*;
 
@@ -1398,6 +1485,196 @@ mod tests {
         .execute(context.sql_db.pool())
         .await
         .unwrap();
+    }
+
+    fn write_preconditions(
+        if_match: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> WritePreconditions {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = if_match {
+            headers.insert(header::IF_MATCH, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = if_none_match {
+            headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(value).unwrap());
+        }
+        WritePreconditions::from_headers(&headers).unwrap()
+    }
+
+    async fn prepare_blob(
+        service: &FileService,
+        path: &EntryPath,
+        blob_key: &str,
+        bytes: &'static [u8],
+    ) -> FileMetadata {
+        let user = service
+            .user_service
+            .get_for_no_key_update(path.pubkey(), &mut service.db.pool().into())
+            .await
+            .unwrap();
+        BlobRepository::stage_upload(
+            blob_key,
+            user.id,
+            bytes.len() as u64,
+            &mut service.db.pool().into(),
+        )
+        .await
+        .unwrap();
+        service
+            .opendal
+            .write_blob_stream(
+                blob_key,
+                futures_util::stream::iter([Ok(Bytes::from_static(bytes))]),
+                path,
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn race_preconditioned_commits(
+        service: &FileService,
+        path: &EntryPath,
+        first_blob: (&str, FileMetadata),
+        second_blob: (&str, FileMetadata),
+        preconditions: WritePreconditions,
+    ) -> [Result<(EntryEntity, WriteOutcome), CommitWriteError>; 2] {
+        let barrier = Arc::new(Barrier::new(2));
+        let first_service = service.clone();
+        let first_path = path.clone();
+        let first_barrier = barrier.clone();
+        let first_preconditions = preconditions.clone();
+        let first = async move {
+            first_barrier.wait().await;
+            first_service
+                .commit_write(
+                    &first_path,
+                    first_blob.0,
+                    &first_blob.1,
+                    WriteMode::Client,
+                    &first_preconditions,
+                )
+                .await
+        };
+        let second_service = service.clone();
+        let second_path = path.clone();
+        let second_barrier = barrier.clone();
+        let second = async move {
+            second_barrier.wait().await;
+            second_service
+                .commit_write(
+                    &second_path,
+                    second_blob.0,
+                    &second_blob.1,
+                    WriteMode::Client,
+                    &preconditions,
+                )
+                .await
+        };
+        let (first, second) = tokio::join!(first, second);
+        [first, second]
+    }
+
+    fn assert_one_preconditioned_commit(
+        results: [Result<(EntryEntity, WriteOutcome), CommitWriteError>; 2],
+    ) {
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    matches!(
+                        result,
+                        Err(CommitWriteError::BeforeCommit(
+                            FileIoError::PreconditionFailed
+                        ))
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_concurrent_if_none_match_creation_commits_once() {
+        let context = AppContext::test().await;
+        let service = FileService::new_from_context(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let path = EntryPath::new(pubkey, StoragePath::new("/pub/state.bin").unwrap());
+        let first = prepare_blob(&service, &path, "__pubky/blobs/create-a", b"a").await;
+        let second = prepare_blob(&service, &path, "__pubky/blobs/create-b", b"b").await;
+
+        let results = race_preconditioned_commits(
+            &service,
+            &path,
+            ("__pubky/blobs/create-a", first),
+            ("__pubky/blobs/create-b", second),
+            write_preconditions(None, Some("*")),
+        )
+        .await;
+
+        assert_one_preconditioned_commit(results);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_concurrent_if_match_update_commits_once() {
+        let context = AppContext::test().await;
+        let service = FileService::new_from_context(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let path = EntryPath::new(pubkey, StoragePath::new("/pub/state.bin").unwrap());
+        let current = service
+            .write(&path, Buffer::from(b"initial".to_vec()))
+            .await
+            .unwrap();
+        let etag = content_hash_etag(&current.content_hash);
+        let first = prepare_blob(&service, &path, "__pubky/blobs/update-a", b"a").await;
+        let second = prepare_blob(&service, &path, "__pubky/blobs/update-b", b"b").await;
+
+        let results = race_preconditioned_commits(
+            &service,
+            &path,
+            ("__pubky/blobs/update-a", first),
+            ("__pubky/blobs/update-b", second),
+            write_preconditions(Some(&etag), None),
+        )
+        .await;
+
+        assert_one_preconditioned_commit(results);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_delete_preconditions() {
+        let context = AppContext::test().await;
+        let service = FileService::new_from_context(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let path = EntryPath::new(pubkey, StoragePath::new("/pub/state.bin").unwrap());
+        let current = service
+            .write(&path, Buffer::from(b"current".to_vec()))
+            .await
+            .unwrap();
+        let etag = content_hash_etag(&current.content_hash);
+
+        let stale = service
+            .delete_with_preconditions(&path, write_preconditions(Some("\"stale\""), None))
+            .await;
+        assert!(matches!(stale, Err(FileIoError::PreconditionFailed)));
+        service.get(&path).await.unwrap();
+
+        service
+            .delete_with_preconditions(&path, write_preconditions(Some(&etag), None))
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .delete_with_preconditions(&path, write_preconditions(Some(&etag), None))
+                .await,
+            Err(FileIoError::PreconditionFailed)
+        ));
     }
 
     #[tokio::test]

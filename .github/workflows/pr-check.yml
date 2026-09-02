@@ -226,9 +226,12 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run wasm-pack unit tests
+      - name: Run host-testable WASM unit tests
+        run: cargo test -p pubky-wasm --lib
+
+      - name: Run browser WASM unit tests
         working-directory: pubky-sdk/bindings/js
-        run: wasm-pack test --node
+        run: wasm-pack test --headless --chrome
 
       - name: Install Electron/X deps
         run: |

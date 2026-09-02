@@ -7,7 +7,7 @@ use tsify::Tsify;
 /// @property {number=} contentLength  Size in bytes.
 /// @property {string=} contentType    Media type (e.g. "application/json; charset=utf-8").
 /// @property {number=} lastModifiedMs Unix epoch milliseconds.
-/// @property {string=} etag           Opaque server ETag for the current version.
+/// @property {string=} etag           Server ETag for the current version.
 ///
 /// @example
 /// const stats = await pubky.publicStorage.stats(`${user}/pub/app/file.json`);
@@ -17,7 +17,8 @@ use tsify::Tsify;
 ///
 /// Notes:
 /// - `contentLength` equals `getBytes(...).length`.
-/// - `etag` may be absent and is opaque; compare values to detect updates.
+/// - `etag` may be absent. Strong tags are unquoted and can be passed to
+///   `putBytesIfMatch`; weak tags retain their `W/\"...\"` wire form and cannot.
 /// - `lastModifiedMs` increases when the resource is updated.
 #[derive(Tsify, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,7 +38,8 @@ pub struct ResourceStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_modified_ms: Option<u64>,
 
-    /// Opaque entity tag identifying the current stored version.
+    /// Entity tag identifying the current stored version. Strong tags are
+    /// unquoted; weak tags retain their `W/\"...\"` wire form.
     #[tsify(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
