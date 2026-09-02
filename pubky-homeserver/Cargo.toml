@@ -37,7 +37,7 @@ pubky-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
-toml = "0.8"
+toml.workspace = true
 tower-cookies = "0.11"
 tower-http = { workspace = true, features = ["cors", "trace"] }
 tracing.workspace = true
