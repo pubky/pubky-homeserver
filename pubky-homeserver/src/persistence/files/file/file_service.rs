@@ -485,14 +485,26 @@ impl FileService {
     }
 
     /// Delete a file.
+    #[cfg(test)]
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, true).await
+        self.delete_inner(path, true, WritePreconditions::default())
+            .await
+    }
+
+    /// Delete a file when its current entity tag satisfies `preconditions`.
+    pub(crate) async fn delete_with_preconditions(
+        &self,
+        path: &EntryPath,
+        preconditions: WritePreconditions,
+    ) -> Result<(), FileIoError> {
+        self.delete_inner(path, true, preconditions).await
     }
 
     /// Delete a file bypassing write-path restrictions.
     /// Used by both admin file APIs.
     pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, false).await
+        self.delete_inner(path, false, WritePreconditions::default())
+            .await
     }
 
     /// Write through the admin interface without user write-path policy.
@@ -1223,29 +1235,31 @@ impl FileService {
         &self,
         path: &EntryPath,
         enforce_write_policy: bool,
+        preconditions: WritePreconditions,
     ) -> Result<(), FileIoError> {
         if enforce_write_policy {
             self.check_write_path_allowed(path).await?;
         }
 
-        match EntryRepository::get_by_path(path, &mut self.db.pool().into()).await {
-            Ok(_) => {}
-            Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
-            Err(error) => return Err(error.into()),
-        }
-
         let mut tx = self.db.pool().begin().await?;
         let result = async {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            let mut user = self
+            let mut user = match self
                 .user_service
                 .get_for_no_key_update(path.pubkey(), &mut executor)
-                .await?;
-            let entry = match EntryRepository::get_by_path(path, &mut executor).await {
-                Ok(entry) => entry,
+                .await
+            {
+                Ok(user) => user,
                 Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
                 Err(error) => return Err(error.into()),
             };
+            let existing = match EntryRepository::get_by_path(path, &mut executor).await {
+                Ok(entry) => Some(entry),
+                Err(sqlx::Error::RowNotFound) => None,
+                Err(error) => return Err(error.into()),
+            };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
+            let entry = existing.ok_or(FileIoError::NotFound)?;
             EntryRepository::delete(entry.id, &mut executor).await?;
             self.events_service
                 .create_event(
@@ -1629,6 +1643,38 @@ mod tests {
         .await;
 
         assert_one_preconditioned_commit(results);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_delete_preconditions() {
+        let context = AppContext::test().await;
+        let service = FileService::new_from_context(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let path = EntryPath::new(pubkey, StoragePath::new("/pub/state.bin").unwrap());
+        let current = service
+            .write(&path, Buffer::from(b"current".to_vec()))
+            .await
+            .unwrap();
+        let etag = content_hash_etag(&current.content_hash);
+
+        let stale = service
+            .delete_with_preconditions(&path, write_preconditions(Some("\"stale\""), None))
+            .await;
+        assert!(matches!(stale, Err(FileIoError::PreconditionFailed)));
+        service.get(&path).await.unwrap();
+
+        service
+            .delete_with_preconditions(&path, write_preconditions(Some(&etag), None))
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .delete_with_preconditions(&path, write_preconditions(Some(&etag), None))
+                .await,
+            Err(FileIoError::PreconditionFailed)
+        ));
     }
 
     #[tokio::test]

@@ -161,6 +161,30 @@ impl SessionStorage {
         send_checked(rb).await
     }
 
+    /// Delete a resource only if its current `ETag` matches `etag`.
+    ///
+    /// A missing resource or stale `ETag` produces a server error with status
+    /// [`StatusCode::PRECONDITION_FAILED`].
+    ///
+    /// # Errors
+    /// - Returns [`crate::errors::RequestError::Validation`] when `etag` is weak
+    ///   or cannot be represented as a strong HTTP entity tag.
+    /// - Returns [`crate::errors::RequestError::UnsupportedFeature`] when the
+    ///   homeserver does not advertise conditional writes.
+    /// - Propagates request construction, transport, and server failures.
+    pub async fn delete_if_match<P>(&self, path: P, etag: &str) -> Result<Response>
+    where
+        P: IntoResourcePath,
+    {
+        let path = path.into_abs_path()?;
+        let etag = strong_etag_header_value(etag)?;
+        let rb = self
+            .conditional_request(Method::DELETE, path)
+            .await?
+            .header(IF_MATCH, etag);
+        send_checked(rb).await
+    }
+
     /// HTTP `DELETE` for an **absolute path**.
     ///
     /// # Errors

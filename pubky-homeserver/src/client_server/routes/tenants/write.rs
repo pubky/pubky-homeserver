@@ -33,15 +33,17 @@ pub async fn legacy_delete(
     session: AuthSession,
     tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
-    delete(state, session, entry_path).await
+    delete(state, session, entry_path, headers).await
 }
 
 pub async fn delete(
     State(state): State<AppState>,
     session: AuthSession,
     entry_path: EntryPath,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
     if !entry_path.path().is_file() {
         return Err(HttpError::bad_request("Target path must be a file"));
@@ -54,7 +56,13 @@ pub async fn delete(
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
-    state.context.file_service.delete(&entry_path).await?;
+    let preconditions =
+        WritePreconditions::from_headers(&headers).map_err(HttpError::bad_request)?;
+    state
+        .context
+        .file_service
+        .delete_with_preconditions(&entry_path, preconditions)
+        .await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 

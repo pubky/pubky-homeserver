@@ -236,6 +236,44 @@ async fn conditional_puts_prevent_lost_updates() {
     );
     let stored = final_response.bytes().await.unwrap();
     assert_eq!(stored.as_ref(), expected_bytes);
+
+    let error = session
+        .storage()
+        .delete_if_match(path, &initial_etag)
+        .await
+        .expect_err("conditional delete must reject a stale ETag");
+    assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+
+    let update_storage = session.storage();
+    let delete_storage = session.storage();
+    let (update, delete) = tokio::join!(
+        update_storage.put_if_match(path, vec![5], &final_etag),
+        delete_storage.delete_if_match(path, &final_etag),
+    );
+    match (update, delete) {
+        (Ok(response), Err(error)) => {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+            assert_eq!(
+                session
+                    .storage()
+                    .get(path)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                [5]
+            );
+        }
+        (Err(error), Ok(response)) => {
+            assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert!(!session.storage().exists(path).await.unwrap());
+        }
+        results => panic!("expected one accepted and one rejected mutation, got {results:?}"),
+    }
 }
 
 #[tokio::test]
