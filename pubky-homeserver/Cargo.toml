@@ -56,7 +56,7 @@ reqwest = { workspace = true, features = [
 governor = "0.10"
 fast-glob = "0.4"
 tokio-util = "0.7"
-percent-encoding = "2"
+percent-encoding.workspace = true
 serde_valid = "2"
 opendal = { version = "0.54", features = ["services-fs"] }
 infer = "0.19"
