@@ -175,11 +175,10 @@ impl ConfigToml {
     /// Parse a raw TOML string, overlaying it on top of the embedded defaults.
     pub fn from_str_with_defaults(raw: &str) -> Result<Self, ConfigReadError> {
         // 1. Parse the embedded defaults
-        let default_val: toml::Value = DEFAULT_CONFIG
-            .parse()
-            .expect("embedded defaults invalid TOML");
+        let default_val: toml::Value =
+            toml::from_str(DEFAULT_CONFIG).expect("embedded defaults invalid TOML");
         // 2. Parse the user's overrides
-        let user_val: toml::Value = raw.parse()?;
+        let user_val: toml::Value = toml::from_str(raw)?;
         // 3. Deep‐merge
         let merged_val = toml_merge::merge_with_options(default_val, user_val, true)
             .map_err(|e| ConfigReadError::ConfigMergeError(e.to_string()))?;
