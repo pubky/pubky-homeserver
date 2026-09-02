@@ -19,7 +19,8 @@ impl FileService {
     /// Delete a file bypassing write-path restrictions.
     /// Used by both admin file APIs.
     pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, false).await
+        self.delete_inner(path, false, WritePreconditions::default())
+            .await
     }
 
     /// Write through the admin interface without user write-path policy.
