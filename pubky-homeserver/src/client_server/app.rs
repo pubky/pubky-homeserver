@@ -14,7 +14,12 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use axum::{http::header::RETRY_AFTER, middleware as axum_middleware, routing::get, Router};
+use axum::{
+    http::header::RETRY_AFTER,
+    middleware as axum_middleware,
+    routing::{any, get},
+    Router,
+};
 use axum_server::{
     tls_rustls::{RustlsAcceptor, RustlsConfig},
     Handle,
@@ -31,7 +36,7 @@ use super::middleware::{
     request_tenant::RequestTenant,
     trace::with_trace_layer,
 };
-use super::routes::{events, info, root, signup_tokens, tenants};
+use super::routes::{dav, drive, events, info, root, signup_tokens, tenants};
 
 /// Errors that can occur when building a `HomeserverCore`.
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +207,9 @@ fn base() -> Router<AppState> {
     Router::new()
         .route("/", get(root::handler))
         .route("/signup_tokens/{token}", get(signup_tokens::get))
+        // Browser file explorer. Same origin as `/dav`, which is what lets it
+        // call an endpoint that sets no CORS headers.
+        .route("/drive", get(drive::get))
         // Events
         .route("/events/", get(events::feed))
         .route(
@@ -233,19 +241,39 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
 
     let app = base()
         .merge(tenants::router(state.context.metrics.clone()))
-        .with_state(state)
+        .with_state(state.clone())
         .merge(auth::base_router(auth_state.clone()))
         .merge(auth::tenant_router(auth_state))
-        .layer(middleware)
+        .layer(middleware.clone())
         // Keep feature discovery independent of authentication and database-backed quotas.
         .route("/info", get(info::get));
+
+    // WebDAV gets the same middleware but is deliberately kept out of the CORS
+    // layer below: `CorsLayer` answers every OPTIONS request itself, and a
+    // WebDAV client reads the `DAV:` compliance header off that response to
+    // decide whether the endpoint is mountable at all. Browsers cannot speak
+    // WebDAV, so nothing is lost by leaving these routes without CORS.
+    //
+    // The wildcard abuts `/dav` rather than following a slash so that it also
+    // matches `/dav/{user_z32}/`, the tenant root clients PROPFIND first.
+    let dav = Router::new()
+        .route("/dav{*path}", any(dav::dav_handler))
+        .with_state(state)
+        .layer(middleware);
 
     // Resolve the target before tracing and authentication. Valid `/storage/...`
     // requests are therefore logged using their Pubky URL.
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
-    Ok(with_trace_layer(app)
+    let cors_app = with_trace_layer(app)
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
-        .layer(CorsLayer::very_permissive().expose_headers([RETRY_AFTER])))
+        .layer(CorsLayer::very_permissive().expose_headers([RETRY_AFTER]));
+    // `dav::cors` sits outermost so it answers a browser preflight before
+    // authentication can 401 it, while a bare OPTIONS still reaches dav-server.
+    let dav_app = with_trace_layer(dav)
+        .layer(axum_middleware::from_fn(RequestTenant::resolve))
+        .layer(axum_middleware::from_fn(dav::cors));
+
+    Ok(cors_app.merge(dav_app))
 }
 
 #[cfg(test)]
@@ -408,6 +436,197 @@ mod tests {
         assert!(!output.contains(&unrelated_public_key));
         assert!(!output.contains(storage_path));
         assert!(!output.contains(&cookie));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_serves_the_authenticated_drive_and_no_other() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router).unwrap();
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+        let propfind = Method::from_bytes(b"PROPFIND").unwrap();
+
+        // Without credentials, the challenge is what makes a client prompt.
+        let response = server
+            .method(propfind.clone(), &format!("/dav/{public_key}/"))
+            .await;
+        response.assert_status(StatusCode::UNAUTHORIZED);
+        response.assert_header(header::WWW_AUTHENTICATE, r#"Basic realm="pubky""#);
+
+        // A WebDAV write must land on the storage key the REST route reads,
+        // which is what stripping only `/dav` buys us.
+        server
+            .put(&format!("/dav/{public_key}/pub/dav.txt"))
+            .add_header("pubky-host", public_key.clone())
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(b"hello".to_vec().into())
+            .expect_success()
+            .await;
+        server
+            .get(&format!("/storage/{public_key}/pub/dav.txt"))
+            .await
+            .assert_text("hello");
+
+        // Mounting a drive starts with a PROPFIND of its root.
+        server
+            .method(propfind, &format!("/dav/{public_key}/"))
+            .add_header("pubky-host", public_key.clone())
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header("depth", "1")
+            .await
+            .assert_status(StatusCode::MULTI_STATUS);
+
+        // Another drive stays out of reach however the path is spelled.
+        let other = Keypair::random().public_key().z32();
+        for path in [
+            format!("/dav/{other}/pub/dav.txt"),
+            format!("/dav/{public_key}/pub/../../{other}/pub/dav.txt"),
+        ] {
+            server
+                .get(&path)
+                .add_header("pubky-host", public_key.clone())
+                .add_header(header::COOKIE, cookie.clone())
+                .await
+                .assert_status(StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_options_advertises_dav_compliance_while_storage_keeps_cors() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router).unwrap();
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+
+        // `CorsLayer` answers every OPTIONS request itself, so a `/dav` route
+        // sitting under it returns a bare 200. Clients read the `DAV:` header
+        // off this response to decide whether the share is mountable at all —
+        // without it, nothing mounts.
+        let response = server
+            .method(Method::OPTIONS, &format!("/dav/{public_key}/"))
+            .add_header("pubky-host", public_key.clone())
+            .add_header(header::COOKIE, cookie)
+            .await;
+        response.assert_status_ok();
+        let dav = response
+            .headers()
+            .get("dav")
+            .expect("OPTIONS must advertise DAV compliance");
+        assert!(
+            dav.to_str().unwrap().starts_with('1'),
+            "unexpected DAV compliance classes: {dav:?}"
+        );
+
+        // The REST routes still need their CORS preflight answered.
+        server
+            .method(Method::OPTIONS, &format!("/storage/{public_key}/pub/x"))
+            .add_header(header::ORIGIN, "https://app.example")
+            .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .await
+            .assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "https://app.example");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_preflight_is_answered_without_credentials_or_cookies() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router).unwrap();
+        let public_key = Keypair::random().public_key().z32();
+
+        // A browser strips credentials from a preflight, so this must be
+        // answered before authentication rather than 401'd.
+        let response = server
+            .method(Method::OPTIONS, &format!("/dav/{public_key}/"))
+            .add_header(header::ORIGIN, "https://webdav.example")
+            .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "PROPFIND")
+            .add_header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization,depth",
+            )
+            .await;
+
+        response.assert_status(StatusCode::NO_CONTENT);
+        response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+
+        let allowed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|v| v.to_str().ok())
+            .expect("preflight must list allowed methods")
+            .to_string();
+        for method in ["PROPFIND", "MKCOL", "MOVE", "LOCK", "PUT", "DELETE"] {
+            assert!(allowed.contains(method), "{method} missing from {allowed}");
+        }
+
+        let headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .expect("preflight must list allowed headers")
+            .to_string();
+        for name in ["authorization", "depth", "destination"] {
+            assert!(headers.contains(name), "{name} missing from {headers}");
+        }
+
+        // The session cookie is SameSite=None, so allowing credentials here
+        // would let any origin read a signed-in user's drive.
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            "credentials must never be allowed cross-origin on /dav"
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_cross_origin_response_exposes_headers_clients_need() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router).unwrap();
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+
+        // PROPFIND on a drive with nothing in it is a 404, so give it a file.
+        server
+            .put(&format!("/dav/{public_key}/pub/cors.txt"))
+            .add_header("pubky-host", public_key.clone())
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(b"hi".to_vec().into())
+            .expect_success()
+            .await;
+
+        let response = server
+            .method(
+                Method::from_bytes(b"PROPFIND").unwrap(),
+                &format!("/dav/{public_key}/"),
+            )
+            .add_header(header::ORIGIN, "https://webdav.example")
+            .add_header("pubky-host", public_key.clone())
+            .add_header(header::COOKIE, cookie)
+            .add_header("depth", "1")
+            .await;
+
+        response.assert_status(StatusCode::MULTI_STATUS);
+        response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+
+        let exposed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .expect("cross-origin responses must expose WebDAV headers")
+            .to_string();
+        for name in ["dav", "lock-token", "etag"] {
+            assert!(exposed.contains(name), "{name} missing from {exposed}");
+        }
     }
 
     async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {

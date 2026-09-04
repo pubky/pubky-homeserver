@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::routes::{
-    admin_events, dav_handler, delete_entry,
+    admin_events, dav_handler, delete_entry, demo_user,
     disable_users::{disable_user, enable_user},
     generate_signup_token, info, root, signup_tokens, user_quota,
 };
@@ -28,6 +28,7 @@ fn create_protected_router(password: &str) -> Router<AppState> {
             get(generate_signup_token::generate_signup_token)
                 .post(generate_signup_token::generate_signup_token_with_limits),
         )
+        .route("/generate_demo_user", post(demo_user::generate_demo_user))
         .route("/info", get(info::info))
         .route("/events-stream", get(admin_events::feed_stream))
         .route("/signup_tokens", get(signup_tokens::list_signup_tokens))

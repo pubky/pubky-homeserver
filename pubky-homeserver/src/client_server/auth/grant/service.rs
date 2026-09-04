@@ -9,8 +9,9 @@ use chrono::Utc;
 use pubky_common::{
     auth::grant::GrantClaims,
     auth::grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
-    auth::jws::GrantId,
-    crypto::PublicKey,
+    auth::jws::{ClientId, GrantId},
+    capabilities::Capabilities,
+    crypto::{Keypair, PublicKey},
 };
 
 use super::crypto::{
@@ -38,6 +39,21 @@ const SIGNUP_CLIENT_ID: &str = "pubky.signup";
 
 /// Signup grants are single-use account creation proofs, not refresh grants.
 const MAX_SIGNUP_GRANT_LIFETIME_SECS: u64 = 5 * 60;
+
+/// A freshly minted personal access token.
+///
+/// `token` is the only time the bearer exists in plaintext on this server —
+/// only its SHA-256 is persisted.
+#[derive(Debug)]
+pub struct PersonalAccessToken {
+    /// The opaque bearer to present as `Authorization: Bearer` (or as the
+    /// password half of Basic auth).
+    pub token: String,
+    /// The grant backing this token, for later revocation.
+    pub grant_id: GrantId,
+    /// Unix seconds at which both the grant and its session expire.
+    pub expires_at: u64,
+}
 
 /// Facade for all grant-based auth operations.
 ///
@@ -216,6 +232,60 @@ impl GrantAuthService {
         } else {
             Err(AuthServiceError::RootCapabilityRequired)
         }
+    }
+
+    /// Mint a long-lived personal access token (PAT) for `user_id`.
+    ///
+    /// A PAT is an ordinary grant plus its session, created *without* the
+    /// user-signed Grant JWS and PoP proof that [`Self::create_grant_session`]
+    /// demands. It exists so clients that cannot run the Ring signing flow —
+    /// standard WebDAV clients, `curl` — can still authenticate.
+    ///
+    /// Two consequences follow from there being no client key to bind:
+    /// - The grant's `cnf` records a keypair whose secret is discarded right
+    ///   here. It is well formed, so nothing downstream chokes on it, but no
+    ///   PoP proof can ever satisfy it.
+    /// - The session is given the grant's own expiry rather than the usual
+    ///   hour, because there is no key to refresh it with.
+    ///
+    /// This bypasses the cold-key model deliberately, so **callers must gate it
+    /// themselves** — nothing here checks authorization.
+    pub async fn mint_personal_access_token(
+        &self,
+        user_id: i32,
+        client_id: ClientId,
+        capabilities: Capabilities,
+        lifetime_secs: u64,
+    ) -> Result<PersonalAccessToken, AuthServiceError> {
+        let now = Utc::now().timestamp() as u64;
+        let expires_at = now.saturating_add(lifetime_secs);
+        let grant_id = GrantId::generate();
+
+        let new_grant = NewGrant {
+            id: grant_id.clone(),
+            user_id,
+            client_id,
+            client_cnf_key: Keypair::random().public_key().z32(),
+            capabilities,
+            issued_at: now,
+            expires_at,
+        };
+        GrantRepository::create(&new_grant, &mut self.sql_db.pool().into()).await?;
+
+        let bearer = SessionBearer::generate();
+        let new_session = NewGrantSession {
+            token_hash: bearer.hash(),
+            grant_id: grant_id.clone(),
+            expires_at,
+        };
+        GrantSessionRepository::replace_for_grant(&new_session, &mut self.sql_db.pool().into())
+            .await?;
+
+        Ok(PersonalAccessToken {
+            token: bearer.into_string(),
+            grant_id,
+            expires_at,
+        })
     }
 
     // ── Private helpers ─────────────────────────────────────────────────

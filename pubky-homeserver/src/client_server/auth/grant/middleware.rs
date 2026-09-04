@@ -74,7 +74,7 @@ where
 
         Box::pin(async move {
             let bearer = match extract_bearer_token(req.headers()) {
-                BearerTokenExtraction::Present(bearer) => bearer,
+                BearerTokenExtraction::Present(bearer, _) => bearer,
                 BearerTokenExtraction::Missing => {
                     return inner.call(req).await.map_err(|e| match e {});
                 }
