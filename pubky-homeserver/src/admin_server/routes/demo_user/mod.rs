@@ -18,6 +18,8 @@
 //! off the public internet.
 //!
 //! [`AdminAuthLayer`]: crate::admin_server::auth_middleware::AdminAuthLayer
+mod pubky_app;
+
 use axum::{
     extract::{Query, State},
     response::IntoResponse,
@@ -81,15 +83,15 @@ const SEED_FILES: [(&str, &[u8]); 12] = [
     ),
     (
         "/pub/photos/harbour.png",
-        include_bytes!("../../../assets/demo/harbour.png"),
+        include_bytes!("../../../../assets/demo/harbour.png"),
     ),
     (
         "/pub/photos/ridge.png",
-        include_bytes!("../../../assets/demo/ridge.png"),
+        include_bytes!("../../../../assets/demo/ridge.png"),
     ),
     (
         "/pub/photos/orchard.png",
-        include_bytes!("../../../assets/demo/orchard.png"),
+        include_bytes!("../../../../assets/demo/orchard.png"),
     ),
     (
         "/pub/photos/captions.txt",
@@ -125,7 +127,7 @@ const SEED_FILES: [(&str, &[u8]); 12] = [
     ),
     (
         "/priv/drive/photos/scan-0001.png",
-        include_bytes!("../../../assets/demo/scan-0001.png"),
+        include_bytes!("../../../../assets/demo/scan-0001.png"),
     ),
     (
         "/priv/drive/projects/pubky-demo/notes.md",
@@ -267,16 +269,23 @@ async fn create_user(
         .await?)
 }
 
-/// Write [`SEED_FILES`] into the new user's drive, returning the paths written.
+/// Write [`SEED_FILES`] and the generated pubky.app tree into the new user's
+/// drive, returning the paths written.
 async fn seed_drive(state: &AppState, public_key: &PublicKey) -> HttpResult<Vec<String>> {
-    let mut written = Vec::with_capacity(SEED_FILES.len());
+    let plain = SEED_FILES
+        .iter()
+        .map(|(path, content)| ((*path).to_string(), content.to_vec()));
+    let social = pubky_app::seed_files(public_key)
+        .into_iter()
+        .map(|file| (file.path, file.body));
 
-    for (path, content) in SEED_FILES {
-        let storage_path = StoragePath::new(path)
+    let mut written = Vec::new();
+    for (path, content) in plain.chain(social) {
+        let storage_path = StoragePath::new(&path)
             .map_err(|e| HttpError::internal_server_and_log(format!("Seed path {path}: {e}")))?;
         let entry_path = EntryPath::new(public_key.clone(), storage_path);
         // `stream::iter` rather than `once` so the stream is `Unpin`.
-        let body = stream::iter([Ok::<Bytes, WriteStreamError>(Bytes::from_static(content))]);
+        let body = stream::iter([Ok::<Bytes, WriteStreamError>(Bytes::from(content))]);
 
         state
             .context
@@ -284,7 +293,7 @@ async fn seed_drive(state: &AppState, public_key: &PublicKey) -> HttpResult<Vec<
             .write_stream(&entry_path, body)
             .await
             .map_err(|e| HttpError::internal_server_and_log(format!("Seed write {path}: {e}")))?;
-        written.push(path.to_string());
+        written.push(path);
     }
 
     Ok(written)
