@@ -6272,6 +6272,7 @@ dependencies = [
  "bytes",
  "http 1.5.0",
  "http-body 1.1.0",
+ "http-body-util",
  "percent-encoding",
  "pin-project-lite",
  "tower-layer",

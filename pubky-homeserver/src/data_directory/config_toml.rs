@@ -46,6 +46,15 @@ pub enum ConfigReadError {
     ConfigMergeError(String),
 }
 
+/// `serde` default for a flag that is on unless an operator turns it off.
+///
+/// These flags were added after homeservers were already deployed, so every one
+/// of them defaults rather than being required: an existing `config.toml` that
+/// predates the field must keep parsing.
+fn enabled() -> bool {
+    true
+}
+
 /// Config structs
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -66,6 +75,15 @@ pub struct DriveToml {
     pub icann_listen_socket: SocketAddr,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
+    /// Serve the browser file explorer at `/drive`.
+    ///
+    /// Off by default: a storage daemon should not also be a web application
+    /// unless the operator asked for one.
+    #[serde(default)]
+    pub web_explorer: bool,
+    /// Serve the WebDAV endpoint at `/dav`.
+    #[serde(default = "enabled")]
+    pub webdav: bool,
 }
 
 /// Admin server configuration
@@ -73,6 +91,12 @@ pub struct DriveToml {
 pub struct AdminToml {
     /// Enable or disable the admin server
     pub enabled: bool,
+    /// Allow `POST /generate_demo_user` to provision throwaway accounts.
+    ///
+    /// Off by default. It creates users without a signup token and hands out
+    /// long-lived credentials, so it belongs on a test homeserver only.
+    #[serde(default)]
+    pub demo_users: bool,
     /// Socket address for the admin HTTP server
     pub listen_socket: SocketAddr,
     /// Password for admin authentication
@@ -318,8 +342,15 @@ mod tests {
         assert_eq!(c.pkdns.user_keys_republisher_interval, 14400);
         assert_eq!(c.pkdns.dht_bootstrap_nodes, None);
         assert_eq!(c.pkdns.dht_request_timeout_ms, None);
-        assert_eq!(c.drive.rate_limits.len(), 1);
+        // Two shipped limits: brute-force protection on signup tokens, and a
+        // runaway-client guard on mounted drives.
+        assert_eq!(c.drive.rate_limits.len(), 2);
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
+        assert_eq!(c.drive.rate_limits[1].path.0, "/dav/*");
+        assert_eq!(
+            c.drive.rate_limits[1].key,
+            crate::shared::quota::LimitKeyType::User
+        );
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());
         assert_eq!(c.storage.default_quota_mb, None);
         assert_eq!(c.storage.backend, StorageConfigToml::FileSystem);
@@ -333,6 +364,46 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn config_files_written_before_the_new_flags_still_parse() {
+        // These three landed after homeservers were deployed. A config.toml
+        // that predates them must keep working, with WebDAV on and the two
+        // demo surfaces off.
+        let legacy = r#"
+            [general]
+            signup_mode = "token_required"
+            database_url = "postgres://localhost:5432/pubky_homeserver"
+            [drive]
+            pubky_listen_socket = "127.0.0.1:6287"
+            icann_listen_socket = "127.0.0.1:6286"
+            rate_limits = []
+            [default_quotas]
+            [storage]
+            type = "file_system"
+            [admin]
+            enabled = true
+            listen_socket = "127.0.0.1:6288"
+            admin_password = "admin"
+            [metrics]
+            enabled = false
+            listen_socket = "127.0.0.1:6289"
+            [pkdns]
+            public_ip = "127.0.0.1"
+            user_keys_republisher_interval = 14400
+            [logging]
+            level = "info"
+            module_levels = []
+        "#;
+
+        let config = ConfigToml::from_str(legacy).expect("a pre-flag config must still parse");
+        assert!(
+            config.drive.webdav,
+            "WebDAV should stay on for existing servers"
+        );
+        assert!(!config.drive.web_explorer, "the explorer must be opt-in");
+        assert!(!config.admin.demo_users, "demo provisioning must be opt-in");
     }
 
     #[test]
@@ -369,8 +440,9 @@ mod tests {
         let s = "[logging]\nlevel=\"trace\"\nmodule_levels = [ ]";
         let merged: ConfigToml = ConfigToml::from_str_with_defaults(s).unwrap();
         // Default rate limits should be preserved from defaults
-        assert_eq!(merged.drive.rate_limits.len(), 1);
+        assert_eq!(merged.drive.rate_limits.len(), 2);
         assert_eq!(merged.drive.rate_limits[0].path.0, "/signup_tokens/*");
+        assert_eq!(merged.drive.rate_limits[1].path.0, "/dav/*");
         let expected_logging = Some(LoggingToml {
             level: LogLevel::from_str("trace").unwrap(),
             module_levels: vec![],

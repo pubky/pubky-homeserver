@@ -6,12 +6,22 @@ database_url = "postgres://localhost:5432/pubky_homeserver"
 [drive]
 pubky_listen_socket = "127.0.0.1:6287"
 icann_listen_socket = "127.0.0.1:6286"
+webdav = true
+web_explorer = false
 
 [[drive.rate_limits]]
 path = "/signup_tokens/*"
 method = "GET"
 quota = "10r/m"
 key = "ip"
+
+# Mounted drives poll constantly, so this is generous: it is here to stop a
+# runaway client, not to shape normal use.
+[[drive.rate_limits]]
+path = "/dav/*"
+method = "PROPFIND"
+quota = "600r/m"
+key = "user"
 
 [default_quotas]
 
@@ -22,6 +32,7 @@ type = "file_system"
 enabled = true
 listen_socket = "127.0.0.1:6288"
 admin_password = "admin"
+demo_users = false
 
 [metrics]
 enabled = false

@@ -13,8 +13,11 @@
 //! - **No Authorization header** → forwards without an identity.
 //! - **Non-Bearer / malformed Authorization header** → forwards without an identity.
 
-use crate::client_server::auth::grant::bearer::{extract_bearer_token, BearerTokenExtraction};
+use crate::client_server::auth::grant::bearer::{
+    extract_bearer_token, BearerTokenExtraction, Scheme,
+};
 use crate::client_server::auth::{AuthSession, AuthState};
+use crate::client_server::routes::dav::DAV_PREFIX;
 use axum::{body::Body, http::Request};
 use futures_util::future::BoxFuture;
 use std::{convert::Infallible, task::Poll};
@@ -72,9 +75,21 @@ where
         let state = self.state.clone();
         let mut inner = self.inner.clone();
 
+        // `Basic` exists for WebDAV clients, which can send nothing else, so it
+        // is honoured only there. Everywhere else a Basic header is somebody
+        // else's scheme and must not be read as a session token.
+        let webdav = is_webdav_path(req.uri().path());
+
         Box::pin(async move {
             let bearer = match extract_bearer_token(req.headers()) {
-                BearerTokenExtraction::Present(bearer) => bearer,
+                BearerTokenExtraction::Present(bearer, Scheme::Bearer) => bearer,
+                BearerTokenExtraction::Present(bearer, Scheme::Basic) if webdav => bearer,
+                BearerTokenExtraction::Present(_, Scheme::Basic) => {
+                    tracing::debug!(
+                        "Basic credentials outside the WebDAV endpoint; forwarding without auth"
+                    );
+                    return inner.call(req).await;
+                }
                 BearerTokenExtraction::Missing => {
                     return inner.call(req).await.map_err(|e| match e {});
                 }
@@ -107,9 +122,38 @@ where
     }
 }
 
+/// Whether a request path is served by the WebDAV endpoint.
+///
+/// Matches the `/dav{*path}` route: `/dav` itself and anything beneath it, but
+/// not a sibling like `/davos`.
+fn is_webdav_path(path: &str) -> bool {
+    path == DAV_PREFIX
+        || path
+            .strip_prefix(DAV_PREFIX)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webdav_paths_are_recognised_exactly() {
+        for path in ["/dav", "/dav/", "/dav/abc/pub/x.txt"] {
+            assert!(is_webdav_path(path), "{path} is the WebDAV endpoint");
+        }
+        // A sibling route must not inherit Basic auth by prefix accident.
+        for path in [
+            "/davos",
+            "/dav-admin",
+            "/storage/abc/pub/x",
+            "/session",
+            "/",
+        ] {
+            assert!(!is_webdav_path(path), "{path} is not the WebDAV endpoint");
+        }
+    }
+
     use crate::app_context::AppContext;
     use crate::client_server::auth::AuthSession;
     use crate::client_server::auth::AuthState;

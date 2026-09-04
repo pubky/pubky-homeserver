@@ -16,6 +16,7 @@ mod layer_domain_error;
 mod opendal;
 
 pub(crate) mod events;
+pub(crate) mod tenant_scope_layer;
 pub(crate) mod write_finalization_layer;
 pub(crate) mod write_path_layer;
 
