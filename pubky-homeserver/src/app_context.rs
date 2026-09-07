@@ -185,6 +185,7 @@ impl AppContext {
             events_service.clone(),
             user_service.clone(),
         )
+        .await
         .map_err(AppContextConversionError::Storage)?;
         file_service
             .recover_blob_storage()

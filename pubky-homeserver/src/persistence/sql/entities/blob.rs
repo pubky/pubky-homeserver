@@ -18,6 +18,15 @@ pub struct BlobReadLeaseRecord {
 }
 
 impl BlobRepository {
+    /// The backend namespace shared by all instances using this database.
+    pub async fn storage_namespace<'a>(
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<String, sqlx::Error> {
+        sqlx::query_scalar("SELECT namespace FROM blob_storage_namespace WHERE id = 1")
+            .fetch_one(executor.get_con().await?)
+            .await
+    }
+
     /// Record an immutable blob before uploading its bytes.
     pub async fn stage_upload<'a>(
         blob_key: &str,

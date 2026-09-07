@@ -259,12 +259,8 @@ impl OpendalService {
     }
 
     /// List immutable backend objects for orphan reconciliation.
-    pub(crate) async fn blob_lister(&self) -> Result<opendal::Lister, FileIoError> {
-        Ok(self
-            .operator
-            .lister_with("__pubky/blobs/")
-            .recursive(true)
-            .await?)
+    pub(crate) async fn blob_lister(&self, prefix: &str) -> Result<opendal::Lister, FileIoError> {
+        Ok(self.operator.lister_with(prefix).recursive(true).await?)
     }
 
     async fn sync_blob_parent(&self, key: &str) -> Result<(), FileIoError> {
@@ -276,7 +272,8 @@ impl OpendalService {
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| std::io::Error::other("blob key has no parent directory"))?;
-        tokio::task::spawn_blocking(move || sync_directory(&parent))
+        let root = Arc::clone(root);
+        tokio::task::spawn_blocking(move || sync_directory_tree(&root, &parent))
             .await
             .map_err(|error| {
                 std::io::Error::other(format!("directory sync task failed: {error}"))
