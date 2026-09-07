@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use opendal::Operator;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -115,6 +115,8 @@ pub struct OpendalService {
     filesystem_root: Option<Arc<PathBuf>>,
     #[cfg(test)]
     fail_next_delete: Arc<AtomicBool>,
+    #[cfg(test)]
+    range_reads: Arc<AtomicUsize>,
 }
 
 impl OpendalService {
@@ -128,6 +130,8 @@ impl OpendalService {
             filesystem_root: filesystem_root.map(Arc::new),
             #[cfg(test)]
             fail_next_delete: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            range_reads: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -239,6 +243,8 @@ impl OpendalService {
         key: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Bytes, FileIoError> {
+        #[cfg(test)]
+        self.range_reads.fetch_add(1, Ordering::Relaxed);
         Ok(Bytes::from(
             self.operator.read_with(key).range(range).await?.to_vec(),
         ))
@@ -298,11 +304,16 @@ impl OpendalService {
             operator,
             filesystem_root: None,
             fail_next_delete: Arc::new(AtomicBool::new(false)),
+            range_reads: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn fail_next_delete(&self) {
         self.fail_next_delete.store(true, Ordering::SeqCst);
+    }
+
+    pub fn range_read_count(&self) -> usize {
+        self.range_reads.load(Ordering::Relaxed)
     }
 }
 
