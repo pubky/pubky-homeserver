@@ -345,6 +345,12 @@ deletions reclaim storage. Also configure an `AbortIncompleteMultipartUpload`
 lifecycle rule for the `__pubky/blobs/` prefix; incomplete multipart uploads are
 not visible to the homeserver's completed-object reconciliation.
 
+Immutable blobs are stored under `__pubky/blobs/{namespace}/`. The namespace is
+created in PostgreSQL and shared by instances using that database. Independent
+databases use separate namespaces, so cleanup cannot delete another homeserver's
+blobs in a shared bucket. Include the namespace table in database backups; a
+restored copy must not run cleanup against the original deployment's live prefix.
+
 ## Troubleshooting
 
 ### `database "pubky_homeserver" does not exist`

@@ -60,6 +60,7 @@ pub struct FileService {
     events_service: EventsService,
     user_service: UserService,
     default_storage_mb: Option<u64>,
+    blob_prefix: String,
     read_leases: Arc<Mutex<ReadLeaseCache>>,
 }
 
@@ -304,6 +305,7 @@ impl FileService {
         events_service: EventsService,
         user_service: UserService,
         default_storage_mb: Option<u64>,
+        blob_prefix: String,
     ) -> Self {
         Self {
             opendal: opendal_service,
@@ -311,6 +313,7 @@ impl FileService {
             events_service,
             user_service,
             default_storage_mb,
+            blob_prefix,
             read_leases: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(READ_LEASE_CACHE_CAPACITY)
                     .expect("read lease cache capacity must be non-zero"),
@@ -318,7 +321,7 @@ impl FileService {
         }
     }
 
-    pub fn new_from_config(
+    pub async fn new_from_config(
         config: &ConfigToml,
         data_directory: &Path,
         db: SqlDb,
@@ -326,12 +329,14 @@ impl FileService {
         user_service: crate::services::user_service::UserService,
     ) -> Result<Self, FileIoError> {
         let opendal_service = OpendalService::new_from_config(&config.storage, data_directory)?;
+        let namespace = BlobRepository::storage_namespace(&mut db.pool().into()).await?;
         Ok(Self::new(
             opendal_service,
             db,
             events_service,
             user_service,
             config.storage.default_quota_mb,
+            format!("__pubky/blobs/{namespace}/"),
         ))
     }
 
@@ -869,7 +874,7 @@ impl FileService {
 
     /// Queue immutable backend objects that are no longer represented in PostgreSQL.
     pub(crate) async fn reconcile_untracked_blobs(&self) -> Result<u64, FileIoError> {
-        let mut lister = self.opendal.blob_lister().await?;
+        let mut lister = self.opendal.blob_lister(&self.blob_prefix).await?;
         let mut blob_keys = Vec::with_capacity(CLEANUP_BATCH_SIZE);
         let mut queued = 0;
 
@@ -902,7 +907,7 @@ impl FileService {
             self.check_write_path_allowed(path).await?;
         }
 
-        let blob_key = format!("__pubky/blobs/{}", uuid::Uuid::new_v4().simple());
+        let blob_key = format!("{}{}", self.blob_prefix, uuid::Uuid::new_v4().simple());
         let reservation = self.reserve_upload(path, &blob_key, size_hint).await?;
         let upload_heartbeat = UploadHeartbeat::start(self.db.clone(), blob_key.clone());
 
@@ -1332,6 +1337,7 @@ impl FileService {
             context.events_service.clone(),
             context.user_service.clone(),
             context.config_toml.storage.default_quota_mb,
+            context.file_service.blob_prefix.clone(),
         ))
     }
 
@@ -2063,11 +2069,11 @@ mod tests {
             .await
             .unwrap();
         let active_blob_key = active.blob_key.unwrap();
-        let orphan_blob_key = "__pubky/blobs/late-orphan";
+        let orphan_blob_key = format!("{}late-orphan", file_service.blob_prefix);
         file_service
             .opendal
             .write_blob_stream(
-                orphan_blob_key,
+                &orphan_blob_key,
                 futures_util::stream::iter([Ok(Bytes::from_static(b"orphan"))]),
                 &path,
             )
@@ -2084,14 +2090,14 @@ mod tests {
             .unwrap());
         assert!(!file_service
             .opendal
-            .blob_exists(orphan_blob_key)
+            .blob_exists(&orphan_blob_key)
             .await
             .unwrap());
 
         file_service
             .opendal
             .write_blob_stream(
-                orphan_blob_key,
+                &orphan_blob_key,
                 futures_util::stream::iter([Ok(Bytes::from_static(b"late"))]),
                 &path,
             )
@@ -2101,10 +2107,70 @@ mod tests {
         file_service.recover_blob_storage().await.unwrap();
         assert!(!file_service
             .opendal
-            .blob_exists(orphan_blob_key)
+            .blob_exists(&orphan_blob_key)
             .await
             .unwrap());
         assert_eq!(file_service.get(&path).await.unwrap().as_ref(), b"active");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_reconciliation_is_isolated_between_databases_sharing_storage() {
+        let first = filesystem_context().await;
+        let second = AppContext::test().await;
+        let first_service = &first.file_service;
+        let second_service = FileService::new_from_config(
+            &first.config_toml,
+            first.data_dir.path(),
+            second.sql_db.clone(),
+            second.events_service.clone(),
+            second.user_service.clone(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(first_service.blob_prefix, second_service.blob_prefix);
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        first.user_service.create(&public_key).await.unwrap();
+        second.user_service.create(&public_key).await.unwrap();
+        let path = EntryPath::new(public_key, StoragePath::new("/pub/state.bin").unwrap());
+        first_service
+            .write(&path, Buffer::from(b"first".to_vec()))
+            .await
+            .unwrap();
+        second_service
+            .write(&path, Buffer::from(b"second".to_vec()))
+            .await
+            .unwrap();
+
+        let orphan = format!("{}orphan", first_service.blob_prefix);
+        first_service
+            .opendal
+            .write_blob_stream(
+                &orphan,
+                futures_util::stream::iter([Ok(Bytes::from_static(b"orphan"))]),
+                &path,
+            )
+            .await
+            .unwrap();
+
+        let restarted = FileService::new_from_config(
+            &first.config_toml,
+            first.data_dir.path(),
+            first.sql_db.clone(),
+            first.events_service.clone(),
+            first.user_service.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_service.blob_prefix, restarted.blob_prefix);
+        assert_eq!(second_service.reconcile_untracked_blobs().await.unwrap(), 0);
+        assert_eq!(restarted.reconcile_untracked_blobs().await.unwrap(), 1);
+        second_service.recover_blob_storage().await.unwrap();
+        restarted.recover_blob_storage().await.unwrap();
+
+        assert!(!restarted.opendal.blob_exists(&orphan).await.unwrap());
+        assert_eq!(restarted.get(&path).await.unwrap().as_ref(), b"first");
+        assert_eq!(second_service.get(&path).await.unwrap().as_ref(), b"second");
     }
 
     #[tokio::test]

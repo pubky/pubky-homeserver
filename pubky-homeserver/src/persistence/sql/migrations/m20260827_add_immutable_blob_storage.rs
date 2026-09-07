@@ -13,6 +13,25 @@ impl MigrationTrait for M20260827AddImmutableBlobStorageMigration {
             .execute(&mut **tx)
             .await?;
 
+        sqlx::query("CREATE INDEX IF NOT EXISTS entries_blob_key_idx ON entries (blob_key)")
+            .execute(&mut **tx)
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS blob_storage_namespace (\
+                id INTEGER PRIMARY KEY CHECK (id = 1), namespace TEXT NOT NULL\
+            )",
+        )
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO blob_storage_namespace (id, namespace) VALUES (1, $1) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(uuid::Uuid::new_v4().simple().to_string())
+        .execute(&mut **tx)
+        .await?;
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS blob_uploads (
@@ -91,6 +110,7 @@ impl MigrationTrait for M20260827AddImmutableBlobStorageMigration {
 mod tests {
     use super::*;
     use crate::persistence::sql::{
+        entities::blob::BlobRepository,
         migrations::{M20250806CreateUserMigration, M20250815CreateEntryMigration},
         migrator::Migrator,
         SqlDb,
@@ -152,6 +172,19 @@ mod tests {
                 .unwrap();
         assert_eq!(blob_key, None);
         assert_eq!(path, "/pub/legacy.txt");
+
+        let index: String = sqlx::query_scalar(
+            "SELECT indexdef FROM pg_indexes WHERE tablename = 'entries' AND indexname = 'entries_blob_key_idx'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert!(index.contains("(blob_key)"));
+
+        let namespace = BlobRepository::storage_namespace(&mut db.pool().into())
+            .await
+            .unwrap();
+        assert!(uuid::Uuid::parse_str(&namespace).is_ok());
 
         for table in ["blob_uploads", "blob_garbage", "blob_read_leases"] {
             let exists: bool = sqlx::query_scalar(
