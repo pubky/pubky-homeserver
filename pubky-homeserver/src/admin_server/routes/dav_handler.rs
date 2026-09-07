@@ -14,7 +14,7 @@ use axum::{
     response::IntoResponse,
 };
 use base64::Engine;
-use dav_server::davpath::DavPath;
+use dav_server::{davpath::DavPath, DavMethod};
 
 pub async fn dav_handler(
     State(state): State<AppState>,
@@ -33,19 +33,20 @@ pub async fn dav_handler(
             .body(Body::from("User collections cannot be deleted"))
             .expect("This response should always be valid"));
     }
-    if has_unsupported_mutation_precondition(&req) {
+    let method = DavMethod::try_from(req.method()).ok();
+    if has_unsupported_mutation_precondition(&req, method) {
         return Ok(Response::builder()
             .status(StatusCode::NOT_IMPLEMENTED)
             .body(Body::from("Conditional WebDAV mutations are not supported"))
             .expect("This response should always be valid"));
     }
-    if req.method().as_str() == "MKCOL" {
+    if method == Some(DavMethod::MkCol) {
         return Ok(Response::builder()
             .status(StatusCode::NOT_IMPLEMENTED)
             .body(Body::from("Empty collections are not supported"))
             .expect("This response should always be valid"));
     }
-    if matches!(req.method().as_str(), "COPY" | "MOVE") {
+    if matches!(method, Some(DavMethod::Copy | DavMethod::Move)) {
         if copy_move_source_equals_destination(&req) {
             return Ok(Response::builder()
                 .status(StatusCode::FORBIDDEN)
@@ -76,20 +77,21 @@ pub async fn dav_handler(
             .insert("Overwrite", HeaderValue::from_static("F"));
     }
 
-    let request_method = req.method().clone();
     let mut dav_response = state.inner_dav_handler.handle(req).await;
-    let status = normalize_dav_status(&request_method, dav_response.status());
+    let status = normalize_dav_status(method, dav_response.status());
     *dav_response.status_mut() = status;
     Ok(dav_response.into_response())
 }
 
-fn normalize_dav_status(method: &Method, status: StatusCode) -> StatusCode {
+fn normalize_dav_status(method: Option<DavMethod>, status: StatusCode) -> StatusCode {
     match (method, status) {
-        (&Method::PUT, StatusCode::METHOD_NOT_ALLOWED) => StatusCode::CONFLICT,
-        (method, StatusCode::METHOD_NOT_ALLOWED) if matches!(method.as_str(), "COPY" | "MOVE") => {
+        (Some(DavMethod::Put), StatusCode::METHOD_NOT_ALLOWED) => StatusCode::CONFLICT,
+        (Some(DavMethod::Copy | DavMethod::Move), StatusCode::METHOD_NOT_ALLOWED) => {
             StatusCode::PRECONDITION_FAILED
         }
-        (&Method::PUT | &Method::PATCH, StatusCode::PAYLOAD_TOO_LARGE) => StatusCode::BAD_REQUEST,
+        (Some(DavMethod::Put | DavMethod::Patch), StatusCode::PAYLOAD_TOO_LARGE) => {
+            StatusCode::BAD_REQUEST
+        }
         _ => status,
     }
 }
@@ -139,10 +141,20 @@ async fn unsupported_collection_source_status(
     }
 }
 
-fn has_unsupported_mutation_precondition(request: &Request<Body>) -> bool {
+fn has_unsupported_mutation_precondition(
+    request: &Request<Body>,
+    method: Option<DavMethod>,
+) -> bool {
     let is_mutation = matches!(
-        request.method().as_str(),
-        "PUT" | "PATCH" | "DELETE" | "COPY" | "MOVE" | "PROPPATCH"
+        method,
+        Some(
+            DavMethod::Put
+                | DavMethod::Patch
+                | DavMethod::Delete
+                | DavMethod::Copy
+                | DavMethod::Move
+                | DavMethod::PropPatch
+        )
     );
     is_mutation
         && ["if", "if-match", "if-none-match", "if-unmodified-since"]
@@ -324,18 +336,15 @@ mod tests {
     #[test]
     fn test_normalizes_dav_storage_errors() {
         assert_eq!(
-            normalize_dav_status(&Method::PUT, StatusCode::METHOD_NOT_ALLOWED),
+            normalize_dav_status(Some(DavMethod::Put), StatusCode::METHOD_NOT_ALLOWED),
             StatusCode::CONFLICT
         );
         assert_eq!(
-            normalize_dav_status(&Method::PATCH, StatusCode::PAYLOAD_TOO_LARGE),
+            normalize_dav_status(Some(DavMethod::Patch), StatusCode::PAYLOAD_TOO_LARGE),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            normalize_dav_status(
-                &Method::from_bytes(b"COPY").unwrap(),
-                StatusCode::METHOD_NOT_ALLOWED,
-            ),
+            normalize_dav_status(Some(DavMethod::Copy), StatusCode::METHOD_NOT_ALLOWED),
             StatusCode::PRECONDITION_FAILED
         );
     }

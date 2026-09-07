@@ -231,7 +231,7 @@ impl ActiveBlobReadLease {
 }
 
 impl BlobReadLease {
-    fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         !self.inner.cancellation.is_cancelled()
     }
 

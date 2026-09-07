@@ -32,6 +32,8 @@ use crate::{
     shared::webdav::{EntryPath, StoragePath},
 };
 
+const DAV_READ_AHEAD_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone)]
 pub(crate) struct AdminDavFileSystem {
     file_service: FileService,
@@ -190,6 +192,7 @@ impl DavFileSystem for AdminDavFileSystem {
                     entry: Box::new(entry),
                     position: 0,
                     lease,
+                    buffer: Bytes::new(),
                 }
             } else {
                 std::fs::create_dir_all(self.spool_directory.as_ref())
@@ -449,6 +452,7 @@ enum AdminDavFileData {
         entry: Box<crate::persistence::sql::entry::EntryEntity>,
         position: u64,
         lease: BlobReadLease,
+        buffer: Bytes,
     },
     Temporary {
         file: tokio::fs::File,
@@ -600,18 +604,25 @@ impl DavFile for AdminDavFile {
                     entry,
                     position,
                     lease,
+                    buffer,
                 } => {
-                    let end = position
-                        .saturating_add(count as u64)
-                        .min(entry.content_length);
-                    if end <= *position {
+                    if !lease.is_active() {
+                        return Err(map_file_error(FileIoError::ReadLeaseLost));
+                    }
+                    if count == 0 || *position >= entry.content_length {
                         return Ok(Bytes::new());
                     }
-                    let bytes = self
-                        .file_service
-                        .get_entry_range(entry, lease, *position..end)
-                        .await
-                        .map_err(map_file_error)?;
+                    if buffer.is_empty() {
+                        let end = position
+                            .saturating_add(DAV_READ_AHEAD_BYTES as u64)
+                            .min(entry.content_length);
+                        *buffer = self
+                            .file_service
+                            .get_entry_range(entry, lease, *position..end)
+                            .await
+                            .map_err(map_file_error)?;
+                    }
+                    let bytes = buffer.split_to(count.min(buffer.len()));
                     *position = position.saturating_add(bytes.len() as u64);
                     Ok(bytes)
                 }
@@ -635,9 +646,11 @@ impl DavFile for AdminDavFile {
                 AdminDavFileData::Remote {
                     entry,
                     position: current,
+                    buffer,
                     ..
                 } => {
                     *current = seek_position(*current, entry.content_length, position)?;
+                    *buffer = Bytes::new();
                     Ok(*current)
                 }
                 AdminDavFileData::Temporary { file, .. } => file
@@ -804,6 +817,68 @@ fn map_file_error(error: FileIoError) -> FsError {
 mod tests {
     use super::*;
     use crate::AppContext;
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_remote_read_ahead_and_seek() {
+        let context = AppContext::test().await;
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let entry_path = EntryPath::new(
+            public_key.clone(),
+            StoragePath::new("/pub/file.bin").unwrap(),
+        );
+        let content: Vec<u8> = (0..DAV_READ_AHEAD_BYTES * 2 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        context
+            .file_service
+            .write(&entry_path, opendal::Buffer::from(content.clone()))
+            .await
+            .unwrap();
+        let filesystem = AdminDavFileSystem::new(
+            context.file_service.clone(),
+            context.data_dir.path().to_path_buf(),
+            u64::MAX,
+        );
+        let path = DavPath::new(&format!("/{}/pub/file.bin", public_key.z32())).unwrap();
+        let mut file = filesystem
+            .open(
+                &path,
+                OpenOptions {
+                    read: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(file.read_bytes(0).await.unwrap().is_empty());
+        assert_eq!(context.file_service.opendal.range_read_count(), 0);
+        let mut received = Vec::new();
+        loop {
+            let bytes = file.read_bytes(16 * 1024).await.unwrap();
+            if bytes.is_empty() {
+                break;
+            }
+            received.extend_from_slice(&bytes);
+        }
+        assert_eq!(received, content);
+        assert_eq!(context.file_service.opendal.range_read_count(), 3);
+
+        file.seek(SeekFrom::Start(7)).await.unwrap();
+        assert_eq!(file.read_bytes(19).await.unwrap().as_ref(), &content[7..26]);
+        file.seek(SeekFrom::Current(11)).await.unwrap();
+        assert_eq!(
+            file.read_bytes(19).await.unwrap().as_ref(),
+            &content[37..56]
+        );
+        file.seek(SeekFrom::End(-3)).await.unwrap();
+        assert_eq!(
+            file.read_bytes(19).await.unwrap().as_ref(),
+            &content[content.len() - 3..]
+        );
+        assert!(file.read_bytes(19).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]
