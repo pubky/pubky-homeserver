@@ -4,7 +4,7 @@ use crate::{
     persistence::{
         files::events::EventsService,
         sql::{
-            entities::blob::{BlobGarbageClaim, BlobReadLeaseRecord, BlobRepository},
+            entities::blob::{BlobGarbageEntity, BlobReadLeaseEntity, BlobRepository},
             entry::{EntryEntity, EntryRepository},
             user::UserEntity,
             SqlDb, UnifiedExecutor,
@@ -71,7 +71,7 @@ struct UploadHeartbeat {
 
 #[derive(Debug)]
 struct ActiveBlobReadLease {
-    record: BlobReadLeaseRecord,
+    record: BlobReadLeaseEntity,
     cancellation: CancellationToken,
     db: SqlDb,
 }
@@ -180,7 +180,7 @@ impl UploadHeartbeat {
 }
 
 impl ActiveBlobReadLease {
-    fn start(db: SqlDb, record: BlobReadLeaseRecord) -> Arc<Self> {
+    fn start(db: SqlDb, record: BlobReadLeaseEntity) -> Arc<Self> {
         let lease = Arc::new(Self {
             record: record.clone(),
             cancellation: CancellationToken::new(),
@@ -1281,7 +1281,7 @@ impl FileService {
         }
     }
 
-    async fn delete_claimed_blob(&self, claim: BlobGarbageClaim) {
+    async fn delete_claimed_blob(&self, claim: BlobGarbageEntity) {
         match tokio::time::timeout(
             CLEANUP_DELETE_TIMEOUT,
             self.opendal.delete_by_key(&claim.blob_key),
@@ -1309,7 +1309,7 @@ impl FileService {
         }
     }
 
-    async fn defer_garbage_claim(&self, claim: &BlobGarbageClaim) {
+    async fn defer_garbage_claim(&self, claim: &BlobGarbageEntity) {
         if let Err(error) = BlobRepository::defer_garbage(
             claim,
             FAILED_CLEANUP_RETRY_SECONDS,

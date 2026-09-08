@@ -1,20 +1,39 @@
 use crate::persistence::sql::UnifiedExecutor;
+use sqlx::{postgres::PgRow, FromRow, Row};
 
 /// Persists immutable blob upload and cleanup bookkeeping.
 pub struct BlobRepository;
 
 /// One worker's ownership of a queued backend deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlobGarbageClaim {
+pub struct BlobGarbageEntity {
     pub blob_key: String,
     claim_token: String,
 }
 
+impl FromRow<'_, PgRow> for BlobGarbageEntity {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            blob_key: row.try_get("blob_key")?,
+            claim_token: row.try_get("claim_token")?,
+        })
+    }
+}
+
 /// A bounded cross-process read lease on one immutable blob.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlobReadLeaseRecord {
+pub struct BlobReadLeaseEntity {
     pub blob_key: String,
     lease_id: String,
+}
+
+impl FromRow<'_, PgRow> for BlobReadLeaseEntity {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            blob_key: row.try_get("blob_key")?,
+            lease_id: row.try_get("lease_id")?,
+        })
+    }
 }
 
 impl BlobRepository {
@@ -285,9 +304,9 @@ impl BlobRepository {
         lease_id: &str,
         lease_seconds: i64,
         executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<Option<BlobReadLeaseRecord>, sqlx::Error> {
+    ) -> Result<Option<BlobReadLeaseEntity>, sqlx::Error> {
         let con = executor.get_con().await?;
-        let leased = sqlx::query_as::<_, (String, String)>(
+        sqlx::query_as::<_, BlobReadLeaseEntity>(
             r#"
             WITH garbage AS (
                 SELECT claim_token
@@ -314,13 +333,12 @@ impl BlobRepository {
         .bind(lease_id)
         .bind(lease_seconds)
         .fetch_optional(con)
-        .await?;
-        Ok(leased.map(|(blob_key, lease_id)| BlobReadLeaseRecord { blob_key, lease_id }))
+        .await
     }
 
     /// Extend one active reader lease without affecting other readers.
     pub async fn refresh_read_lease<'a>(
-        lease: &BlobReadLeaseRecord,
+        lease: &BlobReadLeaseEntity,
         lease_seconds: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<bool, sqlx::Error> {
@@ -355,7 +373,7 @@ impl BlobRepository {
 
     /// Release one reader lease after its final local reader is dropped.
     pub async fn release_read_lease<'a>(
-        lease: &BlobReadLeaseRecord,
+        lease: &BlobReadLeaseEntity,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<(), sqlx::Error> {
         let con = executor.get_con().await?;
@@ -384,10 +402,10 @@ impl BlobRepository {
         limit: i64,
         stale_claim_seconds: i64,
         executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<Vec<BlobGarbageClaim>, sqlx::Error> {
+    ) -> Result<Vec<BlobGarbageEntity>, sqlx::Error> {
         let con = executor.get_con().await?;
         let claim_token = uuid::Uuid::new_v4().simple().to_string();
-        let rows = sqlx::query_as::<_, (String, String)>(
+        sqlx::query_as::<_, BlobGarbageEntity>(
             r#"
             WITH candidates AS (
                 SELECT blob_key
@@ -419,19 +437,12 @@ impl BlobRepository {
         .bind(stale_claim_seconds)
         .bind(&claim_token)
         .fetch_all(con)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(blob_key, claim_token)| BlobGarbageClaim {
-                blob_key,
-                claim_token,
-            })
-            .collect())
+        .await
     }
 
     /// Remove a blob from the cleanup queue after backend deletion succeeds.
     pub async fn finish_garbage<'a>(
-        claim: &BlobGarbageClaim,
+        claim: &BlobGarbageEntity,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<(), sqlx::Error> {
         let con = executor.get_con().await?;
@@ -445,7 +456,7 @@ impl BlobRepository {
 
     /// Keep a failed deletion tombstoned while deferring it for a later retry.
     pub async fn defer_garbage<'a>(
-        claim: &BlobGarbageClaim,
+        claim: &BlobGarbageEntity,
         retry_delay_seconds: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<(), sqlx::Error> {
