@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use super::FileService;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
-const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Periodically retries durable blob cleanup work.
 pub(crate) struct BlobCleanupTask {
