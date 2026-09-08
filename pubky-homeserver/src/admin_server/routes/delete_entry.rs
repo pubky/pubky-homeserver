@@ -25,12 +25,9 @@ mod tests {
 
     use super::super::super::app_state::AppState;
     use super::*;
-    use crate::persistence::files::{
-        events::{EventRepository, EventType, EventVisibility},
-        FileService,
-    };
+    use crate::persistence::files::events::{EventRepository, EventType, EventVisibility};
     use crate::persistence::sql::entry::EntryRepository;
-    use crate::services::user_service::UserService;
+    use crate::services::{file_service::FileService, user_service::UserService};
     use crate::shared::webdav::{EntryPath, StoragePath};
     use crate::AppContext;
     use axum::{routing::delete, Router};
