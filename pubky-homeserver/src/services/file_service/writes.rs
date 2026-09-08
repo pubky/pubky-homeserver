@@ -141,6 +141,22 @@ impl FileService {
             self.check_write_path_allowed(path).await?;
         }
 
+        // Reject stale requests before staging bytes. commit_write checks again under the user lock.
+        if !preconditions.is_empty() {
+            let mut executor = self.db.pool().into();
+            if mode.enforces_path_collisions()
+                && EntryRepository::has_file_folder_collision(path, &mut executor).await?
+            {
+                return Err(FileIoError::PathCollision);
+            }
+            let existing = match self.get_info(path, &mut executor).await {
+                Ok(entry) => Some(entry),
+                Err(FileIoError::NotFound) => None,
+                Err(error) => return Err(error),
+            };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
+        }
+
         let blob_key = format!("{}{}", self.blob_prefix, uuid::Uuid::new_v4().simple());
         let reservation = self.reserve_upload(path, &blob_key, size_hint).await?;
         let upload_heartbeat = UploadHeartbeat::start(self.db.clone(), blob_key.clone());

@@ -131,13 +131,6 @@ impl PubkyCookieAuthFlow {
     /// [`await_credential`](Self::await_credential) directly if you need to
     /// inspect or persist the credential before building a session.
     ///
-    /// Signup flows bind the cookie credential to the homeserver named in the
-    /// signup deep link. Signin flows do not name a homeserver, so their cookie
-    /// credential remains unbound until a successful
-    /// [`PubkySession::revalidate`](PubkySession::revalidate). Until then, the
-    /// session can still use normal cookie storage APIs, but it will not
-    /// authenticate private event streams.
-    ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Authentication`] if the relay channel
     ///   expires before approval.

@@ -14,6 +14,14 @@ pubky = "0.x"            # this crate
 # pubky-testnet = "0.x"
 ```
 
+## Upgrade notes
+
+Conditional storage APIs add `RequestError::UnsupportedFeature { feature }`.
+When upgrading from an SDK without this variant, update exhaustive Rust matches
+on `RequestError` to handle it. It means the homeserver does not advertise the
+required feature. Do not retry a conditional operation as an unconditional write
+or delete, since that would discard its concurrency protection.
+
 ## Quick start
 
 ```rust no_run

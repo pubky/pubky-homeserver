@@ -155,6 +155,81 @@ fn assert_one_preconditioned_commit(
 
 #[tokio::test]
 #[pubky_test_utils::test]
+async fn test_stale_write_preconditions_reject_before_upload() {
+    let context = AppContext::test().await;
+    let service = FileService::new_from_context(&context).unwrap();
+    let pubkey = pubky_common::crypto::Keypair::random().public_key();
+    context.user_service.create(&pubkey).await.unwrap();
+    let path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/state.bin").unwrap());
+    let missing = EntryPath::new(pubkey, StoragePath::new("/pub/missing.bin").unwrap());
+    service
+        .write(&path, Buffer::from(b"current".to_vec()))
+        .await
+        .unwrap();
+
+    for (path, preconditions) in [
+        (&path, write_preconditions(Some("\"stale\""), None)),
+        (&path, write_preconditions(None, Some("*"))),
+        (&missing, write_preconditions(Some("*"), None)),
+    ] {
+        let stream = futures_util::stream::poll_fn(|_| {
+            panic!("a rejected upload must not read the request body")
+        });
+        let result = service
+            .write_stream_with_preconditions(path, stream, Some(1024), preconditions)
+            .await;
+        assert!(matches!(result, Err(FileIoError::PreconditionFailed)));
+    }
+
+    let pending_blobs: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM blob_uploads) + (SELECT COUNT(*) FROM blob_garbage)",
+    )
+    .fetch_one(context.sql_db.pool())
+    .await
+    .unwrap();
+    assert_eq!(pending_blobs, 0);
+    assert_eq!(service.get(&path).await.unwrap().as_ref(), b"current");
+}
+
+#[tokio::test]
+#[pubky_test_utils::test]
+async fn test_write_preconditions_rechecked_after_upload() {
+    let context = AppContext::test().await;
+    let service = FileService::new_from_context(&context).unwrap();
+    let pubkey = pubky_common::crypto::Keypair::random().public_key();
+    context.user_service.create(&pubkey).await.unwrap();
+
+    for existing in [false, true] {
+        let path = EntryPath::new(
+            pubkey.clone(),
+            StoragePath::new(&format!("/pub/state-{existing}.bin")).unwrap(),
+        );
+        let preconditions = if existing {
+            let entry = service
+                .write(&path, Buffer::from(b"initial".to_vec()))
+                .await
+                .unwrap();
+            write_preconditions(Some(&content_hash_etag(&entry.content_hash)), None)
+        } else {
+            write_preconditions(None, Some("*"))
+        };
+        let stream = Box::pin(futures_util::stream::once(async {
+            service
+                .write(&path, Buffer::from(b"concurrent".to_vec()))
+                .await
+                .unwrap();
+            Ok(Bytes::from_static(b"rejected"))
+        }));
+        let result = service
+            .write_stream_with_preconditions(&path, stream, Some(8), preconditions)
+            .await;
+        assert!(matches!(result, Err(FileIoError::PreconditionFailed)));
+        assert_eq!(service.get(&path).await.unwrap().as_ref(), b"concurrent");
+    }
+}
+
+#[tokio::test]
+#[pubky_test_utils::test]
 async fn test_concurrent_if_none_match_creation_commits_once() {
     let context = AppContext::test().await;
     let service = FileService::new_from_context(&context).unwrap();
