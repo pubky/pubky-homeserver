@@ -76,6 +76,8 @@ paths:
       description: |-
         Returns stable, opaque feature identifiers supported by this homeserver.
         Clients must ignore unknown identifiers.
+        `conditional-writes` guarantees enforcement of `If-Match` and
+        `If-None-Match` on both storage PUT and DELETE requests.
       operationId: getInfo
       responses:
         '200':
@@ -597,21 +599,28 @@ paths:
 
         The authenticated user must match `user_z32` and have write capability
         covering the storage path.
+        `If-Match` deletes only a matching current representation. Failed
+        `If-Match` or `If-None-Match` preconditions leave the file unchanged.
       operationId: deletePathAddressedEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfMatch"
+      - "$ref": "#/components/parameters/IfNoneMatch"
       responses:
         '204':
           description: File deleted.
         '400':
-          description: Invalid owner public key or storage path.
+          description: Invalid owner public key, storage path, or conditional header.
         '401':
           description: No valid session.
         '403':
           description: Insufficient permissions or path outside `pub/` and `priv/`.
         '404':
           description: File or storage owner not found.
+        '412':
+          description: An `If-Match` or `If-None-Match` precondition failed.
   "/{path}":
     parameters:
     - name: path
@@ -887,19 +896,28 @@ paths:
 
         Deletes a file at the given path. Path must be under `/pub/` or `/priv/`.
         The authenticated user must match the target tenant and have write capability.
+        `If-Match` deletes only a matching current representation. Failed
+        `If-Match` or `If-None-Match` preconditions leave the file unchanged.
       operationId: deleteEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfMatch"
+      - "$ref": "#/components/parameters/IfNoneMatch"
       responses:
         '204':
           description: File deleted
+        '400':
+          description: Invalid storage path or conditional header
         '401':
           description: No valid session
         '403':
           description: Insufficient permissions or path outside `/pub/` and `/priv/`
         '404':
           description: File not found
+        '412':
+          description: An `If-Match` or `If-None-Match` precondition failed
   "/events/":
     get:
       tags:
