@@ -28,7 +28,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 use crate::{
-    persistence::files::{BlobReadLease, FileIoError, FileService, WriteStreamError},
+    persistence::files::{FileIoError, WriteStreamError},
+    services::file_service::{BlobReadLease, FileService},
     shared::webdav::{EntryPath, StoragePath},
 };
 

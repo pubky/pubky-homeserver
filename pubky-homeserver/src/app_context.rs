@@ -5,14 +5,17 @@
 //! Create with a `DataDir` instance: `AppContext::try_from(data_dir)`
 //!
 
-use crate::services::user_service::UserService;
+use crate::services::{
+    file_service::{BlobCleanupTask, FileService},
+    user_service::UserService,
+};
 #[cfg(any(test, feature = "testing"))]
 use crate::MockDataDir;
 use crate::{
     client_server::auth::RevocationListener,
     observability::{Metrics, MetricsInitError},
     persistence::{
-        files::{events::EventsService, BlobCleanupTask, FileIoError, FileService},
+        files::{events::EventsService, FileIoError},
         sql::{Migrator, PgEventListener, SqlDb},
     },
     ConfigToml, DataDir,
