@@ -351,6 +351,10 @@ databases use separate namespaces, so cleanup cannot delete another homeserver's
 blobs in a shared bucket. Include the namespace table in database backups; a
 restored copy must not run cleanup against the original deployment's live prefix.
 
+Tracked abandoned uploads and deferred deletions are retried every minute.
+The full backend scan for objects missing from database tracking runs at startup
+and once per day. This repair scan is separate from normal queued cleanup.
+
 ## Troubleshooting
 
 ### `database "pubky_homeserver" does not exist`

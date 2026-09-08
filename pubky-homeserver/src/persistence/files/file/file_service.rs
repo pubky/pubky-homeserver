@@ -6,7 +6,7 @@ use crate::{
         sql::{
             entities::blob::{BlobGarbageClaim, BlobReadLeaseRecord, BlobRepository},
             entry::{EntryEntity, EntryRepository},
-            user::{UserEntity, UserRepository},
+            user::UserEntity,
             SqlDb, UnifiedExecutor,
         },
     },
@@ -496,7 +496,9 @@ impl FileService {
     }
 
     pub(crate) async fn admin_users(&self) -> Result<Vec<String>, FileIoError> {
-        Ok(UserRepository::get_all(&mut self.db.pool().into())
+        Ok(self
+            .user_service
+            .get_all()
             .await?
             .into_iter()
             .map(|user| user.public_key.z32())
