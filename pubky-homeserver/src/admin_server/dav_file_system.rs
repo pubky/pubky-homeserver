@@ -29,7 +29,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     persistence::files::{FileIoError, WriteStreamError},
-    services::file_service::{BlobReadLease, FileService},
+    services::file_service::FileService,
     shared::webdav::{EntryPath, StoragePath},
 };
 
@@ -184,15 +184,9 @@ impl DavFileSystem for AdminDavFileSystem {
             };
             let data = if !writable {
                 let entry = existing.clone().ok_or(FsError::NotFound)?;
-                let lease = self
-                    .file_service
-                    .acquire_entry_read_lease(&entry)
-                    .await
-                    .map_err(map_file_error)?;
                 AdminDavFileData::Remote {
                     entry: Box::new(entry),
                     position: 0,
-                    lease,
                     buffer: Bytes::new(),
                 }
             } else {
@@ -452,7 +446,6 @@ enum AdminDavFileData {
     Remote {
         entry: Box<crate::persistence::sql::entry::EntryEntity>,
         position: u64,
-        lease: BlobReadLease,
         buffer: Bytes,
     },
     Temporary {
@@ -604,12 +597,8 @@ impl DavFile for AdminDavFile {
                 AdminDavFileData::Remote {
                     entry,
                     position,
-                    lease,
                     buffer,
                 } => {
-                    if !lease.is_active() {
-                        return Err(map_file_error(FileIoError::ReadLeaseLost));
-                    }
                     if count == 0 || *position >= entry.content_length {
                         return Ok(Bytes::new());
                     }
@@ -619,7 +608,7 @@ impl DavFile for AdminDavFile {
                             .min(entry.content_length);
                         *buffer = self
                             .file_service
-                            .get_entry_range(entry, lease, *position..end)
+                            .get_entry_range(entry, *position..end)
                             .await
                             .map_err(map_file_error)?;
                     }
@@ -879,6 +868,75 @@ mod tests {
             &content[content.len() - 3..]
         );
         assert!(file.read_bytes(19).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_remote_read_fails_after_blob_cleanup() {
+        let context = AppContext::test().await;
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let entry_path = EntryPath::new(
+            public_key.clone(),
+            StoragePath::new("/pub/file.bin").unwrap(),
+        );
+        let original = context
+            .file_service
+            .write(
+                &entry_path,
+                opendal::Buffer::from(vec![1; DAV_READ_AHEAD_BYTES + 1]),
+            )
+            .await
+            .unwrap();
+        let filesystem = AdminDavFileSystem::new(
+            context.file_service.clone(),
+            context.data_dir.path().to_path_buf(),
+            u64::MAX,
+        );
+        let path = DavPath::new(&format!("/{}/pub/file.bin", public_key.z32())).unwrap();
+        let mut file = filesystem
+            .open(
+                &path,
+                OpenOptions {
+                    read: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            file.read_bytes(DAV_READ_AHEAD_BYTES).await.unwrap().len(),
+            DAV_READ_AHEAD_BYTES
+        );
+        context
+            .file_service
+            .write(
+                &entry_path,
+                opendal::Buffer::from(vec![2; DAV_READ_AHEAD_BYTES + 1]),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE blob_garbage SET available_at = statement_timestamp()")
+            .execute(context.sql_db.pool())
+            .await
+            .unwrap();
+        context.file_service.recover_blob_storage().await.unwrap();
+        assert!(!context
+            .file_service
+            .opendal
+            .blob_exists(original.blob_key.as_ref().unwrap())
+            .await
+            .unwrap());
+        assert!(matches!(file.read_bytes(1).await, Err(FsError::NotFound)));
+        assert_eq!(
+            context
+                .file_service
+                .get(&entry_path)
+                .await
+                .unwrap()
+                .as_ref(),
+            vec![2; DAV_READ_AHEAD_BYTES + 1]
+        );
     }
 
     #[tokio::test]

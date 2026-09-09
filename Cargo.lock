@@ -4190,7 +4190,6 @@ dependencies = [
  "httpdate",
  "infer",
  "jsonwebtoken",
- "lru 0.14.0",
  "mainline",
  "mime_guess",
  "opendal",

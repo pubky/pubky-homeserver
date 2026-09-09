@@ -25,7 +25,6 @@ impl FileService {
             &mut self.db.pool().into(),
         )
         .await?;
-        BlobRepository::prune_expired_read_leases(&mut self.db.pool().into()).await?;
         self.drain_blob_garbage().await;
         Ok(())
     }

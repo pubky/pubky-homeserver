@@ -9,5 +9,4 @@ mod upload_heartbeat;
 mod writes;
 
 pub(crate) use cleanup_task::BlobCleanupTask;
-pub(crate) use reads::BlobReadLease;
 pub use service::FileService;

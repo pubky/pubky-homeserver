@@ -77,7 +77,6 @@ sqlx = { version = "0.8", features = [
     "json",
 ] }
 dashmap = "6"
-lru = "0.14"
 async-trait.workspace = true
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }

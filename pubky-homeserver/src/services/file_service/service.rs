@@ -12,16 +12,9 @@ use crate::{shared::webdav::EntryPath, AppContext};
 use bytes::Bytes;
 #[cfg(test)]
 use futures_util::StreamExt;
-use lru::LruCache;
 #[cfg(test)]
 use opendal::Buffer;
-use std::{
-    num::NonZeroUsize,
-    path::Path,
-    sync::{Arc, Mutex},
-};
-
-use super::reads::{ReadLeaseCache, READ_LEASE_CACHE_CAPACITY};
+use std::path::Path;
 
 /// Coordinates logical file entries in PostgreSQL with immutable backend blobs.
 #[derive(Debug, Clone)]
@@ -32,7 +25,6 @@ pub struct FileService {
     pub(super) user_service: UserService,
     pub(super) default_storage_mb: Option<u64>,
     pub(super) blob_prefix: String,
-    pub(super) read_leases: Arc<Mutex<ReadLeaseCache>>,
 }
 
 impl FileService {
@@ -51,10 +43,6 @@ impl FileService {
             user_service,
             default_storage_mb,
             blob_prefix,
-            read_leases: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(READ_LEASE_CACHE_CAPACITY)
-                    .expect("read lease cache capacity must be non-zero"),
-            ))),
         }
     }
 

@@ -1,4 +1,4 @@
-use super::{BlobGarbageEntity, BlobReadLeaseEntity};
+use super::BlobGarbageEntity;
 use crate::persistence::sql::UnifiedExecutor;
 
 /// Persists immutable blob upload and cleanup bookkeeping.
@@ -266,105 +266,6 @@ impl BlobRepository {
         Ok(total.max(0) as u64)
     }
 
-    /// Create a renewable lease unless cleanup already owns the blob.
-    pub async fn create_read_lease<'a>(
-        blob_key: &str,
-        lease_id: &str,
-        lease_seconds: i64,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<Option<BlobReadLeaseEntity>, sqlx::Error> {
-        let con = executor.get_con().await?;
-        sqlx::query_as::<_, BlobReadLeaseEntity>(
-            r#"
-            WITH garbage AS (
-                SELECT claim_token
-                FROM blob_garbage
-                WHERE blob_key = $1
-                FOR UPDATE
-            ), leased AS (
-                INSERT INTO blob_read_leases (blob_key, lease_id, expires_at)
-                SELECT $1, $2, clock_timestamp() + ($3 * INTERVAL '1 second')
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM garbage WHERE claim_token IS NOT NULL
-                )
-                ON CONFLICT (blob_key, lease_id) DO UPDATE
-                SET expires_at = GREATEST(
-                    blob_read_leases.expires_at,
-                    EXCLUDED.expires_at
-                )
-                RETURNING blob_key, lease_id
-            )
-            SELECT blob_key, lease_id FROM leased
-            "#,
-        )
-        .bind(blob_key)
-        .bind(lease_id)
-        .bind(lease_seconds)
-        .fetch_optional(con)
-        .await
-    }
-
-    /// Extend one active reader lease without affecting other readers.
-    pub async fn refresh_read_lease<'a>(
-        lease: &BlobReadLeaseEntity,
-        lease_seconds: i64,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<bool, sqlx::Error> {
-        let con = executor.get_con().await?;
-        let result = sqlx::query(
-            r#"
-            WITH garbage AS (
-                SELECT claim_token
-                FROM blob_garbage
-                WHERE blob_key = $1
-                FOR UPDATE
-            )
-            UPDATE blob_read_leases
-            SET expires_at = GREATEST(
-                expires_at, clock_timestamp() + ($3 * INTERVAL '1 second')
-            )
-            WHERE blob_key = $1
-              AND lease_id = $2
-              AND expires_at > clock_timestamp()
-              AND NOT EXISTS (
-                  SELECT 1 FROM garbage WHERE claim_token IS NOT NULL
-              )
-            "#,
-        )
-        .bind(&lease.blob_key)
-        .bind(&lease.lease_id)
-        .bind(lease_seconds)
-        .execute(con)
-        .await?;
-        Ok(result.rows_affected() == 1)
-    }
-
-    /// Release one reader lease after its final local reader is dropped.
-    pub async fn release_read_lease<'a>(
-        lease: &BlobReadLeaseEntity,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<(), sqlx::Error> {
-        let con = executor.get_con().await?;
-        sqlx::query("DELETE FROM blob_read_leases WHERE blob_key = $1 AND lease_id = $2")
-            .bind(&lease.blob_key)
-            .bind(&lease.lease_id)
-            .execute(con)
-            .await?;
-        Ok(())
-    }
-
-    /// Remove reader leases that were not renewed before their deadline.
-    pub async fn prune_expired_read_leases<'a>(
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<u64, sqlx::Error> {
-        let con = executor.get_con().await?;
-        let result =
-            sqlx::query("DELETE FROM blob_read_leases WHERE expires_at <= statement_timestamp()")
-                .execute(con)
-                .await?;
-        Ok(result.rows_affected())
-    }
-
     /// Claim cleanup work without holding a database transaction during backend I/O.
     pub async fn claim_garbage<'a>(
         limit: i64,
@@ -382,12 +283,6 @@ impl BlobRepository {
                   AND (
                     claimed_at IS NULL
                     OR claimed_at <= statement_timestamp() - ($2 * INTERVAL '1 second')
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM blob_read_leases
-                    WHERE blob_read_leases.blob_key = blob_garbage.blob_key
-                      AND blob_read_leases.expires_at > statement_timestamp()
                   )
                 ORDER BY available_at, blob_key
                 LIMIT $1
@@ -489,13 +384,6 @@ mod tests {
         BlobRepository::defer_garbage(&claimed[0], 0, &mut executor)
             .await
             .unwrap();
-        assert!(
-            BlobRepository::create_read_lease("blob-a", "reader-a", 300, &mut executor)
-                .await
-                .unwrap()
-                .is_none(),
-            "an ambiguous deletion must remain tombstoned"
-        );
         let reclaimed = BlobRepository::claim_garbage(10, 300, &mut executor)
             .await
             .unwrap();
@@ -720,181 +608,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(garbage_count, 2);
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_read_lease_blocks_garbage_claim() {
-        let db = SqlDb::test().await;
-        let mut executor = db.pool().into();
-        BlobRepository::enqueue_garbage("blob-a", 1, 10, 0, &mut executor)
-            .await
-            .unwrap();
-        let lease = BlobRepository::create_read_lease("blob-a", "reader-a", 300, &mut executor)
-            .await
-            .unwrap()
-            .expect("unclaimed garbage should remain readable");
-        let expires_before: chrono::NaiveDateTime =
-            sqlx::query_scalar("SELECT expires_at FROM blob_read_leases WHERE blob_key = 'blob-a'")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        assert_eq!(lease.blob_key, "blob-a");
-
-        assert!(
-            BlobRepository::refresh_read_lease(&lease, 60, &mut executor)
-                .await
-                .unwrap(),
-            "renewing an active lease should succeed"
-        );
-        let expires_after: chrono::NaiveDateTime =
-            sqlx::query_scalar("SELECT expires_at FROM blob_read_leases WHERE blob_key = 'blob-a'")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        assert!(expires_after >= expires_before);
-
-        let second_lease =
-            BlobRepository::create_read_lease("blob-a", "reader-b", 300, &mut executor)
-                .await
-                .unwrap()
-                .expect("a second reader should get an independent lease");
-        let lease_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM blob_read_leases WHERE blob_key = 'blob-a'")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        assert_eq!(lease_count, 2);
-
-        assert!(BlobRepository::claim_garbage(1, 300, &mut executor)
-            .await
-            .unwrap()
-            .is_empty());
-
-        BlobRepository::release_read_lease(&lease, &mut executor)
-            .await
-            .unwrap();
-        assert!(BlobRepository::claim_garbage(1, 300, &mut executor)
-            .await
-            .unwrap()
-            .is_empty());
-        BlobRepository::release_read_lease(&second_lease, &mut executor)
-            .await
-            .unwrap();
-        assert_eq!(
-            BlobRepository::claim_garbage(1, 300, &mut executor)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_claimed_garbage_rejects_new_read_lease() {
-        let db = SqlDb::test().await;
-        let mut executor = db.pool().into();
-        BlobRepository::enqueue_garbage("blob-a", 1, 10, 0, &mut executor)
-            .await
-            .unwrap();
-        assert_eq!(
-            BlobRepository::claim_garbage(1, 300, &mut executor)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        assert!(
-            BlobRepository::create_read_lease("blob-a", "reader-a", 300, &mut executor)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_expired_read_lease_cannot_be_revived_after_cleanup_claim() {
-        let db = SqlDb::test().await;
-        let mut executor = db.pool().into();
-        BlobRepository::enqueue_garbage("blob-a", 1, 10, 0, &mut executor)
-            .await
-            .unwrap();
-        let lease = BlobRepository::create_read_lease("blob-a", "reader-a", 60, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        sqlx::query("UPDATE blob_read_leases SET expires_at = statement_timestamp()")
-            .execute(db.pool())
-            .await
-            .unwrap();
-        assert_eq!(
-            BlobRepository::claim_garbage(1, 300, &mut executor)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        assert!(
-            !BlobRepository::refresh_read_lease(&lease, 60, &mut executor)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_read_lease_waiting_on_claim_is_rejected() {
-        let db = SqlDb::test().await;
-        BlobRepository::enqueue_garbage("blob-a", 1, 10, 0, &mut db.pool().into())
-            .await
-            .unwrap();
-        let mut claim_tx = db.pool().begin().await.unwrap();
-        sqlx::query("SELECT blob_key FROM blob_garbage WHERE blob_key = 'blob-a' FOR UPDATE")
-            .execute(&mut *claim_tx)
-            .await
-            .unwrap();
-
-        let task_db = db.clone();
-        let lease_task = tokio::spawn(async move {
-            BlobRepository::create_read_lease("blob-a", "reader-a", 300, &mut task_db.pool().into())
-                .await
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        sqlx::query(
-            "UPDATE blob_garbage SET claimed_at = statement_timestamp(), claim_token = 'claim' \
-             WHERE blob_key = 'blob-a'",
-        )
-        .execute(&mut *claim_tx)
-        .await
-        .unwrap();
-        claim_tx.commit().await.unwrap();
-
-        assert!(lease_task.await.unwrap().unwrap().is_none());
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_garbage_claim_skips_concurrent_read_lease() {
-        let db = SqlDb::test().await;
-        BlobRepository::enqueue_garbage("blob-a", 1, 10, 0, &mut db.pool().into())
-            .await
-            .unwrap();
-        let mut lease_tx = db.pool().begin().await.unwrap();
-        BlobRepository::create_read_lease("blob-a", "reader-a", 300, &mut (&mut lease_tx).into())
-            .await
-            .unwrap()
-            .expect("lease should be staged inside the transaction");
-
-        let task_db = db.clone();
-        let claim_task = tokio::spawn(async move {
-            BlobRepository::claim_garbage(1, 300, &mut task_db.pool().into()).await
-        });
-        assert!(claim_task.await.unwrap().unwrap().is_empty());
-        lease_tx.commit().await.unwrap();
     }
 
     #[tokio::test]
