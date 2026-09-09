@@ -1,7 +1,6 @@
 use crate::persistence::sql::entry::EntryRepository;
 use crate::services::file_service::{
-    cleanup::STALE_GARBAGE_CLAIM_SECONDS, reads::READ_LEASE_SECONDS,
-    upload_heartbeat::UploadHeartbeat,
+    cleanup::STALE_GARBAGE_CLAIM_SECONDS, upload_heartbeat::UploadHeartbeat,
 };
 use crate::{
     services::user_service::FILE_METADATA_SIZE,
@@ -425,10 +424,6 @@ async fn test_legacy_entry_is_readable_and_rewritten_to_immutable_blob() {
         .unwrap());
 
     sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
-    sqlx::query("UPDATE blob_read_leases SET expires_at = statement_timestamp()")
         .execute(context.sql_db.pool())
         .await
         .unwrap();
@@ -860,19 +855,6 @@ async fn test_blob_cleanup_retries_backend_delete_failure() {
             .await
             .unwrap();
     assert_eq!(pending, (1, 1));
-    assert!(
-        BlobRepository::create_read_lease(
-            &first_blob_key,
-            "late-reader",
-            READ_LEASE_SECONDS,
-            &mut context.sql_db.pool().into(),
-        )
-        .await
-        .unwrap()
-        .is_none(),
-        "an ambiguous backend deletion must remain tombstoned"
-    );
-
     sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP WHERE blob_key = $1")
         .bind(&first_blob_key)
         .execute(context.sql_db.pool())
@@ -994,101 +976,124 @@ async fn test_retained_versions_are_bounded_by_physical_quota() {
 
 #[tokio::test]
 #[pubky_test_utils::test]
-async fn test_active_reader_delays_blob_cleanup() {
+async fn test_replaced_and_deleted_blobs_are_retained_until_cleanup() {
     let context = AppContext::test().await;
     let file_service = FileService::new_from_context(&context).unwrap();
     let public_key = pubky_common::crypto::Keypair::random().public_key();
     context.user_service.create(&public_key).await.unwrap();
     let path = EntryPath::new(public_key, StoragePath::new("/pub/state.bin").unwrap());
-    let original = file_service
-        .write(&path, Buffer::from(b"original".to_vec()))
-        .await
-        .unwrap();
-    let original_key = original.blob_key.clone().unwrap();
-    let stream = file_service.get_entry_stream(&original).await.unwrap();
 
-    file_service
-        .write(&path, Buffer::from(b"replacement".to_vec()))
+    for overwrite in [true, false] {
+        let original = file_service
+            .write(&path, Buffer::from(b"original".to_vec()))
+            .await
+            .unwrap();
+        let blob_key = original.blob_key.as_ref().unwrap();
+        let stream = file_service.get_entry_stream(&original).await.unwrap();
+        if overwrite {
+            file_service
+                .write(&path, Buffer::from(b"replacement".to_vec()))
+                .await
+                .unwrap();
+        } else {
+            file_service.delete(&path).await.unwrap();
+        }
+        let retained: bool = sqlx::query_scalar(
+            "SELECT available_at >= statement_timestamp() + INTERVAL '59 minutes' \
+             FROM blob_garbage WHERE blob_key = $1",
+        )
+        .bind(blob_key)
+        .fetch_one(context.sql_db.pool())
         .await
         .unwrap();
+        assert!(retained);
+        file_service.recover_blob_storage().await.unwrap();
+        assert!(file_service.opendal.blob_exists(blob_key).await.unwrap());
+        assert_eq!(
+            file_service
+                .get_entry_range(&original, 0..8)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"original"
+        );
+
+        sqlx::query(
+            "UPDATE blob_garbage SET available_at = statement_timestamp() WHERE blob_key = $1",
+        )
+        .bind(blob_key)
+        .execute(context.sql_db.pool())
+        .await
+        .unwrap();
+        file_service.recover_blob_storage().await.unwrap();
+        assert!(!file_service.opendal.blob_exists(blob_key).await.unwrap());
+        assert!(matches!(
+            file_service.get_entry_range(&original, 0..8).await,
+            Err(FileIoError::NotFound)
+        ));
+        drop(stream);
+        if overwrite {
+            assert_eq!(
+                file_service.get(&path).await.unwrap().as_ref(),
+                b"replacement"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[pubky_test_utils::test]
+async fn test_copy_stream_failure_does_not_publish_destination() {
+    let context = AppContext::test().await;
+    let file_service = FileService::new_from_context(&context).unwrap();
+    let pubkey = pubky_common::crypto::Keypair::random().public_key();
+    context.user_service.create(&pubkey).await.unwrap();
+    let source = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/source.bin").unwrap());
+    let destination = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/copy.bin").unwrap());
+    let entry = file_service
+        .write(&source, Buffer::from(vec![1; 64 * 1024]))
+        .await
+        .unwrap();
+    let mut stream = file_service.get_entry_stream(&entry).await.unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(first.len() < entry.content_length as usize);
+    file_service.delete(&source).await.unwrap();
     sqlx::query("UPDATE blob_garbage SET available_at = statement_timestamp()")
         .execute(context.sql_db.pool())
         .await
         .unwrap();
     file_service.recover_blob_storage().await.unwrap();
-    assert!(file_service
-        .opendal
-        .get_stream_by_key(&original_key)
-        .await
-        .is_ok());
 
-    drop(stream);
-    for _ in 0..20 {
-        let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_read_leases")
-            .fetch_one(context.sql_db.pool())
-            .await
-            .unwrap();
-        if leases == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    file_service.recover_blob_storage().await.unwrap();
+    let stream = futures_util::stream::iter([Ok(first)])
+        .chain(stream)
+        .map(|chunk| {
+            chunk.map_err(|error| crate::persistence::files::WriteStreamError::Other(error.into()))
+        });
+    assert!(file_service
+        .write_stream_inner(
+            &destination,
+            stream,
+            crate::services::file_service::writes::WriteMode::AdminCreate,
+            Some(entry.content_length),
+        )
+        .await
+        .is_err());
     assert!(matches!(
-        file_service.opendal.get_stream_by_key(&original_key).await,
+        file_service
+            .get_info(&destination, &mut context.sql_db.pool().into())
+            .await,
         Err(FileIoError::NotFound)
     ));
-}
-
-#[tokio::test]
-#[pubky_test_utils::test]
-async fn test_concurrent_local_readers_share_and_release_one_lease() {
-    let context = AppContext::test().await;
-    let file_service = FileService::new_from_context(&context).unwrap();
-    let public_key = pubky_common::crypto::Keypair::random().public_key();
-    context.user_service.create(&public_key).await.unwrap();
-    let path = EntryPath::new(public_key, StoragePath::new("/pub/state.bin").unwrap());
-    let entry = file_service
-        .write(&path, Buffer::from(b"content".to_vec()))
-        .await
-        .unwrap();
-
-    let first = file_service.acquire_entry_read_lease(&entry).await.unwrap();
-    let second = file_service.acquire_entry_read_lease(&entry).await.unwrap();
-
-    assert!(Arc::ptr_eq(&first.inner, &second.inner));
     assert_eq!(
-        file_service
-            .read_leases
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        1
+        context.user_service.get(&pubkey).await.unwrap().used_bytes,
+        0
     );
-    let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_read_leases")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
-    assert_eq!(leases, 1);
-
-    drop(first);
-    let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_read_leases")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
-    assert_eq!(leases, 1);
-    drop(second);
-    for _ in 0..20 {
-        let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_read_leases")
+    let events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE path = '/pub/copy.bin'")
             .fetch_one(context.sql_db.pool())
             .await
             .unwrap();
-        if leases == 0 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the final reader should release the shared database lease");
+    assert_eq!(events, 0);
 }
 
 #[tokio::test]

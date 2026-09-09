@@ -17,7 +17,7 @@ use super::{upload_heartbeat::UploadHeartbeat, FileService};
 
 // A failed remote close can complete after the client loses the response.
 const ABANDONED_UPLOAD_SETTLE_SECONDS: i64 = 60 * 60;
-const ACTIVE_BLOB_RETENTION_SECONDS: i64 = 5 * 60;
+const ACTIVE_BLOB_RETENTION_SECONDS: i64 = 60 * 60;
 // Bound physical data to the active version, one retained version, and one replacement upload.
 const PHYSICAL_STORAGE_QUOTA_MULTIPLIER: u64 = 3;
 

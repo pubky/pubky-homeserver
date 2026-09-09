@@ -19,8 +19,6 @@ pub enum FileIoError {
     PathCollision,
     #[error("Upload ownership was lost during streaming")]
     UploadLeaseLost,
-    #[error("Read ownership was lost during streaming")]
-    ReadLeaseLost,
 }
 
 impl From<opendal::Error> for FileIoError {

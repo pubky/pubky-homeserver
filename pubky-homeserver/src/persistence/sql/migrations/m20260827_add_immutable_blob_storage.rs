@@ -72,25 +72,6 @@ impl MigrationTrait for M20260827AddImmutableBlobStorageMigration {
         .execute(&mut **tx)
         .await?;
 
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS blob_read_leases (
-                blob_key TEXT NOT NULL,
-                lease_id TEXT NOT NULL,
-                expires_at TIMESTAMP NOT NULL,
-                PRIMARY KEY (blob_key, lease_id)
-            )
-            "#,
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS blob_read_leases_expiry_idx ON blob_read_leases (expires_at, blob_key)",
-        )
-        .execute(&mut **tx)
-        .await?;
-
         sqlx::query("CREATE INDEX IF NOT EXISTS blob_uploads_user_idx ON blob_uploads (user_id)")
             .execute(&mut **tx)
             .await?;
@@ -186,7 +167,7 @@ mod tests {
             .unwrap();
         assert!(uuid::Uuid::parse_str(&namespace).is_ok());
 
-        for table in ["blob_uploads", "blob_garbage", "blob_read_leases"] {
+        for table in ["blob_uploads", "blob_garbage"] {
             let exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
             )
@@ -226,20 +207,5 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(garbage_user_nullable, "YES");
-
-        sqlx::query(
-            "INSERT INTO blob_read_leases (blob_key, lease_id, expires_at) \
-             VALUES ('blob-a', 'reader-a', CURRENT_TIMESTAMP), \
-                    ('blob-a', 'reader-b', CURRENT_TIMESTAMP)",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        let leases: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM blob_read_leases WHERE blob_key = 'blob-a'")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        assert_eq!(leases, 2);
     }
 }
