@@ -351,7 +351,9 @@ databases use separate namespaces, so cleanup cannot delete another homeserver's
 blobs in a shared bucket. Include the namespace table in database backups; a
 restored copy must not run cleanup against the original deployment's live prefix.
 
-Tracked abandoned uploads and deferred deletions are retried every minute.
+Tracked abandoned uploads and deferred deletions are retried every 15 minutes.
+Retained blobs count toward the physical-storage limit until deleted, so frequent
+large overwrites may temporarily block new uploads until cleanup frees space.
 The full backend scan for objects missing from database tracking runs at startup
 and once per day. This repair scan is separate from normal queued cleanup.
 
