@@ -135,7 +135,7 @@ pub struct Pubky {
 }
 
 impl Pubky {
-    /// Construct with defaults (mainnet relays, standard timeouts).
+    /// Construct with the default mainnet configuration and no HTTP client timeouts.
     ///
     /// # Errors
     /// - Returns [`crate::errors::Error`] when the underlying [`PubkyHttpClient`] fails to
@@ -158,6 +158,25 @@ impl Pubky {
     }
 
     /// Construct from an already-configured transport.
+    ///
+    /// Configure HTTP timeouts and other transport settings with
+    /// [`PubkyHttpClient::builder()`], then wrap the resulting client here.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(not(target_arch = "wasm32"))]
+    /// # fn example() -> pubky::Result<()> {
+    /// use std::time::Duration;
+    /// use pubky::{Pubky, PubkyHttpClient};
+    ///
+    /// let client = PubkyHttpClient::builder()
+    ///     .request_timeout(Duration::from_secs(30))
+    ///     .read_timeout(Duration::from_secs(10))
+    ///     .build()?;
+    /// let pubky = Pubky::with_client(client);
+    /// # let _ = pubky;
+    /// # Ok(()) }
+    /// ```
     #[must_use]
     pub const fn with_client(client: PubkyHttpClient) -> Self {
         Self { client }
