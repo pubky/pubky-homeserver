@@ -80,6 +80,26 @@ impl FileService {
         }
     }
 
+    pub(super) async fn cleanup_for_quota(&self, user_id: i32) {
+        let claims = match BlobRepository::claim_garbage_for_quota(
+            user_id,
+            CLEANUP_BATCH_SIZE as i64,
+            STALE_GARBAGE_CLAIM_SECONDS,
+            &mut self.db.pool().into(),
+        )
+        .await
+        {
+            Ok(claims) => claims,
+            Err(error) => {
+                tracing::error!(user_id, %error, "Failed to claim quota cleanup work");
+                return;
+            }
+        };
+        futures_util::stream::iter(claims)
+            .for_each_concurrent(CLEANUP_CONCURRENCY, |claim| self.delete_claimed_blob(claim))
+            .await;
+    }
+
     async fn delete_claimed_blob(&self, claim: BlobGarbageEntity) {
         match tokio::time::timeout(
             CLEANUP_DELETE_TIMEOUT,

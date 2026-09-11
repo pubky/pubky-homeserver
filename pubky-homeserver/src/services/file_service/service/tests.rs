@@ -927,7 +927,7 @@ async fn test_cleanup_recovers_after_blob_delete_before_acknowledgement() {
 
 #[tokio::test]
 #[pubky_test_utils::test]
-async fn test_retained_versions_are_bounded_by_physical_quota() {
+async fn test_quota_pressure_reclaims_retained_versions() {
     let context = AppContext::test_with_config(|config| {
         config.storage.default_quota_mb = Some(1);
     })
@@ -937,33 +937,21 @@ async fn test_retained_versions_are_bounded_by_physical_quota() {
     context.user_service.create(&public_key).await.unwrap();
     let path = EntryPath::new(public_key, StoragePath::new("/pub/state.bin").unwrap());
     let content_length = 800 * 1024;
+    let mut entries = Vec::new();
 
     for byte in [1, 2, 3] {
-        file_service
-            .write_stream_with_size_hint(
-                &path,
-                futures_util::stream::iter([Ok(Bytes::from(vec![byte; content_length]))]),
-                content_length as u64,
-            )
-            .await
-            .unwrap();
+        entries.push(
+            file_service
+                .write_stream_with_size_hint(
+                    &path,
+                    futures_util::stream::iter([Ok(Bytes::from(vec![byte; content_length]))]),
+                    content_length as u64,
+                )
+                .await
+                .unwrap(),
+        );
     }
 
-    let error = file_service
-        .write_stream_with_size_hint(
-            &path,
-            futures_util::stream::iter([Ok(Bytes::from(vec![4; content_length]))]),
-            content_length as u64,
-        )
-        .await
-        .expect_err("retained versions must count toward physical storage limits");
-    assert!(matches!(error, FileIoError::DiskSpaceQuotaExceeded));
-
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
-    file_service.recover_blob_storage().await.unwrap();
     file_service
         .write_stream_with_size_hint(
             &path,
@@ -972,6 +960,96 @@ async fn test_retained_versions_are_bounded_by_physical_quota() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        file_service.get(&path).await.unwrap().as_ref(),
+        vec![4; content_length]
+    );
+    for entry in &entries[..2] {
+        assert!(matches!(
+            file_service.get_entry_range(entry, 0..1).await,
+            Err(FileIoError::NotFound)
+        ));
+    }
+    assert!(file_service
+        .opendal
+        .blob_exists(entries[2].blob_key.as_ref().unwrap())
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+#[pubky_test_utils::test]
+async fn test_quota_cleanup_failure_preserves_storage_limit_and_retry_delay() {
+    let context = AppContext::test_with_config(|config| {
+        config.storage.default_quota_mb = Some(1);
+    })
+    .await;
+    let file_service = FileService::new_from_context(&context).unwrap();
+    let pubkey = pubky_common::crypto::Keypair::random().public_key();
+    let user = context.user_service.create(&pubkey).await.unwrap();
+    let path = EntryPath::new(pubkey, StoragePath::new("/pub/state.bin").unwrap());
+    let length = 800 * 1024;
+    let old = file_service
+        .write(&path, Buffer::from(vec![1; length]))
+        .await
+        .unwrap();
+    file_service
+        .write(&path, Buffer::from(vec![2; length]))
+        .await
+        .unwrap();
+    BlobRepository::stage_upload(
+        "active-upload",
+        user.id,
+        length as u64,
+        &mut context.sql_db.pool().into(),
+    )
+    .await
+    .unwrap();
+
+    file_service.opendal.fail_next_delete();
+    let error = file_service
+        .write_stream_with_size_hint(
+            &path,
+            futures_util::stream::iter([Ok(Bytes::from(vec![3; length]))]),
+            length as u64,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FileIoError::DiskSpaceQuotaExceeded));
+    assert_eq!(
+        file_service.get(&path).await.unwrap().as_ref(),
+        vec![2; length]
+    );
+    assert!(file_service
+        .opendal
+        .blob_exists(old.blob_key.as_ref().unwrap())
+        .await
+        .unwrap());
+
+    let retry_deferred: bool = sqlx::query_scalar(
+        "SELECT NOT retained_for_reads AND available_at > statement_timestamp() \
+         FROM blob_garbage WHERE blob_key = $1",
+    )
+    .bind(old.blob_key.as_ref().unwrap())
+    .fetch_one(context.sql_db.pool())
+    .await
+    .unwrap();
+    assert!(retry_deferred);
+    assert!(BlobRepository::claim_garbage_for_quota(
+        user.id,
+        64,
+        STALE_GARBAGE_CLAIM_SECONDS,
+        &mut context.sql_db.pool().into()
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    let staged: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM blob_uploads WHERE blob_key = 'active-upload'")
+            .fetch_one(context.sql_db.pool())
+            .await
+            .unwrap();
+    assert_eq!(staged, 1);
 }
 
 #[tokio::test]

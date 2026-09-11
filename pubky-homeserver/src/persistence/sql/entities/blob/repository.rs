@@ -91,6 +91,7 @@ impl BlobRepository {
             SET user_id = EXCLUDED.user_id,
                 content_length = GREATEST(blob_garbage.content_length, EXCLUDED.content_length),
                 available_at = GREATEST(blob_garbage.available_at, EXCLUDED.available_at),
+                retained_for_reads = FALSE,
                 claimed_at = NULL,
                 claim_token = NULL
             "#,
@@ -149,7 +150,7 @@ impl BlobRepository {
         Ok(refreshed.is_some())
     }
 
-    /// Queue an unreferenced backend object for eventual deletion.
+    /// Retain a replaced or deleted file blob for in-progress reads.
     pub async fn enqueue_garbage<'a>(
         blob_key: &str,
         user_id: i32,
@@ -160,8 +161,10 @@ impl BlobRepository {
         let con = executor.get_con().await?;
         sqlx::query(
             r#"
-            INSERT INTO blob_garbage (blob_key, user_id, content_length, available_at)
-            VALUES ($1, $2, $3, statement_timestamp() + ($4 * INTERVAL '1 second'))
+            INSERT INTO blob_garbage (
+                blob_key, user_id, content_length, available_at, retained_for_reads
+            )
+            VALUES ($1, $2, $3, statement_timestamp() + ($4 * INTERVAL '1 second'), TRUE)
             ON CONFLICT (blob_key) DO UPDATE
             SET available_at = GREATEST(
                     blob_garbage.available_at,
@@ -203,6 +206,7 @@ impl BlobRepository {
             SET user_id = EXCLUDED.user_id,
                 content_length = GREATEST(blob_garbage.content_length, EXCLUDED.content_length),
                 available_at = GREATEST(blob_garbage.available_at, EXCLUDED.available_at),
+                retained_for_reads = FALSE,
                 claimed_at = NULL,
                 claim_token = NULL
             "#,
@@ -272,6 +276,25 @@ impl BlobRepository {
         stale_claim_seconds: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Vec<BlobGarbageEntity>, sqlx::Error> {
+        Self::claim_garbage_inner(limit, stale_claim_seconds, None, executor).await
+    }
+
+    /// Claim one user's garbage, allowing read retention to end early under quota pressure.
+    pub async fn claim_garbage_for_quota<'a>(
+        user_id: i32,
+        limit: i64,
+        stale_claim_seconds: i64,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<BlobGarbageEntity>, sqlx::Error> {
+        Self::claim_garbage_inner(limit, stale_claim_seconds, Some(user_id), executor).await
+    }
+
+    async fn claim_garbage_inner<'a>(
+        limit: i64,
+        stale_claim_seconds: i64,
+        quota_user_id: Option<i32>,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<BlobGarbageEntity>, sqlx::Error> {
         let con = executor.get_con().await?;
         let claim_token = uuid::Uuid::new_v4().simple().to_string();
         sqlx::query_as::<_, BlobGarbageEntity>(
@@ -279,7 +302,9 @@ impl BlobRepository {
             WITH candidates AS (
                 SELECT blob_key
                 FROM blob_garbage
-                WHERE available_at <= statement_timestamp()
+                WHERE (available_at <= statement_timestamp()
+                       OR ($4::INTEGER IS NOT NULL AND retained_for_reads))
+                  AND ($4::INTEGER IS NULL OR user_id = $4)
                   AND (
                     claimed_at IS NULL
                     OR claimed_at <= statement_timestamp() - ($2 * INTERVAL '1 second')
@@ -299,6 +324,7 @@ impl BlobRepository {
         .bind(limit)
         .bind(stale_claim_seconds)
         .bind(&claim_token)
+        .bind(quota_user_id)
         .fetch_all(con)
         .await
     }
@@ -326,7 +352,7 @@ impl BlobRepository {
         let con = executor.get_con().await?;
         sqlx::query(
             "UPDATE blob_garbage \
-             SET claimed_at = NULL, \
+             SET claimed_at = NULL, retained_for_reads = FALSE, \
                  available_at = statement_timestamp() + ($3 * INTERVAL '1 second') \
              WHERE blob_key = $1 AND claim_token = $2",
         )
@@ -343,6 +369,51 @@ impl BlobRepository {
 mod tests {
     use super::*;
     use crate::persistence::sql::SqlDb;
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_quota_cleanup_claims_only_eligible_user_blobs() {
+        let db = SqlDb::test().await;
+        let mut executor = db.pool().into();
+        BlobRepository::enqueue_garbage("retained", 1, 10, 3600, &mut executor)
+            .await
+            .unwrap();
+        BlobRepository::enqueue_garbage("other-user", 2, 10, 0, &mut executor)
+            .await
+            .unwrap();
+        BlobRepository::stage_upload("active", 1, 10, &mut executor)
+            .await
+            .unwrap();
+        BlobRepository::abandon_upload("abandoned", 1, 10, 3600, &mut executor)
+            .await
+            .unwrap();
+        BlobRepository::abandon_upload("expired", 1, 10, 0, &mut executor)
+            .await
+            .unwrap();
+
+        let mut claimed = BlobRepository::claim_garbage_for_quota(1, 64, 300, &mut executor)
+            .await
+            .unwrap();
+        claimed.sort_by(|a, b| a.blob_key.cmp(&b.blob_key));
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|claim| claim.blob_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["expired", "retained"]
+        );
+        assert!(
+            BlobRepository::claim_garbage_for_quota(1, 64, 300, &mut executor)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let ordinary = BlobRepository::claim_garbage(64, 300, &mut executor)
+            .await
+            .unwrap();
+        assert_eq!(ordinary.len(), 1);
+        assert_eq!(ordinary[0].blob_key, "other-user");
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]

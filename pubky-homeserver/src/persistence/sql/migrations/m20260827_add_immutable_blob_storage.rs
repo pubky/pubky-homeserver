@@ -58,6 +58,7 @@ impl MigrationTrait for M20260827AddImmutableBlobStorageMigration {
                 user_id INTEGER,
                 content_length BIGINT NOT NULL,
                 available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                retained_for_reads BOOLEAN NOT NULL DEFAULT FALSE,
                 claimed_at TIMESTAMP,
                 claim_token TEXT
             )

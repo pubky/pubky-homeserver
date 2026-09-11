@@ -36,7 +36,7 @@ impl FileService {
     }
 
     /// Get the content selected by an already-loaded logical entry.
-    /// Reads may fail if cleanup removes the blob after its retention period.
+    /// Reads may fail if cleanup removes the blob, including early cleanup under quota pressure.
     pub(crate) async fn get_entry_stream(
         &self,
         entry: &EntryEntity,
