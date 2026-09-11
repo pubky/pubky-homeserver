@@ -132,7 +132,7 @@ pub async fn get(
         }
     }
 
-    let stream = state.context.file_service.get_stream(&entry_path).await?;
+    let stream = state.context.file_service.get_entry_stream(&entry).await?;
     let body_stream = Body::from_stream(stream);
     let mut response = entry.to_response_headers().into_response();
     *response.body_mut() = body_stream;
@@ -396,6 +396,60 @@ mod tests {
     fn assert_validators_present(headers: &HeaderMap) {
         assert!(headers.contains_key(header::ETAG));
         assert!(headers.contains_key(header::LAST_MODIFIED));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_response_body_fails_after_blob_cleanup() {
+        use futures_util::{StreamExt, TryStreamExt};
+        use tower::ServiceExt;
+
+        let (context, router, _, public_key, _) = create_environment().await.unwrap();
+        let path = crate::shared::webdav::EntryPath::new(
+            public_key.clone(),
+            crate::shared::webdav::StoragePath::new("/pub/file.bin").unwrap(),
+        );
+        let original = context
+            .file_service
+            .write(&path, opendal::Buffer::from(vec![1; 64 * 1024]))
+            .await
+            .unwrap();
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/pub/file.bin")
+                    .header("host", public_key.z32())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let first = body.next().await.unwrap().unwrap();
+        assert!(first.len() < original.content_length as usize);
+
+        context
+            .file_service
+            .write(&path, opendal::Buffer::from(vec![2; 64 * 1024]))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE blob_garbage SET available_at = statement_timestamp()")
+            .execute(context.sql_db.pool())
+            .await
+            .unwrap();
+        context.file_service.recover_blob_storage().await.unwrap();
+        assert!(!context
+            .file_service
+            .opendal
+            .blob_exists(original.blob_key.as_ref().unwrap())
+            .await
+            .unwrap());
+        assert!(body.try_collect::<Vec<_>>().await.is_err());
+        assert_eq!(
+            context.file_service.get(&path).await.unwrap().as_ref(),
+            vec![2; 64 * 1024]
+        );
     }
 
     #[tokio::test]

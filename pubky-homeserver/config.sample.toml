@@ -88,10 +88,17 @@ type = "file_system"
 # Omit for unlimited. 0 means zero storage (not unlimited).
 # default_quota_mb = 1024
 
+# Maximum combined size of in-progress admin DAV uploads (in MB).
+# Temporary upload files are stored under the homeserver data directory.
+admin_dav_spool_limit_mb = 1024
+
 # Google Cloud Bucket
 # Files are saved in a Google Cloud Bucket.
 # type = "google_bucket"
 # Name of the Google Cloud Bucket. The bucket must exist already.
+# Disable soft delete and Object Versioning so cleanup reclaims physical storage immediately.
+# Configure an AbortIncompleteMultipartUpload lifecycle rule for the __pubky/blobs/ prefix so
+# process crashes cannot leave multipart upload parts stored indefinitely.
 # bucket_name = "my_bucket"
 # Path to the service account file. The content of the service account file can also be added directly in here.
 # This must be absolute/full path.

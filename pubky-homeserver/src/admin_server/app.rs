@@ -14,8 +14,10 @@ use crate::AppContext;
 #[cfg(any(test, feature = "testing"))]
 use crate::MockDataDir;
 use crate::{AppContextConversionError, PersistentDataDir};
+use axum::http::{header, HeaderName, HeaderValue, Method};
+use axum::middleware::{self, Next};
 use axum::routing::{any, delete, post};
-use axum::{routing::get, Router};
+use axum::{extract::Request, response::Response, routing::get, Router};
 use axum_server::Handle;
 use tokio::task::JoinHandle;
 use tower_http::cors::CorsLayer;
@@ -56,9 +58,38 @@ pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Rout
         .merge(public_router)
         .route("/dav{*path}", any(dav_handler::dav_handler))
         .with_state(state)
-        .layer(CorsLayer::very_permissive());
+        .layer(CorsLayer::very_permissive().expose_headers([
+            header::ALLOW,
+            header::ACCEPT_RANGES,
+            header::CONTENT_RANGE,
+            header::ETAG,
+        ]))
+        .layer(middleware::from_fn(normalize_dav_headers));
 
     with_trace_layer(app).into_make_service()
+}
+
+async fn normalize_dav_headers(request: Request, next: Next) -> Response {
+    let is_dav = request.uri().path() == "/dav" || request.uri().path().starts_with("/dav/");
+    let is_dav_options = is_dav && request.method() == Method::OPTIONS;
+    let mut response = next.run(request).await;
+    if is_dav {
+        response
+            .headers_mut()
+            .remove(HeaderName::from_static("dav"));
+        response
+            .headers_mut()
+            .remove(HeaderName::from_static("ms-author-via"));
+    }
+    if is_dav_options {
+        response.headers_mut().insert(
+            header::ALLOW,
+            HeaderValue::from_static(
+                "HEAD, GET, PUT, PATCH, OPTIONS, PROPFIND, COPY, MOVE, DELETE",
+            ),
+        );
+    }
+    response
 }
 
 /// Errors that can occur when building a `AdminServer`.
@@ -178,11 +209,10 @@ mod tests {
     use base64::Engine;
     use pubky_common::crypto::Keypair;
 
+    use super::*;
     use crate::admin_server::AdminAuthExt;
     use crate::persistence::sql::signup_code::{SignupCode, SignupCodeRepository};
     use crate::shared::quota::{BandwidthQuota, UserQuota};
-
-    use super::*;
 
     fn bw(s: &str) -> BandwidthQuota {
         BandwidthQuota::from_str(s).unwrap()
@@ -436,6 +466,326 @@ mod tests {
         response.assert_status_ok();
     }
 
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_rejects_empty_collection_creation() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let collection = format!("/dav/{}/pub/empty/", public_key.z32());
+
+        server
+            .method(Method::from_bytes(b"MKCOL").unwrap(), &collection)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_rejects_empty_collection_copy() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let source_key = pubky_common::crypto::Keypair::random().public_key();
+        let destination_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&source_key).await.unwrap();
+        context.user_service.create(&destination_key).await.unwrap();
+        let source = format!("/dav/{}", source_key.z32());
+        let destination = format!("/dav/{}/pub/copied/", destination_key.z32());
+
+        server
+            .method(Method::from_bytes(b"COPY").unwrap(), &source)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &destination)
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_missing_collection_copy_returns_not_found() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let source = format!("/dav/{}/pub/missing", public_key.z32());
+        let destination = format!("/dav/{}/pub/copied/", public_key.z32());
+
+        server
+            .method(Method::from_bytes(b"COPY").unwrap(), &source)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &destination)
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_put_allows_legacy_file_directory_collision() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let child = format!("/dav/{}/pub/dir/child.txt", public_key.z32());
+        let parent = format!("/dav/{}/pub/dir", public_key.z32());
+        server
+            .put(&child)
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"child".to_vec().into())
+            .expect_success()
+            .await;
+
+        server
+            .put(&parent)
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"parent".to_vec().into())
+            .expect_success()
+            .await;
+        assert_eq!(
+            server
+                .get(&parent)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"parent"
+        );
+        assert_eq!(
+            server
+                .get(&child)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"child"
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_traverses_legacy_file_directory_collision() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let source = format!("/dav/{}/pub/source/", public_key.z32());
+        let source_file = format!("{source}x");
+        let source_child = format!("{source}x/child.txt");
+        let destination = format!("/dav/{}/pub/destination/", public_key.z32());
+        let destination_file = format!("{destination}x");
+        let destination_child = format!("{destination}x/child.txt");
+
+        for (path, contents) in [
+            (&source_child, b"child".as_slice()),
+            (&source_file, b"file".as_slice()),
+        ] {
+            server
+                .put(path)
+                .add_header("Authorization", auth_value.as_str())
+                .bytes(contents.to_vec().into())
+                .expect_success()
+                .await;
+        }
+
+        let response = server
+            .method(Method::from_bytes(b"PROPFIND").unwrap(), &source)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Depth", "1")
+            .expect_success()
+            .await;
+        let body = response.text();
+        assert!(body.contains("/source/x</"), "exact file missing: {body}");
+        assert!(body.contains("/source/x/</"), "directory missing: {body}");
+
+        let response = server
+            .method(
+                Method::from_bytes(b"PROPFIND").unwrap(),
+                &format!("{source}x/"),
+            )
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Depth", "1")
+            .expect_success()
+            .await;
+        let body = response.text();
+        assert!(
+            body.contains("/source/x/child.txt</"),
+            "child missing: {body}"
+        );
+
+        server
+            .method(Method::from_bytes(b"COPY").unwrap(), &source)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &destination)
+            .add_header("Depth", "infinity")
+            .expect_success()
+            .await;
+        for (path, contents) in [
+            (&destination_file, b"file".as_slice()),
+            (&destination_child, b"child".as_slice()),
+        ] {
+            assert_eq!(
+                server
+                    .get(path)
+                    .add_header("Authorization", auth_value.as_str())
+                    .expect_success()
+                    .await
+                    .as_bytes()
+                    .as_ref(),
+                contents
+            );
+        }
+
+        server
+            .delete(&source)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await;
+        for path in [&source_file, &source_child] {
+            server
+                .get(path)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_failure()
+                .await
+                .assert_status(axum::http::StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_put_unknown_user_returns_conflict() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        let file = format!("/dav/{}/pub/file.txt", public_key.z32());
+
+        server
+            .put(&file)
+            .add_header("Authorization", auth_header())
+            .bytes(b"content".to_vec().into())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_preflight_includes_cors_headers() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let response = server
+            .method(Method::OPTIONS, "/dav/")
+            .add_header("Origin", "https://admin.example")
+            .add_header("Access-Control-Request-Method", "PUT")
+            .expect_success()
+            .await;
+
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-origin"));
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-methods"));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_advertises_only_supported_methods() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let response = server
+            .method(Method::OPTIONS, "/dav/")
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await;
+
+        assert!(!response.headers().contains_key("DAV"));
+        assert!(!response.headers().contains_key("MS-Author-Via"));
+        let allow = response.headers().get("Allow").unwrap().to_str().unwrap();
+        for unsupported in ["MKCOL", "LOCK", "UNLOCK", "PROPPATCH"] {
+            assert!(!allow.split(',').any(|method| method == unsupported));
+        }
+
+        server
+            .method(Method::from_bytes(b"LOCK").unwrap(), "/dav/")
+            .add_header("Authorization", auth_value.as_str())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_cors_exposes_response_headers() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let response = server
+            .get("/dav/")
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Origin", "https://admin.example")
+            .expect_success()
+            .await;
+
+        let exposed = response
+            .headers()
+            .get("access-control-expose-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        for header in ["allow", "accept-ranges", "content-range", "etag"] {
+            assert!(exposed.split(',').any(|value| value.trim() == header));
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_rejects_non_atomic_mutation_preconditions() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let file = format!("/dav/{}/pub/file.txt", public_key.z32());
+        server
+            .put(&file)
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"original".to_vec().into())
+            .expect_success()
+            .await;
+
+        server
+            .put(&file)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("If-Match", "\"stale\"")
+            .bytes(b"replacement".to_vec().into())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            server
+                .get(&file)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"original"
+        );
+    }
+
     /// PUT a file via WebDAV, GET it back, then DELETE it.
     #[tokio::test]
     #[pubky_test_utils::test]
@@ -472,6 +822,77 @@ mod tests {
         response.assert_status_ok();
         assert_eq!(response.as_bytes().as_ref(), file_content);
 
+        // Replacing a file with shorter content must truncate the old bytes.
+        let replacement = b"short";
+        let response = server
+            .put(&file_url)
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(replacement.to_vec().into())
+            .expect_success()
+            .await;
+        response.assert_status(axum::http::StatusCode::NO_CONTENT);
+        let response = server
+            .get(&file_url)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.as_bytes().as_ref(), replacement);
+
+        let head = server
+            .method(Method::HEAD, &file_url)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await;
+        head.assert_status_ok();
+        assert!(head.as_bytes().is_empty());
+        assert!(head.headers().contains_key(axum::http::header::ETAG));
+        assert!(head
+            .headers()
+            .contains_key(axum::http::header::LAST_MODIFIED));
+
+        for method in ["COPY", "MOVE"] {
+            server
+                .method(Method::from_bytes(method.as_bytes()).unwrap(), &file_url)
+                .add_header("Authorization", auth_value.as_str())
+                .add_header("Destination", &file_url)
+                .expect_failure()
+                .await
+                .assert_status(axum::http::StatusCode::FORBIDDEN);
+        }
+
+        let range = server
+            .get(&file_url)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Range", "bytes=1-3")
+            .expect_success()
+            .await;
+        range.assert_status(axum::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(range.as_bytes().as_ref(), &replacement[1..=3]);
+
+        let copy_url = format!("/dav/{}/pub/copy.txt", pubkey.z32());
+        let moved_url = format!("/dav/{}/pub/moved.txt", pubkey.z32());
+        let response = server
+            .method(Method::from_bytes(b"COPY").unwrap(), &file_url)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &copy_url)
+            .expect_success()
+            .await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let response = server
+            .method(Method::from_bytes(b"MOVE").unwrap(), &copy_url)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &moved_url)
+            .expect_success()
+            .await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let response = server
+            .get(&moved_url)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await;
+        assert_eq!(response.as_bytes().as_ref(), replacement);
+
         // PROPFIND on the user's pub directory should list the file
         let propfind = Method::from_bytes(b"PROPFIND").unwrap();
         let dir_url = format!("/dav/{}/pub/", pubkey.z32());
@@ -484,6 +905,10 @@ mod tests {
         response.assert_status(axum::http::StatusCode::MULTI_STATUS);
         let body = response.text();
         assert!(body.contains("test.txt"), "PROPFIND should list the file");
+        assert!(
+            !body.contains("__pubky"),
+            "PROPFIND must not expose internal blob keys"
+        );
 
         // DELETE the file
         let response = server
@@ -502,10 +927,255 @@ mod tests {
         response.assert_status(axum::http::StatusCode::NOT_FOUND);
     }
 
-    /// Exceeding user quota through the admin DAV endpoint currently returns 500.
+    /// Collection COPY, MOVE, and DELETE preserve nested logical files.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_dav_put_quota_overflow_returns_500() {
+    async fn test_dav_copy_move_delete_directory() {
+        use pubky_common::crypto::Keypair;
+
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+
+        let keypair = Keypair::from_secret(&[1; 32]);
+        let pubkey = keypair.public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+
+        let source_dir = format!("/dav/{}/pub/source/", pubkey.z32());
+        let copied_dir = format!("/dav/{}/pub/copied/", pubkey.z32());
+        let moved_dir = format!("/dav/{}/pub/moved/", pubkey.z32());
+        let replaced_file = format!("/dav/{}/pub/moved", pubkey.z32());
+        let source_file = format!("{source_dir}nested/file.txt");
+        let copied_file = format!("{copied_dir}nested/file.txt");
+        let moved_file = format!("{moved_dir}nested/file.txt");
+
+        server
+            .put(&source_file)
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"nested".to_vec().into())
+            .expect_success()
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+
+        server
+            .method(Method::from_bytes(b"COPY").unwrap(), &source_dir)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &copied_dir)
+            .add_header("Depth", "infinity")
+            .expect_success()
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+        assert_eq!(
+            server
+                .get(&copied_file)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"nested"
+        );
+
+        server
+            .put(&replaced_file)
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"replaced".to_vec().into())
+            .expect_success()
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+
+        server
+            .method(Method::from_bytes(b"MOVE").unwrap(), &copied_dir)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &moved_dir)
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            server
+                .get(&replaced_file)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"replaced"
+        );
+        server
+            .delete(&replaced_file)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await;
+        server
+            .method(Method::from_bytes(b"MOVE").unwrap(), &copied_dir)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &moved_dir)
+            .expect_success()
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+        assert_eq!(
+            server
+                .get(&moved_file)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"nested"
+        );
+        server
+            .get(&replaced_file)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::FOUND);
+        server
+            .get(&copied_file)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        let user = context.user_service.get(&pubkey).await.unwrap();
+        assert_eq!(
+            user.used_bytes,
+            2 * (b"nested".len() as u64 + crate::services::user_service::FILE_METADATA_SIZE)
+        );
+        let garbage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage")
+            .fetch_one(context.sql_db.pool())
+            .await
+            .unwrap();
+        assert_eq!(garbage, 1);
+
+        server
+            .delete(&moved_dir)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_success()
+            .await
+            .assert_status(axum::http::StatusCode::NO_CONTENT);
+        server
+            .get(&moved_file)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_rejects_user_collection_mutations() {
+        use pubky_common::crypto::Keypair;
+
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let pubkey = Keypair::from_secret(&[2; 32]).public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let file_url = format!("/dav/{}/pub/file.txt", pubkey.z32());
+        let user_url = format!("/dav/{}/", pubkey.z32());
+        server
+            .put(&file_url)
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"preserved".to_vec().into())
+            .expect_success()
+            .await;
+
+        for destination in [
+            user_url.clone(),
+            format!("/dav/x/../{}/", pubkey.z32()),
+            format!("/dav/x/%2e%2e/{}/", pubkey.z32()),
+        ] {
+            server
+                .delete(&destination)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_failure()
+                .await
+                .assert_status(axum::http::StatusCode::FORBIDDEN);
+            for method in ["COPY", "MOVE"] {
+                server
+                    .method(Method::from_bytes(method.as_bytes()).unwrap(), &file_url)
+                    .add_header("Authorization", auth_value.as_str())
+                    .add_header("Destination", &destination)
+                    .expect_failure()
+                    .await
+                    .assert_status(axum::http::StatusCode::FORBIDDEN);
+            }
+        }
+        assert_eq!(
+            server
+                .get(&file_url)
+                .add_header("Authorization", auth_value.as_str())
+                .expect_success()
+                .await
+                .as_bytes()
+                .as_ref(),
+            b"preserved"
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_rejects_existing_collection_overwrite() {
+        use pubky_common::crypto::Keypair;
+
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let source_pubkey = Keypair::from_secret(&[3; 32]).public_key();
+        let destination_pubkey = Keypair::from_secret(&[4; 32]).public_key();
+        context.user_service.create(&source_pubkey).await.unwrap();
+        context
+            .user_service
+            .create(&destination_pubkey)
+            .await
+            .unwrap();
+        let source_dir = format!("/dav/{}/pub/source/", source_pubkey.z32());
+        let destination_dir = format!("/dav/{}/pub/destination/", destination_pubkey.z32());
+        let source_file = format!("{source_dir}file.txt");
+        let destination_file = format!("{destination_dir}file.txt");
+
+        for (path, content) in [
+            (&source_file, b"source".as_slice()),
+            (&destination_file, b"destination".as_slice()),
+        ] {
+            server
+                .put(path)
+                .add_header("Authorization", auth_value.as_str())
+                .bytes(content.to_vec().into())
+                .expect_success()
+                .await;
+        }
+
+        for method in ["COPY", "MOVE"] {
+            server
+                .method(Method::from_bytes(method.as_bytes()).unwrap(), &source_dir)
+                .add_header("Authorization", auth_value.as_str())
+                .add_header("Destination", &destination_dir)
+                .expect_failure()
+                .await
+                .assert_status(axum::http::StatusCode::PRECONDITION_FAILED);
+        }
+        for (path, content) in [
+            (&source_file, b"source".as_slice()),
+            (&destination_file, b"destination".as_slice()),
+        ] {
+            assert_eq!(
+                server
+                    .get(path)
+                    .add_header("Authorization", auth_value.as_str())
+                    .expect_success()
+                    .await
+                    .as_bytes()
+                    .as_ref(),
+                content
+            );
+        }
+    }
+
+    /// Exceeding user quota through the admin DAV endpoint returns 507.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_put_quota_overflow_returns_507() {
         use pubky_common::crypto::Keypair;
 
         let context = AppContext::test_with_config(|c| c.storage.default_quota_mb = Some(1)).await;
@@ -535,7 +1205,7 @@ mod tests {
             .bytes(file_content.into())
             .expect_failure()
             .await;
-        response.assert_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        response.assert_status(axum::http::StatusCode::INSUFFICIENT_STORAGE);
     }
 
     #[tokio::test]

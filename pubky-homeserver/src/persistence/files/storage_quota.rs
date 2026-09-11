@@ -30,7 +30,7 @@ mod tests {
     use super::would_exceed_limit;
 
     #[test]
-    fn quota_limit_math_handles_boundaries_and_negative_deltas() {
+    fn test_quota_limit_math_handles_boundaries_and_negative_deltas() {
         assert!(!would_exceed_limit(500, 500, Some(1000)));
         assert!(would_exceed_limit(500, 501, Some(1000)));
         assert!(!would_exceed_limit(1000, -500, Some(1000)));

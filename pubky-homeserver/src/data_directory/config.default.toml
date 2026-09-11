@@ -17,6 +17,7 @@ key = "ip"
 
 [storage]
 type = "file_system"
+admin_dav_spool_limit_mb = 1024
 
 [admin]
 enabled = true
