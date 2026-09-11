@@ -35,7 +35,6 @@ use crate::{
     actors::session::SessionInfo,
     cross_log,
     errors::{AuthError, RequestError, Result},
-    util::check_http_status,
 };
 
 /// Refresh the bearer proactively when it has less than this many seconds left.
@@ -343,7 +342,7 @@ impl GrantCredential {
             .json(&body)
             .send()
             .await?;
-        let resp = check_http_status(resp).await?;
+        let resp = client.check_http_status(resp).await?;
         let parsed: GrantSessionResponse =
             resp.json().await.map_err(|e| RequestError::DecodeJson {
                 message: format!("decoding /auth/grant/session response: {e}"),
@@ -390,7 +389,7 @@ impl SessionCredential for GrantCredential {
             .send()
             .await
             .map_err(crate::Error::from)?;
-        check_http_status(response).await?;
+        client.check_http_status(response).await?;
         Ok(())
     }
 
@@ -428,7 +427,7 @@ impl SessionCredential for GrantCredential {
         if credential_session_missing(&response) {
             return Ok(None);
         }
-        let response = check_http_status(response).await?;
+        let response = client.check_http_status(response).await?;
         let session: GrantSessionInfo =
             response
                 .json()

@@ -102,7 +102,6 @@ use crate::{
     actors::session::credential::SessionCredential,
     cross_log,
     errors::{Error, RequestError, Result},
-    util::check_http_status,
 };
 
 /// A single event from the event stream.
@@ -482,7 +481,7 @@ impl EventStreamBuilder {
         // Surface homeserver rejections (e.g. 401/403/400 for private-path
         // authorization) as a typed `RequestError::Server` carrying the status
         // and the server's message, rather than a hand-rolled string.
-        let response = check_http_status(response).await?;
+        let response = self.client.check_http_status(response).await?;
 
         let sse_stream = response.bytes_stream().eventsource();
         let event_stream = sse_stream.filter_map(|result| async move {

@@ -20,7 +20,6 @@ use super::{
     pop_signer::GrantPopSigner,
 };
 use crate::errors::{RequestError, Result};
-use crate::util::check_http_status;
 use crate::{PubkyHttpClient, cross_log};
 
 /// Establish a grant-backed session by exchanging a user-signed grant for
@@ -90,7 +89,7 @@ pub(crate) async fn signup_account_from_grant(
         .json(&body)
         .send()
         .await?;
-    check_http_status(resp).await?;
+    client.check_http_status(resp).await?;
     Ok(())
 }
 
@@ -116,7 +115,7 @@ async fn post_grant_session(
         .json(&body)
         .send()
         .await?;
-    let resp = check_http_status(resp).await?;
+    let resp = client.check_http_status(resp).await?;
     resp.json().await.map_err(|e| {
         RequestError::DecodeJson {
             message: format!("decoding grant session response: {e}"),

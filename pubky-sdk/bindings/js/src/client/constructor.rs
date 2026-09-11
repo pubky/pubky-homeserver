@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
-use crate::js_error::{JsResult, PubkyError, PubkyErrorName, deserialize_ts};
+use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 
 // ------------------------------------------------------------------------------------------------
 // JS style config objects for the client.
@@ -31,7 +31,9 @@ pub struct PubkyClientConfig {
     /// Configuration on how to access pkarr packets on the mainline DHT.
     #[tsify(optional)]
     pub(crate) pkarr: Option<PkarrConfig>,
-    // NOTE: user_max_record_age belonged to the old client — removed here.
+    /// Maximum HTTP error-body bytes to capture. Defaults to 4096; zero skips the body.
+    #[tsify(optional)]
+    pub(crate) max_error_body_bytes: Option<usize>,
 }
 
 /// Low-level HTTP bridge used by the Pubky facade and actors.
@@ -52,26 +54,36 @@ impl Client {
     /// Create a Pubky HTTP client.
     ///
     /// @param {PubkyClientConfig} [config]
-    /// Optional transport overrides:
-    /// `{ pkarr?: { relays?: string[], request_timeout?: number } }`.
+    /// Optional error-body limit and PKARR overrides:
+    /// `{ maxErrorBodyBytes?: number, pkarr?: { relays?: string[], requestTimeout?: number } }`.
     ///
     /// @returns {Client}
     /// A configured low-level client. Prefer `new Pubky().client` unless you
-    /// need custom relays/timeouts.
+    /// need custom relays, timeouts or error-body limits.
     ///
     /// @throws {InvalidInput}
-    /// If any PKARR relay URL is invalid.
+    /// If a relay URL is invalid or the error-body limit is not an integer in 0..=4294967295.
     ///
     /// @example
     /// const client = new Client({
-    ///   pkarr: { relays: ["https://relay1/","https://relay2/"], request_timeout: 8000 }
+    ///   maxErrorBodyBytes: 1024,
+    ///   pkarr: { relays: ["https://relay1/","https://relay2/"], requestTimeout: 8000 }
     /// });
     /// const pubky = Pubky.withClient(client);
     #[wasm_bindgen(constructor)]
     pub fn new(config_opt: Option<Ts<PubkyClientConfig>>) -> JsResult<Self> {
-        let config_opt = config_opt.as_ref().map(deserialize_ts).transpose()?;
+        // A JSON roundtrip would turn NaN/Infinity into null and silently use defaults.
+        let config_opt = config_opt
+            .map(|config| serde_wasm_bindgen::from_value::<PubkyClientConfig>(config.js_value()))
+            .transpose()
+            .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))?;
         let mut builder = pubky::PubkyHttpClient::builder();
 
+        if let Some(config) = config_opt.as_ref()
+            && let Some(limit) = config.max_error_body_bytes
+        {
+            builder.max_error_body_bytes(limit);
+        }
         if let Some(config) = config_opt
             && let Some(pkarr) = config.pkarr
         {

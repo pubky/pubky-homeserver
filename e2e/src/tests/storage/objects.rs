@@ -1,5 +1,6 @@
 use super::*;
 use base64::Engine;
+use pubky_testnet::pubky::{ClientId, Pubky};
 
 fn assert_server_status(error: Error, expected: StatusCode) {
     assert!(
@@ -537,4 +538,51 @@ async fn write_same_path_separate_users() {
     assert_eq!(content_length, content1.len() as u64);
     let read_bytes_b = response.bytes().await.unwrap();
     assert_eq!(read_bytes_b, content1);
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn configured_error_limit_preserves_private_grant_and_cookie_reads() {
+    let testnet = build_full_testnet().await;
+    let pubky = Pubky::with_client(
+        testnet
+            .client_builder()
+            .max_error_body_bytes(0)
+            .build()
+            .unwrap(),
+    );
+    let signer = pubky.signer(Keypair::random());
+    signer
+        .signup(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let grant = signer
+        .signin(ClientId::new("error-limit.test").unwrap())
+        .await
+        .unwrap();
+    grant
+        .storage()
+        .put("/priv/test/file", "private")
+        .await
+        .unwrap();
+    let cookie = signer.signin_cookie().await.unwrap();
+    for session in [&grant, &cookie] {
+        let response = session.storage().get("/priv/test/file").await.unwrap();
+        assert_eq!(response.text().await.unwrap(), "private");
+        let error = session
+            .storage()
+            .get("/priv/test/missing")
+            .await
+            .unwrap_err();
+        let Error::Request(RequestError::Server { status, message }) = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(message, "Not Found");
+        assert!(!session
+            .storage()
+            .exists("/priv/test/missing")
+            .await
+            .unwrap());
+    }
 }

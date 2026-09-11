@@ -125,12 +125,13 @@ pub enum RequestError {
     #[error("HTTP transport error: {0}")]
     Transport(#[from] reqwest::Error),
 
-    /// The server returned a non-success status. Includes status and body message.
+    /// The server returned a non-success status. Includes status and bounded diagnostics.
     #[error("Server responded with an error: {status} - {message}")]
     Server {
         /// The HTTP status code returned by the server.
         status: reqwest::StatusCode,
-        /// Short description or the server response body captured for context.
+        /// Status reason or response text bounded by the client's error-body limit.
+        /// A truncation marker identifies oversized bodies; UTF-8 decoding may expand the text.
         message: String,
     },
 

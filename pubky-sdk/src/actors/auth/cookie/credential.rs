@@ -37,7 +37,6 @@ use crate::{
     client::user_endpoint_url,
     cross_log,
     errors::{PkarrError, Result},
-    util::check_http_status,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -196,7 +195,7 @@ impl CookieCredential {
         .await?;
         let response = request.body(token.serialize()).send().await?;
 
-        let response = check_http_status(response).await?;
+        let response = client.check_http_status(response).await?;
         cross_log!(
             info,
             "Session exchange for {} succeeded; constructing credential",
@@ -278,7 +277,7 @@ impl SessionCredential for CookieCredential {
         let rb = session_request(client, Method::DELETE, &self.user, homeserver.as_ref()).await?;
         let rb = self.attach(rb, client).await?;
         let response = rb.send().await.map_err(crate::Error::from)?;
-        check_http_status(response).await?;
+        client.check_http_status(response).await?;
         Ok(())
     }
 
@@ -329,7 +328,7 @@ impl SessionCredential for CookieCredential {
             cross_log!(info, "Cookie session missing on revalidate");
             return Ok(None);
         }
-        let response = check_http_status(response).await?;
+        let response = client.check_http_status(response).await?;
         let bytes = response.bytes().await?;
         let record = CookieSessionRecord::deserialize(&bytes)?;
         let info = SessionInfo::new(record.public_key().clone(), record.capabilities().to_vec());

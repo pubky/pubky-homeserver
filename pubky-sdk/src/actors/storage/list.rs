@@ -5,7 +5,6 @@ use super::core::{PublicStorage, SessionStorage, dir_trailing_slash_error};
 use crate::actors::storage::resource::{
     IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath,
 };
-use crate::util::check_http_status;
 use crate::{Result, cross_log};
 
 impl SessionStorage {
@@ -171,19 +170,20 @@ impl<'a> ListBuilder<'a> {
         }
 
         // 2) Build request per scope
-        let rb = match self.scope {
-            ListScope::Public(storage) => {
+        let (client, rb) = match self.scope {
+            ListScope::Public(storage) => (
+                &storage.client,
                 storage
                     .client
                     .cross_request(Method::GET, url.clone())
-                    .await?
-            }
+                    .await?,
+            ),
             ListScope::Session(storage) => {
                 let rb = storage
                     .client
                     .cross_request(Method::GET, url.clone())
                     .await?;
-                storage.attach_credential(rb).await?
+                (&storage.client, storage.attach_credential(rb).await?)
             }
         };
 
@@ -195,7 +195,7 @@ impl<'a> ListBuilder<'a> {
             resp.status(),
             resp.url()
         );
-        let resp = check_http_status(resp).await?;
+        let resp = client.check_http_status(resp).await?;
 
         let bytes = resp.bytes().await?;
         let mut out = Vec::new();

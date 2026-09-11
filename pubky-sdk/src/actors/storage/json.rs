@@ -3,7 +3,6 @@ use reqwest::Response;
 use super::core::{PublicStorage, SessionStorage};
 use super::resource::{IntoPubkyResource, IntoResourcePath};
 use crate::Result;
-use crate::util::check_http_status;
 
 //
 // SessionStorage (as-me)
@@ -30,7 +29,7 @@ impl SessionStorage {
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await?;
-        let resp = check_http_status(resp).await?;
+        let resp = self.client.check_http_status(resp).await?;
         Ok(resp.json::<T>().await?)
     }
 
@@ -54,7 +53,7 @@ impl SessionStorage {
             .json(body)
             .send()
             .await?;
-        check_http_status(resp).await
+        self.client.check_http_status(resp).await
     }
 }
 
@@ -81,7 +80,7 @@ impl PublicStorage {
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await?;
-        let resp = check_http_status(resp).await?;
+        let resp = self.client.check_http_status(resp).await?;
         Ok(resp.json::<T>().await?)
     }
 }
