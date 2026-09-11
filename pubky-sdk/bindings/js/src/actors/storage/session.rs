@@ -1,15 +1,22 @@
 // js/src/client/storage/session.rs
-use js_sys::Uint8Array;
+use js_sys::{Object, Reflect, Uint8Array};
+use reqwest::header::HeaderValue;
 use serde::Serialize;
 use tsify::Ts;
 use wasm_bindgen::prelude::*;
 use web_sys::Response;
 
 use super::stats::ResourceStats;
-use crate::js_error::{JsResult, serialize_ts};
+use crate::js_error::{JsResult, PubkyError, PubkyErrorName, serialize_ts};
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_PATH: &'static str = r#"export type Path = `/pub/${string}` | `/priv/${string}`;"#;
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_VERSIONED_BYTES: &'static str = r#"export interface VersionedBytes {
+  bytes: Uint8Array;
+  etag: string;
+}"#;
 
 /// Read/write storage scoped to **your** session (absolute paths: `/pub/...` or `/priv/...`).
 #[wasm_bindgen]
@@ -63,6 +70,35 @@ impl SessionStorage {
         let resp = self.0.get(path).await?;
         let bytes = resp.bytes().await?;
         Ok(Uint8Array::from(bytes.as_ref()))
+    }
+
+    /// GET bytes and the strong `ETag` from the same response.
+    ///
+    /// Use this for read-modify-write flows so the bytes and version cannot come
+    /// from different resource revisions.
+    ///
+    /// @param {Path} path
+    /// @returns {Promise<VersionedBytes>}
+    #[wasm_bindgen(js_name = "getBytesWithEtag", unchecked_return_type = "VersionedBytes")]
+    pub async fn get_bytes_with_etag(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+    ) -> JsResult<JsValue> {
+        let response = self.0.get(path).await?;
+        let etag = response_etag(&response)?;
+        let bytes = response.bytes().await?;
+        let result = Object::new();
+        Reflect::set(
+            &result,
+            &JsValue::from_str("bytes"),
+            &Uint8Array::from(bytes.as_ref()),
+        )?;
+        Reflect::set(
+            &result,
+            &JsValue::from_str("etag"),
+            &JsValue::from_str(&etag),
+        )?;
+        Ok(result.into())
     }
 
     /// GET text from an absolute session path.
@@ -135,6 +171,45 @@ impl SessionStorage {
         Ok(())
     }
 
+    /// PUT binary only if the current `ETag` matches.
+    ///
+    /// @param {Path} path
+    /// @param {Uint8Array} bytes
+    /// @param {string} etag Strong `ETag` returned with the bytes being modified;
+    /// weak tags are rejected.
+    /// @returns {Promise<string>} The strong `ETag` for the committed resource.
+    /// @throws {PubkyError} With status code `412` when the resource changed.
+    #[wasm_bindgen(js_name = "putBytesIfMatch")]
+    pub async fn put_bytes_if_match(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        body: &[u8],
+        etag: &str,
+    ) -> JsResult<String> {
+        let response = self
+            .0
+            .put_if_match(path, body.to_vec(), etag)
+            .await
+            .map_err(conditional_write_error)?;
+        response_etag(&response)
+    }
+
+    /// PUT binary only if the resource does not exist.
+    ///
+    /// @param {Path} path
+    /// @param {Uint8Array} bytes
+    /// @returns {Promise<string>} The strong `ETag` for the created resource.
+    /// @throws {PubkyError} With status code `412` when the resource exists.
+    #[wasm_bindgen(js_name = "putBytesIfAbsent")]
+    pub async fn put_bytes_if_absent(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        body: &[u8],
+    ) -> JsResult<String> {
+        let response = self.0.put_if_absent(path, body.to_vec()).await?;
+        response_etag(&response)
+    }
+
     /// PUT text at an absolute session path.
     ///
     /// @param {Path} path
@@ -177,5 +252,96 @@ impl SessionStorage {
     ) -> JsResult<()> {
         self.0.delete(path).await?;
         Ok(())
+    }
+
+    /// Delete a resource only if its current `ETag` matches.
+    ///
+    /// @param {Path} path
+    /// @param {string} etag Strong `ETag` returned with the resource.
+    /// @returns {Promise<void>}
+    /// @throws {PubkyError} With status code `412` when the resource changed.
+    #[wasm_bindgen(js_name = "deleteIfMatch")]
+    pub async fn delete_if_match(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        etag: &str,
+    ) -> JsResult<()> {
+        self.0
+            .delete_if_match(path, etag)
+            .await
+            .map_err(conditional_write_error)?;
+        Ok(())
+    }
+}
+
+fn response_etag(response: &reqwest::Response) -> JsResult<String> {
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .ok_or_else(|| {
+            PubkyError::new(
+                PubkyErrorName::InternalError,
+                "conditional write response is missing an ETag",
+            )
+        })?;
+    strong_response_etag(etag)
+}
+
+fn strong_response_etag(etag: &HeaderValue) -> JsResult<String> {
+    let raw = etag.as_bytes();
+    let opaque = raw
+        .strip_prefix(b"\"")
+        .and_then(|value| value.strip_suffix(b"\""))
+        .filter(|value| {
+            value
+                .iter()
+                .all(|byte| *byte == b'!' || (b'#'..=b'~').contains(byte))
+        })
+        .ok_or_else(|| {
+            PubkyError::new(
+                PubkyErrorName::InternalError,
+                "conditional write response contains an invalid strong ETag",
+            )
+        })?;
+    String::from_utf8(opaque.to_vec()).map_err(|_| {
+        PubkyError::new(
+            PubkyErrorName::InternalError,
+            "conditional write response contains a non-ASCII ETag",
+        )
+    })
+}
+
+fn conditional_write_error(error: pubky::Error) -> PubkyError {
+    match error {
+        error @ pubky::Error::Request(pubky::errors::RequestError::Validation { .. }) => {
+            PubkyError::new(PubkyErrorName::InvalidInput, error)
+        }
+        error => error.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strong_response_etag_requires_quoted_ascii_strong_tag() {
+        assert_eq!(
+            strong_response_etag(&HeaderValue::from_static("\"abc123\"")).unwrap(),
+            "abc123"
+        );
+        for invalid in ["W/\"abc123\"", "abc123", "\"has space\""] {
+            strong_response_etag(&HeaderValue::from_static(invalid)).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn test_conditional_validation_maps_to_invalid_input() {
+        let error = conditional_write_error(pubky::Error::Request(
+            pubky::errors::RequestError::Validation {
+                message: "invalid ETag".to_string(),
+            },
+        ));
+        assert!(matches!(error.name, PubkyErrorName::InvalidInput));
     }
 }

@@ -26,7 +26,8 @@ pub struct ResourceStats {
     pub content_type: Option<String>,
     /// `Last-Modified` parsed into `SystemTime` (RFC7231).
     pub last_modified: Option<SystemTime>,
-    /// `ETag` string.
+    /// `ETag` value. Strong tags are unquoted; weak tags retain their HTTP wire
+    /// form (`W/"..."`) and cannot be used for conditional writes.
     pub etag: Option<String>,
 }
 
@@ -62,9 +63,10 @@ impl ResourceStats {
 fn clean_etag(raw: &str) -> String {
     let s = raw.trim();
 
-    // Weak: W/"abc" -> W/abc
+    // Preserve the wire form so an opaque strong value beginning with `W/`
+    // cannot be confused with a weak validator.
     if s.starts_with("W/\"") && s.ends_with('"') && s.len() >= 4 {
-        return format!("W/{}", &s[3..s.len() - 1]);
+        return s.to_string();
     }
 
     // Strong: "abc" -> abc
@@ -73,4 +75,15 @@ fn clean_etag(raw: &str) -> String {
     }
 
     s.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distinguishes_weak_tags_from_strong_values_beginning_with_w_slash() {
+        assert_eq!(clean_etag("W/\"abc\""), "W/\"abc\"");
+        assert_eq!(clean_etag("\"W/abc\""), "W/abc");
+    }
 }

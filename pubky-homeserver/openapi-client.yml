@@ -76,6 +76,8 @@ paths:
       description: |-
         Returns stable, opaque feature identifiers supported by this homeserver.
         Clients must ignore unknown identifiers.
+        `conditional-writes` guarantees enforcement of `If-Match` and
+        `If-None-Match` on both storage PUT and DELETE requests.
       operationId: getInfo
       responses:
         '200':
@@ -92,6 +94,7 @@ paths:
               example:
                 features:
                 - path-addressed-storage
+                - conditional-writes
   "/signup_tokens/{token}":
     get:
       tags:
@@ -539,10 +542,15 @@ paths:
         match `user_z32` and have write capability covering the storage path.
         If `Content-Length` is provided, the user's quota is checked before the
         request body is streamed.
+        `If-Match` updates only the named current representation, while
+        `If-None-Match: *` creates only when the path does not exist.
       operationId: putPathAddressedEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfMatch"
+      - "$ref": "#/components/parameters/IfNoneMatch"
       requestBody:
         required: true
         content:
@@ -551,10 +559,22 @@ paths:
               type: string
               format: binary
       responses:
+        '200':
+          description: Existing file replaced.
+          headers:
+            ETag:
+              description: Strong entity tag for the stored representation.
+              schema:
+                type: string
         '201':
-          description: File created or updated.
+          description: File created.
+          headers:
+            ETag:
+              description: Strong entity tag for the stored representation.
+              schema:
+                type: string
         '400':
-          description: Invalid owner public key or storage path.
+          description: Invalid owner public key, storage path, or conditional header.
         '401':
           description: No valid session.
         '403':
@@ -564,6 +584,8 @@ paths:
             or the user account is disabled.
         '409':
           description: File/folder path collision.
+        '412':
+          description: An `If-Match` or `If-None-Match` precondition failed.
         '507':
           description: Storage quota exceeded.
     delete:
@@ -577,21 +599,28 @@ paths:
 
         The authenticated user must match `user_z32` and have write capability
         covering the storage path.
+        `If-Match` deletes only a matching current representation. Failed
+        `If-Match` or `If-None-Match` preconditions leave the file unchanged.
       operationId: deletePathAddressedEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfMatch"
+      - "$ref": "#/components/parameters/IfNoneMatch"
       responses:
         '204':
           description: File deleted.
         '400':
-          description: Invalid owner public key or storage path.
+          description: Invalid owner public key, storage path, or conditional header.
         '401':
           description: No valid session.
         '403':
           description: Insufficient permissions or path outside `pub/` and `priv/`.
         '404':
           description: File or storage owner not found.
+        '412':
+          description: An `If-Match` or `If-None-Match` precondition failed.
   "/{path}":
     parameters:
     - name: path
@@ -812,10 +841,15 @@ paths:
         covering the path.
 
         If `Content-Length` is provided, a quota pre-check is performed before streaming.
+        `If-Match` updates only the named current representation, while
+        `If-None-Match: *` creates only when the path does not exist.
       operationId: putEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfMatch"
+      - "$ref": "#/components/parameters/IfNoneMatch"
       requestBody:
         required: true
         content:
@@ -824,8 +858,22 @@ paths:
               type: string
               format: binary
       responses:
+        '200':
+          description: Existing file replaced
+          headers:
+            ETag:
+              description: Strong entity tag for the stored representation.
+              schema:
+                type: string
         '201':
-          description: File created or updated
+          description: File created
+          headers:
+            ETag:
+              description: Strong entity tag for the stored representation.
+              schema:
+                type: string
+        '400':
+          description: Invalid storage path or conditional header
         '401':
           description: No valid session
         '403':
@@ -834,6 +882,8 @@ paths:
             `/priv/`, session lacks write capability for path, or user account is disabled.
         '409':
           description: File/folder path collision
+        '412':
+          description: An `If-Match` or `If-None-Match` precondition failed
         '507':
           description: Storage quota exceeded
     delete:
@@ -846,19 +896,28 @@ paths:
 
         Deletes a file at the given path. Path must be under `/pub/` or `/priv/`.
         The authenticated user must match the target tenant and have write capability.
+        `If-Match` deletes only a matching current representation. Failed
+        `If-Match` or `If-None-Match` preconditions leave the file unchanged.
       operationId: deleteEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfMatch"
+      - "$ref": "#/components/parameters/IfNoneMatch"
       responses:
         '204':
           description: File deleted
+        '400':
+          description: Invalid storage path or conditional header
         '401':
           description: No valid session
         '403':
           description: Insufficient permissions or path outside `/pub/` and `/priv/`
         '404':
           description: File not found
+        '412':
+          description: An `If-Match` or `If-None-Match` precondition failed
   "/events/":
     get:
       tags:
@@ -1026,6 +1085,22 @@ components:
         public key and the value is the session secret. The `name` field here
         is a placeholder; the actual name varies per user.
   parameters:
+    IfMatch:
+      name: If-Match
+      in: header
+      description: >-
+        Apply the write only when a current representation strongly matches an
+        ASCII entity tag.
+      schema:
+        type: string
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      description: >-
+        Apply the write only when no current representation matches an ASCII
+        entity tag.
+      schema:
+        type: string
     PubkyHost:
       name: pubky-host
       in: header

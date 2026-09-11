@@ -1,6 +1,6 @@
 use crate::{
     persistence::{
-        files::{FileIoError, WriteStreamError},
+        files::{FileIoError, WritePreconditions, WriteStreamError},
         sql::{
             entry::{EntryEntity, EntryRepository},
             user::UserEntity,
@@ -19,7 +19,8 @@ impl FileService {
     /// Delete a file bypassing write-path restrictions.
     /// Used by both admin file APIs.
     pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, false).await
+        self.delete_inner(path, false, WritePreconditions::default())
+            .await
     }
 
     /// Write through the admin interface without user write-path policy.
@@ -29,8 +30,15 @@ impl FileService {
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, None)
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::AdminOverwrite,
+            None,
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     pub(crate) async fn admin_write_stream_with_size_hint(
@@ -39,8 +47,15 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: u64,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, Some(size_hint))
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::AdminOverwrite,
+            Some(size_hint),
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     pub(crate) async fn admin_create_stream_with_size_hint(
@@ -49,8 +64,15 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: u64,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminCreate, Some(size_hint))
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::AdminCreate,
+            Some(size_hint),
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     pub(crate) async fn admin_users(&self) -> Result<Vec<String>, FileIoError> {
@@ -154,6 +176,7 @@ impl FileService {
             }),
             WriteMode::AdminCreate,
             Some(source_length),
+            WritePreconditions::default(),
         )
         .await?;
         Ok(())

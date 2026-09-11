@@ -168,13 +168,16 @@ impl CookieCredential {
             "Establishing new session exchange for {}",
             token.public_key()
         );
-        let request = session_request(
-            client,
-            Method::POST,
-            token.public_key(),
-            homeserver.as_ref(),
-        )
-        .await?;
+        let homeserver = match homeserver {
+            Some(homeserver) => homeserver,
+            None => {
+                crate::Pkdns::with_client(client.clone())
+                    .require_homeserver_of(token.public_key())
+                    .await?
+            }
+        };
+        let request =
+            session_request(client, Method::POST, token.public_key(), Some(&homeserver)).await?;
         let response = request.body(token.serialize()).send().await?;
 
         let response = check_http_status(response).await?;
@@ -183,7 +186,7 @@ impl CookieCredential {
             "Session exchange for {} succeeded; constructing credential",
             token.public_key()
         );
-        Self::from_response(response, homeserver).await
+        Self::from_response(response, Some(homeserver)).await
     }
 
     /// Cookie secret accessor — used by [`super::view::CookieSessionView`]

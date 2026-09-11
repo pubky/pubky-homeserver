@@ -1,10 +1,22 @@
 use super::*;
 use base64::Engine;
+use pubky_testnet::pubky::ResourceStats;
 
 fn assert_server_status(error: Error, expected: StatusCode) {
     assert!(
         matches!(error, Error::Request(RequestError::Server { status, .. }) if status == expected),
         "expected server status {expected}, got {error:?}"
+    );
+}
+
+fn assert_credential_homeserver_mismatch(error: Error) {
+    assert!(
+        matches!(
+            error,
+            Error::Request(RequestError::Validation { ref message })
+                if message.contains("cannot attach session credential to target homeserver")
+        ),
+        "expected credential homeserver mismatch, got {error:?}"
     );
 }
 
@@ -78,6 +90,16 @@ async fn put_get_delete() {
 
     let response = session
         .client()
+        .request(Method::PUT, &storage_url)
+        .header("Cookie", &cookie)
+        .body(vec![5, 6, 7, 8, 9])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = session
+        .client()
         .request(Method::GET, &storage_url)
         .send()
         .await
@@ -89,7 +111,7 @@ async fn put_get_delete() {
     );
     assert_eq!(
         response.bytes().await.unwrap(),
-        bytes::Bytes::from(vec![0, 1, 2, 3, 4])
+        bytes::Bytes::from(vec![5, 6, 7, 8, 9])
     );
 
     let response = session
@@ -135,12 +157,190 @@ async fn put_get_delete() {
     let events = response.text().await.unwrap();
     assert!(
         events.starts_with(&format!(
-            "PUT pubky://{}/pub/foo.txt\nDEL pubky://{}/pub/foo.txt\n",
+            "PUT pubky://{}/pub/foo.txt\nPUT pubky://{}/pub/foo.txt\nDEL pubky://{}/pub/foo.txt\n",
+            public_key.z32(),
             public_key.z32(),
             public_key.z32()
         )),
         "unexpected event feed: {events}"
     );
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn conditional_puts_prevent_lost_updates() {
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let session = pubky
+        .signer(Keypair::random())
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    let path = "/pub/app/state % caf\u{e9}.bin";
+
+    let error = session
+        .storage()
+        .put_if_match(path, vec![0], "missing")
+        .await
+        .expect_err("If-Match must reject a missing resource");
+    assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+
+    let create_response = session
+        .storage()
+        .put_if_absent(path, vec![1])
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    assert!(create_response.headers().contains_key("etag"));
+
+    let error = session
+        .storage()
+        .put_if_absent(path, vec![2])
+        .await
+        .expect_err("conditional create must reject an existing resource");
+    assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+
+    let initial_response = session.storage().get(path).await.unwrap();
+    let initial_etag = ResourceStats::from_headers(initial_response.headers())
+        .etag
+        .unwrap();
+    assert_eq!(initial_response.bytes().await.unwrap().as_ref(), [1]);
+    let first_storage = session.storage();
+    let second_storage = session.storage();
+    let (first, second) = tokio::join!(
+        first_storage.put_if_match(path, vec![3], &initial_etag),
+        second_storage.put_if_match(path, vec![4], &initial_etag),
+    );
+
+    let (successful_write, failed_write, expected_bytes) = match (first, second) {
+        (Ok(response), Err(error)) => (response, error, [3]),
+        (Err(error), Ok(response)) => (response, error, [4]),
+        results => panic!("expected one accepted and one rejected write, got {results:?}"),
+    };
+    assert_server_status(failed_write, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(successful_write.status(), StatusCode::OK);
+
+    let final_response = session.storage().get(path).await.unwrap();
+    let final_etag = ResourceStats::from_headers(final_response.headers())
+        .etag
+        .unwrap();
+    assert_eq!(
+        successful_write
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("\"{final_etag}\"")
+    );
+    let stored = final_response.bytes().await.unwrap();
+    assert_eq!(stored.as_ref(), expected_bytes);
+
+    let error = session
+        .storage()
+        .delete_if_match(path, &initial_etag)
+        .await
+        .expect_err("conditional delete must reject a stale ETag");
+    assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+
+    let update_storage = session.storage();
+    let delete_storage = session.storage();
+    let (update, delete) = tokio::join!(
+        update_storage.put_if_match(path, vec![5], &final_etag),
+        delete_storage.delete_if_match(path, &final_etag),
+    );
+    match (update, delete) {
+        (Ok(response), Err(error)) => {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+            assert_eq!(
+                session
+                    .storage()
+                    .get(path)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                [5]
+            );
+        }
+        (Err(error), Ok(response)) => {
+            assert_server_status(error, StatusCode::PRECONDITION_FAILED);
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert!(!session.storage().exists(path).await.unwrap());
+        }
+        results => panic!("expected one accepted and one rejected mutation, got {results:?}"),
+    }
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+#[allow(deprecated, reason = "E2E tests cover the deprecated cookie flow")]
+async fn storage_rejects_cookie_credential_after_homeserver_change() {
+    let testnet = build_full_testnet().await;
+    let first_homeserver = testnet.homeserver_app().public_key();
+    let second_homeserver = Keypair::random().public_key();
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let session = signer.signup_cookie(&first_homeserver, None).await.unwrap();
+
+    signer
+        .pkdns()
+        .publish_homeserver_force(Some(&second_homeserver))
+        .await
+        .unwrap();
+
+    let error = session
+        .storage()
+        .put("/pub/app/state.bin", vec![1])
+        .await
+        .expect_err("cookie credentials must remain bound to their issuing homeserver");
+    assert_credential_homeserver_mismatch(error);
+
+    let error = session
+        .storage()
+        .put_if_absent("/pub/app/state.bin", vec![1])
+        .await
+        .expect_err("cookie credentials must remain bound to their issuing homeserver");
+    assert_credential_homeserver_mismatch(error);
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn storage_rejects_grant_credential_after_homeserver_change() {
+    let testnet = build_full_testnet().await;
+    let first_homeserver = testnet.homeserver_app().public_key();
+    let second_homeserver = Keypair::random().public_key();
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer.signup(&first_homeserver, None).await.unwrap();
+    let session = signer
+        .signin_blocking(ClientId::new("storage.test").unwrap())
+        .await
+        .unwrap();
+
+    signer
+        .pkdns()
+        .publish_homeserver_force(Some(&second_homeserver))
+        .await
+        .unwrap();
+
+    let error = session
+        .storage()
+        .put("/pub/app/state.bin", vec![1])
+        .await
+        .expect_err("grant credentials must remain bound to their issuing homeserver");
+    assert_credential_homeserver_mismatch(error);
+
+    let error = session
+        .storage()
+        .put_if_absent("/pub/app/state.bin", vec![1])
+        .await
+        .expect_err("grant credentials must remain bound to their issuing homeserver");
+    assert_credential_homeserver_mismatch(error);
 }
 
 #[tokio::test]

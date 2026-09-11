@@ -391,6 +391,26 @@ await s.putJson("/pub/example.com/data.json", { ok: true });
 await s.putText("/pub/example.com/note.txt", "hello");
 await s.putBytes("/pub/example.com/img.bin", new Uint8Array([1, 2, 3]));
 
+// Conditional binary writes return the committed version's ETag.
+const initialEtag = await s.putBytesIfAbsent(
+  "/pub/example.com/state.bin",
+  initialState,
+);
+const nextEtag = await s.putBytesIfMatch(
+  "/pub/example.com/state.bin",
+  nextState,
+  initialEtag,
+);
+
+// For read-modify-write, read the bytes and ETag atomically.
+const current = await s.getBytesWithEtag("/pub/example.com/state.bin");
+const modified = updateState(current.bytes);
+await s.putBytesIfMatch(
+  "/pub/example.com/state.bin",
+  modified,
+  current.etag,
+);
+
 // Reads
 const response = await s.get("/pub/example.com/data.json"); // -> Response (stream it)
 await s.getJson("/pub/example.com/data.json");

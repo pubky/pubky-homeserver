@@ -1,6 +1,6 @@
 use crate::{
     persistence::{
-        files::{FileIoError, WriteStreamError},
+        files::{FileIoError, WritePreconditions, WriteStreamError},
         sql::{
             entities::blob::BlobRepository,
             entry::{EntryEntity, EntryRepository},
@@ -23,7 +23,8 @@ const UNREFERENCED_BLOB_GRACE_SECONDS: i64 = 60 * 60;
 // Bound physical data to the active version, one retained version, and one replacement upload.
 const PHYSICAL_STORAGE_QUOTA_MULTIPLIER: u64 = 3;
 
-enum CommitWriteError {
+#[derive(Debug)]
+pub(super) enum CommitWriteError {
     BeforeCommit(FileIoError),
     CommitOutcomeUnknown(FileIoError),
 }
@@ -32,6 +33,13 @@ struct UploadReservation {
     user_id: i32,
     tracked_length: u64,
     max_blob_length: Option<u64>,
+}
+
+/// Whether a committed write created or replaced its logical resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Created,
+    Replaced,
 }
 
 #[derive(Clone, Copy)]
@@ -57,29 +65,68 @@ impl WriteMode {
 
 impl FileService {
     /// Write a streamed file and atomically publish its logical entry.
+    #[cfg(test)]
     pub async fn write_stream(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, None)
-            .await
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::Client,
+            None,
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
     }
 
     /// Write a streamed file with a trusted upper-bound hint for upload reservation.
+    #[cfg(test)]
     pub async fn write_stream_with_size_hint(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         size_hint: u64,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, Some(size_hint))
+        self.write_stream_inner(
+            path,
+            stream,
+            WriteMode::Client,
+            Some(size_hint),
+            WritePreconditions::default(),
+        )
+        .await
+        .map(|(entry, _)| entry)
+    }
+
+    /// Write a streamed file when its current entity tag satisfies `preconditions`.
+    pub(crate) async fn write_stream_with_preconditions(
+        &self,
+        path: &EntryPath,
+        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        size_hint: Option<u64>,
+        preconditions: WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), FileIoError> {
+        self.write_stream_inner(path, stream, WriteMode::Client, size_hint, preconditions)
             .await
     }
 
     /// Delete a file.
+    #[cfg(test)]
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        self.delete_inner(path, true).await
+        self.delete_inner(path, true, WritePreconditions::default())
+            .await
+    }
+
+    /// Delete a file when its current entity tag satisfies `preconditions`.
+    pub(crate) async fn delete_with_preconditions(
+        &self,
+        path: &EntryPath,
+        preconditions: WritePreconditions,
+    ) -> Result<(), FileIoError> {
+        self.delete_inner(path, true, preconditions).await
     }
 
     pub(super) async fn write_stream_inner(
@@ -88,9 +135,26 @@ impl FileService {
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         mode: WriteMode,
         size_hint: Option<u64>,
-    ) -> Result<EntryEntity, FileIoError> {
+        preconditions: WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), FileIoError> {
         if mode.enforces_write_path() {
             self.check_write_path_allowed(path).await?;
+        }
+
+        // Reject stale requests before staging bytes. commit_write checks again under the user lock.
+        if !preconditions.is_empty() {
+            let mut executor = self.db.pool().into();
+            if mode.enforces_path_collisions()
+                && EntryRepository::has_file_folder_collision(path, &mut executor).await?
+            {
+                return Err(FileIoError::PathCollision);
+            }
+            let existing = match self.get_info(path, &mut executor).await {
+                Ok(entry) => Some(entry),
+                Err(FileIoError::NotFound) => None,
+                Err(error) => return Err(error),
+            };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
         }
 
         let blob_key = format!("{}{}", self.blob_prefix, uuid::Uuid::new_v4().simple());
@@ -137,7 +201,9 @@ impl FileService {
             return Err(FileIoError::UploadLeaseLost);
         }
 
-        let result = self.commit_write(path, &blob_key, &metadata, mode).await;
+        let result = self
+            .commit_write(path, &blob_key, &metadata, mode, &preconditions)
+            .await;
         match result {
             Ok(entry) => {
                 self.events_service.notify_event().await;
@@ -226,13 +292,14 @@ impl FileService {
         }
     }
 
-    async fn commit_write(
+    pub(super) async fn commit_write(
         &self,
         path: &EntryPath,
         blob_key: &str,
         metadata: &crate::persistence::files::FileMetadata,
         mode: WriteMode,
-    ) -> Result<EntryEntity, CommitWriteError> {
+        preconditions: &WritePreconditions,
+    ) -> Result<(EntryEntity, WriteOutcome), CommitWriteError> {
         let mut tx = self
             .db
             .pool()
@@ -257,9 +324,15 @@ impl FileService {
                 Err(sqlx::Error::RowNotFound) => None,
                 Err(error) => return Err(error.into()),
             };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
             if mode.requires_missing_destination() && existing.is_some() {
                 return Err(FileIoError::PathCollision);
             }
+            let outcome = if existing.is_some() {
+                WriteOutcome::Replaced
+            } else {
+                WriteOutcome::Created
+            };
             let existing_bytes = existing.as_ref().map_or(0, |entry| entry.content_length);
             let metadata_bytes = if existing.is_none() {
                 FILE_METADATA_SIZE as i64
@@ -337,6 +410,7 @@ impl FileService {
 
             EntryRepository::get_by_path(path, &mut executor)
                 .await
+                .map(|entry| (entry, outcome))
                 .map_err(Into::into)
         }
         .await;
@@ -361,29 +435,31 @@ impl FileService {
         &self,
         path: &EntryPath,
         enforce_write_policy: bool,
+        preconditions: WritePreconditions,
     ) -> Result<(), FileIoError> {
         if enforce_write_policy {
             self.check_write_path_allowed(path).await?;
         }
 
-        match EntryRepository::get_by_path(path, &mut self.db.pool().into()).await {
-            Ok(_) => {}
-            Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
-            Err(error) => return Err(error.into()),
-        }
-
         let mut tx = self.db.pool().begin().await?;
         let result = async {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            let mut user = self
+            let mut user = match self
                 .user_service
                 .get_for_no_key_update(path.pubkey(), &mut executor)
-                .await?;
-            let entry = match EntryRepository::get_by_path(path, &mut executor).await {
-                Ok(entry) => entry,
+                .await
+            {
+                Ok(user) => user,
                 Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
                 Err(error) => return Err(error.into()),
             };
+            let existing = match EntryRepository::get_by_path(path, &mut executor).await {
+                Ok(entry) => Some(entry),
+                Err(sqlx::Error::RowNotFound) => None,
+                Err(error) => return Err(error.into()),
+            };
+            preconditions.check(existing.as_ref().map(|entry| &entry.content_hash))?;
+            let entry = existing.ok_or(FileIoError::NotFound)?;
             EntryRepository::delete(entry.id, &mut executor).await?;
             self.events_service
                 .create_event(

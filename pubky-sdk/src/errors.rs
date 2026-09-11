@@ -26,7 +26,7 @@ pub enum BuildError {
 /// The crate’s top-level error type.
 ///
 /// It groups failures into high-level categories:
-/// - [`Error::Request`] — HTTP transport/server/validation issues
+/// - [`Error::Request`] — HTTP, validation, decoding, and server-feature issues
 /// - [`Error::Pkarr`] — PKARR/DHT resolution and publishing issues
 /// - [`Error::Parse`] — URL parsing failures
 /// - [`Error::Authentication`] — auth/session/token/crypto issues
@@ -35,7 +35,7 @@ pub enum BuildError {
 /// Most lower-level errors automatically convert into this enum via `From`.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// HTTP request/response failed (transport, server, validation, JSON).
+    /// Request handling failed (HTTP, validation, decoding, or server features).
     #[error("Request failed: {0}")]
     Request(#[from] RequestError),
 
@@ -118,7 +118,7 @@ pub enum AuthError {
 
 // --- Consolidated Request Error ---
 
-/// Transport and server-side HTTP errors.
+/// Request, response, validation, decoding, and server-feature errors.
 #[derive(Debug, Error)]
 pub enum RequestError {
     /// Network/protocol failure from reqwest (timeouts, TLS, I/O, etc.).
@@ -146,6 +146,13 @@ pub enum RequestError {
     DecodeJson {
         /// Error message from the JSON deserializer (with context if available).
         message: String,
+    },
+
+    /// The target homeserver does not advertise a feature required by the operation.
+    #[error("Homeserver does not support required feature: {feature}")]
+    UnsupportedFeature {
+        /// Stable feature identifier advertised by the homeserver `/info` endpoint.
+        feature: String,
     },
 }
 
