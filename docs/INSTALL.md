@@ -218,14 +218,7 @@ sed -i 's|^# \[general\]|[general]|; s|^# database_url = .*|database_url = "post
 
 ## Run
 
-Database migrations run automatically at startup. Stop all homeserver instances
-before upgrading, take a database and storage backup, then run one upgraded instance
-until migrations finish before starting the others. Mixed-version rolling upgrades
-are not supported because storage schema changes can alter how file bytes are
-addressed. After the upgraded server accepts its first file write, rolling back to a
-version that predates immutable blob storage is unsupported.
-Restoring an earlier version requires restoring PostgreSQL and blob storage from
-the same pre-upgrade snapshot.
+Upgrading an existing installation? Read the [storage upgrade instructions](./STORAGE.md#upgrading-to-immutable-blob-storage) first.
 
 ### Docker
 
@@ -340,24 +333,8 @@ The generated `config.toml` works out of the box for local use. Here are a few s
 
 The full list of options is documented in [`pubky-homeserver/config.sample.toml`](../pubky-homeserver/config.sample.toml).
 
-When using `google_bucket`, disable bucket soft delete and Object Versioning so
-deletions reclaim storage. Also configure an `AbortIncompleteMultipartUpload`
-lifecycle rule for the `__pubky/blobs/` prefix; incomplete multipart uploads are
-not visible to the homeserver's completed-object reconciliation.
-
-Immutable blobs are stored under `__pubky/blobs/{namespace}/`. The namespace is
-created in PostgreSQL and shared by instances using that database. Independent
-databases use separate namespaces, so cleanup cannot delete another homeserver's
-blobs in a shared bucket. Include the namespace table in database backups; a
-restored copy must not run cleanup against the original deployment's live prefix.
-
-Overwritten and deleted blobs are retained for at least one hour. Tracked abandoned
-uploads and deferred deletions are retried every 15 minutes. Reads and copies still
-using an old blob after cleanup may fail and require retrying. Retained blobs count
-toward the physical-storage limit until deleted, so frequent large overwrites may
-temporarily block new uploads until cleanup frees space.
-The full backend scan for objects missing from database tracking runs at startup
-and once per day. This repair scan is separate from normal queued cleanup.
+For cloud storage, see [Google Cloud Bucket setup](./GOOGLE_BUCKET.md).
+For backups, storage limits, and file cleanup, see [Storage operations](./STORAGE.md).
 
 ## Troubleshooting
 
