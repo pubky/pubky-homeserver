@@ -17,7 +17,9 @@ use super::{upload_heartbeat::UploadHeartbeat, FileService};
 
 // A failed remote close can complete after the client loses the response.
 const ABANDONED_UPLOAD_SETTLE_SECONDS: i64 = 60 * 60;
-const ACTIVE_BLOB_RETENTION_SECONDS: i64 = 60 * 60;
+// Grace for reads using a replaced/deleted blob, shortened under quota pressure.
+// Reads may fail after cleanup; unchanged files have no read deadline.
+const UNREFERENCED_BLOB_GRACE_SECONDS: i64 = 60 * 60;
 // Bound physical data to the active version, one retained version, and one replacement upload.
 const PHYSICAL_STORAGE_QUOTA_MULTIPLIER: u64 = 3;
 
@@ -160,50 +162,66 @@ impl FileService {
         blob_key: &str,
         size_hint: Option<u64>,
     ) -> Result<UploadReservation, FileIoError> {
-        let mut tx = self.db.pool().begin().await?;
-        let result = async {
-            let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            let user = self
-                .user_service
-                .get_for_no_key_update(path.pubkey(), &mut executor)
-                .await?;
-            let max_bytes = crate::persistence::files::storage_quota::resolve_storage_max_bytes(
-                &user,
-                self.default_storage_mb,
-            );
-            let reservation = match max_bytes {
-                Some(max_bytes) => size_hint.unwrap_or(max_bytes),
-                None => size_hint.unwrap_or(0),
-            };
-            if max_bytes.is_some_and(|max_bytes| reservation > max_bytes) {
-                return Err(FileIoError::DiskSpaceQuotaExceeded);
-            }
-            let tracked =
-                BlobRepository::tracked_bytes_for_user(user.id, FILE_METADATA_SIZE, &mut executor)
+        let mut cleanup_attempted = false;
+        loop {
+            let mut tx = self.db.pool().begin().await?;
+            let mut quota_user_id = None;
+            let result = async {
+                let mut executor = UnifiedExecutor::from_tx(&mut tx);
+                let user = self
+                    .user_service
+                    .get_for_no_key_update(path.pubkey(), &mut executor)
                     .await?;
-            let physical_usage = user.used_bytes.saturating_add(tracked);
-            if max_bytes.is_some_and(|max_bytes| {
-                physical_usage.saturating_add(reservation.max(FILE_METADATA_SIZE))
-                    > max_bytes.saturating_mul(PHYSICAL_STORAGE_QUOTA_MULTIPLIER)
-            }) {
-                return Err(FileIoError::DiskSpaceQuotaExceeded);
+                let max_bytes = crate::persistence::files::storage_quota::resolve_storage_max_bytes(
+                    &user,
+                    self.default_storage_mb,
+                );
+                let reservation = match max_bytes {
+                    Some(max_bytes) => size_hint.unwrap_or(max_bytes),
+                    None => size_hint.unwrap_or(0),
+                };
+                if max_bytes.is_some_and(|max_bytes| reservation > max_bytes) {
+                    return Err(FileIoError::DiskSpaceQuotaExceeded);
+                }
+                let tracked = BlobRepository::tracked_bytes_for_user(
+                    user.id,
+                    FILE_METADATA_SIZE,
+                    &mut executor,
+                )
+                .await?;
+                let physical_usage = user.used_bytes.saturating_add(tracked);
+                if max_bytes.is_some_and(|max_bytes| {
+                    physical_usage.saturating_add(reservation.max(FILE_METADATA_SIZE))
+                        > max_bytes.saturating_mul(PHYSICAL_STORAGE_QUOTA_MULTIPLIER)
+                }) {
+                    quota_user_id = Some(user.id);
+                    return Err(FileIoError::DiskSpaceQuotaExceeded);
+                }
+                BlobRepository::stage_upload(blob_key, user.id, reservation, &mut executor).await?;
+                Ok(UploadReservation {
+                    user_id: user.id,
+                    tracked_length: reservation,
+                    max_blob_length: max_bytes,
+                })
             }
-            BlobRepository::stage_upload(blob_key, user.id, reservation, &mut executor).await?;
-            Ok(UploadReservation {
-                user_id: user.id,
-                tracked_length: reservation,
-                max_blob_length: max_bytes,
-            })
-        }
-        .await;
-        match result {
-            Ok(reservation) => {
-                tx.commit().await?;
-                Ok(reservation)
-            }
-            Err(error) => {
-                tx.rollback().await?;
-                Err(error)
+            .await;
+            match result {
+                Ok(reservation) => {
+                    tx.commit().await?;
+                    return Ok(reservation);
+                }
+                Err(error) => {
+                    if let Err(rollback_error) = tx.rollback().await {
+                        tracing::error!(%rollback_error, "Failed to roll back upload reservation");
+                        return Err(error);
+                    }
+                    if let Some(user_id) = quota_user_id.filter(|_| !cleanup_attempted) {
+                        cleanup_attempted = true;
+                        self.cleanup_for_quota(user_id).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
             }
         }
     }
@@ -311,7 +329,7 @@ impl FileService {
                     &old_blob_key,
                     user.id,
                     existing_bytes,
-                    ACTIVE_BLOB_RETENTION_SECONDS,
+                    UNREFERENCED_BLOB_GRACE_SECONDS,
                     &mut executor,
                 )
                 .await?;
@@ -383,7 +401,7 @@ impl FileService {
                 &Self::backend_key(&entry),
                 user.id,
                 entry.content_length,
-                ACTIVE_BLOB_RETENTION_SECONDS,
+                UNREFERENCED_BLOB_GRACE_SECONDS,
                 &mut executor,
             )
             .await?;
@@ -394,7 +412,9 @@ impl FileService {
         match result {
             Ok(()) => tx.commit().await?,
             Err(error) => {
-                tx.rollback().await?;
+                if let Err(rollback_error) = tx.rollback().await {
+                    tracing::error!(%rollback_error, "Failed to roll back file deletion");
+                }
                 return Err(error);
             }
         }
