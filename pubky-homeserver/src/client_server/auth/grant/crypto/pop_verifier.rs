@@ -150,15 +150,12 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use pubky_common::crypto::Keypair;
+    use pubky_common::{auth::jws::sign_jws, crypto::Keypair};
 
-    use super::jws_crypto;
     use super::*;
 
     fn sign_pop(client_kp: &Keypair, raw: &PopProofClaims) -> JwsCompact {
-        let header = jws_crypto::eddsa_header(POP_JWS_TYP);
-        let enc = jws_crypto::encoding_key(client_kp);
-        let token = jsonwebtoken::encode(&header, raw, &enc).unwrap();
+        let token = sign_jws(client_kp, POP_JWS_TYP, raw);
         JwsCompact::parse(&token).unwrap()
     }
 
@@ -172,29 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn verify_accepts_pubky_common_sign_jws() {
-        // Interop check: SDKs sign PoP proofs via `pubky_common::auth::jws::sign_jws`.
-        // The homeserver must accept that wire format byte-for-byte.
-        let client_kp = Keypair::random();
-        let hs_kp = Keypair::random();
-        let raw = make_valid_pop(&hs_kp);
-
-        let compact_str = pubky_common::auth::jws::sign_jws(&client_kp, POP_JWS_TYP, &raw);
-        let compact = JwsCompact::parse(&compact_str).unwrap();
-
-        let cnf_key = client_kp.public_key();
-        let aud = hs_kp.public_key().z32();
-        let context = PopVerificationContext {
-            cnf_key: &cnf_key,
-            expected_audience: &aud,
-            expected_grant_id: &raw.gid,
-        };
-        let pop = PopProof::verify(&compact, &context).unwrap();
-        assert_eq!(pop.grant_id, raw.gid);
-    }
-
-    #[test]
     fn sign_and_verify_roundtrip() {
+        // Interop check: verify the shared signer used by SDKs through the
+        // homeserver's full PoP verification pipeline.
         let client_kp = Keypair::random();
         let hs_kp = Keypair::random();
         let raw = make_valid_pop(&hs_kp);
@@ -278,10 +255,8 @@ mod tests {
         let raw = make_valid_pop(&hs_kp);
 
         // Sign with wrong typ header
-        let header = jws_crypto::eddsa_header("wrong-typ");
-        let enc = jws_crypto::encoding_key(&client_kp);
-        let compact =
-            JwsCompact::parse(&jsonwebtoken::encode(&header, &raw, &enc).unwrap()).unwrap();
+        let token = sign_jws(&client_kp, "wrong-typ", &raw);
+        let compact = JwsCompact::parse(&token).unwrap();
 
         let cnf_key = client_kp.public_key();
         let aud = hs_kp.public_key().z32();

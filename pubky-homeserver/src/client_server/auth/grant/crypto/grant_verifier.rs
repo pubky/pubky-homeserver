@@ -86,18 +86,15 @@ pub enum Error {
 mod tests {
     use chrono::Utc;
     use pubky_common::{
-        auth::jws::{ClientId, GrantId},
+        auth::jws::{sign_jws, ClientId, GrantId},
         capabilities::Capability,
         crypto::Keypair,
     };
 
-    use super::jws_crypto;
     use super::*;
 
     fn sign_raw_grant(keypair: &Keypair, raw: &GrantClaims) -> JwsCompact {
-        let header = jws_crypto::eddsa_header(GRANT_JWS_TYP);
-        let enc = jws_crypto::encoding_key(keypair);
-        let token = jsonwebtoken::encode(&header, raw, &enc).unwrap();
+        let token = sign_jws(keypair, GRANT_JWS_TYP, raw);
         JwsCompact::parse(&token).unwrap()
     }
 
@@ -116,6 +113,8 @@ mod tests {
 
     #[test]
     fn sign_and_verify_roundtrip() {
+        // Interop check: verify the shared signer used by SDKs through the
+        // homeserver's full grant verification pipeline.
         let user_kp = Keypair::random();
         let client_kp = Keypair::random();
         let raw = make_valid_raw_grant(&user_kp, &client_kp);
@@ -126,23 +125,6 @@ mod tests {
         assert_eq!(claims.cnf, client_kp.public_key());
         assert_eq!(claims.client_id, raw.client_id);
         assert_eq!(claims.jti, raw.jti);
-    }
-
-    #[test]
-    fn verify_grant_accepts_pubky_common_sign_jws() {
-        // Interop check: SDKs sign grants via `pubky_common::auth::jws::sign_jws`
-        // (raw ed25519-dalek + base64url). The homeserver must accept that wire
-        // format byte-for-byte through the existing `verify_grant` pipeline.
-        let user_kp = Keypair::random();
-        let client_kp = Keypair::random();
-        let raw = make_valid_raw_grant(&user_kp, &client_kp);
-
-        let compact_str = pubky_common::auth::jws::sign_jws(&user_kp, GRANT_JWS_TYP, &raw);
-        let compact = JwsCompact::parse(&compact_str).unwrap();
-
-        let claims = verify_grant(&compact).unwrap();
-        assert_eq!(claims.jti, raw.jti);
-        assert_eq!(claims.cnf, client_kp.public_key());
     }
 
     #[test]
@@ -177,10 +159,8 @@ mod tests {
         let raw = make_valid_raw_grant(&user_kp, &client_kp);
 
         // Sign with wrong typ header
-        let header = jws_crypto::eddsa_header("wrong-typ");
-        let enc = jws_crypto::encoding_key(&user_kp);
-        let compact =
-            JwsCompact::parse(&jsonwebtoken::encode(&header, &raw, &enc).unwrap()).unwrap();
+        let token = sign_jws(&user_kp, "wrong-typ", &raw);
+        let compact = JwsCompact::parse(&token).unwrap();
 
         let result = verify_grant(&compact);
         assert!(matches!(result, Err(Error::InvalidHeaderType)));

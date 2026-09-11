@@ -479,7 +479,6 @@ fn build_session_response(
 
 #[cfg(test)]
 mod tests {
-    use super::super::crypto::jws_crypto;
     use super::*;
     use crate::persistence::sql::{
         signup_code::{SignupCode, SignupCodeRepository},
@@ -569,9 +568,7 @@ mod tests {
     }
 
     fn sign_jws<T: serde::Serialize>(kp: &Keypair, typ: &str, claims: &T) -> JwsCompact {
-        let header = jws_crypto::eddsa_header(typ);
-        let enc = jws_crypto::encoding_key(kp);
-        let token = jsonwebtoken::encode(&header, claims, &enc).unwrap();
+        let token = pubky_common::auth::jws::sign_jws(kp, typ, claims);
         JwsCompact::parse(&token).unwrap()
     }
 
