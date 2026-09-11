@@ -12,7 +12,6 @@ use std::sync::Arc;
 use crate::actors::session::credential::SessionCredential;
 use crate::client::user_endpoint_url;
 use crate::errors::{RequestError, Result};
-use crate::util::check_http_status;
 use crate::{PubkyHttpClient, PubkySession};
 
 /// Account-level grant management for a signed-in user.
@@ -76,7 +75,7 @@ impl GrantManager {
             .await?
             .send()
             .await?;
-        let resp = check_http_status(resp).await?;
+        let resp = self.client.check_http_status(resp).await?;
         let grants: Vec<GrantInfo> = resp.json().await.map_err(|e| RequestError::DecodeJson {
             message: format!("decoding /auth/grant/sessions response: {e}"),
         })?;
@@ -101,7 +100,7 @@ impl GrantManager {
             .await?
             .send()
             .await?;
-        check_http_status(resp).await?;
+        self.client.check_http_status(resp).await?;
         Ok(())
     }
 }

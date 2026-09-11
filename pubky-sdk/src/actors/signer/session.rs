@@ -24,7 +24,6 @@ use crate::{
         grant::pop_signer::GrantPopSigner,
     },
     cross_log,
-    util::check_http_status,
 };
 
 const SIGNUP_CLIENT_ID: &str = "pubky.signup";
@@ -321,7 +320,7 @@ impl PubkySigner {
             .await?;
 
         // Map non-2xx into our error type; keep body/headers intact for the caller.
-        check_http_status(response).await
+        self.client.check_http_status(response).await
     }
 
     async fn publish_signup_homeserver(&self, homeserver: &PublicKey) -> Result<()> {

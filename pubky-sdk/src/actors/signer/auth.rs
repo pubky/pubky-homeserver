@@ -19,7 +19,6 @@ use crate::{
     },
     cross_log,
     errors::{AuthError, Result},
-    util::check_http_status,
 };
 
 use super::PubkySigner;
@@ -174,7 +173,7 @@ impl PubkySigner {
             .send()
             .await?;
 
-        check_http_status(response).await?;
+        self.client.check_http_status(response).await?;
         cross_log!(info, "Auth payload delivered successfully");
         Ok(())
     }

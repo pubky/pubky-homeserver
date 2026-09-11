@@ -70,6 +70,28 @@ println!("Your current homeserver: {:?}", resolved);
 # Ok(()) }
 ```
 
+## Error-body limits
+
+HTTP status checking leaves successful response bodies unread. For HTTP errors,
+the client captures up to 4096 body bytes for the error message. Change this limit when creating the client:
+
+```rust,no_run
+use pubky::{Pubky, PubkyHttpClient};
+
+let client = PubkyHttpClient::builder()
+    .max_error_body_bytes(1024)
+    .build()?;
+let pubky = Pubky::with_client(client);
+# Ok::<_, pubky::BuildError>(())
+```
+
+The setting applies to all checked requests made through that client, including
+credential-refresh errors. Set it to `0` to skip error-body reads and use the
+HTTP status reason as the message. Positive limits preserve short messages and
+mark longer ones with `[response body truncated at N bytes]`.
+
+In JavaScript, use `Pubky.withClient(new Client({ maxErrorBodyBytes: 1024 }))`.
+
 ## Key formats (display vs transport)
 
 `PublicKey` has two string representations:

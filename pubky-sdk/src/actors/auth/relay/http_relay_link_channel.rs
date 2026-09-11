@@ -9,7 +9,7 @@ use pubky_common::crypto::hash;
 use reqwest::Method;
 use url::Url;
 
-use crate::{PubkyHttpClient, cross_log, util::check_http_status};
+use crate::{PubkyHttpClient, cross_log};
 
 /// Default HTTP relay base when none is supplied.
 #[deprecated(note = "Use `DEFAULT_HTTP_RELAY_INBOX` with `HttpRelayInboxChannel` instead")]
@@ -96,7 +96,7 @@ impl HttpRelayLinkChannel {
             Err(err) => return Err(PollError::Failure(err.into())),
         };
 
-        let response = match check_http_status(response).await {
+        let response = match client.check_http_status(response).await {
             Ok(response) => response,
             Err(e) => return Err(PollError::Failure(e)),
         };

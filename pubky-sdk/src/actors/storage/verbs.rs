@@ -3,11 +3,11 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use super::core::{PublicStorage, SessionStorage};
 use super::resource::{IntoPubkyResource, IntoResourcePath};
 use super::stats::ResourceStats;
-use crate::{Result, cross_log, util::check_http_status};
+use crate::{PubkyHttpClient, Result, cross_log};
 
 /// Interpret the result of a `HEAD` request into a shared outcome used by both
 /// session and public storage clients.
-async fn interpret_head(resp: Response) -> Result<Option<Response>> {
+async fn interpret_head(client: &PubkyHttpClient, resp: Response) -> Result<Option<Response>> {
     match resp.status() {
         StatusCode::NOT_FOUND | StatusCode::GONE => {
             cross_log!(debug, "HEAD request returned {}", resp.status());
@@ -15,27 +15,27 @@ async fn interpret_head(resp: Response) -> Result<Option<Response>> {
         }
         _ => {
             cross_log!(debug, "HEAD request returned {}", resp.status());
-            Ok(Some(check_http_status(resp).await?))
+            Ok(Some(client.check_http_status(resp).await?))
         }
     }
 }
 
 /// Send a prepared request and ensure the HTTP status indicates success.
-async fn send_checked(rb: RequestBuilder) -> Result<Response> {
+async fn send_checked(client: &PubkyHttpClient, rb: RequestBuilder) -> Result<Response> {
     let resp = rb.send().await?;
     cross_log!(debug, "Request completed with status {}", resp.status());
-    check_http_status(resp).await
+    client.check_http_status(resp).await
 }
 
 /// Send a prepared `HEAD` request and interpret the outcome.
-async fn send_head(rb: RequestBuilder) -> Result<Option<Response>> {
+async fn send_head(client: &PubkyHttpClient, rb: RequestBuilder) -> Result<Option<Response>> {
     let resp = rb.send().await?;
     cross_log!(
         debug,
         "HEAD request completed with status {}",
         resp.status()
     );
-    interpret_head(resp).await
+    interpret_head(client, resp).await
 }
 
 //
@@ -62,7 +62,7 @@ impl SessionStorage {
     ///   resource/URL.
     pub async fn get<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::GET, path).await?;
-        send_checked(rb).await
+        send_checked(&self.client, rb).await
     }
 
     /// Lightweight existence check (HEAD) for an **absolute path**.
@@ -72,7 +72,7 @@ impl SessionStorage {
     /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource.
     pub async fn exists<P: IntoResourcePath>(&self, path: P) -> Result<bool> {
         let rb = self.request(Method::HEAD, path).await?;
-        Ok(send_head(rb).await?.is_some())
+        Ok(send_head(&self.client, rb).await?.is_some())
     }
 
     /// Retrieve metadata via `HEAD` for an **absolute path** (no body).
@@ -82,7 +82,7 @@ impl SessionStorage {
     /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource.
     pub async fn stats<P: IntoResourcePath>(&self, path: P) -> Result<Option<ResourceStats>> {
         let rb = self.request(Method::HEAD, path).await?;
-        Ok(send_head(rb)
+        Ok(send_head(&self.client, rb)
             .await?
             .map(|resp| ResourceStats::from_headers(resp.headers())))
     }
@@ -102,7 +102,7 @@ impl SessionStorage {
         B: Into<reqwest::Body>,
     {
         let rb = self.request(Method::PUT, path).await?.body(body);
-        send_checked(rb).await
+        send_checked(&self.client, rb).await
     }
 
     /// HTTP `DELETE` for an **absolute path**.
@@ -114,7 +114,7 @@ impl SessionStorage {
     ///   resource/URL.
     pub async fn delete<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::DELETE, path).await?;
-        send_checked(rb).await
+        send_checked(&self.client, rb).await
     }
 }
 
@@ -145,7 +145,7 @@ impl PublicStorage {
     ///   addressed resource/URL.
     pub async fn get<A: IntoPubkyResource>(&self, addr: A) -> Result<Response> {
         let rb = self.request(Method::GET, addr).await?;
-        send_checked(rb).await
+        send_checked(&self.client, rb).await
     }
 
     /// HEAD existence check for an addressed resource.
@@ -155,7 +155,7 @@ impl PublicStorage {
     /// - Returns [`crate::errors::Error::Parse`] if `addr` cannot be converted into a valid addressed resource.
     pub async fn exists<A: IntoPubkyResource>(&self, addr: A) -> Result<bool> {
         let rb = self.request(Method::HEAD, addr).await?;
-        Ok(send_head(rb).await?.is_some())
+        Ok(send_head(&self.client, rb).await?.is_some())
     }
 
     /// Metadata via `HEAD` for an addressed resource (no body).
@@ -165,7 +165,7 @@ impl PublicStorage {
     /// - Returns [`crate::errors::Error::Parse`] if `addr` cannot be converted into a valid addressed resource.
     pub async fn stats<A: IntoPubkyResource>(&self, addr: A) -> Result<Option<ResourceStats>> {
         let rb = self.request(Method::HEAD, addr).await?;
-        Ok(send_head(rb)
+        Ok(send_head(&self.client, rb)
             .await?
             .map(|resp| ResourceStats::from_headers(resp.headers())))
     }

@@ -5,7 +5,7 @@ use pubky_common::crypto::hash;
 use reqwest::{Method, StatusCode};
 use url::Url;
 
-use crate::{PubkyHttpClient, cross_log, util::check_http_status};
+use crate::{PubkyHttpClient, cross_log};
 
 /// Default HTTP relay inbox base when none is supplied.
 pub const DEFAULT_HTTP_RELAY_INBOX: &str = "https://httprelay.pubky.app/inbox";
@@ -126,7 +126,7 @@ impl HttpRelayInboxChannel {
             return Err(PollError::Timeout);
         }
 
-        let response = match check_http_status(response).await {
+        let response = match client.check_http_status(response).await {
             Ok(response) => response,
             Err(e) => return Err(PollError::Failure(e)),
         };
@@ -202,7 +202,7 @@ impl HttpRelayInboxChannel {
         let request = client.cross_request(Method::POST, self.to_url()).await?;
         let request = request.body(body.to_vec());
         let response = request.send().await?;
-        check_http_status(response).await?;
+        client.check_http_status(response).await?;
         Ok(())
     }
 
@@ -220,7 +220,7 @@ impl HttpRelayInboxChannel {
             StatusCode::OK => Ok(true),
             StatusCode::NOT_FOUND => Ok(false),
             _ => {
-                check_http_status(response).await?;
+                client.check_http_status(response).await?;
                 Ok(false)
             }
         }
@@ -243,7 +243,7 @@ impl HttpRelayInboxChannel {
             }
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
-                check_http_status(response).await?;
+                client.check_http_status(response).await?;
                 Ok(None)
             }
         }
@@ -276,7 +276,7 @@ impl HttpRelayInboxChannel {
             StatusCode::REQUEST_TIMEOUT => Ok(Some(false)),
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
-                check_http_status(response).await?;
+                client.check_http_status(response).await?;
                 Ok(None)
             }
         }
@@ -427,6 +427,8 @@ impl Display for EncryptedHttpRelayInboxChannel {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Error, errors::RequestError};
+    use httpmock::MockServer;
     use pubky_common::crypto::random_bytes;
 
     use super::*;
@@ -762,5 +764,30 @@ mod tests {
             result.is_err(),
             "Expected error after MAX_FAILURES, got {result:?}"
         );
+    }
+    #[tokio::test]
+    async fn relay_errors_use_the_client_limit() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("DELETE");
+            then.status(500).body("diagnostic");
+        });
+        let channel = random_channel(&Url::parse(&server.base_url()).unwrap());
+        for (limit, expected) in [
+            (0, "Internal Server Error"),
+            (4, "diag\n[response body truncated at 4 bytes]"),
+        ] {
+            let client = PubkyHttpClient::builder()
+                .isolated_pkarr_test()
+                .max_error_body_bytes(limit)
+                .build()
+                .unwrap();
+            let error = channel.ack(&client).await.unwrap_err();
+            let Error::Request(RequestError::Server { status, message }) = error else {
+                panic!("unexpected error: {error:?}");
+            };
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(message, expected);
+        }
     }
 }

@@ -41,3 +41,13 @@ test("new Client() with faulty config", async (t) => {
     "should throw an error",
   );
 });
+
+test("error-body limit without pkarr options", (t) => {
+  for (const maxErrorBodyBytes of [0, 16, 4294967295]) {
+    t.doesNotThrow(() => new Client({ maxErrorBodyBytes }), `accepts ${maxErrorBodyBytes}`);
+  }
+  for (const maxErrorBodyBytes of [-1, 1.5, NaN, Infinity, 4294967296]) {
+    t.throws(() => new Client({ maxErrorBodyBytes }), `rejects ${maxErrorBodyBytes}`);
+  }
+  t.end();
+});

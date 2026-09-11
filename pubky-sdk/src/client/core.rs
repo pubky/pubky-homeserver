@@ -5,6 +5,8 @@ use std::time::Duration;
 use super::http_targets::HomeserverFeatures;
 use crate::{cross_log, errors::BuildError};
 
+pub(crate) const DEFAULT_MAX_ERROR_BODY_BYTES: usize = 4096;
+
 const DEFAULT_USER_AGENT: &str = concat!("pubky.org", "@", env!("CARGO_PKG_VERSION"),);
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,6 +31,7 @@ struct NativeHttpConfig {
 ///   [`Self::request_timeout`]
 /// - HTTP read timeout (native only): reqwest default (disabled) unless set via
 ///   [`Self::read_timeout`]
+/// - Error-body capture: 4096 bytes; see [`Self::max_error_body_bytes`].
 /// - User-agent: `pubky.org@<crate-version>` plus any [`Self::user_agent_extra`]
 /// - Idle keep-alive connections per host (native only): reqwest default unless set via
 ///   [`Self::pool_max_idle_per_host`]
@@ -63,6 +66,7 @@ pub struct PubkyHttpClientBuilder {
 
     /// Optional user-agent segment appended to the default UA for app-level telemetry.
     user_agent_extra: Option<String>,
+    max_error_body_bytes: Option<usize>,
 
     #[cfg(not(target_arch = "wasm32"))]
     native_http: NativeHttpConfig,
@@ -198,6 +202,28 @@ impl PubkyHttpClientBuilder {
         self
     }
 
+    /// Limit the body bytes captured for HTTP error diagnostics. Defaults to 4096.
+    ///
+    /// Set `0` to skip error-body reads and use the status reason as the message.
+    /// Longer bodies receive a truncation marker. This applies to all checked SDK
+    /// requests, including credential refresh. Successful-body handling is unchanged.
+    ///
+    /// A stalled body at or below a positive limit still needs a request timeout.
+    /// Transport buffers and UTF-8 decoding have separate memory costs.
+    ///
+    /// # Example
+    /// ```
+    /// # use pubky::PubkyHttpClient;
+    /// let client = PubkyHttpClient::builder()
+    ///     .max_error_body_bytes(1024)
+    ///     .build()?;
+    /// # Ok::<_, pubky::BuildError>(())
+    /// ```
+    pub fn max_error_body_bytes(&mut self, limit: usize) -> &mut Self {
+        self.max_error_body_bytes = Some(limit);
+        self
+    }
+
     /// Build a [`PubkyHttpClient`].
     ///
     /// # Errors
@@ -280,6 +306,9 @@ impl PubkyHttpClientBuilder {
             pkarr,
             http: http_builder.build()?,
             features,
+            max_error_body_bytes: self
+                .max_error_body_bytes
+                .unwrap_or(DEFAULT_MAX_ERROR_BODY_BYTES),
 
             #[cfg(not(target_arch = "wasm32"))]
             icann_http: icann_http_builder.build()?,
@@ -462,6 +491,7 @@ pub struct PubkyHttpClient {
     pub(crate) http: reqwest::Client,
     pub(crate) pkarr: pkarr::Client,
     pub(crate) features: HomeserverFeatures,
+    pub(crate) max_error_body_bytes: usize,
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) icann_http: reqwest::Client,
