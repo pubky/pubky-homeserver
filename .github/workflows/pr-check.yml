@@ -329,6 +329,8 @@ jobs:
   docker-build:
     uses: ./.github/workflows/docker-build.yml
     with:
+      runner: ubuntu-24.04
+      cache_scope_suffix: -amd64
       build_profile: debug
       platforms: linux/amd64
       publish: false

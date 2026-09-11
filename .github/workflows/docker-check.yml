@@ -9,6 +9,17 @@ permissions:
 
 jobs:
   build:
+    strategy:
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
     uses: ./.github/workflows/docker-build.yml
     with:
+      runner: ${{ matrix.runner }}
+      cache_scope_suffix: -${{ matrix.architecture }}
+      build_profile: release
+      platforms: linux/${{ matrix.architecture }}
       publish: false

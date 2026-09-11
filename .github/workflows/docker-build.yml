@@ -3,6 +3,14 @@ name: Build Docker Images
 on:
   workflow_call:
     inputs:
+      runner:
+        description: GitHub runner label for the build
+        type: string
+        default: ubuntu-latest
+      cache_scope_suffix:
+        description: Optional suffix to isolate caches for separate architecture builds
+        type: string
+        default: ''
       build_profile:
         description: Docker build profile (debug or release)
         type: string
@@ -28,7 +36,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 150
     strategy:
       matrix:
@@ -49,7 +57,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build Docker image
-        uses: pubky/ci-workflows/.github/actions/docker/build_and_push@e6d3b38b5ebfa97b86595cb44f3a86695e473b09 # v1.0.0
+        uses: pubky/ci-workflows/.github/actions/docker/build_and_push@5faaf004d36bb93a204b58cf7190ffe7fbcce16f
         with:
           registry: registry-1.docker.io/synonymsoft
           context: .
@@ -59,8 +67,12 @@ jobs:
             type=ref,event=tag
           platforms: ${{ inputs.platforms }}
           image: ${{ matrix.image }}
-          cache_from: type=gha,scope=docker-${{ inputs.build_profile }}-${{ matrix.target }}
-          cache_to: type=gha,scope=docker-${{ inputs.build_profile }}-${{ matrix.target }},mode=max
+          # Publishing imports only the caches warmed by native release checks on main.
+          cache_from: |
+            ${{ !inputs.publish && format('type=gha,scope=docker-{0}-{1}{2}', inputs.build_profile, matrix.target, inputs.cache_scope_suffix) || '' }}
+            ${{ inputs.publish && format('type=gha,scope=docker-{0}-{1}-amd64', inputs.build_profile, matrix.target) || '' }}
+            ${{ inputs.publish && format('type=gha,scope=docker-{0}-{1}-arm64', inputs.build_profile, matrix.target) || '' }}
+          cache_to: ${{ !inputs.publish && format('type=gha,scope=docker-{0}-{1}{2},mode=max', inputs.build_profile, matrix.target, inputs.cache_scope_suffix) || '' }}
           build_args: |
             BUILD_TARGET=${{ matrix.target }}
             BUILD_PROFILE=${{ inputs.build_profile }}
