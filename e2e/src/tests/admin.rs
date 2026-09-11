@@ -2,7 +2,7 @@ use pubky_testnet::pubky::{
     errors::RequestError, ClientId, Error, Keypair, Method, PubkyHttpClient, StatusCode,
 };
 use pubky_testnet::{
-    pubky_homeserver::{ConfigToml, Domain, MockDataDir},
+    pubky_homeserver::{ConfigToml, Domain},
     Testnet,
 };
 use serde::Deserialize;
@@ -48,11 +48,9 @@ async fn admin_info_includes_metadata() {
     );
     let admin_password = config.admin.admin_password.clone();
 
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
-
     let mut testnet = Testnet::new().await.unwrap();
     let homeserver = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 
@@ -89,9 +87,8 @@ async fn per_user_quota_via_admin_api() {
 
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 
@@ -182,9 +179,8 @@ async fn per_user_speed_override_throttles_via_admin_api() {
 
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 
@@ -272,9 +268,8 @@ async fn per_user_read_speed_override_throttles_via_admin_api() {
 
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 
@@ -360,9 +355,8 @@ async fn allowed_write_paths_enforced_via_http() {
 
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 
@@ -471,9 +465,8 @@ async fn admin_event_stream_exposes_private_events() {
 
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 
