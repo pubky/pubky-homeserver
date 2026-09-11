@@ -141,6 +141,19 @@ impl AsyncDrop for OpendalGcpCleaner {
 /// Creates a filesystem operator.
 /// The operator will be created in a temporary directory.
 /// The directory is returned and will be deleted when TempDir is dropped.
+/// Filesystem operator configured like production: uploads are staged in a
+/// sibling directory and renamed into place on close.
+pub(crate) fn get_atomic_fs_operator() -> (Operator, TempDir) {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let root = tmp_dir.path().join("files");
+    let staging = tmp_dir.path().join("files-tmp");
+    let builder = opendal::services::Fs::default()
+        .root(root.to_str().unwrap())
+        .atomic_write_dir(staging.to_str().unwrap());
+    let operator = opendal::Operator::new(builder).unwrap().finish();
+    (operator, tmp_dir)
+}
+
 pub(crate) fn get_fs_operator() -> (Operator, TempDir) {
     let tmp_dir = tempfile::tempdir().unwrap();
     let s = tmp_dir.path().to_str().unwrap();
