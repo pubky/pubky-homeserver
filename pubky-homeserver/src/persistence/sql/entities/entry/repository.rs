@@ -174,25 +174,22 @@ impl EntryRepository {
             full_path.push('/');
         }
 
-        let statement = Query::select()
-            .from(ENTRY_TABLE)
-            .expr(Expr::col((ENTRY_TABLE, EntryIden::Id)).count())
-            .left_join(
-                USER_TABLE,
-                Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
-            )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).like(format!("{}%", full_path))) // Everything that starts with the path
-            .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
-            .limit(1)
-            .to_owned();
-
-        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
-        let count: i64 = sqlx::query_scalar_with(&query, values)
-            .fetch_one(con)
-            .await?;
-
-        Ok(count > 0)
+        sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM entries
+                JOIN users ON users.id = entries."user"
+                WHERE users.public_key = $1
+                  AND substr(entries.path, 1, length($2)) = $2
+            )
+            "#,
+        )
+        .bind(path.pubkey().z32())
+        .bind(full_path)
+        .fetch_one(con)
+        .await
     }
 
     /// Check if writing `path` would make an exact file path collide with an
@@ -279,24 +276,30 @@ impl EntryRepository {
             // Make sure the path is a folder
             dir_path.push('/');
         }
-        // Use this regex to get the distinct paths
-        // ^(?'fixed_directory'\/test\/)(?'path_segment'[^\/]*)(?'opt_slash_indicating_dir'\/?)(?'rest_of_path'.*)$
-        // DISTINCT ON makes sure that the same path is only returned once.
+        // Reduce descendants to their first path segment. Literal substring operations are used
+        // because valid storage paths may contain SQL LIKE or regular-expression metacharacters.
         let inner_statement = Query::select()
             .from(ENTRY_TABLE)
             .expr(Expr::cust_with_values(
-                "DISTINCT ON (regpath) regexp_replace(entries.path, '^'||$1||'([^/]*)(\\/?)(.*)?$', $1||'\\1'||'\\2') as regpath",
+                "DISTINCT ON (regpath) CASE \
+                    WHEN strpos(substr(entries.path, length($1) + 1), '/') > 0 \
+                    THEN $1 || split_part(substr(entries.path, length($1) + 1), '/', 1) || '/' \
+                    ELSE entries.path \
+                 END AS regpath",
                 vec![sea_query::Value::from(dir_path.clone())],
             ))
             .left_join(
                 USER_TABLE,
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).like(format!("{}%", dir_path))) // Everything that starts with the path
+            .and_where(Expr::cust_with_values(
+                "substr(entries.path, 1, length($1)) = $1",
+                vec![sea_query::Value::from(dir_path)],
+            ))
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .to_owned();
 
-        // Use a select in select to filter the previous regex regpath
+        // Use a select in select to filter the derived child paths
         // to make the cursor and limit work.
         let mut outer_statement = Query::select()
             .expr(Expr::col("regpath"))
@@ -371,7 +374,6 @@ impl EntryRepository {
             full_path.push('/');
         }
 
-        // let cursor_id = EntryRepository::get_cursor_id_deep(cursor, executor).await?;
         let mut statement = Query::select()
             .from(ENTRY_TABLE)
             .columns([(ENTRY_TABLE, EntryIden::Path)])
@@ -379,7 +381,10 @@ impl EntryRepository {
                 USER_TABLE,
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).like(format!("{}%", full_path))) // Everything that starts with the path
+            .and_where(Expr::cust_with_values(
+                "substr(entries.path, 1, length($1)) = $1",
+                vec![sea_query::Value::from(full_path)],
+            ))
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .to_owned();
 
@@ -829,6 +834,73 @@ mod tests {
             }
         }
         assert_eq!(set.len(), 6);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_lists_treat_path_metacharacters_literally() {
+        let db = SqlDb::test().await;
+        let user_pubkey = Keypair::random().public_key();
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
+            .await
+            .unwrap();
+        for path in [
+            "/literal%_[x]/file.txt",
+            "/literal%_[x]/sub/child.txt",
+            "/literalA_[x]/wrong.txt",
+            "/literal%a[x]/wrong.txt",
+        ] {
+            EntryRepository::create(
+                user.id,
+                &StoragePath::new(path).unwrap(),
+                &pubky_common::crypto::Hash::from_bytes([0; 32]),
+                100,
+                "text/plain",
+                &mut db.pool().into(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let base = EntryPath::new(
+            user_pubkey.clone(),
+            StoragePath::new("/literal%_[x]/").unwrap(),
+        );
+        let entries =
+            EntryRepository::list_shallow(&base, None, None, false, &mut db.pool().into())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                EntryPath::new(
+                    user_pubkey.clone(),
+                    StoragePath::new("/literal%_[x]/file.txt").unwrap(),
+                ),
+                EntryPath::new(
+                    user_pubkey.clone(),
+                    StoragePath::new("/literal%_[x]/sub/").unwrap(),
+                ),
+            ]
+        );
+        let entries = EntryRepository::list_deep(&base, None, None, false, &mut db.pool().into())
+            .await
+            .unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                EntryPath::new(
+                    user_pubkey.clone(),
+                    StoragePath::new("/literal%_[x]/file.txt").unwrap()
+                ),
+                EntryPath::new(
+                    user_pubkey,
+                    StoragePath::new("/literal%_[x]/sub/child.txt").unwrap()
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1333,5 +1405,41 @@ mod tests {
         .await
         .unwrap();
         assert!(!exists);
+
+        EntryRepository::create(
+            user.id,
+            &StoragePath::new("/literalA_/wrong.txt").unwrap(),
+            &pubky_common::crypto::Hash::from_bytes([0; 32]),
+            100,
+            "text/plain",
+            &mut db.pool().into(),
+        )
+        .await
+        .unwrap();
+        let literal = EntryPath::new(
+            user_pubkey.clone(),
+            StoragePath::new("/literal%_/").unwrap(),
+        );
+        assert!(
+            !EntryRepository::contains_directory(&literal, &mut db.pool().into())
+                .await
+                .unwrap()
+        );
+
+        EntryRepository::create(
+            user.id,
+            &StoragePath::new("/literal%_/file.txt").unwrap(),
+            &pubky_common::crypto::Hash::from_bytes([0; 32]),
+            100,
+            "text/plain",
+            &mut db.pool().into(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            EntryRepository::contains_directory(&literal, &mut db.pool().into())
+                .await
+                .unwrap()
+        );
     }
 }
