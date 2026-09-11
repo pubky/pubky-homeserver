@@ -48,6 +48,10 @@ impl HttpError {
         Self::new_with_message(StatusCode::BAD_REQUEST, message)
     }
 
+    pub fn precondition_failed() -> HttpError {
+        Self::new_with_message(StatusCode::PRECONDITION_FAILED, "Precondition Failed")
+    }
+
     pub fn insufficient_storage() -> HttpError {
         Self::new_with_message(
             StatusCode::INSUFFICIENT_STORAGE,
@@ -126,6 +130,7 @@ impl From<FileIoError> for HttpError {
                 Self::new_with_message(StatusCode::CONFLICT, "File/folder path collision")
             }
             FileIoError::StreamBroken(_) => Self::bad_request("Stream broken"),
+            FileIoError::PreconditionFailed => Self::precondition_failed(),
             e => Self::internal_server_and_log(format!("FileIoError: {}", e)),
         }
     }

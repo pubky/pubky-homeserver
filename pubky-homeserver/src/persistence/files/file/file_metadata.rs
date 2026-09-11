@@ -3,6 +3,16 @@ use pubky_common::crypto::{Hash, Hasher};
 /// Fallback content type if no content type is detected.
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
+/// The opaque entity-tag value of a stored file: its content hash, base64 encoded.
+pub fn content_hash_etag_value(hash: &Hash) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash.as_bytes())
+}
+
+/// The strong `ETag` header value of a stored file, including quotes.
+pub fn content_hash_etag(hash: &Hash) -> String {
+    format!("\"{}\"", content_hash_etag_value(hash))
+}
+
 /// Metadata of a file.
 #[derive(Debug, Clone)]
 pub struct FileMetadata {

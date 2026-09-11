@@ -20,6 +20,8 @@ pub mod storage {
 pub mod features {
     /// Homeserver supports storage URLs containing the resource owner in the path.
     pub const PATH_ADDRESSED_STORAGE: &str = "path-addressed-storage";
+    /// Homeserver enforces `If-Match` and `If-None-Match` on storage `PUT`.
+    pub const CONDITIONAL_WRITES: &str = "conditional-writes";
 }
 
 /// Local test network's hardcoded port numbers for local development.
