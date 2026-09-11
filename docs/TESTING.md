@@ -132,14 +132,19 @@ workflow](../.github/workflows/docker-build.yml) for both targets:
 
 | Workflow | Trigger | Profile | Platforms | Publishes images |
 | --- | --- | --- | --- | --- |
-| [PR Check](../.github/workflows/pr-check.yml) | Pull requests and pushes to `main` | `debug` | `linux/amd64`, `linux/arm64` (native runners) | No |
+| [PR Check](../.github/workflows/pr-check.yml) | Pull requests and pushes to `main` | `debug` | `linux/amd64` (native runner) | No |
 | [Release Docker check](../.github/workflows/docker-check.yml) | Pushes to `main` | `release` | `linux/amd64`, `linux/arm64` (native runners) | No |
 | [Docker publishing](../.github/workflows/docker.yml) | Tags matching `v*` | `release` | `linux/amd64`, `linux/arm64` | Yes |
 
-Build caches are scoped by profile and target. PR Docker checks and release
-Docker checks on `main` run AMD64 on `ubuntu-24.04` and ARM64 on
-`ubuntu-24.04-arm`, with caches additionally scoped by architecture. Publishing
+Build caches are scoped by profile, target, and architecture. Debug Docker checks
+run AMD64 on `ubuntu-24.04` for PRs and pushes to `main`, warming the
+`docker-debug-<target>-amd64` caches on `main` for PRs to reuse. On `main`,
+release Docker checks also run AMD64 on `ubuntu-24.04` and ARM64 on
+`ubuntu-24.04-arm`.
+ARM64 build failures are therefore caught on `main` after merging. Publishing
 builds both architectures together on `ubuntu-latest`, using emulation for ARM64.
+Publishing imports only the two architecture-specific release caches warmed on
+`main` and disables cache export by passing an empty `cache_to` value.
 
 ## Common Commands
 
