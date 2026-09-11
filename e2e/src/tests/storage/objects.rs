@@ -538,3 +538,44 @@ async fn write_same_path_separate_users() {
     let read_bytes_b = response.bytes().await.unwrap();
     assert_eq!(read_bytes_b, content1);
 }
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn raw_private_storage_preserves_grant_and_cookie_authorization() {
+    use pubky_testnet::pubky::ClientId;
+
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let grant = signer
+        .signin(ClientId::new("raw-storage.test").unwrap())
+        .await
+        .unwrap();
+    grant
+        .storage()
+        .put("/priv/test/file", "private")
+        .await
+        .unwrap();
+    let cookie = signer.signin_cookie().await.unwrap();
+    for session in [&grant, &cookie] {
+        let response = session.storage().get_raw("/priv/test/file").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "private");
+        let response = session
+            .storage()
+            .get_raw("/priv/test/missing")
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_server_status(
+            session
+                .storage()
+                .get("/priv/test/missing")
+                .await
+                .unwrap_err(),
+            StatusCode::NOT_FOUND,
+        );
+    }
+}

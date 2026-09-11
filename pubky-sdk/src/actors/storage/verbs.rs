@@ -57,12 +57,39 @@ impl SessionStorage {
     ///
     /// # Errors
     /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
-    ///   responds with a non-success status (the server message is captured).
+    ///   responds with a non-success status. Diagnostics capture up to 4096 body
+    ///   bytes, with a truncation marker when more bytes are observed.
     /// - [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid
     ///   resource/URL.
     pub async fn get<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
+        let response = self.get_raw(path).await?;
+        check_http_status(response).await
+    }
+
+    /// HTTP `GET` with caller-controlled status and body handling.
+    ///
+    /// Uses the same path validation, routing and credentials as [`Self::get`],
+    /// but returns the final HTTP response without checking its status or reading
+    /// its body. A received 404, 410, 429 or 500 is therefore `Ok(Response)`.
+    /// The HTTP client's existing redirect policy still applies.
+    ///
+    /// Inspect [`Response::status`] before consuming the body. Drop responses you
+    /// do not need, or count streamed bytes before appending them to a buffer.
+    /// Calling `text()`, `bytes()` or `json()` still collects the entire body;
+    /// neither a HEAD preflight nor Content-Length enforces a download limit.
+    ///
+    /// This gives control over the storage response, not separate requests made
+    /// during credential refresh or transport discovery.
+    ///
+    /// # Errors
+    /// - Propagates path validation, discovery, credential preparation and HTTP
+    ///   transport errors. A failed proactive refresh is a preparation error,
+    ///   not the storage GET response.
+    pub async fn get_raw<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::GET, path).await?;
-        send_checked(rb).await
+        let response = rb.send().await?;
+        cross_log!(debug, "Request completed with status {}", response.status());
+        Ok(response)
     }
 
     /// Lightweight existence check (HEAD) for an **absolute path**.
@@ -93,7 +120,8 @@ impl SessionStorage {
     ///
     /// # Errors
     /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
-    ///   responds with a non-success status (the server message is captured).
+    ///   responds with a non-success status. Diagnostics capture up to 4096 body
+    ///   bytes, with a truncation marker when more bytes are observed.
     /// - [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid
     ///   resource/URL.
     pub async fn put<P, B>(&self, path: P, body: B) -> Result<Response>
@@ -109,7 +137,8 @@ impl SessionStorage {
     ///
     /// # Errors
     /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
-    ///   responds with a non-success status (the server message is captured).
+    ///   responds with a non-success status. Diagnostics capture up to 4096 body
+    ///   bytes, with a truncation marker when more bytes are observed.
     /// - [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid
     ///   resource/URL.
     pub async fn delete<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
@@ -140,7 +169,8 @@ impl PublicStorage {
     ///
     /// # Errors
     /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
-    ///   responds with a non-success status (the server message is captured).
+    ///   responds with a non-success status. Diagnostics capture up to 4096 body
+    ///   bytes, with a truncation marker when more bytes are observed.
     /// - [`crate::errors::Error::Parse`] if `addr` cannot be converted into a valid
     ///   addressed resource/URL.
     pub async fn get<A: IntoPubkyResource>(&self, addr: A) -> Result<Response> {
@@ -170,3 +200,7 @@ impl PublicStorage {
             .map(|resp| ResourceStats::from_headers(resp.headers())))
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(deprecated, reason = "Verify the supported legacy-cookie storage path")]
+mod tests;

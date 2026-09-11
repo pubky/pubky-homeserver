@@ -70,6 +70,49 @@ println!("Your current homeserver: {:?}", resolved);
 # Ok(()) }
 ```
 
+## Bounded storage reads
+
+`SessionStorage::get()` returns successful responses without reading their bodies.
+For non-success responses, SDK status handling captures at most 4096 response
+bytes as diagnostic text and marks longer messages as truncated. This applies to
+all checked SDK requests, including errors during proactive credential refresh.
+
+Use `SessionStorage::get_raw()` when you need to inspect the GET status before
+reading any body. It uses the same authentication and routing as `get()`, but
+returns HTTP errors such as 404 or 500 as responses. Path, transport and credential
+preparation failures still return SDK errors. The existing redirect policy applies.
+
+```rust,no_run
+use futures_util::StreamExt;
+
+# async fn read(session: pubky::PubkySession) -> Result<(), Box<dyn std::error::Error>> {
+let response = session.storage().get_raw("/priv/my.app/backup").await?;
+if !response.status().is_success() {
+    // Classify absence or other server errors without collecting their bodies.
+    return Err(format!("backup request failed: {}", response.status()).into());
+}
+let limit = 4096;
+let mut body = Vec::new();
+let mut stream = response.bytes_stream();
+while let Some(chunk) = stream.next().await {
+    let chunk = chunk?;
+    if chunk.len() > limit - body.len() {
+        return Err("backup exceeds the byte limit".into());
+    }
+    body.extend_from_slice(&chunk);
+}
+// Decode and validate the complete, bounded backup here.
+# Ok(()) }
+```
+
+A HEAD preflight and Content-Length are advisory; count actual bytes before
+appending. Calling `text()`, `bytes()` or `json()` collects the complete body.
+The bound covers SDK accumulation, with additional bounded text-decoding overhead;
+transport buffers and individual chunks have separate memory costs. Timeouts remain
+caller-configured. Successful credential-refresh JSON is a separate response and
+is not bounded by the storage reader. `get_raw()` is available in Rust (native and
+WASM); this change does not add a JavaScript `getRaw()` binding.
+
 ## Key formats (display vs transport)
 
 `PublicKey` has two string representations:

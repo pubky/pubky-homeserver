@@ -141,7 +141,7 @@ impl HomeserverFeatures {
     }
 
     #[cfg(test)]
-    pub(super) fn insert(&self, homeserver: &PublicKey, features: &[&str]) {
+    pub(crate) fn insert(&self, homeserver: &PublicKey, features: &[&str]) {
         let cell = self.cell(homeserver);
         let mut cached = cell
             .try_lock()

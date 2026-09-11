@@ -771,4 +771,47 @@ mod tests {
             &claims.iss.z32()
         );
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn oversized_refresh_error_is_bounded_before_storage_request() {
+        use crate::util::test_server::TestServer;
+        use std::time::Duration;
+
+        let reply = format!(
+            "HTTP/1.1 500 Error\r\nTransfer-Encoding: chunked\r\n\r\n1001\r\n{}\r\n",
+            "x".repeat(4097)
+        );
+        let server = TestServer::start(reply.into_bytes());
+        let (mut stored, claims) = stored_credential(now_unix() + 3600);
+        stored.homeserver_pk = server.homeserver.clone();
+        let signer = GrantPopSigner::local(Keypair::from_secret(&stored.client_key_secret));
+        let credential = test_credential(stored, claims, signer);
+        credential.state.lock().await.token_expires_at = 0;
+        let storage = crate::SessionStorage {
+            client: server.client.clone(),
+            user: server.user.clone(),
+            credential: Arc::new(credential),
+        };
+        let error =
+            tokio::time::timeout(Duration::from_secs(2), storage.get_raw("/priv/test/file"))
+                .await
+                .expect("refresh error must stop at the body cap")
+                .unwrap_err();
+        let crate::Error::Request(RequestError::Server { status, message }) = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            message,
+            format!(
+                "{}\n[response body truncated at 4096 bytes]",
+                "x".repeat(4096)
+            )
+        );
+        let request = server.finish().await;
+        assert!(
+            request.starts_with("POST /auth/grant/session "),
+            "{request}"
+        );
+    }
 }
