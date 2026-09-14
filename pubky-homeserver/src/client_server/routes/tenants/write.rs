@@ -1,4 +1,4 @@
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -15,8 +15,9 @@ use crate::{
     },
     persistence::{
         files::{
+            content_hash_etag,
             write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
-            WriteStreamError,
+            WritePreconditions, WriteStreamError,
         },
         sql::{entry::EntryRepository, user::UserEntity, UnifiedExecutor},
     },
@@ -32,15 +33,17 @@ pub async fn legacy_delete(
     session: AuthSession,
     tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
-    delete(state, session, entry_path).await
+    delete(state, session, entry_path, headers).await
 }
 
 pub async fn delete(
     State(state): State<AppState>,
     session: AuthSession,
     entry_path: EntryPath,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
     if !entry_path.path().is_file() {
         return Err(HttpError::bad_request("Target path must be a file"));
@@ -53,8 +56,30 @@ pub async fn delete(
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
-    state.context.file_service.delete(&entry_path).await?;
+    let preconditions = parse_preconditions(&headers)?;
+    if preconditions.if_none_match_header().is_some() {
+        return Err(HttpError::bad_request(
+            "If-None-Match is not supported on DELETE",
+        ));
+    }
+
+    state
+        .context
+        .file_service
+        .delete(&entry_path, &preconditions)
+        .await?;
     Ok((StatusCode::NO_CONTENT, ()))
+}
+
+/// Parse the conditional headers of a write, rejecting the ones that are not
+/// enforced so a client never gets a silently unconditional write.
+fn parse_preconditions(headers: &HeaderMap) -> HttpResult<WritePreconditions> {
+    if headers.contains_key(header::IF_UNMODIFIED_SINCE) {
+        return Err(HttpError::bad_request(
+            "If-Unmodified-Since is not supported; use If-Match",
+        ));
+    }
+    WritePreconditions::from_headers(headers).map_err(HttpError::bad_request)
 }
 
 pub async fn legacy_put(
@@ -87,6 +112,8 @@ pub async fn put(
         .get_or_http_error(entry_path.pubkey(), true)
         .await?;
 
+    let preconditions = parse_preconditions(&headers)?;
+
     // Early fail: check Content-Length header against the user's storage quota
     // so we can reject before streaming the entire body.
     // We read from the header rather than body.size_hint() because middleware
@@ -107,12 +134,18 @@ pub async fn put(
     let converted_stream =
         body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
-    state
+    let written = state
         .context
         .file_service
-        .write_stream(&entry_path, converted_stream)
+        .write_stream(&entry_path, converted_stream, &preconditions)
         .await?;
-    Ok((StatusCode::CREATED, ()))
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&content_hash_etag(&written.hash)).expect("base64 string is valid"),
+    );
+    Ok((StatusCode::CREATED, response_headers))
 }
 
 /// Parse the `Content-Length` header into a `u64`, returning `None` if absent or unparseable.
@@ -267,5 +300,289 @@ mod tests {
         check_hint(&db, &user, None, "/test.txt", Some(10 * 1024 * 1024 * 1024))
             .await
             .expect("unlimited quota should accept any size");
+    }
+}
+
+#[cfg(test)]
+mod conditional_write_tests {
+    use std::sync::Arc;
+
+    use axum::http::{header, StatusCode};
+    use axum_test::TestServer;
+    use pubky_common::{
+        auth::AuthToken,
+        capabilities::Capability,
+        crypto::{Hasher, Keypair},
+    };
+
+    use crate::app_context::AppContext;
+    use crate::client_server::ClientServer;
+    use crate::persistence::files::content_hash_etag;
+
+    struct Env {
+        server: TestServer,
+        host: String,
+        cookie: String,
+    }
+
+    async fn environment() -> Env {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router).unwrap();
+
+        let keypair = Keypair::random();
+        let host = keypair.public_key().to_z32();
+        let auth_token = AuthToken::sign(&keypair, vec![Capability::root()]);
+        let body: axum::body::Bytes = auth_token.serialize().into();
+        let response = server
+            .post("/signup")
+            .add_header("host", &host)
+            .bytes(body)
+            .expect_success()
+            .await;
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("signup sets a session cookie")
+            .to_string();
+
+        Env {
+            server,
+            host,
+            cookie,
+        }
+    }
+
+    impl Env {
+        fn put(&self, body: &[u8]) -> axum_test::TestRequest {
+            self.server
+                .put("/pub/foo")
+                .add_header("host", &self.host)
+                .add_header(header::COOKIE, &self.cookie)
+                .bytes(body.to_vec().into())
+        }
+
+        fn delete(&self) -> axum_test::TestRequest {
+            self.server
+                .delete("/pub/foo")
+                .add_header("host", &self.host)
+                .add_header(header::COOKIE, &self.cookie)
+        }
+
+        async fn get_status(&self) -> StatusCode {
+            self.server
+                .get("/pub/foo")
+                .add_header("host", &self.host)
+                .await
+                .status_code()
+        }
+
+        async fn get_body(&self) -> Vec<u8> {
+            self.server
+                .get("/pub/foo")
+                .add_header("host", &self.host)
+                .expect_success()
+                .await
+                .into_bytes()
+                .to_vec()
+        }
+
+        async fn get_etag(&self) -> String {
+            self.server
+                .get("/pub/foo")
+                .add_header("host", &self.host)
+                .expect_success()
+                .await
+                .headers()
+                .get(header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn put_returns_the_etag_that_get_reports() {
+        let env = environment().await;
+
+        let response = env.put(b"v1").expect_success().await;
+        response.assert_status(StatusCode::CREATED);
+        let put_etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        assert_eq!(put_etag, env.get_etag().await);
+        assert!(put_etag.starts_with('"') && put_etag.ends_with('"'));
+    }
+
+    /// The ETag must describe the bytes this request wrote, not whatever the
+    /// entry row holds afterwards, or a concurrent write's tag could leak
+    /// into this client's next If-Match.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn put_etag_is_the_hash_of_the_body_sent() {
+        let env = environment().await;
+
+        let response = env.put(b"exactly these bytes").expect_success().await;
+        let put_etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        let mut hasher = Hasher::new();
+        hasher.update(b"exactly these bytes");
+        assert_eq!(put_etag, content_hash_etag(&hasher.finalize()));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn if_match_delete_compare_and_delete() {
+        let env = environment().await;
+
+        env.put(b"v1").expect_success().await;
+        let etag_v1 = env.get_etag().await;
+
+        env.delete()
+            .add_header(header::IF_MATCH, "\"stale\"")
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+        assert_eq!(env.get_body().await, b"v1");
+
+        env.delete()
+            .add_header(header::IF_MATCH, &etag_v1)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        assert_eq!(env.get_status().await, StatusCode::NOT_FOUND);
+
+        // Gone now: 404 whether or not If-Match is sent. RFC 9110 §13.2.1
+        // ignores preconditions when the unconditional response is not 2xx,
+        // unlike PUT to a missing path, where If-Match: * is evaluated and
+        // fails with 412.
+        env.delete().await.assert_status(StatusCode::NOT_FOUND);
+        env.delete()
+            .add_header(header::IF_MATCH, &etag_v1)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        env.delete()
+            .add_header(header::IF_MATCH, "*")
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn unsupported_conditional_headers_are_rejected_not_ignored() {
+        let env = environment().await;
+        env.put(b"v1").expect_success().await;
+
+        env.delete()
+            .add_header(header::IF_NONE_MATCH, "\"x\"")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+        env.put(b"v2")
+            .add_header(header::IF_UNMODIFIED_SINCE, "Sat, 01 Jan 2000 00:00:00 GMT")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+        env.delete()
+            .add_header(header::IF_UNMODIFIED_SINCE, "Sat, 01 Jan 2000 00:00:00 GMT")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+
+        assert_eq!(env.get_body().await, b"v1");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn if_none_match_star_creates_once() {
+        let env = environment().await;
+
+        env.put(b"v1")
+            .add_header(header::IF_NONE_MATCH, "*")
+            .expect_success()
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        env.put(b"v2")
+            .add_header(header::IF_NONE_MATCH, "*")
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+
+        assert_eq!(env.get_body().await, b"v1");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn if_match_compare_and_set() {
+        let env = environment().await;
+
+        env.put(b"v1").expect_success().await;
+        let etag_v1 = env.get_etag().await;
+
+        // Fresh ETag: the update lands.
+        env.put(b"v2")
+            .add_header(header::IF_MATCH, &etag_v1)
+            .expect_success()
+            .await
+            .assert_status(StatusCode::CREATED);
+        assert_eq!(env.get_body().await, b"v2");
+
+        // Stale ETag: rejected, content untouched.
+        env.put(b"v3")
+            .add_header(header::IF_MATCH, &etag_v1)
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+        assert_eq!(env.get_body().await, b"v2");
+
+        // Missing resource with If-Match: * is also a failed precondition.
+        env.server
+            .put("/pub/missing")
+            .add_header("host", &env.host)
+            .add_header(header::COOKIE, &env.cookie)
+            .add_header(header::IF_MATCH, "*")
+            .bytes(b"x".to_vec().into())
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn malformed_conditional_headers_are_bad_requests() {
+        let env = environment().await;
+
+        env.put(b"v1")
+            .add_header(header::IF_MATCH, "unquoted")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+        env.put(b"v1")
+            .add_header(header::IF_NONE_MATCH, "W/nope")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+
+        env.server
+            .get("/pub/foo")
+            .add_header("host", &env.host)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn unconditional_put_still_overwrites() {
+        let env = environment().await;
+
+        env.put(b"v1").expect_success().await;
+        env.put(b"v2")
+            .expect_success()
+            .await
+            .assert_status(StatusCode::CREATED);
+        assert_eq!(env.get_body().await, b"v2");
     }
 }

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::persistence::files::{events::EventsService, layer_domain_error::LayerDomainError};
+use crate::persistence::files::{
+    events::EventsService, layer_domain_error::LayerDomainError, WritePreconditions,
+};
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
@@ -91,6 +93,46 @@ fn path_collision_error(entry_path: &EntryPath) -> opendal::Error {
     .set_source(LayerDomainError::PathCollision)
 }
 
+pub(super) fn precondition_failed_error(entry_path: &EntryPath) -> opendal::Error {
+    opendal::Error::new(
+        opendal::ErrorKind::ConditionNotMatch,
+        format!("Write precondition failed for {entry_path}"),
+    )
+    .set_source(LayerDomainError::PreconditionFailed)
+}
+
+/// Rebuild `args` without its entity-tag conditions.
+///
+/// Conditions are enforced by the finalizer against entry content hashes, so
+/// they must not reach the backend: OpenDAL's correctness check rejects them
+/// for backends without native support, and backends with support would
+/// compare them against their own ETags. `OpWrite` has no way to unset them.
+///
+/// The copied field list is exhaustive for opendal 0.54.1; re-check it when
+/// bumping the dependency.
+fn strip_preconditions(args: &OpWrite) -> OpWrite {
+    let mut stripped = OpWrite::new()
+        .with_append(args.append())
+        .with_concurrent(args.concurrent())
+        .with_if_not_exists(args.if_not_exists());
+    if let Some(value) = args.content_type() {
+        stripped = stripped.with_content_type(value);
+    }
+    if let Some(value) = args.content_disposition() {
+        stripped = stripped.with_content_disposition(value);
+    }
+    if let Some(value) = args.content_encoding() {
+        stripped = stripped.with_content_encoding(value);
+    }
+    if let Some(value) = args.cache_control() {
+        stripped = stripped.with_cache_control(value);
+    }
+    if let Some(metadata) = args.user_metadata() {
+        stripped = stripped.with_user_metadata(metadata.clone());
+    }
+    stripped
+}
+
 pub(super) async fn check_no_path_collision(
     entry_path: &EntryPath,
     executor: &mut UnifiedExecutor<'_>,
@@ -151,11 +193,24 @@ impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A> {
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
         let entry_path = EntryPath::parse_opendal(path)?;
+        let preconditions = WritePreconditions::parse(args.if_match(), args.if_none_match())
+            .map_err(|error| {
+                unexpected(
+                    format!("Invalid write precondition for {entry_path}"),
+                    error,
+                )
+            })?;
         self.finalizer.collision_preflight(&entry_path).await?;
-        let (rp, writer) = self.inner.write(entry_path.as_str(), args).await?;
+        self.finalizer
+            .precondition_preflight(&entry_path, &preconditions)
+            .await?;
+        let (rp, writer) = self
+            .inner
+            .write(entry_path.as_str(), strip_preconditions(&args))
+            .await?;
         Ok((
             rp,
-            WriteFinalizationWriter::new(writer, self.finalizer.clone(), entry_path),
+            WriteFinalizationWriter::new(writer, self.finalizer.clone(), entry_path, preconditions),
         ))
     }
 
@@ -220,6 +275,37 @@ impl Finalizer {
         check_no_path_collision(entry_path, &mut self.sql_db.pool().into()).await
     }
 
+    /// Reject a write whose precondition already fails before any bytes are
+    /// accepted. The authoritative check runs again under the user lock in
+    /// [`prepare_write`](Finalizer::prepare_write).
+    async fn precondition_preflight(
+        &self,
+        entry_path: &EntryPath,
+        preconditions: &WritePreconditions,
+    ) -> Result<()> {
+        if preconditions.is_empty() {
+            return Ok(());
+        }
+
+        let existing_entry =
+            match EntryRepository::get_by_path(entry_path, &mut self.sql_db.pool().into()).await {
+                Ok(entry) => Some(entry),
+                Err(sqlx::Error::RowNotFound) => None,
+                Err(error) => {
+                    return Err(unexpected(
+                        format!("Failed to load existing entry {entry_path}"),
+                        error,
+                    ));
+                }
+            };
+        if !preconditions.is_satisfied_by(existing_entry.as_ref().map(|entry| &entry.content_hash))
+        {
+            return Err(precondition_failed_error(entry_path));
+        }
+
+        Ok(())
+    }
+
     pub(super) fn notify_event(&self) {
         let events_service = self.events_service.clone();
         drop(tokio::spawn(async move {
@@ -234,7 +320,7 @@ pub(super) mod test_support {
 
     use crate::persistence::files::{
         events::{EventEntity, EventRepository, EventVisibility},
-        opendal::opendal_test_operators::get_memory_operator,
+        opendal::opendal_test_operators::{get_atomic_fs_operator, get_memory_operator},
     };
     use crate::persistence::sql::SqlDb;
 
@@ -258,6 +344,20 @@ pub(super) mod test_support {
             None,
             true,
         ))
+    }
+
+    /// Filesystem-backed operator staging uploads like production does.
+    /// The returned directory must outlive the operator.
+    pub(in super::super) fn test_fs_operator(db: &SqlDb) -> (opendal::Operator, tempfile::TempDir) {
+        let (backend, dir) = get_atomic_fs_operator();
+        let operator = backend.layer(WriteFinalizationLayer::new(
+            UserService::new(db.clone()),
+            db.clone(),
+            EventsService::new(db.clone(), 100),
+            None,
+            true,
+        ));
+        (operator, dir)
     }
 
     pub(in super::super) fn test_user_service(db: &SqlDb) -> UserService {
