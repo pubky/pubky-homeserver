@@ -3,24 +3,14 @@ name: Build Docker Images
 on:
   workflow_call:
     inputs:
-      runner:
-        description: GitHub runner label for the build
+      architecture:
+        description: Native architecture for checks (amd64 or arm64); publishing always builds both
         type: string
-        default: ubuntu-latest
-      cache_scope_suffix:
-        description: Optional suffix to isolate caches for separate architecture builds
-        type: string
-        default: ''
+        default: amd64
       build_profile:
         description: Docker build profile (debug or release)
         type: string
-        default: release
-      platforms:
-        description: Target platforms for the Docker images
-        type: string
-        default: |
-          linux/arm64
-          linux/amd64
+        required: true
       publish:
         description: Publish images to Docker Hub with version and latest tags
         type: boolean
@@ -36,7 +26,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.publish && 'ubuntu-latest' || inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 150
     strategy:
       matrix:
@@ -56,6 +46,38 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Select build settings
+        id: settings
+        shell: bash
+        env:
+          PUBLISH: ${{ inputs.publish }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+          CACHE_SCOPE: docker-${{ inputs.build_profile }}-${{ matrix.target }}
+        run: |
+          if [[ "$PUBLISH" == "true" ]]; then
+            # Publishing imports native caches from main without exporting.
+            architectures=(amd64 arm64)
+            cache_to=''
+          else
+            case "$ARCHITECTURE" in
+              amd64|arm64) architectures=("$ARCHITECTURE") ;;
+              *) echo "Unsupported architecture: $ARCHITECTURE" >&2; exit 1 ;;
+            esac
+            cache_to="type=gha,scope=${CACHE_SCOPE}-${ARCHITECTURE},mode=max"
+          fi
+
+          platforms=''
+          {
+            echo 'cache_from<<EOF'
+            for architecture in "${architectures[@]}"; do
+              platforms+="linux/${architecture},"
+              echo "type=gha,scope=${CACHE_SCOPE}-${architecture}"
+            done
+            echo 'EOF'
+            echo "platforms=${platforms%,}"
+            echo "cache_to=$cache_to"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build Docker image
         uses: pubky/ci-workflows/.github/actions/docker/build_and_push@5faaf004d36bb93a204b58cf7190ffe7fbcce16f
         with:
@@ -65,14 +87,10 @@ jobs:
           latest: ${{ inputs.publish }}
           tags: |
             type=ref,event=tag
-          platforms: ${{ inputs.platforms }}
+          platforms: ${{ steps.settings.outputs.platforms }}
           image: ${{ matrix.image }}
-          # Publishing imports only the caches warmed by native release checks on main.
-          cache_from: |
-            ${{ !inputs.publish && format('type=gha,scope=docker-{0}-{1}{2}', inputs.build_profile, matrix.target, inputs.cache_scope_suffix) || '' }}
-            ${{ inputs.publish && format('type=gha,scope=docker-{0}-{1}-amd64', inputs.build_profile, matrix.target) || '' }}
-            ${{ inputs.publish && format('type=gha,scope=docker-{0}-{1}-arm64', inputs.build_profile, matrix.target) || '' }}
-          cache_to: ${{ !inputs.publish && format('type=gha,scope=docker-{0}-{1}{2},mode=max', inputs.build_profile, matrix.target, inputs.cache_scope_suffix) || '' }}
+          cache_from: ${{ steps.settings.outputs.cache_from }}
+          cache_to: ${{ steps.settings.outputs.cache_to }}
           build_args: |
             BUILD_TARGET=${{ matrix.target }}
             BUILD_PROFILE=${{ inputs.build_profile }}

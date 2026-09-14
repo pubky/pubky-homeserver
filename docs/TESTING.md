@@ -127,8 +127,8 @@ docker run --rm --network none pubky-testnet:release homeserver --help
 
 ### Docker builds in CI
 
-All Docker jobs use the shared [build
-workflow](../.github/workflows/docker-build.yml) for both targets:
+All Docker jobs use the shared [build workflow](../.github/workflows/docker-build.yml)
+to build both `homeserver` and `testnet` images.
 
 | Workflow | Trigger | Profile | Platforms | Publishes images |
 | --- | --- | --- | --- | --- |
@@ -136,15 +136,17 @@ workflow](../.github/workflows/docker-build.yml) for both targets:
 | [Release Docker check](../.github/workflows/docker-check.yml) | Pushes to `main` | `release` | `linux/amd64`, `linux/arm64` (native runners) | No |
 | [Docker publishing](../.github/workflows/docker.yml) | Tags matching `v*` | `release` | `linux/amd64`, `linux/arm64` | Yes |
 
-Build caches are scoped by profile, target, and architecture. Debug Docker checks
-run AMD64 on `ubuntu-24.04` for PRs and pushes to `main`, warming the
-`docker-debug-<target>-amd64` caches on `main` for PRs to reuse. On `main`,
-release Docker checks also run AMD64 on `ubuntu-24.04` and ARM64 on
-`ubuntu-24.04-arm`.
-ARM64 build failures are therefore caught on `main` after merging. Publishing
-builds both architectures together on `ubuntu-latest`, using emulation for ARM64.
-Publishing imports only the two architecture-specific release caches warmed on
-`main` and disables cache export by passing an empty `cache_to` value.
+Callers must specify `build_profile`. Native checks default to `architecture: amd64`
+and `publish: false`; setting `publish: true` builds and publishes both architectures.
+The shared workflow derives runners, platforms, and cache scopes from these inputs.
+
+Checks use native runners: `ubuntu-24.04` for AMD64 and `ubuntu-24.04-arm` for ARM64.
+ARM64 is checked only after merging to `main`. Publishing runs on `ubuntu-latest`
+with ARM64 emulation.
+
+Caches use the scope `docker-<profile>-<target>-<architecture>`. Checks import and
+update their cache, with debug builds on `main` warming caches for PRs. Publishing
+imports both architecture-specific release caches from `main` without exporting.
 
 ## Common Commands
 

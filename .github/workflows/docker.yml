@@ -11,6 +11,7 @@ jobs:
   build-and-push:
     uses: ./.github/workflows/docker-build.yml
     with:
+      build_profile: release
       publish: true
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
