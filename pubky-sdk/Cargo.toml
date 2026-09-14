@@ -34,7 +34,7 @@ base64.workspace = true
 pkarr = { workspace = true, features = ["full"] }
 percent-encoding.workspace = true
 cookie = "0.18"
-flume = { version = "0.11", default-features = false, features = ["async"] }
+flume = { version = "0.12", default-features = false, features = ["async"] }
 futures-util.workspace = true
 lru = { version = "0.18", default-features = false }
 serde.workspace = true

@@ -4313,7 +4313,7 @@ dependencies = [
  "base64 0.23.1",
  "cookie",
  "eventsource-stream",
- "flume 0.11.1",
+ "flume 0.12.0",
  "futures-lite",
  "futures-util",
  "http-relay",
