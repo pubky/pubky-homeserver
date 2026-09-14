@@ -14,7 +14,7 @@ use axum::{
     http::{header, HeaderValue},
     response::IntoResponse,
 };
-use axum_extra::extract::Host;
+use axum_extra::{headers::Host, TypedHeader};
 use bytes::Bytes;
 use pubky_common::crypto::PublicKey;
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ use super::service::CookieSessionCreation;
 pub async fn signup(
     State(state): State<AuthState>,
     cookies: Cookies,
-    Host(host): Host,
+    TypedHeader(host): TypedHeader<Host>,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> HttpResult<impl IntoResponse> {
@@ -40,7 +40,7 @@ pub async fn signup(
         .signup(&body, signup_token.as_ref())
         .await?;
     state.metrics.record_signup();
-    create_session_cookie_response(cookies, &host, session)
+    create_session_cookie_response(cookies, host.hostname(), session)
 }
 
 fn parse_signup_token(token: Option<&String>) -> HttpResult<Option<SignupCode>> {
@@ -76,11 +76,11 @@ pub(crate) fn create_session_cookie_response(
 pub async fn signin(
     State(state): State<AuthState>,
     cookies: Cookies,
-    Host(host): Host,
+    TypedHeader(host): TypedHeader<Host>,
     body: Bytes,
 ) -> HttpResult<impl IntoResponse> {
     let session = state.cookie_auth_service.signin(&body).await?;
-    create_session_cookie_response(cookies, &host, session)
+    create_session_cookie_response(cookies, host.hostname(), session)
 }
 
 /// `GET /session` — returns session info as postcard-serialized binary.
@@ -108,14 +108,14 @@ pub async fn signout(
     State(state): State<AuthState>,
     auth: Option<crate::client_server::auth::AuthSession>,
     cookies: Cookies,
-    Host(host): Host,
+    TypedHeader(host): TypedHeader<Host>,
     tenant: RequestTenant,
 ) -> HttpResult<impl IntoResponse> {
     state.cookie_auth_service.signout(auth).await?;
 
     let mut removal = Cookie::new(tenant.public_key().z32(), String::new());
     removal.make_removal();
-    configure_session_cookie(&mut removal, &host);
+    configure_session_cookie(&mut removal, host.hostname());
     cookies.add(removal);
 
     Ok(StatusCode::OK.into_response())
