@@ -2,6 +2,13 @@ use axum::{body::Body, http::StatusCode, response::Response};
 use pubky_common::timestamp::Timestamp;
 use sqlx::types::chrono::{DateTime, Utc};
 
+use crate::constants::{DEFAULT_LIST_LIMIT, DEFAULT_MAX_LIST_LIMIT};
+
+/// Apply the default list limit and cap it at the maximum, preserving explicit zero.
+pub(crate) fn effective_list_limit(limit: Option<u16>) -> u16 {
+    std::cmp::min(limit.unwrap_or(DEFAULT_LIST_LIMIT), DEFAULT_MAX_LIST_LIMIT)
+}
+
 /// Convert a pubky timestamp to a sqlx datetime.
 pub fn timestamp_to_sqlx_datetime(timestamp: &Timestamp) -> DateTime<Utc> {
     let micros = timestamp.as_u64();

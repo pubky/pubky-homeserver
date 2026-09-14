@@ -1,11 +1,13 @@
-use crate::constants::{DEFAULT_LIST_LIMIT, DEFAULT_MAX_LIST_LIMIT};
 use crate::persistence::sql::entry::EntryEntity;
 use crate::{
     persistence::sql::{
         entities::user::{UserIden, USER_TABLE},
         UnifiedExecutor,
     },
-    shared::webdav::{EntryPath, StoragePath},
+    shared::{
+        effective_list_limit,
+        webdav::{EntryPath, StoragePath},
+    },
 };
 use sea_query::{Alias, Expr, ExprTrait, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
 use sea_query_sqlx::SqlxBinder;
@@ -331,8 +333,7 @@ impl EntryRepository {
             }
         }
 
-        let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let limit = std::cmp::min(limit, DEFAULT_MAX_LIST_LIMIT);
+        let limit = effective_list_limit(limit);
         outer_statement = outer_statement.limit(limit.into()).to_owned();
 
         let (query, values) = outer_statement.build_sqlx(PostgresQueryBuilder);
@@ -411,8 +412,7 @@ impl EntryRepository {
             }
         }
 
-        let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let limit = std::cmp::min(limit, DEFAULT_MAX_LIST_LIMIT);
+        let limit = effective_list_limit(limit);
         statement = statement.limit(limit.into()).to_owned();
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);

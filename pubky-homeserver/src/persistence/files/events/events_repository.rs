@@ -9,7 +9,7 @@ use sqlx::{
 };
 
 use crate::{
-    constants::{DEFAULT_LIST_LIMIT, DEFAULT_MAX_LIST_LIMIT, PUBLIC_ROOT},
+    constants::{DEFAULT_LIST_LIMIT, PUBLIC_ROOT},
     persistence::{
         files::events::EventEntity,
         sql::{
@@ -17,7 +17,7 @@ use crate::{
             UnifiedExecutor,
         },
     },
-    shared::{timestamp_to_sqlx_datetime, webdav::EntryPath},
+    shared::{effective_list_limit, timestamp_to_sqlx_datetime, webdav::EntryPath},
 };
 
 use super::PathFilter;
@@ -274,8 +274,7 @@ impl EventRepository {
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Vec<EventEntity>, sqlx::Error> {
         let cursor = cursor.unwrap_or(EventCursor::new(0));
-        let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let limit = std::cmp::min(limit, DEFAULT_MAX_LIST_LIMIT);
+        let limit = effective_list_limit(limit);
 
         let mut statement = Query::select()
             .columns([
@@ -329,7 +328,7 @@ impl EventRepository {
             return Ok(Vec::new());
         }
 
-        let limit = std::cmp::min(limit.unwrap_or(DEFAULT_LIST_LIMIT), DEFAULT_MAX_LIST_LIMIT);
+        let limit = effective_list_limit(limit);
         let order = if reverse { Order::Desc } else { Order::Asc };
 
         let mut statement = Query::select()

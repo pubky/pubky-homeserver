@@ -8,10 +8,9 @@ use sea_query_sqlx::SqlxBinder;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlx::{postgres::PgRow, FromRow, Row};
 
-use crate::shared::quota::UserQuota;
 use crate::{
-    constants::{DEFAULT_LIST_LIMIT, DEFAULT_MAX_LIST_LIMIT},
     persistence::sql::UnifiedExecutor,
+    shared::{effective_list_limit, quota::UserQuota},
 };
 
 pub const SIGNUP_CODE_TABLE: &str = "signup_codes";
@@ -32,15 +31,6 @@ pub struct SignupCodeListQuery {
     pub state: SignupCodeListState,
     pub limit: Option<u16>,
     pub cursor: Option<SignupCode>,
-}
-
-impl SignupCodeListQuery {
-    fn effective_limit(&self) -> u16 {
-        std::cmp::min(
-            self.limit.unwrap_or(DEFAULT_LIST_LIMIT),
-            DEFAULT_MAX_LIST_LIMIT,
-        )
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -164,7 +154,7 @@ impl SignupCodeRepository {
                 .to_owned();
         }
 
-        let limit = list_query.effective_limit();
+        let limit = effective_list_limit(list_query.limit);
         statement = statement.limit((limit as u64) + 1).to_owned();
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
