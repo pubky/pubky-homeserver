@@ -58,11 +58,11 @@ fast-glob = "0.4"
 tokio-util = "0.7"
 percent-encoding.workspace = true
 serde_valid = "2"
-opendal = { version = "0.54", features = ["services-fs"] }
+opendal = { version = "0.57", features = ["services-fs"] }
 infer = "0.19"
 mime_guess = "2"
-dav-server-opendalfs = "0.6"
-dav-server = "0.8"
+dav-server-opendalfs = "=0.7.2" # Pinned because higher versions need an MSRV bump
+dav-server = "0.11"
 sea-query = { version = "0.32", features = ["with-chrono", "postgres-array"] }
 sea-query-binder = { version = "0.7", features = [
     "with-chrono",

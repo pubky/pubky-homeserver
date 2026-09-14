@@ -81,6 +81,7 @@ impl<A: Access> LayeredAccess for WritePathAccessor<A> {
     type Writer = A::Writer;
     type Lister = A::Lister;
     type Deleter = WritePathDeleter<A::Deleter>;
+    type Copier = A::Copier;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -100,9 +101,15 @@ impl<A: Access> LayeredAccess for WritePathAccessor<A> {
         self.inner.write(path, args).await
     }
 
-    async fn copy(&self, from: &str, to: &str, args: OpCopy) -> Result<RpCopy> {
+    async fn copy(
+        &self,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<(RpCopy, Self::Copier)> {
         check_write_path_allowed(&self.user_service, to).await?;
-        self.inner.copy(from, to, args).await
+        self.inner.copy(from, to, args, opts).await
     }
 
     async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
@@ -141,14 +148,14 @@ impl<A: Access> LayeredAccess for WritePathAccessor<A> {
     }
 }
 
-/// Deleter wrapper that checks write-path restrictions in `flush()`.
+/// Deleter wrapper that checks write-path restrictions in `close()`.
 ///
-/// Since `delete()` is sync, we buffer paths locally and only forward them
-/// to the inner deleter in `flush()` after the async permission check passes.
+/// We buffer paths locally and only forward them to the inner deleter in
+/// `close()` after every permission check passes.
 ///
 /// If any path in the batch fails the permission check, the entire batch is
 /// rejected (fail-closed). The queue is **not** drained on error, so a
-/// subsequent `flush()` will re-check and re-attempt all buffered paths.
+/// subsequent `close()` will re-check and re-attempt all buffered paths.
 pub struct WritePathDeleter<R> {
     inner: R,
     user_service: UserService,
@@ -156,22 +163,22 @@ pub struct WritePathDeleter<R> {
 }
 
 impl<R: oio::Delete> oio::Delete for WritePathDeleter<R> {
-    fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         // Buffer locally — don't forward to inner yet.
         self.path_queue.push((path.to_string(), args));
         Ok(())
     }
 
-    async fn flush(&mut self) -> Result<usize> {
+    async fn close(&mut self) -> Result<()> {
         // Check all queued paths first.
         for (path, _) in &self.path_queue {
             check_write_path_allowed(&self.user_service, path).await?;
         }
-        // All checks passed — forward to inner deleter and flush.
+        // All checks passed — forward to the inner deleter and close it.
         for (path, args) in self.path_queue.drain(..) {
-            self.inner.delete(&path, args)?;
+            self.inner.delete(&path, args).await?;
         }
-        self.inner.flush().await
+        self.inner.close().await
     }
 }
 
