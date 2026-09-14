@@ -130,7 +130,6 @@ impl<A: Access> LayeredAccess for WritePathAccessor<A> {
             WritePathDeleter {
                 inner: deleter,
                 user_service: self.user_service.clone(),
-                path_queue: Vec::new(),
             },
         ))
     }
@@ -148,42 +147,30 @@ impl<A: Access> LayeredAccess for WritePathAccessor<A> {
     }
 }
 
-/// Deleter wrapper that checks write-path restrictions in `close()`.
+/// Deleter wrapper that checks each path before forwarding it to the inner deleter.
 ///
-/// We buffer paths locally and only forward them to the inner deleter in
-/// `close()` after every permission check passes.
-///
-/// If any path in the batch fails the permission check, the entire batch is
-/// rejected (fail-closed). The queue is **not** drained on error, so a
-/// subsequent `close()` will re-check and re-attempt all buffered paths.
+/// A batch can partially succeed: paths accepted before a later permission
+/// error have already been forwarded and are not rolled back.
 pub struct WritePathDeleter<R> {
     inner: R,
     user_service: UserService,
-    path_queue: Vec<(String, OpDelete)>,
 }
 
 impl<R: oio::Delete> oio::Delete for WritePathDeleter<R> {
     async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
-        // Buffer locally — don't forward to inner yet.
-        self.path_queue.push((path.to_string(), args));
-        Ok(())
+        check_write_path_allowed(&self.user_service, path).await?;
+        self.inner.delete(path, args).await
     }
 
     async fn close(&mut self) -> Result<()> {
-        // Check all queued paths first.
-        for (path, _) in &self.path_queue {
-            check_write_path_allowed(&self.user_service, path).await?;
-        }
-        // All checks passed — forward to the inner deleter and close it.
-        for (path, args) in self.path_queue.drain(..) {
-            self.inner.delete(&path, args).await?;
-        }
         self.inner.close().await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use opendal::raw::oio::Delete;
+
     use crate::persistence::files::opendal::opendal_test_operators::{
         get_fs_operator, get_memory_operator,
     };
@@ -196,6 +183,31 @@ mod tests {
     use crate::shared::webdav::StoragePath;
 
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingDeleter {
+        deleted_paths: Vec<String>,
+        closed: bool,
+    }
+
+    impl oio::Delete for RecordingDeleter {
+        async fn delete(&mut self, path: &str, _args: OpDelete) -> Result<()> {
+            self.deleted_paths.push(path.to_string());
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.closed = true;
+            Ok(())
+        }
+    }
+
+    fn recording_deleter(db: &SqlDb) -> WritePathDeleter<RecordingDeleter> {
+        WritePathDeleter {
+            inner: RecordingDeleter::default(),
+            user_service: UserService::new(db.clone()),
+        }
+    }
 
     fn wdp(s: &str) -> StoragePath {
         s.parse().unwrap()
@@ -218,6 +230,64 @@ mod tests {
             .await
             .unwrap();
         pubkey
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_delete_forwards_allowed_path_before_later_denial() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user_with_write_paths(&db, Some(vec![wdp("/pub/allowed/")])).await;
+        let mut deleter = recording_deleter(&db);
+        let allowed_path = format!("{}/pub/allowed/file.txt", pubkey.z32());
+        let forbidden_path = format!("{}/pub/forbidden/file.txt", pubkey.z32());
+
+        deleter
+            .delete(&allowed_path, OpDelete::default())
+            .await
+            .unwrap();
+
+        let error = deleter
+            .delete(&forbidden_path, OpDelete::default())
+            .await
+            .expect_err("forbidden path should fail immediately");
+
+        assert_eq!(error.kind(), opendal::ErrorKind::PermissionDenied);
+        assert_eq!(deleter.inner.deleted_paths, vec![allowed_path]);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_delete_does_not_forward_forbidden_first_path() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user_with_write_paths(&db, Some(vec![wdp("/pub/allowed/")])).await;
+        let mut deleter = recording_deleter(&db);
+        let forbidden_path = format!("{}/pub/forbidden/file.txt", pubkey.z32());
+
+        let error = deleter
+            .delete(&forbidden_path, OpDelete::default())
+            .await
+            .expect_err("forbidden path should fail immediately");
+
+        assert_eq!(error.kind(), opendal::ErrorKind::PermissionDenied);
+        assert!(deleter.inner.deleted_paths.is_empty());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_delete_close_delegates_after_allowed_paths() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user_with_write_paths(&db, Some(vec![wdp("/pub/allowed/")])).await;
+        let mut deleter = recording_deleter(&db);
+        let allowed_path = format!("{}/pub/allowed/file.txt", pubkey.z32());
+
+        deleter
+            .delete(&allowed_path, OpDelete::default())
+            .await
+            .unwrap();
+        deleter.close().await.unwrap();
+
+        assert_eq!(deleter.inner.deleted_paths, vec![allowed_path]);
+        assert!(deleter.inner.closed);
     }
 
     /// Build an operator with both WritePathLayer (outermost) and WriteFinalizationLayer,
