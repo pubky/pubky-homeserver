@@ -59,7 +59,7 @@ mod tests {
     use crate::persistence::sql::sql_db::SqlDb;
     use pubky_common::crypto::Keypair;
     use sea_query::{PostgresQueryBuilder, Query, SimpleExpr};
-    use sea_query_binder::SqlxBinder;
+    use sea_query_sqlx::SqlxBinder;
 
     type QuotaColumns = (
         Option<i32>,

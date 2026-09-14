@@ -3,8 +3,8 @@ use std::{fmt::Display, str::FromStr};
 use base32::{decode, encode, Alphabet};
 use pubky_common::crypto::random_bytes;
 use pubky_common::crypto::PublicKey;
-use sea_query::{Expr, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
-use sea_query_binder::SqlxBinder;
+use sea_query::{Expr, ExprTrait, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query_sqlx::SqlxBinder;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlx::{postgres::PgRow, FromRow, Row};
 
@@ -36,9 +36,10 @@ pub struct SignupCodeListQuery {
 
 impl SignupCodeListQuery {
     fn effective_limit(&self) -> u16 {
-        self.limit
-            .unwrap_or(DEFAULT_LIST_LIMIT)
-            .min(DEFAULT_MAX_LIST_LIMIT)
+        std::cmp::min(
+            self.limit.unwrap_or(DEFAULT_LIST_LIMIT),
+            DEFAULT_MAX_LIST_LIMIT,
+        )
     }
 }
 
@@ -231,7 +232,7 @@ impl SignupCodeRepository {
                     SignupCodeIden::UsedBy,
                     SimpleExpr::Value(used_by.z32().into()),
                 ),
-                (SignupCodeIden::UsedAt, Expr::current_timestamp().into()),
+                (SignupCodeIden::UsedAt, Expr::current_timestamp()),
             ])
             .and_where(Expr::col(SignupCodeIden::Id).eq(id.to_string()))
             .and_where(Expr::col(SignupCodeIden::UsedBy).is_null())

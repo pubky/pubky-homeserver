@@ -63,8 +63,8 @@ infer = "0.19"
 mime_guess = "2"
 dav-server-opendalfs = "0.6"
 dav-server = "0.8"
-sea-query = { version = "0.32", features = ["with-chrono", "postgres-array"] }
-sea-query-binder = { version = "0.7", features = [
+sea-query = { version = "1", features = ["with-chrono", "postgres-array"] }
+sea-query-sqlx = { version = "0.8", features = [
     "with-chrono",
     "runtime-tokio",
     "sqlx-postgres",

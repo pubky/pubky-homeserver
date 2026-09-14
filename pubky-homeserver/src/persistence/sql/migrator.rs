@@ -1,5 +1,5 @@
 use sea_query::{ColumnDef, Expr, PostgresQueryBuilder, Query, SimpleExpr, Table};
-use sea_query_binder::SqlxBinder;
+use sea_query_sqlx::SqlxBinder;
 use sqlx::{Row, Transaction};
 
 use crate::persistence::sql::{

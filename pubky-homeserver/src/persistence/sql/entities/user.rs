@@ -1,6 +1,6 @@
 use pubky_common::crypto::PublicKey;
-use sea_query::{Expr, Iden, PostgresQueryBuilder, Query, SimpleExpr};
-use sea_query_binder::SqlxBinder;
+use sea_query::{Expr, ExprTrait, Iden, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::persistence::sql::UnifiedExecutor;

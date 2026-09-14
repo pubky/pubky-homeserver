@@ -1,7 +1,7 @@
 use pubky_common::events::{EventCursor, EventType};
 use pubky_common::timestamp::Timestamp;
-use sea_query::{Condition, Expr, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
-use sea_query_binder::SqlxBinder;
+use sea_query::{Condition, Expr, ExprTrait, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query_sqlx::SqlxBinder;
 use sqlx::{
     postgres::PgRow,
     types::chrono::{DateTime, Utc},
@@ -275,7 +275,7 @@ impl EventRepository {
     ) -> Result<Vec<EventEntity>, sqlx::Error> {
         let cursor = cursor.unwrap_or(EventCursor::new(0));
         let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let limit = limit.min(DEFAULT_MAX_LIST_LIMIT);
+        let limit = std::cmp::min(limit, DEFAULT_MAX_LIST_LIMIT);
 
         let mut statement = Query::select()
             .columns([
@@ -329,9 +329,7 @@ impl EventRepository {
             return Ok(Vec::new());
         }
 
-        let limit = limit
-            .unwrap_or(DEFAULT_LIST_LIMIT)
-            .min(DEFAULT_MAX_LIST_LIMIT);
+        let limit = std::cmp::min(limit.unwrap_or(DEFAULT_LIST_LIMIT), DEFAULT_MAX_LIST_LIMIT);
         let order = if reverse { Order::Desc } else { Order::Asc };
 
         let mut statement = Query::select()

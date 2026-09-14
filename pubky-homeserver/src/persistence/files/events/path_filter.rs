@@ -1,6 +1,6 @@
 //! Authorized path filter for the event stream, shared by the route and the repository.
 
-use sea_query::{Expr, LikeExpr, SimpleExpr};
+use sea_query::{Expr, ExprTrait, LikeExpr, SimpleExpr};
 
 use crate::shared::webdav::StoragePath;
 

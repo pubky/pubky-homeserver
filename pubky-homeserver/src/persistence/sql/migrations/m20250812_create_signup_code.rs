@@ -51,8 +51,8 @@ enum SignupCodeIden {
 #[cfg(test)]
 mod tests {
     use pubky_common::crypto::{Keypair, PublicKey};
-    use sea_query::{Query, SimpleExpr};
-    use sea_query_binder::SqlxBinder;
+    use sea_query::{ExprTrait, Query, SimpleExpr};
+    use sea_query_sqlx::SqlxBinder;
     use sqlx::{postgres::PgRow, FromRow, Row};
 
     use crate::persistence::sql::{

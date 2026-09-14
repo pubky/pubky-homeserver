@@ -1,8 +1,8 @@
 //! Repository for PoP nonce replay prevention.
 
 use pubky_common::auth::jws::PopNonce;
-use sea_query::{Expr, PostgresQueryBuilder, Query, SimpleExpr};
-use sea_query_binder::SqlxBinder;
+use sea_query::{Expr, ExprTrait, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query_sqlx::SqlxBinder;
 
 use crate::persistence::sql::{
     migrations::m20260325_create_grant_sessions::{PopNonceIden, POP_NONCES_TABLE},

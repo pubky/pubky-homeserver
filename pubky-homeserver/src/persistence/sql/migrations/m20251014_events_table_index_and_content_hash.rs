@@ -90,7 +90,7 @@ mod tests {
     use pubky_common::crypto::Hash;
     use pubky_common::crypto::Keypair;
     use sea_query::{Iden, Query, SimpleExpr};
-    use sea_query_binder::SqlxBinder;
+    use sea_query_sqlx::SqlxBinder;
 
     use crate::persistence::sql::{
         entities::{

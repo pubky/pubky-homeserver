@@ -7,8 +7,8 @@ use crate::{
     },
     shared::webdav::{EntryPath, StoragePath},
 };
-use sea_query::{Alias, Expr, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
-use sea_query_binder::SqlxBinder;
+use sea_query::{Alias, Expr, ExprTrait, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, Row};
 
 pub const ENTRY_TABLE: &str = "entries";
@@ -106,7 +106,7 @@ impl EntryRepository {
                     EntryIden::ContentType,
                     SimpleExpr::Value(entry.content_type.clone().into()),
                 ),
-                (EntryIden::ModifiedAt, Expr::current_timestamp().into()),
+                (EntryIden::ModifiedAt, Expr::current_timestamp()),
             ])
             .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).eq(entry.id))
             .to_owned();
@@ -332,7 +332,7 @@ impl EntryRepository {
         }
 
         let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let limit = limit.min(DEFAULT_MAX_LIST_LIMIT);
+        let limit = std::cmp::min(limit, DEFAULT_MAX_LIST_LIMIT);
         outer_statement = outer_statement.limit(limit.into()).to_owned();
 
         let (query, values) = outer_statement.build_sqlx(PostgresQueryBuilder);
@@ -412,7 +412,7 @@ impl EntryRepository {
         }
 
         let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let limit = limit.min(DEFAULT_MAX_LIST_LIMIT);
+        let limit = std::cmp::min(limit, DEFAULT_MAX_LIST_LIMIT);
         statement = statement.limit(limit.into()).to_owned();
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);

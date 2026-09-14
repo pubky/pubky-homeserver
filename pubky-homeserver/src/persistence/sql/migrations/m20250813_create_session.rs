@@ -85,7 +85,7 @@ mod tests {
     use pubky_common::capabilities::{Capabilities, Capability, CapsBuilder};
     use pubky_common::crypto::Keypair;
     use sea_query::{Query, SimpleExpr};
-    use sea_query_binder::SqlxBinder;
+    use sea_query_sqlx::SqlxBinder;
     use sqlx::{postgres::PgRow, FromRow, Row};
 
     use crate::persistence::sql::{

@@ -2,9 +2,10 @@
 
 use pubky_common::auth::jws::GrantId;
 use sea_query::{
-    Alias, CommonTableExpression, Expr, Iden, PostgresQueryBuilder, Query, WithClause, WithQuery,
+    Alias, CommonTableExpression, Expr, ExprTrait, Iden, PostgresQueryBuilder, Query, WithClause,
+    WithQuery,
 };
-use sea_query_binder::SqlxBinder;
+use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::client_server::auth::grant::crypto::session_token::SessionTokenHash;

@@ -68,7 +68,7 @@ enum EventIden {
 mod tests {
     use pubky_common::crypto::Keypair;
     use sea_query::{Query, SimpleExpr};
-    use sea_query_binder::SqlxBinder;
+    use sea_query_sqlx::SqlxBinder;
 
     use crate::persistence::sql::{
         entities::user::{UserIden, USER_TABLE},
