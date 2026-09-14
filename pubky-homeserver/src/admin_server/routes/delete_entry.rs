@@ -66,7 +66,7 @@ mod tests {
         write_test_file(&file_service, &entry_path).await;
 
         // Delete the file
-        let server = axum_test::TestServer::new(router).unwrap();
+        let server = axum_test::TestServer::new(router);
         let response = server
             .delete(format!("/webdav/{}", entry_path.as_str()).as_str())
             .await;
@@ -114,7 +114,7 @@ mod tests {
 
         // Delete the file
         let url = format!("/webdav/{}/pub/{}", pubkey.z32(), file_path);
-        let server = axum_test::TestServer::new(router).unwrap();
+        let server = axum_test::TestServer::new(router);
         let response = server.delete(url.as_str()).await;
         assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
     }
@@ -131,7 +131,7 @@ mod tests {
             .with_state(app_state);
 
         // Delete with invalid pubkey
-        let server = axum_test::TestServer::new(router).unwrap();
+        let server = axum_test::TestServer::new(router);
         let response = server
             .delete("/webdav/1234/pub/test.txt".to_string().as_str())
             .await;

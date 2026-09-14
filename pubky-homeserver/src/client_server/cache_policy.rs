@@ -139,8 +139,7 @@ mod tests {
             Router::new()
                 .route("/{*path}", get(success))
                 .layer(middleware::from_fn(private_cache_policy)),
-        )
-        .unwrap();
+        );
 
         let response = server.get("/priv/secret.txt").await;
 
@@ -162,8 +161,7 @@ mod tests {
             Router::new()
                 .route("/{*path}", get(success))
                 .layer(middleware::from_fn(private_cache_policy)),
-        )
-        .unwrap();
+        );
 
         let response = server.get("/pub/../priv/secret.txt").await;
 
@@ -183,8 +181,7 @@ mod tests {
             Router::new()
                 .route("/{*path}", post(missing))
                 .layer(middleware::from_fn(private_cache_policy)),
-        )
-        .unwrap();
+        );
 
         let response = server.post("/priv/missing.txt").await;
 
@@ -207,8 +204,7 @@ mod tests {
             Router::new()
                 .route("/{*path}", get(success))
                 .layer(middleware::from_fn(private_cache_policy)),
-        )
-        .unwrap();
+        );
 
         let response = server.get("/pub/file.txt").await;
 
@@ -228,8 +224,7 @@ mod tests {
             Router::new()
                 .route("/events-stream", get(success).post(missing))
                 .layer(middleware::from_fn(sse_cache_policy)),
-        )
-        .unwrap();
+        );
 
         for response in [
             server.get("/events-stream").await,

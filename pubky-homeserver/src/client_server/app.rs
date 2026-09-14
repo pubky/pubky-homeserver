@@ -278,7 +278,7 @@ mod tests {
         })
         .await;
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
-        let server = TestServer::new(router).unwrap();
+        let server = TestServer::new(router);
         let user = Keypair::random();
 
         let cookie = signup_cookie(&server, &user).await;
@@ -319,7 +319,7 @@ mod tests {
         })
         .await;
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
-        let server = TestServer::new(router).unwrap();
+        let server = TestServer::new(router);
 
         let response = server.get("/info").await;
 
@@ -338,7 +338,7 @@ mod tests {
         let context = Arc::new(AppContext::read_from(data_dir).await.unwrap());
         let metrics = context.metrics.clone();
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
-        let server = TestServer::new(router).unwrap();
+        let server = TestServer::new(router);
         let user = Keypair::random();
         let cookie = signup_cookie(&server, &user).await;
         let public_key = user.public_key().z32();

@@ -346,7 +346,7 @@ mod tests {
     ) -> anyhow::Result<(Arc<AppContext>, Router, TestServer, Keypair, String)> {
         let context = AppContext::test().await;
         let router = ClientServer::create_router(Arc::clone(&context))?;
-        let server = axum_test::TestServer::new(router.clone()).unwrap();
+        let server = axum_test::TestServer::new(router.clone());
 
         let keypair = Keypair::random();
         let cookie = create_root_user(&server, &keypair).await?.to_string();

@@ -68,7 +68,7 @@ mod tests {
             .with_state(app_state);
 
         // Disable the tenant
-        let server = axum_test::TestServer::new(router).unwrap();
+        let server = axum_test::TestServer::new(router);
         let pubkey_path = pubkey.z32();
         let response = server
             .post(format!("/users/{}/disable", pubkey_path).as_str())

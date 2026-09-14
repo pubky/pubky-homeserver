@@ -49,7 +49,7 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn test_server(context: &Arc<AppContext>) -> axum_test::TestServer {
-        axum_test::TestServer::new(super::app::create_app(Self::new(Arc::clone(context)))).unwrap()
+        axum_test::TestServer::new(super::app::create_app(Self::new(Arc::clone(context))))
     }
 }
 
