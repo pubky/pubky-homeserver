@@ -120,6 +120,38 @@ let text = storage.get("/pub/my-cool-app/data.txt").await?.text().await?;
 # Ok(()) }
 ```
 
+Conditional writes (compare-and-set), on homeservers that advertise
+`conditional-writes`:
+
+```rust no_run
+use pubky::{ClientId, Keypair, Pubky, content_etag, errors::RequestError, Error};
+
+# async fn run(keypair: Keypair) -> pubky::Result<()> {
+let pubky = Pubky::new()?;
+let session = pubky
+    .signer(keypair)
+    .signin(ClientId::new("my-cool-app").unwrap())
+    .await?;
+let storage = session.storage();
+let path = "/pub/my-cool-app/state.json";
+
+// Create only if the path is free; returns the entity tag of what was stored.
+let etag = storage.put_if_absent(path, r#"{"n":0}"#).await?;
+
+// Read back and verify the body hashes to the ETag it came with.
+let current = storage.get_verified(path).await?;
+assert_eq!(current.etag, etag);
+assert_eq!(current.etag, content_etag(&current.bytes));
+
+// Write only if nobody else has written since. A 412 means re-read and retry.
+match storage.put_if_match(path, r#"{"n":1}"#, &current.etag).await {
+    Ok(new_etag) => println!("stored as {new_etag}"),
+    Err(Error::Request(RequestError::PreconditionFailed { .. })) => println!("lost the race"),
+    Err(e) => return Err(e),
+}
+# Ok(()) }
+```
+
 Public (read-only):
 
 ```rust no_run

@@ -4,6 +4,7 @@ import {
   Keypair,
   Pubky,
   PublicKey,
+  contentEtag,
   resolvePubky,
   type Address,
   type Path,
@@ -744,6 +745,67 @@ test("storage.get streams a Web Response for session/public storage", async (t) 
   }
 
   await session.storage.delete(path);
+
+  t.end();
+});
+
+test("session: conditional writes and verified reads", async (t) => {
+  const sdk = Pubky.testnet();
+
+  const signer = sdk.signer(Keypair.random());
+  const signupToken = await createSignupToken();
+  await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await signer.signin("storage.test");
+
+  const userPk = session.info.publicKey.z32();
+  const path: Path = "/pub/example.com/state.bin";
+  const addr = toAddress(userPk, path);
+  const v1 = Uint8Array.from([1, 1, 1]);
+  const v2 = Uint8Array.from([2, 2, 2, 2]);
+
+  const etagV1 = await session.storage.putBytesIfAbsent(path, v1);
+  t.equal(etagV1, contentEtag(v1), "put reports the content etag");
+
+  try {
+    await session.storage.putBytesIfAbsent(path, v2);
+    t.fail("second create-only write should fail");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(error.name, "RequestError", "mapped error name");
+    t.equal(getStatusCode(error), 412, "status code 412");
+  }
+
+  const etagV2 = await session.storage.putBytesIfMatch(path, v2, etagV1);
+  t.equal(etagV2, contentEtag(v2), "compare-and-set reports the new etag");
+
+  try {
+    await session.storage.putBytesIfMatch(path, v1, etagV1);
+    t.fail("stale etag should be rejected");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(getStatusCode(error), 412, "stale etag is 412");
+  }
+
+  {
+    const got = await session.storage.getBytesVerified(path);
+    t.deepEqual([...got.bytes], [...v2], "verified session read");
+    t.equal(got.etag, etagV2, "verified read reports the etag");
+  }
+  {
+    const got = await sdk.publicStorage.getBytesVerified(addr);
+    t.deepEqual([...got.bytes], [...v2], "verified public read");
+    t.equal(got.etag, etagV2, "public verified read reports the etag");
+  }
+
+  try {
+    await session.storage.deleteIfMatch(path, etagV1);
+    t.fail("stale etag should not delete");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(getStatusCode(error), 412, "stale delete is 412");
+  }
+  await session.storage.deleteIfMatch(path, etagV2);
+  t.equal(await session.storage.exists(path), false, "deleted on matching etag");
 
   t.end();
 });

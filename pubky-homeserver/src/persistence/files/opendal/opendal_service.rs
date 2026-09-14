@@ -434,32 +434,7 @@ mod tests {
         let service = OpendalService::new_from_operator(operator.clone());
         let pubkey = create_user(&db).await;
         let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
-
-        // Hold every event insert for a while so the request can be dropped
-        // while its finalization transaction is open.
-        sqlx::query(
-            r#"
-            CREATE FUNCTION slow_event_insert() RETURNS trigger AS $$
-            BEGIN
-                PERFORM pg_sleep(1);
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            CREATE TRIGGER slow_event_insert_trigger
-            BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION slow_event_insert()
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        install_slow_event_insert(&db).await;
 
         let request_path = path.clone();
         let request = tokio::spawn(async move {
@@ -484,6 +459,89 @@ mod tests {
             b"committed"
         );
         assert_eq!(all_events(&db).await.len(), 1);
+    }
+
+    /// The delete counterpart: the row removal must commit and the blob must
+    /// go even though the request was dropped mid-finalization.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn delete_finalization_completes_after_the_request_is_dropped() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let service = OpendalService::new_from_operator(operator.clone());
+        let pubkey = create_user(&db).await;
+        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        operator
+            .write(path.as_str(), b"doomed".to_vec())
+            .await
+            .unwrap();
+        install_slow_event_insert(&db).await;
+
+        let request_path = path.clone();
+        let request = tokio::spawn(async move {
+            service
+                .delete(&request_path, &WritePreconditions::default())
+                .await
+        });
+
+        wait_for_active_query(&db, "%INSERT INTO \"events\"%").await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        wait_until(
+            || async {
+                let row_gone = EntryRepository::get_by_path(&path, &mut db.pool().into())
+                    .await
+                    .is_err();
+                row_gone && !operator.exists(path.as_str()).await.unwrap()
+            },
+            &format!("entry {path} was never deleted"),
+        )
+        .await;
+        assert_eq!(all_events(&db).await.len(), 2);
+    }
+
+    /// Hold every event insert for a while so a request can be dropped while
+    /// its finalization transaction is open.
+    async fn install_slow_event_insert(db: &SqlDb) {
+        sqlx::query(
+            r#"
+            CREATE FUNCTION slow_event_insert() RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(1);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER slow_event_insert_trigger
+            BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION slow_event_insert()
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    /// Poll until `condition` holds, for a few seconds at most.
+    async fn wait_until<F, Fut>(condition: F, message: &str)
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        for _ in 0..500 {
+            if condition().await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{message}");
     }
 
     /// Poll until a statement matching `pattern` is executing on this database.

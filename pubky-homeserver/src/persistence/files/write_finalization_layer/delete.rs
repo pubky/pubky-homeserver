@@ -177,10 +177,11 @@ impl Finalizer {
                 Ok(DeleteOutcome::Deleted)
             }
             Ok(DeleteOutcome::NotFound) => {
-                // Nothing was deleted, but the row may have been repaired.
-                tx.commit()
+                // The user or the entry is missing, so nothing was staged,
+                // not even a repair: that needs both to exist.
+                tx.rollback()
                     .await
-                    .map_err(|error| unexpected("Failed to commit empty delete", error))?;
+                    .map_err(|error| unexpected("Failed to roll back empty delete", error))?;
                 Ok(DeleteOutcome::NotFound)
             }
             Err(error) if is_precondition_failure(&error) => {

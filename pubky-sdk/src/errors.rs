@@ -119,7 +119,11 @@ pub enum AuthError {
 // --- Consolidated Request Error ---
 
 /// Transport and server-side HTTP errors.
+///
+/// Non-exhaustive: new server responses get new variants, so matches need a
+/// wildcard arm.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RequestError {
     /// Network/protocol failure from reqwest (timeouts, TLS, I/O, etc.).
     #[error("HTTP transport error: {0}")]
@@ -146,6 +150,32 @@ pub enum RequestError {
     DecodeJson {
         /// Error message from the JSON deserializer (with context if available).
         message: String,
+    },
+
+    /// The server rejected a conditional write (`412 Precondition Failed`):
+    /// the stored content no longer matches the entity tag presented, or a
+    /// create-only write found the path taken. Re-read and retry.
+    #[error("Precondition failed: {message}")]
+    PreconditionFailed {
+        /// The server response body captured for context.
+        message: String,
+    },
+
+    /// A storage response could not be verified: its body does not hash to
+    /// the `ETag` it came with, or it carries no `ETag`. Usually a read that
+    /// raced a concurrent write.
+    #[error("Content verification failed: {message}")]
+    Verification {
+        /// What did not match.
+        message: String,
+    },
+
+    /// The user's homeserver does not advertise a feature this call relies
+    /// on, or its features could not be determined.
+    #[error("Homeserver does not support `{feature}`")]
+    UnsupportedFeature {
+        /// The `/info` feature name.
+        feature: String,
     },
 }
 

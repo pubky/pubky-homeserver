@@ -38,6 +38,12 @@ use super::layer::{unexpected, Finalizer};
 
 /// Identity of a stored blob as the backend reports it, obtainable with a
 /// `stat`. `None` when the backend reports nothing that changes with content.
+///
+/// The modification time is the weakest of the three. Kernels stamp it at a
+/// granularity of a few milliseconds, so two same-length publishes within
+/// one tick get the same fingerprint, and a row left stale by the second one
+/// (its commit failed after the publish) would be trusted. The filesystem
+/// backend reports nothing stronger; both conditions together are rare.
 pub(super) fn blob_fingerprint(metadata: &Metadata) -> Option<String> {
     if let Some(etag) = metadata.etag() {
         return Some(format!("etag:{etag}"));
@@ -52,6 +58,17 @@ pub(super) fn blob_fingerprint(metadata: &Metadata) -> Option<String> {
             metadata.content_length()
         )
     })
+}
+
+/// What a `stat` of the blob says about the row.
+enum StatVerdict {
+    /// The blob's fingerprint matches the row: the row can be trusted.
+    Vouched,
+    /// The row has no fingerprint, or a different one: the blob must be
+    /// hashed to know. Carries the blob's current fingerprint.
+    Unvouched(Option<String>),
+    /// The backend has no blob at the entry's path, or cannot see it.
+    Missing,
 }
 
 /// How the blob at an entry's path relates to the row.
@@ -105,28 +122,45 @@ impl Finalizer {
         Ok(blob_fingerprint(&stat.into_metadata()))
     }
 
+    /// What a `stat` of the blob says about the row, without reading the blob.
+    async fn stat_blob(&self, entry: &EntryEntity) -> Result<StatVerdict> {
+        let metadata = match self
+            .probe
+            .stat_dyn(entry.path.as_str(), OpStat::new())
+            .await
+        {
+            Ok(stat) => stat.into_metadata(),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(StatVerdict::Missing),
+            Err(error) => return Err(error),
+        };
+        let fingerprint = blob_fingerprint(&metadata);
+        if fingerprint.is_some() && fingerprint == entry.blob_fingerprint {
+            Ok(StatVerdict::Vouched)
+        } else {
+            Ok(StatVerdict::Unvouched(fingerprint))
+        }
+    }
+
     /// Compare the blob at the entry's path with the row. Reads the blob only
     /// when its fingerprint does not vouch for the row.
     pub(super) async fn verify_blob(&self, entry: &EntryEntity) -> Result<VerifiedBlob> {
-        let path = entry.path.as_str();
-        let metadata = match self.probe.stat_dyn(path, OpStat::new()).await {
-            Ok(stat) => stat.into_metadata(),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
+        let fingerprint = match self.stat_blob(entry).await? {
+            StatVerdict::Vouched => {
+                return Ok(VerifiedBlob {
+                    state: BlobState::Consistent,
+                    fingerprint: entry.blob_fingerprint.clone(),
+                });
+            }
+            StatVerdict::Missing => {
                 return Ok(VerifiedBlob {
                     state: BlobState::Missing,
                     fingerprint: None,
                 });
             }
-            Err(error) => return Err(error),
+            StatVerdict::Unvouched(fingerprint) => fingerprint,
         };
-        let fingerprint = blob_fingerprint(&metadata);
-        if fingerprint.is_some() && fingerprint == entry.blob_fingerprint {
-            return Ok(VerifiedBlob {
-                state: BlobState::Consistent,
-                fingerprint,
-            });
-        }
 
+        let path = entry.path.as_str();
         let (_, mut reader) = self.probe.read_dyn(path, OpRead::new()).await?;
         let mut builder = FileMetadataBuilder::default();
         builder.guess_mime_type_from_path(entry.path.path().as_str());
@@ -153,19 +187,20 @@ impl Finalizer {
     /// The content hash a precondition must be compared with, without holding
     /// the user lock. The row's hash when its fingerprint vouches for it;
     /// otherwise the row is reconciled in a transaction of its own first, so
-    /// that a blob is hashed once and a lying row is repaired even when the
-    /// request is then rejected. `None` if the backend has no blob for it.
+    /// that a lying row is repaired even when the request is then rejected.
+    /// `None` if the backend has no blob for it.
+    ///
+    /// Only a `stat` happens outside the lock. The blob is hashed by the
+    /// repair, under the lock, so concurrent probes of one path hash it once
+    /// between them and the first repair records the fingerprint for the rest.
     pub(super) async fn verified_content_hash(&self, entry: EntryEntity) -> Result<Option<Hash>> {
-        let verified = self.verify_blob(&entry).await?;
-        match verified.state {
-            BlobState::Consistent if verified.fingerprint == entry.blob_fingerprint => {
-                Ok(Some(entry.content_hash))
-            }
-            BlobState::Missing => {
+        match self.stat_blob(&entry).await? {
+            StatVerdict::Vouched => Ok(Some(entry.content_hash)),
+            StatVerdict::Missing => {
                 log_missing_blob(&entry.path);
                 Ok(None)
             }
-            BlobState::Consistent | BlobState::Diverged(_) => self.repair_entry(&entry.path).await,
+            StatVerdict::Unvouched(_) => self.repair_entry(&entry.path).await,
         }
     }
 
@@ -702,6 +737,165 @@ mod tests {
         assert_eq!(
             user_usage(&fixture.db, &fixture.pubkey).await,
             30 + FILE_METADATA_SIZE
+        );
+    }
+}
+
+/// Proves a blob is hashed at most once per conditional write: by the repair,
+/// under the user lock, never by the preflight itself. The fingerprint it
+/// records then spares the check at close and every later probe.
+#[cfg(test)]
+mod read_count_tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use opendal::raw::{
+        Access, Layer, LayeredAccess, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead, RpWrite,
+    };
+    use opendal::Result;
+
+    use crate::persistence::files::{
+        content_hash_etag, events::EventsService,
+        opendal::opendal_test_operators::get_atomic_fs_operator,
+    };
+    use crate::persistence::sql::{entry::EntryRepository, SqlDb};
+    use crate::services::user_service::UserService;
+    use crate::shared::webdav::{EntryPath, StoragePath};
+
+    use super::super::layer::test_support::create_user;
+    use super::super::WriteFinalizationLayer;
+
+    /// Counts backend reads. Sits beneath the finalization layer, where the
+    /// backend would, so the finalizer's probe reads are counted too.
+    #[derive(Debug, Clone)]
+    struct CountReadsLayer {
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl<A: Access> Layer<A> for CountReadsLayer {
+        type LayeredAccess = CountReadsAccessor<A>;
+
+        fn layer(&self, inner: A) -> Self::LayeredAccess {
+            CountReadsAccessor {
+                inner,
+                reads: self.reads.clone(),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountReadsAccessor<A> {
+        inner: A,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl<A: Access> LayeredAccess for CountReadsAccessor<A> {
+        type Inner = A;
+        type Reader = A::Reader;
+        type Writer = A::Writer;
+        type Lister = A::Lister;
+        type Deleter = A::Deleter;
+
+        fn inner(&self) -> &Self::Inner {
+            &self.inner
+        }
+
+        async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.read(path, args).await
+        }
+
+        async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+            self.inner.write(path, args).await
+        }
+
+        async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
+            self.inner.list(path, args).await
+        }
+
+        async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
+            self.inner.delete().await
+        }
+    }
+
+    async fn current_etag(db: &SqlDb, path: &EntryPath) -> String {
+        let entry = EntryRepository::get_by_path(path, &mut db.pool().into())
+            .await
+            .unwrap();
+        content_hash_etag(&entry.content_hash)
+    }
+
+    async fn write_if_match(
+        operator: &opendal::Operator,
+        path: &EntryPath,
+        etag: &str,
+        content: Vec<u8>,
+    ) {
+        let mut writer = operator
+            .writer_with(path.as_str())
+            .if_match(etag)
+            .await
+            .unwrap();
+        writer.write(content).await.unwrap();
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn a_row_without_a_fingerprint_is_hashed_once_per_conditional_write() {
+        let db = SqlDb::test().await;
+        let (backend, _dir) = get_atomic_fs_operator();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let operator = backend
+            .layer(CountReadsLayer {
+                reads: reads.clone(),
+            })
+            .layer(WriteFinalizationLayer::new(
+                UserService::new(db.clone()),
+                db.clone(),
+                EventsService::new(db.clone(), 100),
+                None,
+                true,
+            ));
+        let pubkey = create_user(&db).await;
+        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+
+        operator.write(path.as_str(), vec![1; 10]).await.unwrap();
+        let entry = EntryRepository::get_by_path(&path, &mut db.pool().into())
+            .await
+            .unwrap();
+        EntryRepository::set_blob_fingerprint(entry.id, None, &mut db.pool().into())
+            .await
+            .unwrap();
+        reads.store(0, Ordering::SeqCst);
+
+        write_if_match(
+            &operator,
+            &path,
+            &current_etag(&db, &path).await,
+            vec![2; 20],
+        )
+        .await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "an unfingerprinted row must be hashed exactly once"
+        );
+
+        // The fingerprint is recorded now: a `stat` vouches for the row.
+        write_if_match(
+            &operator,
+            &path,
+            &current_etag(&db, &path).await,
+            vec![3; 30],
+        )
+        .await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "a fingerprinted row must not be read at all"
         );
     }
 }

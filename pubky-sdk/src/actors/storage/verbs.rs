@@ -21,7 +21,7 @@ async fn interpret_head(resp: Response) -> Result<Option<Response>> {
 }
 
 /// Send a prepared request and ensure the HTTP status indicates success.
-async fn send_checked(rb: RequestBuilder) -> Result<Response> {
+pub(super) async fn send_checked(rb: RequestBuilder) -> Result<Response> {
     let resp = rb.send().await?;
     cross_log!(debug, "Request completed with status {}", resp.status());
     check_http_status(resp).await

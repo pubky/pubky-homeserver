@@ -204,10 +204,15 @@ impl From<pubky::Error> for PubkyError {
         };
 
         // If this was a server error, attach status_code; else leave it None.
-        if let pubky::Error::Request(RequestError::Server { status, .. }) = &err {
-            return Self::new_with_status(name, &err, status.as_u16());
+        match &err {
+            pubky::Error::Request(RequestError::Server { status, .. }) => {
+                Self::new_with_status(name, &err, status.as_u16())
+            }
+            pubky::Error::Request(RequestError::PreconditionFailed { .. }) => {
+                Self::new_with_status(name, &err, 412)
+            }
+            _ => Self::new(name, err),
         }
-        Self::new(name, err)
     }
 }
 

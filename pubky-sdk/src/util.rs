@@ -20,5 +20,8 @@ pub async fn check_http_status(response: Response) -> Result<Response> {
             .to_string()
     });
 
+    if status == reqwest::StatusCode::PRECONDITION_FAILED {
+        return Err(Error::from(RequestError::PreconditionFailed { message }));
+    }
     Err(Error::from(RequestError::Server { status, message }))
 }

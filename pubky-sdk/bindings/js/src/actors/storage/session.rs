@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::Response;
 
 use super::stats::ResourceStats;
+use super::verified::VerifiedBytes;
 use crate::js_error::{JsResult, serialize_ts};
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -177,5 +178,67 @@ impl SessionStorage {
     ) -> JsResult<()> {
         self.0.delete(path).await?;
         Ok(())
+    }
+
+    /// PUT binary only if the stored content still has entity tag `etag`.
+    /// Resolves to the entity tag of what was written. Rejects with a
+    /// `RequestError` carrying `statusCode: 412` if the content changed.
+    ///
+    /// @param {Path} path
+    /// @param {Uint8Array} body
+    /// @param {string} etag Entity tag as reported by `stats`, `getBytesVerified` or a previous write.
+    /// @returns {Promise<string>}
+    #[wasm_bindgen(js_name = "putBytesIfMatch")]
+    pub async fn put_bytes_if_match(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        body: &[u8],
+        etag: &str,
+    ) -> JsResult<String> {
+        Ok(self.0.put_if_match(path, body.to_vec(), etag).await?)
+    }
+
+    /// PUT binary only if nothing is stored at `path` yet. Resolves to the
+    /// entity tag of what was written. Rejects with a `RequestError`
+    /// carrying `statusCode: 412` if the path already exists.
+    ///
+    /// @param {Path} path
+    /// @param {Uint8Array} body
+    /// @returns {Promise<string>}
+    #[wasm_bindgen(js_name = "putBytesIfAbsent")]
+    pub async fn put_bytes_if_absent(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        body: &[u8],
+    ) -> JsResult<String> {
+        Ok(self.0.put_if_absent(path, body.to_vec()).await?)
+    }
+
+    /// Delete a path only if the stored content still has entity tag `etag`.
+    /// Rejects with a `RequestError` carrying `statusCode: 412` if the
+    /// content changed.
+    ///
+    /// @param {Path} path
+    /// @param {string} etag
+    /// @returns {Promise<void>}
+    #[wasm_bindgen(js_name = "deleteIfMatch")]
+    pub async fn delete_if_match(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        etag: &str,
+    ) -> JsResult<()> {
+        Ok(self.0.delete_if_match(path, etag).await?)
+    }
+
+    /// GET bytes and verify they hash to the entity tag they came with.
+    ///
+    /// @param {Path} path
+    /// @returns {Promise<VerifiedBytes>}
+    #[wasm_bindgen(js_name = "getBytesVerified")]
+    pub async fn get_bytes_verified(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+    ) -> JsResult<VerifiedBytes> {
+        Ok(self.0.get_verified(path).await?.into())
     }
 }

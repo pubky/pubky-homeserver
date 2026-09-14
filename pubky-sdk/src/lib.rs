@@ -65,6 +65,7 @@ pub use errors::{BuildError, Error, Result};
 // Export common types and constants
 #[doc(inline)]
 pub use crate::actors::storage::{
+    conditional::{VerifiedBody, content_etag},
     list::ListBuilder,
     resource::{IntoPubkyResource, IntoResourcePath, resolve_pubky},
     resource::{PubkyResource, ResourcePath},

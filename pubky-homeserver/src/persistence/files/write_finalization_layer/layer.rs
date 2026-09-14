@@ -125,7 +125,8 @@ pub(super) fn is_precondition_failure(error: &opendal::Error) -> bool {
 /// compare them against their own ETags. `OpWrite` has no way to unset them.
 ///
 /// The copied field list is exhaustive for opendal 0.54.1; re-check it when
-/// bumping the dependency.
+/// bumping the dependency, and extend `strip_preconditions_tests` with any
+/// field the bump adds.
 fn strip_preconditions(args: &OpWrite) -> OpWrite {
     let mut stripped = OpWrite::new()
         .with_append(args.append())
@@ -355,6 +356,46 @@ impl Finalizer {
         drop(tokio::spawn(async move {
             events_service.notify_event().await;
         }));
+    }
+}
+
+#[cfg(test)]
+mod strip_preconditions_tests {
+    use std::collections::HashMap;
+
+    use opendal::raw::OpWrite;
+
+    use super::strip_preconditions;
+
+    /// Every field but the two conditions must survive the copy. This cannot
+    /// notice a field a dependency bump adds; add it here when it does.
+    #[test]
+    fn keeps_every_field_but_the_conditions() {
+        let metadata = HashMap::from([("key".to_string(), "value".to_string())]);
+        let args = OpWrite::new()
+            .with_append(true)
+            .with_concurrent(3)
+            .with_if_not_exists(true)
+            .with_content_type("text/plain")
+            .with_content_disposition("attachment")
+            .with_content_encoding("gzip")
+            .with_cache_control("no-store")
+            .with_user_metadata(metadata.clone())
+            .with_if_match("\"a\"")
+            .with_if_none_match("\"b\"");
+
+        let stripped = strip_preconditions(&args);
+
+        assert_eq!(stripped.if_match(), None);
+        assert_eq!(stripped.if_none_match(), None);
+        assert!(stripped.append());
+        assert_eq!(stripped.concurrent(), 3);
+        assert!(stripped.if_not_exists());
+        assert_eq!(stripped.content_type(), Some("text/plain"));
+        assert_eq!(stripped.content_disposition(), Some("attachment"));
+        assert_eq!(stripped.content_encoding(), Some("gzip"));
+        assert_eq!(stripped.cache_control(), Some("no-store"));
+        assert_eq!(stripped.user_metadata(), Some(&metadata));
     }
 }
 

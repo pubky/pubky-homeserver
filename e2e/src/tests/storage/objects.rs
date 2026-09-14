@@ -1,7 +1,7 @@
 use super::*;
 use base64::Engine;
 
-fn assert_server_status(error: Error, expected: StatusCode) {
+pub(super) fn assert_server_status(error: Error, expected: StatusCode) {
     assert!(
         matches!(error, Error::Request(RequestError::Server { status, .. }) if status == expected),
         "expected server status {expected}, got {error:?}"

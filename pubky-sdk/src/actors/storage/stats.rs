@@ -59,7 +59,7 @@ impl ResourceStats {
     }
 }
 
-fn clean_etag(raw: &str) -> String {
+pub(crate) fn clean_etag(raw: &str) -> String {
     let s = raw.trim();
 
     // Weak: W/"abc" -> W/abc

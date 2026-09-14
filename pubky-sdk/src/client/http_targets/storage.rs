@@ -22,6 +22,21 @@ impl StorageAddressing {
 }
 
 impl PubkyHttpClient {
+    /// Whether the homeserver of `owner` advertises `feature` in `/info`.
+    /// `false` when the homeserver cannot be resolved or its features
+    /// cannot be fetched, so callers fail closed.
+    pub(crate) async fn homeserver_supports(&self, owner: &PublicKey, feature: &str) -> bool {
+        let homeserver = Pkdns::with_client(self.clone())
+            .get_homeserver_of(owner)
+            .await
+            .ok()
+            .flatten();
+        match homeserver {
+            Some(homeserver) => self.features.supports(self, &homeserver, feature).await,
+            None => false,
+        }
+    }
+
     pub(super) async fn prepare_storage_addressing(
         &self,
         url: &mut Url,
@@ -80,6 +95,22 @@ impl PubkyHttpClient {
 mod tests {
     use super::*;
     use crate::Keypair;
+
+    /// Conditional writes must not fall back to unconditional ones, so an
+    /// owner whose homeserver cannot be resolved counts as unsupported.
+    #[tokio::test]
+    async fn unresolvable_homeserver_supports_nothing() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        let owner = Keypair::random().public_key();
+        assert!(
+            !client
+                .homeserver_supports(&owner, PATH_ADDRESSED_STORAGE)
+                .await
+        );
+    }
 
     #[tokio::test]
     async fn advertised_feature_keeps_the_storage_path() {

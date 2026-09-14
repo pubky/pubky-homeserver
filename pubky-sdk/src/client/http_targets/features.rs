@@ -15,6 +15,10 @@ use crate::{PubkyHttpClient, PublicKey};
 const MAX_INFO_BYTES: usize = 16 * 1024;
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const INFO_CACHE_TTL: Duration = Duration::from_secs(60);
+/// A fetch that failed is remembered only briefly. Callers that fail closed
+/// on a missing feature, like conditional writes, must not be locked out for
+/// a full TTL by one transient error.
+const INFO_FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);
 const INFO_CACHE_CAPACITY: usize = 256;
 type FeatureCell = Arc<AsyncMutex<Option<CachedFeatures>>>;
 
@@ -91,11 +95,17 @@ impl HomeserverFeatures {
             return features.iter().any(|candidate| candidate == feature);
         }
 
-        let features = fetch().await.unwrap_or_default();
+        let fetched = fetch().await;
+        let ttl = if fetched.is_some() {
+            INFO_CACHE_TTL
+        } else {
+            INFO_FAILURE_CACHE_TTL
+        };
+        let features = fetched.unwrap_or_default();
         let supports = features.iter().any(|candidate| candidate == feature);
         *cached = Some(CachedFeatures {
             features,
-            expires_at: Instant::now() + INFO_CACHE_TTL,
+            expires_at: Instant::now() + ttl,
         });
         supports
     }
@@ -141,7 +151,7 @@ impl HomeserverFeatures {
     }
 
     #[cfg(test)]
-    pub(super) fn insert(&self, homeserver: &PublicKey, features: &[&str]) {
+    pub(crate) fn insert(&self, homeserver: &PublicKey, features: &[&str]) {
         let cell = self.cell(homeserver);
         let mut cached = cell
             .try_lock()
@@ -266,6 +276,42 @@ mod tests {
             .await;
         assert!(!cached);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_expires_sooner_than_a_successful_one() {
+        let discovery = HomeserverFeatures::default();
+
+        let failed = crate::Keypair::random().public_key();
+        let before = Instant::now();
+        discovery
+            .supports_for(&failed, PATH_ADDRESSED_STORAGE, || async { None })
+            .await;
+        let expires_at = discovery
+            .cell(&failed)
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .expires_at;
+        assert!(expires_at <= before + INFO_CACHE_TTL);
+        assert!(expires_at <= Instant::now() + INFO_FAILURE_CACHE_TTL);
+
+        let fetched = crate::Keypair::random().public_key();
+        let before = Instant::now();
+        discovery
+            .supports_for(&fetched, PATH_ADDRESSED_STORAGE, || async {
+                Some(Vec::new())
+            })
+            .await;
+        let expires_at = discovery
+            .cell(&fetched)
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .expires_at;
+        assert!(expires_at >= before + INFO_CACHE_TTL);
     }
 
     #[tokio::test]

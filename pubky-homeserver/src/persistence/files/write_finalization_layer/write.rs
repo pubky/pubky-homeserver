@@ -599,6 +599,57 @@ mod tests {
         );
     }
 
+    /// Two writers opened against the same tag race to close. The user lock
+    /// must admit exactly one; the other must lose without touching the
+    /// winner's content or accounting.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn racing_compare_and_set_writers_admit_exactly_one() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let pubkey = create_user(&db).await;
+        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+
+        operator.write(path.as_str(), vec![1; 10]).await.unwrap();
+        let etag_v1 = current_etag(&db, &path).await;
+
+        let mut writers = Vec::new();
+        for content in [vec![2; 20], vec![3; 30]] {
+            let mut writer = conditional_writer(&operator, &path, &if_match(&etag_v1))
+                .await
+                .unwrap();
+            writer.write(content).await.unwrap();
+            writers.push(writer);
+        }
+        let barrier = Arc::new(Barrier::new(writers.len()));
+        let closes = writers.into_iter().map(|mut writer| {
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                writer.close().await
+            }
+        });
+        let results = futures_util::future::join_all(closes).await;
+
+        let (admitted, rejected): (Vec<_>, Vec<_>) =
+            results.into_iter().partition(|result| result.is_ok());
+        assert_eq!(admitted.len(), 1, "exactly one writer must win");
+        assert_eq!(rejected.len(), 1);
+        assert_precondition_failed(rejected.into_iter().next().unwrap().unwrap_err());
+
+        let content = operator.read(path.as_str()).await.unwrap().to_vec();
+        assert!(content == vec![2; 20] || content == vec![3; 30]);
+        let entry = EntryRepository::get_by_path(&path, &mut db.pool().into())
+            .await
+            .unwrap();
+        assert_eq!(entry.content_hash, pubky_common::crypto::hash(&content));
+        assert_eq!(
+            user_usage(&db, &pubkey).await,
+            content.len() as u64 + FILE_METADATA_SIZE
+        );
+        assert_eq!(all_events(&db).await.len(), 2);
+    }
+
     async fn install_failing_trigger(db: &SqlDb, table: &str, operation: &str) {
         sqlx::query(&format!(
             r#"

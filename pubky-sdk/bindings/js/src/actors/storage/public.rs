@@ -1,5 +1,6 @@
 // js/src/client/storage/public.rs
 use super::stats::ResourceStats;
+use super::verified::VerifiedBytes;
 use js_sys::Uint8Array;
 use serde::Serialize;
 use tsify::Ts;
@@ -70,6 +71,19 @@ impl PublicStorage {
         let resp = self.0.get(address).await?;
         let bytes = resp.bytes().await?;
         Ok(Uint8Array::from(bytes.as_ref()))
+    }
+
+    /// Fetch bytes from an addressed path and verify they hash to the entity
+    /// tag they came with.
+    ///
+    /// @param {Address} address
+    /// @returns {Promise<VerifiedBytes>}
+    #[wasm_bindgen(js_name = "getBytesVerified")]
+    pub async fn get_bytes_verified(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Address")] address: String,
+    ) -> JsResult<VerifiedBytes> {
+        Ok(self.0.get_verified(address).await?.into())
     }
 
     /// Fetch text from an addressed path as UTF-8 text.
