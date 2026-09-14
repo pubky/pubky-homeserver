@@ -59,7 +59,7 @@ tokio-util = "0.7"
 percent-encoding.workspace = true
 serde_valid = "2"
 opendal = { version = "0.57", features = ["services-fs"] }
-infer = "0.19"
+infer = "0.22"
 mime_guess = "2"
 dav-server-opendalfs = "=0.7.2" # Pinned because higher versions need an MSRV bump
 dav-server = "0.11"
