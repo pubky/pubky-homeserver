@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use futures_util::StreamExt;
-use reqwest::Response;
+use reqwest::{Response, StatusCode};
 
 use crate::{
     PubkyHttpClient,
@@ -16,19 +16,22 @@ impl PubkyHttpClient {
         }
         let status = response.status();
         let message = if self.max_error_body_bytes == 0 {
-            // Dropping the stream also cancels the browser reader without polling it.
+            // `bytes_stream()` acquires the browser body reader; dropping the unpolled
+            // stream cancels the underlying `ReadableStream`.
             drop(response.bytes_stream());
             None
         } else {
             self.read_error_message(response).await.ok()
         }
-        .unwrap_or_else(|| {
-            status
-                .canonical_reason()
-                .unwrap_or("Unknown Error")
-                .to_owned()
-        });
+        .unwrap_or_else(|| Self::status_reason(status));
         Err(Error::from(RequestError::Server { status, message }))
+    }
+
+    fn status_reason(status: StatusCode) -> String {
+        status
+            .canonical_reason()
+            .unwrap_or("Unknown Error")
+            .to_owned()
     }
 
     async fn read_error_message(&self, response: Response) -> reqwest::Result<String> {
@@ -45,12 +48,12 @@ impl PubkyHttpClient {
                 break;
             }
         }
+        // Cancel the unread remainder before decoding the captured prefix.
         drop(chunks);
 
-        // Native reqwest retains a UTF-8 BOM; browser Response.text() strips it.
         let body = body.as_slice();
-        #[cfg(target_arch = "wasm32")]
-        let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+        // Strip a leading UTF-8 BOM on all targets, matching browser Response::text().
+        let body = body.strip_prefix("\u{FEFF}".as_bytes()).unwrap_or(body);
         let mut message = String::from_utf8_lossy(body).into_owned();
         if truncated {
             write!(message, "\n[response body truncated at {limit} bytes]")

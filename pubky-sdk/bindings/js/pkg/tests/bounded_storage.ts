@@ -92,6 +92,8 @@ for (const setting of [undefined, 16, 8192, 0]) {
       { status: 500, body: "" },
       { status: 500, body: "small" },
       { status: 500, body: "\ufeffhello" },
+      { status: 500, body: "\ufeff" },
+      { status: 500, body: "hello\ufeff" },
       { status: 500, body: "x".repeat(limit) },
       { status: 200, body: "successful body" },
     ];

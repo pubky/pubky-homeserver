@@ -88,7 +88,11 @@ let pubky = Pubky::with_client(client);
 The setting applies to all checked requests made through that client, including
 credential-refresh errors. Set it to `0` to skip error-body reads and use the
 HTTP status reason as the message. Positive limits preserve short messages and
-mark longer ones with `[response body truncated at N bytes]`.
+mark longer ones with `\n[response body truncated at N bytes]`.
+
+The limit caps captured response bytes. Invalid UTF-8 can expand the message to
+three times that size, plus the truncation marker. Transport buffers and
+allocations add memory overhead.
 
 In JavaScript, use `Pubky.withClient(new Client({ maxErrorBodyBytes: 1024 }))`.
 

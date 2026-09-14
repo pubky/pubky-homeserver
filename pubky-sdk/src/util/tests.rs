@@ -179,15 +179,17 @@ async fn checked_success_does_not_consume_the_body() {
 
 #[tokio::test]
 async fn error_text_decoding_and_read_failure() {
-    for body in [
-        b"\xef\xbb\xbfhello".as_slice(),
-        b"bad\xfftext",
-        "caf\u{e9}".as_bytes(),
+    for (body, expected) in [
+        (b"\xef\xbb\xbfhello".as_slice(), "hello"),
+        (b"\xef\xbb\xbf", ""),
+        ("hello\u{FEFF}".as_bytes(), "hello\u{FEFF}"),
+        (b"bad\xfftext", "bad\u{fffd}text"),
+        ("caf\u{e9}".as_bytes(), "caf\u{e9}"),
     ] {
         let (response, _socket) =
             serve_response(400, &format!("Content-Length: {}\r\n", body.len()), body).await;
         let (_, message) = server_error(response, client(None)).await;
-        assert_eq!(message, String::from_utf8_lossy(body));
+        assert_eq!(message, expected);
     }
     let mut body = vec![b'x'; 4095];
     body.extend_from_slice("\u{20ac}".as_bytes());

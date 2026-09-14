@@ -31,7 +31,9 @@ pub struct PubkyClientConfig {
     /// Configuration on how to access pkarr packets on the mainline DHT.
     #[tsify(optional)]
     pub(crate) pkarr: Option<PkarrConfig>,
-    /// Maximum HTTP error-body bytes to capture. Defaults to 4096; zero skips the body.
+    /// Maximum raw HTTP error-body bytes to capture. Defaults to 4096; zero skips the body.
+    /// UTF-8 decoding can produce up to three times as many bytes of text, plus the
+    /// truncation marker. This does not cap final message size or total memory use.
     #[tsify(optional)]
     pub(crate) max_error_body_bytes: Option<usize>,
 }
@@ -79,34 +81,32 @@ impl Client {
             .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))?;
         let mut builder = pubky::PubkyHttpClient::builder();
 
-        if let Some(config) = config_opt.as_ref()
-            && let Some(limit) = config.max_error_body_bytes
-        {
-            builder.max_error_body_bytes(limit);
-        }
-        if let Some(config) = config_opt
-            && let Some(pkarr) = config.pkarr
-        {
-            // Relays
-            if let Some(relays) = pkarr.relays {
-                let mut relay_set_error: Option<String> = None;
-                builder.pkarr(|p| {
-                    p.no_relays();
-                    if let Err(e) = p.relays(&relays) {
-                        relay_set_error = Some(e.to_string());
-                    }
-                    p
-                });
-                if let Some(msg) = relay_set_error {
-                    return Err(PubkyError::new(PubkyErrorName::InvalidInput, msg));
-                }
+        if let Some(config) = config_opt {
+            if let Some(limit) = config.max_error_body_bytes {
+                builder.max_error_body_bytes(limit);
             }
-            // Timeout
-            if let Some(timeout_ms) = pkarr.request_timeout {
-                builder.pkarr(|p| {
-                    p.request_timeout(Duration::from_millis(timeout_ms));
-                    p
-                });
+            if let Some(pkarr) = config.pkarr {
+                // Relays
+                if let Some(relays) = pkarr.relays {
+                    let mut relay_set_error: Option<String> = None;
+                    builder.pkarr(|p| {
+                        p.no_relays();
+                        if let Err(e) = p.relays(&relays) {
+                            relay_set_error = Some(e.to_string());
+                        }
+                        p
+                    });
+                    if let Some(msg) = relay_set_error {
+                        return Err(PubkyError::new(PubkyErrorName::InvalidInput, msg));
+                    }
+                }
+                // Timeout
+                if let Some(timeout_ms) = pkarr.request_timeout {
+                    builder.pkarr(|p| {
+                        p.request_timeout(Duration::from_millis(timeout_ms));
+                        p
+                    });
+                }
             }
         }
 

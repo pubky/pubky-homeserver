@@ -202,14 +202,16 @@ impl PubkyHttpClientBuilder {
         self
     }
 
-    /// Limit the body bytes captured for HTTP error diagnostics. Defaults to 4096.
+    /// Limit the raw response bytes captured for HTTP error diagnostics. Defaults to 4096.
     ///
     /// Set `0` to skip error-body reads and use the status reason as the message.
     /// Longer bodies receive a truncation marker. This applies to all checked SDK
     /// requests, including credential refresh. Successful-body handling is unchanged.
     ///
+    /// Lossy UTF-8 decoding can produce up to three times the captured byte count,
+    /// plus the truncation marker. This limit does not cap the final message size
+    /// or total memory use; transport buffers and allocations add overhead.
     /// A stalled body at or below a positive limit still needs a request timeout.
-    /// Transport buffers and UTF-8 decoding have separate memory costs.
     ///
     /// # Example
     /// ```
