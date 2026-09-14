@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 
 #[cfg(test)]
@@ -133,6 +134,29 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Run a finalization step to completion on its own task.
+///
+/// Finalizing a write publishes the blob and then commits the entry row;
+/// finalizing a delete commits the row removal and then removes the blob.
+/// If the request future is dropped between those two steps, for example
+/// because the client disconnected, the entry row and the blob would end up
+/// disagreeing. A spawned task keeps running after the caller is dropped,
+/// so the step always completes. The client only loses the response.
+async fn spawn_finalization<T: Send + 'static>(
+    finalization: impl Future<Output = Result<T, opendal::Error>> + Send + 'static,
+) -> Result<T, FileIoError> {
+    match tokio::spawn(finalization).await {
+        Ok(result) => Ok(result?),
+        Err(error) => Err(FileIoError::OpenDAL(
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "Finalization task did not complete",
+            )
+            .set_source(error),
+        )),
+    }
+}
+
 /// Build the storage operators from an `AppContext` (test-only convenience).
 #[cfg(test)]
 pub fn build_storage_operators_from_context(
@@ -197,11 +221,18 @@ impl OpendalService {
         path: &EntryPath,
         preconditions: &WritePreconditions,
     ) -> Result<(), FileIoError> {
-        let mut delete = self.operator.delete_with(path.as_str());
-        if let Some(if_match) = preconditions.if_match_header() {
-            delete = delete.version(&if_match);
-        }
-        Ok(delete.await?)
+        let operator = self.operator.clone();
+        let path = path.as_str().to_string();
+        let if_match = preconditions.if_match_header();
+        spawn_finalization(async move {
+            let mut delete = operator.delete_with(&path);
+            if let Some(if_match) = &if_match {
+                delete = delete.version(if_match);
+            }
+            delete.await
+        })
+        .await?;
+        Ok(())
     }
 
     /// Delete a file bypassing write-path restrictions.
@@ -248,7 +279,7 @@ impl OpendalService {
         let mut writer = guard.take();
         match write_result {
             Ok(()) => {
-                writer.close().await?;
+                spawn_finalization(async move { writer.close().await }).await?;
                 Ok(metadata_builder.finalize())
             }
             Err(e) => {
@@ -340,6 +371,13 @@ mod tests {
     use crate::persistence::files::opendal::opendal_test_operators::{
         get_atomic_fs_operator, OpendalTestOperators,
     };
+    use crate::persistence::files::write_finalization_layer::test_support::{
+        all_events, create_user, test_operator,
+    };
+    use crate::persistence::sql::{
+        entry::{EntryEntity, EntryRepository},
+        SqlDb,
+    };
     use crate::shared::webdav::StoragePath;
 
     /// A client that disconnects mid-upload drops the request future. The
@@ -383,6 +421,98 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("{message}");
+    }
+
+    /// A client that disconnects while the write is being finalized drops
+    /// the request future. The finalization must still run to completion so
+    /// the entry row and the blob never end up disagreeing.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn finalization_completes_after_the_request_is_dropped() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let service = OpendalService::new_from_operator(operator.clone());
+        let pubkey = create_user(&db).await;
+        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+
+        // Hold every event insert for a while so the request can be dropped
+        // while its finalization transaction is open.
+        sqlx::query(
+            r#"
+            CREATE FUNCTION slow_event_insert() RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(1);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER slow_event_insert_trigger
+            BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION slow_event_insert()
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let request_path = path.clone();
+        let request = tokio::spawn(async move {
+            let stream = futures_util::stream::iter([Ok(Bytes::from_static(b"committed"))]);
+            service
+                .write_stream(
+                    &request_path,
+                    Box::pin(stream),
+                    &WritePreconditions::default(),
+                )
+                .await
+        });
+
+        wait_for_active_query(&db, "%INSERT INTO \"events\"%").await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        let entry = wait_for_entry(&db, &path).await;
+        assert_eq!(entry.content_length, 9);
+        assert_eq!(
+            operator.read(path.as_str()).await.unwrap().to_vec(),
+            b"committed"
+        );
+        assert_eq!(all_events(&db).await.len(), 1);
+    }
+
+    /// Poll until a statement matching `pattern` is executing on this database.
+    async fn wait_for_active_query(db: &SqlDb, pattern: &str) {
+        for _ in 0..500 {
+            let (active,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND state = 'active' AND query LIKE $1",
+            )
+            .bind(pattern)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            if active > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("no active query matching {pattern:?}");
+    }
+
+    async fn wait_for_entry(db: &SqlDb, path: &EntryPath) -> EntryEntity {
+        for _ in 0..500 {
+            if let Ok(entry) = EntryRepository::get_by_path(path, &mut db.pool().into()).await {
+                return entry;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("entry {path} was never committed");
     }
 
     #[test]

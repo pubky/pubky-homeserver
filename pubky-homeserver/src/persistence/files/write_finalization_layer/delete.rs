@@ -11,7 +11,7 @@ use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
 use opendal::{Error, Result};
 
-use super::layer::{precondition_failed_error, unexpected, Finalizer};
+use super::layer::{is_precondition_failure, precondition_failed_error, unexpected, Finalizer};
 
 struct StagedDelete {
     user: UserEntity,
@@ -177,10 +177,20 @@ impl Finalizer {
                 Ok(DeleteOutcome::Deleted)
             }
             Ok(DeleteOutcome::NotFound) => {
-                tx.rollback()
+                // Nothing was deleted, but the row may have been repaired.
+                tx.commit()
                     .await
-                    .map_err(|error| unexpected("Failed to roll back empty delete", error))?;
+                    .map_err(|error| unexpected("Failed to commit empty delete", error))?;
                 Ok(DeleteOutcome::NotFound)
+            }
+            Err(error) if is_precondition_failure(&error) => {
+                // The condition is checked before the row is deleted, so the
+                // transaction holds at most a repair of the entry row. Keep it.
+                tx.commit().await.map_err(|commit_error| {
+                    unexpected("Failed to commit entry repair", commit_error)
+                })?;
+                self.notify_event();
+                Err(error)
             }
             Err(error) => {
                 if let Err(rollback_error) = tx.rollback().await {
@@ -218,7 +228,7 @@ impl Finalizer {
         preconditions: &WritePreconditions,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<Option<StagedDelete>> {
-        let user = match self
+        let mut user = match self
             .user_service
             .get_for_no_key_update(entry_path.pubkey(), executor)
             .await
@@ -247,10 +257,28 @@ impl Finalizer {
             None => None,
         };
 
+        // A conditional delete depends on the row describing the blob, so
+        // verify (and repair) it first. See `prepare_write`.
+        let (existing_entry, current_hash) = match (user.as_mut(), existing_entry) {
+            (Some(user), Some(entry)) if !preconditions.is_empty() => {
+                let reconciled = self.reconcile_entry(user, entry, executor).await?;
+                if let Some(event) = reconciled.event {
+                    self.record_event(user.id, event, entry_path, executor)
+                        .await?;
+                }
+                (Some(reconciled.entry), reconciled.content_hash)
+            }
+            (_, entry) => {
+                let current_hash = entry.as_ref().map(|entry| entry.content_hash);
+                (entry, current_hash)
+            }
+        };
+
         // Checked under the user lock, like writes. A missing entry fails
         // `If-Match` (RFC 9110 §13.1.1) rather than being a silent no-op.
-        if !preconditions.is_satisfied_by(existing_entry.as_ref().map(|entry| &entry.content_hash))
-        {
+        // Nothing but the repair above may precede it: on failure the
+        // transaction is committed to keep that repair.
+        if !preconditions.is_satisfied_by(current_hash.as_ref()) {
             return Err(precondition_failed_error(entry_path));
         }
 

@@ -70,6 +70,7 @@ impl EntryRepository {
                 (ENTRY_TABLE, EntryIden::ContentHash),
                 (ENTRY_TABLE, EntryIden::ContentLength),
                 (ENTRY_TABLE, EntryIden::ContentType),
+                (ENTRY_TABLE, EntryIden::BlobFingerprint),
                 (ENTRY_TABLE, EntryIden::ModifiedAt),
                 (ENTRY_TABLE, EntryIden::CreatedAt),
             ])
@@ -106,9 +107,34 @@ impl EntryRepository {
                     EntryIden::ContentType,
                     SimpleExpr::Value(entry.content_type.clone().into()),
                 ),
+                (
+                    EntryIden::BlobFingerprint,
+                    SimpleExpr::Value(entry.blob_fingerprint.clone().into()),
+                ),
                 (EntryIden::ModifiedAt, Expr::current_timestamp().into()),
             ])
             .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).eq(entry.id))
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        sqlx::query_with(&query, values).execute(con).await?;
+        Ok(())
+    }
+
+    /// Record the fingerprint of the blob behind an entry without touching
+    /// anything else on the row.
+    pub async fn set_blob_fingerprint<'a>(
+        id: i64,
+        fingerprint: Option<&str>,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<(), sqlx::Error> {
+        let statement = Query::update()
+            .table(ENTRY_TABLE)
+            .values(vec![(
+                EntryIden::BlobFingerprint,
+                SimpleExpr::Value(fingerprint.map(str::to_string).into()),
+            )])
+            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).eq(id))
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
@@ -443,6 +469,7 @@ pub enum EntryIden {
     ContentHash,
     ContentLength,
     ContentType,
+    BlobFingerprint,
     ModifiedAt,
     CreatedAt,
 }

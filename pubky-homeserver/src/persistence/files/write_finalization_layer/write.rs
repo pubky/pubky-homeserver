@@ -15,20 +15,35 @@ use opendal::raw::oio;
 use opendal::Result;
 
 use super::{
-    layer::{check_no_path_collision, precondition_failed_error, unexpected, Finalizer},
-    resolve_storage_max_bytes, would_exceed_limit,
+    layer::{
+        check_no_path_collision, is_precondition_failure, precondition_failed_error, unexpected,
+        Finalizer,
+    },
+    resolve_storage_max_bytes,
+    verify::blob_fingerprint,
+    would_exceed_limit,
 };
 
 struct PreparedWrite {
     user: UserEntity,
     existing_entry: Option<EntryEntity>,
     bytes_delta: i64,
+    /// Owed by a repair of the existing entry, inserted with the write's own event.
+    repair_event: Option<EventType>,
+}
+
+/// Database effects of a write that precede the backend publish.
+struct StagedWrite {
+    entry_id: i64,
+    user_id: i32,
+    repair_event: Option<EventType>,
 }
 
 impl PreparedWrite {
     fn new(
         user: UserEntity,
         existing_entry: Option<EntryEntity>,
+        repair_event: Option<EventType>,
         file_metadata: &FileMetadata,
         default_storage_mb: Option<u64>,
     ) -> Result<Self> {
@@ -54,6 +69,7 @@ impl PreparedWrite {
             user,
             existing_entry,
             bytes_delta,
+            repair_event,
         })
     }
 }
@@ -153,6 +169,16 @@ impl Finalizer {
                     .map_err(|error| unexpected("Failed to commit write finalization", error))?;
                 metadata
             }
+            Err(error) if is_precondition_failure(&error) => {
+                // The condition is checked before any write effect, so the
+                // transaction holds at most a repair of the entry row. Keep
+                // it: the client's next GET must see the repaired ETag.
+                tx.commit().await.map_err(|commit_error| {
+                    unexpected("Failed to commit entry repair", commit_error)
+                })?;
+                self.notify_event();
+                return Err(error);
+            }
             Err(error) => {
                 if let Err(rollback_error) = tx.rollback().await {
                     tracing::error!(
@@ -177,11 +203,27 @@ impl Finalizer {
         preconditions: &WritePreconditions,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<opendal::Metadata> {
-        let prepared = match self
+        // Order matters here:
+        // 1. Entry row and quota, under the per-user lock only. A failure
+        //    rolls back with the blob untouched.
+        // 2. Backend publish. From here on a failure leaves the blob
+        //    published and the row stale; the next conditional write
+        //    repairs that.
+        // 3. Fingerprint of the published blob.
+        // 4. Events, last: their insert takes a homeserver-wide advisory
+        //    lock held until commit, which must not span the publish.
+        let staged = match self
             .prepare_write(entry_path, file_metadata, preconditions, executor)
             .await
         {
-            Ok(prepared) => prepared,
+            Ok(prepared) => {
+                self.stage_write_effects(prepared, entry_path, file_metadata, executor)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let staged = match staged {
+            Ok(staged) => staged,
             Err(error) => {
                 // Nothing has been published yet: discard the staged bytes.
                 abort_backend_write(backend_writer, entry_path).await;
@@ -189,8 +231,36 @@ impl Finalizer {
             }
         };
         let backend_metadata = backend_writer.close().await?;
-        self.apply_write_effects(prepared, entry_path, file_metadata, executor)
-            .await?;
+
+        // Record the published blob's identity so a later conditional write
+        // can trust this row with a `stat` instead of reading the blob.
+        // Some backends report it on close, others only on `stat`.
+        let fingerprint = match blob_fingerprint(&backend_metadata) {
+            Some(fingerprint) => Some(fingerprint),
+            None => self.stat_blob_fingerprint(entry_path).await?,
+        };
+        EntryRepository::set_blob_fingerprint(staged.entry_id, fingerprint.as_deref(), executor)
+            .await
+            .map_err(|error| {
+                unexpected(
+                    format!("Failed to record blob fingerprint for {entry_path}"),
+                    error,
+                )
+            })?;
+
+        if let Some(repair_event) = staged.repair_event {
+            self.record_event(staged.user_id, repair_event, entry_path, executor)
+                .await?;
+        }
+        self.record_event(
+            staged.user_id,
+            EventType::Put {
+                content_hash: file_metadata.hash,
+            },
+            entry_path,
+            executor,
+        )
+        .await?;
         Ok(backend_metadata)
     }
 
@@ -201,7 +271,7 @@ impl Finalizer {
         preconditions: &WritePreconditions,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<PreparedWrite> {
-        let user = self
+        let mut user = self
             .user_service
             .get_for_no_key_update(entry_path.pubkey(), executor)
             .await
@@ -227,74 +297,81 @@ impl Finalizer {
             }
         };
 
+        // Only a conditional write depends on the row describing the blob,
+        // so only then is it verified (and repaired) before the check.
+        let (existing_entry, current_hash, repair_event) = match existing_entry {
+            Some(entry) if !preconditions.is_empty() => {
+                let reconciled = self.reconcile_entry(&mut user, entry, executor).await?;
+                (
+                    Some(reconciled.entry),
+                    reconciled.content_hash,
+                    reconciled.event,
+                )
+            }
+            entry => {
+                let current_hash = entry.as_ref().map(|entry| entry.content_hash);
+                (entry, current_hash, None)
+            }
+        };
+
         // Authoritative precondition check: the user row lock above serializes
         // all writes by this user, so the entry cannot change before commit.
-        if !preconditions.is_satisfied_by(existing_entry.as_ref().map(|entry| &entry.content_hash))
-        {
+        // Nothing but the repair above may precede it: on failure the
+        // transaction is committed to keep that repair.
+        if !preconditions.is_satisfied_by(current_hash.as_ref()) {
+            if let Some(repair_event) = repair_event {
+                self.record_event(user.id, repair_event, entry_path, executor)
+                    .await?;
+            }
             return Err(precondition_failed_error(entry_path));
         }
 
-        PreparedWrite::new(user, existing_entry, file_metadata, self.default_storage_mb)
+        PreparedWrite::new(
+            user,
+            existing_entry,
+            repair_event,
+            file_metadata,
+            self.default_storage_mb,
+        )
     }
 
-    async fn apply_write_effects(
+    /// Entry row and quota for the write. Events are deliberately not
+    /// inserted here: see `write_in_transaction`.
+    async fn stage_write_effects(
         &self,
         prepared: PreparedWrite,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
         executor: &mut UnifiedExecutor<'_>,
-    ) -> Result<()> {
+    ) -> Result<StagedWrite> {
         let PreparedWrite {
             mut user,
             existing_entry,
             bytes_delta,
+            repair_event,
         } = prepared;
-        match existing_entry {
+        let entry_id = match existing_entry {
             Some(mut entry) => {
                 entry.content_hash = file_metadata.hash;
                 entry.content_length = file_metadata.length as u64;
                 entry.content_type = file_metadata.content_type.clone();
-                EntryRepository::update(&entry, executor).await
+                EntryRepository::update(&entry, executor)
+                    .await
+                    .map(|()| entry.id)
             }
-            None => EntryRepository::create(
-                user.id,
-                entry_path.path(),
-                &file_metadata.hash,
-                file_metadata.length as u64,
-                &file_metadata.content_type,
-                executor,
-            )
-            .await
-            .map(|_| ()),
-        }
-        .map_err(|error| {
-            unexpected(
-                format!(
-                    "Failed to write entry {} after backend close; potential orphaned file",
-                    entry_path
-                ),
-                error,
-            )
-        })?;
-        self.events_service
-            .create_event(
-                user.id,
-                EventType::Put {
-                    content_hash: file_metadata.hash,
-                },
-                entry_path,
-                executor,
-            )
-            .await
-            .map_err(|error| {
-                unexpected(
-                    format!(
-                        "Failed to create event {} after backend close; potential orphaned file",
-                        entry_path
-                    ),
-                    error,
+            None => {
+                EntryRepository::create(
+                    user.id,
+                    entry_path.path(),
+                    &file_metadata.hash,
+                    file_metadata.length as u64,
+                    &file_metadata.content_type,
+                    executor,
                 )
-            })?;
+                .await
+            }
+        }
+        .map_err(|error| unexpected(format!("Failed to write entry {}", entry_path), error))?;
         user.used_bytes = user.used_bytes.saturating_add_signed(bytes_delta);
         self.user_service
             .update_in_tx(&user, executor)
@@ -306,7 +383,11 @@ impl Finalizer {
                 )
             })?;
 
-        Ok(())
+        Ok(StagedWrite {
+            entry_id,
+            user_id: user.id,
+            repair_event,
+        })
     }
 }
 
@@ -518,47 +599,118 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn event_insert_failure_rolls_back_entry_event_and_quota() {
-        let db = SqlDb::test().await;
-        let operator = test_operator(&db);
-        let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
-
-        sqlx::query(
+    async fn install_failing_trigger(db: &SqlDb, table: &str, operation: &str) {
+        sqlx::query(&format!(
             r#"
-            CREATE FUNCTION fail_event_insert() RETURNS trigger AS $$
+            CREATE FUNCTION fail_{table}_{operation}() RETURNS trigger AS $$
             BEGIN
-                RAISE EXCEPTION 'forced event insert failure';
+                RAISE EXCEPTION 'forced {table} {operation} failure';
             END;
             $$ LANGUAGE plpgsql
-            "#,
-        )
+            "#
+        ))
         .execute(db.pool())
         .await
         .unwrap();
-        sqlx::query(
-            r#"
-            CREATE TRIGGER fail_event_insert_trigger
-            BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION fail_event_insert()
-            "#,
-        )
+        sqlx::query(&format!(
+            "CREATE TRIGGER fail_{table}_{operation}_trigger BEFORE {operation} ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION fail_{table}_{operation}()"
+        ))
         .execute(db.pool())
         .await
         .unwrap();
+    }
+
+    fn assert_staging_empty(dir: &tempfile::TempDir) {
+        let staged: Vec<_> = std::fs::read_dir(dir.path().join("files-tmp"))
+            .unwrap()
+            .collect();
+        assert!(staged.is_empty(), "upload leaked a staged file: {staged:?}");
+    }
+
+    /// A failure before the publish rolls back everything and leaves the
+    /// previous content in place, with the rejected upload's staged file
+    /// removed.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn entry_update_failure_rolls_back_without_publishing_the_blob() {
+        let db = SqlDb::test().await;
+        let (operator, dir) = test_fs_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
 
         operator
             .write(entry_path.as_str(), vec![1; 10])
             .await
+            .unwrap();
+        let etag_v1 = current_etag(&db, &entry_path).await;
+        install_failing_trigger(&db, "entries", "UPDATE").await;
+
+        operator
+            .write(entry_path.as_str(), vec![2; 20])
+            .await
+            .expect_err("forced entry update failure should fail the write");
+
+        assert_eq!(current_etag(&db, &entry_path).await, etag_v1);
+        assert_eq!(
+            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
+            vec![1; 10]
+        );
+        assert_eq!(user_usage(&db, &pubkey).await, 10 + FILE_METADATA_SIZE);
+        assert_eq!(all_events(&db).await.len(), 1);
+        assert_staging_empty(&dir);
+    }
+
+    /// Events are inserted after the publish, so a failed event insert
+    /// leaves the blob published and the row stale. That is the state the
+    /// next conditional write must detect and repair.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn event_insert_failure_leaves_a_stale_row_that_a_conditional_write_repairs() {
+        let db = SqlDb::test().await;
+        let (operator, dir) = test_fs_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+
+        operator
+            .write(entry_path.as_str(), vec![1; 10])
+            .await
+            .unwrap();
+        let etag_v1 = current_etag(&db, &entry_path).await;
+        install_failing_trigger(&db, "events", "INSERT").await;
+
+        operator
+            .write(entry_path.as_str(), vec![2; 20])
+            .await
             .expect_err("forced event failure should fail the write");
 
-        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+        // Published, but the row still describes v1.
+        assert_eq!(
+            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
+            vec![2; 20]
+        );
+        assert_eq!(current_etag(&db, &entry_path).await, etag_v1);
+        assert_eq!(user_usage(&db, &pubkey).await, 10 + FILE_METADATA_SIZE);
+        assert_eq!(all_events(&db).await.len(), 1);
+        assert_staging_empty(&dir);
+
+        // The stale tag must not win against the real content, and the
+        // repair must be kept even though the write is rejected.
+        sqlx::query("DROP TRIGGER fail_events_INSERT_trigger ON events")
+            .execute(db.pool())
             .await
-            .expect_err("entry insert should roll back");
-        assert_eq!(user_usage(&db, &pubkey).await, 0);
-        assert!(all_events(&db).await.is_empty());
+            .unwrap();
+        let error = conditional_write(&operator, &entry_path, vec![3; 30], &if_match(&etag_v1))
+            .await
+            .expect_err("stale tag must be rejected");
+        assert_precondition_failed(error);
+
+        assert_eq!(
+            current_etag(&db, &entry_path).await,
+            content_hash_etag(&pubky_common::crypto::hash(&[2; 20]))
+        );
+        assert_eq!(user_usage(&db, &pubkey).await, 20 + FILE_METADATA_SIZE);
+        assert_eq!(all_events(&db).await.len(), 2);
     }
 
     #[tokio::test]
@@ -661,5 +813,153 @@ mod tests {
         .await
         .expect("cross-user uploads should not deadlock");
         assert!(cross_user_results.iter().all(Result::is_ok));
+    }
+}
+
+/// Proves the ordering in `write_in_transaction`: one user's slow backend
+/// publish must not hold the homeserver-wide event lock and stall everyone
+/// else's writes.
+#[cfg(test)]
+mod publish_overlap_tests {
+    use std::{sync::Arc, time::Duration};
+
+    use opendal::raw::{
+        oio, Access, Layer, LayeredAccess, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
+        RpWrite,
+    };
+    use opendal::Result;
+    use tokio::sync::Notify;
+
+    use crate::persistence::files::{events::EventsService, opendal::opendal_test_operators};
+    use crate::persistence::sql::SqlDb;
+    use crate::services::user_service::UserService;
+    use crate::shared::webdav::{EntryPath, StoragePath};
+
+    use super::super::layer::test_support::{all_events, create_user};
+    use super::super::WriteFinalizationLayer;
+
+    /// Blocks the close of one path until released, and reports when it is
+    /// blocked. Sits beneath the finalization layer, where the backend would.
+    #[derive(Debug, Clone)]
+    struct BlockingCloseLayer {
+        path: String,
+        blocked: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl<A: Access> Layer<A> for BlockingCloseLayer {
+        type LayeredAccess = BlockingCloseAccessor<A>;
+
+        fn layer(&self, inner: A) -> Self::LayeredAccess {
+            BlockingCloseAccessor {
+                inner,
+                layer: self.clone(),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingCloseAccessor<A> {
+        inner: A,
+        layer: BlockingCloseLayer,
+    }
+
+    impl<A: Access> LayeredAccess for BlockingCloseAccessor<A> {
+        type Inner = A;
+        type Reader = A::Reader;
+        type Writer = BlockingCloseWriter<A::Writer>;
+        type Lister = A::Lister;
+        type Deleter = A::Deleter;
+
+        fn inner(&self) -> &Self::Inner {
+            &self.inner
+        }
+
+        async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+            self.inner.read(path, args).await
+        }
+
+        async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+            let (rp, inner) = self.inner.write(path, args).await?;
+            let gate = (path == self.layer.path)
+                .then(|| (self.layer.blocked.clone(), self.layer.release.clone()));
+            Ok((rp, BlockingCloseWriter { inner, gate }))
+        }
+
+        async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
+            self.inner.list(path, args).await
+        }
+
+        async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
+            self.inner.delete().await
+        }
+    }
+
+    struct BlockingCloseWriter<W> {
+        inner: W,
+        gate: Option<(Arc<Notify>, Arc<Notify>)>,
+    }
+
+    impl<W: oio::Write> oio::Write for BlockingCloseWriter<W> {
+        async fn write(&mut self, bs: opendal::Buffer) -> Result<()> {
+            self.inner.write(bs).await
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            self.inner.abort().await
+        }
+
+        async fn close(&mut self) -> Result<opendal::Metadata> {
+            if let Some((blocked, release)) = self.gate.take() {
+                blocked.notify_one();
+                release.notified().await;
+            }
+            self.inner.close().await
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn a_slow_publish_for_one_user_does_not_block_other_users() {
+        let db = SqlDb::test().await;
+        let slow_user = create_user(&db).await;
+        let other_user = create_user(&db).await;
+        let slow_path = EntryPath::new(slow_user, StoragePath::new("/slow.txt").unwrap());
+        let other_path = EntryPath::new(other_user, StoragePath::new("/quick.txt").unwrap());
+
+        let blocked = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let operator = opendal_test_operators::get_memory_operator()
+            .layer(BlockingCloseLayer {
+                path: slow_path.as_str().to_string(),
+                blocked: blocked.clone(),
+                release: release.clone(),
+            })
+            .layer(WriteFinalizationLayer::new(
+                UserService::new(db.clone()),
+                db.clone(),
+                EventsService::new(db.clone(), 100),
+                None,
+                true,
+            ));
+
+        let slow_operator = operator.clone();
+        let slow_write =
+            tokio::spawn(async move { slow_operator.write(slow_path.as_str(), vec![1; 10]).await });
+        blocked.notified().await;
+
+        // The slow write is inside its finalization transaction with its
+        // publish stalled. Another user's write must still get through.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            operator.write(other_path.as_str(), vec![2; 20]),
+        )
+        .await
+        .expect("another user's write must not wait on a stalled publish")
+        .unwrap();
+
+        release.notify_one();
+        slow_write.await.unwrap().unwrap();
+        assert_eq!(all_events(&db).await.len(), 2);
     }
 }
