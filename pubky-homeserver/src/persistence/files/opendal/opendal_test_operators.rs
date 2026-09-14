@@ -69,7 +69,7 @@ impl OpendalTestOperators {
     }
 
     /// Get all operators.
-    pub fn operators(&self) -> Vec<(opendal::Scheme, Operator)> {
+    pub fn operators(&self) -> Vec<(&'static str, Operator)> {
         let mut operators = vec![
             (self.fs_operator.info().scheme(), self.fs_operator.clone()),
             (
@@ -126,7 +126,11 @@ impl AsyncDrop for OpendalGcpCleaner {
                 return;
             }
         };
-        match base_gcs_operator.remove_all(&test_root_dir).await {
+        match base_gcs_operator
+            .delete_with(&test_root_dir)
+            .recursive(true)
+            .await
+        {
             Ok(_) => {}
             Err(e) => {
                 println!(

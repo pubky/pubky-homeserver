@@ -91,6 +91,7 @@ impl<R: oio::Delete> WriteFinalizationDeleter<R> {
 
         self.inner
             .delete(pending.entry_path.as_str(), pending.args.clone())
+            .await
             .map_err(|error| {
                 tracing::error!(
                     path = %pending.entry_path,
@@ -103,13 +104,13 @@ impl<R: oio::Delete> WriteFinalizationDeleter<R> {
         Ok(outcome)
     }
 
-    async fn flush_blob_deletes(&mut self, earlier_error: Option<Error>) -> Result<usize> {
-        let flush_result = self.inner.flush().await;
-        match (earlier_error, flush_result) {
-            (Some(error), Err(flush_error)) => {
+    async fn close_blob_deletes(&mut self, earlier_error: Option<Error>) -> Result<()> {
+        let close_result = self.inner.close().await;
+        match (earlier_error, close_result) {
+            (Some(error), Err(close_error)) => {
                 tracing::error!(
-                    error = %flush_error,
-                    "Failed to flush blob deletions after an earlier delete error"
+                    error = %close_error,
+                    "Failed to close blob deletions after an earlier delete error"
                 );
                 Err(error)
             }
@@ -120,20 +121,20 @@ impl<R: oio::Delete> WriteFinalizationDeleter<R> {
 }
 
 impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
-    fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         let entry_path = EntryPath::parse_opendal(path)?;
         self.delete_queue.push(PendingDelete { entry_path, args });
         Ok(())
     }
 
-    async fn flush(&mut self) -> Result<usize> {
+    async fn close(&mut self) -> Result<()> {
         let outcome = self.process_delete_queue().await;
 
         if outcome.should_notify {
             self.finalizer.notify_event();
         }
 
-        self.flush_blob_deletes(outcome.first_error).await
+        self.close_blob_deletes(outcome.first_error).await
     }
 }
 
@@ -285,20 +286,19 @@ mod tests {
     #[derive(Default)]
     struct BatchDelete {
         queued_paths: Vec<String>,
-        flushed_paths: Vec<String>,
+        closed_paths: Vec<String>,
     }
 
     impl oio::Delete for BatchDelete {
-        fn delete(&mut self, path: &str, _args: OpDelete) -> Result<()> {
+        async fn delete(&mut self, path: &str, _args: OpDelete) -> Result<()> {
             self.queued_paths.push(path.to_string());
             Ok(())
         }
 
-        async fn flush(&mut self) -> Result<usize> {
+        async fn close(&mut self) -> Result<()> {
             let queued_paths = std::mem::take(&mut self.queued_paths);
-            let deleted = queued_paths.len();
-            self.flushed_paths.extend(queued_paths);
-            Ok(deleted)
+            self.closed_paths.extend(queued_paths);
+            Ok(())
         }
     }
 
@@ -492,13 +492,15 @@ mod tests {
             WriteFinalizationDeleter::new(BatchDelete::default(), Arc::new(test_finalizer(&db)));
         deleter
             .delete(failing_path.as_str(), OpDelete::default())
+            .await
             .unwrap();
         deleter
             .delete(succeeding_path.as_str(), OpDelete::default())
+            .await
             .unwrap();
 
         deleter
-            .flush()
+            .close()
             .await
             .expect_err("the batch should report the first finalization error");
 
@@ -514,7 +516,7 @@ mod tests {
         assert_eq!(events.last().unwrap().event_type, EventType::Delete);
         assert_eq!(events.last().unwrap().path, succeeding_path);
         assert_eq!(
-            deleter.inner.flushed_paths,
+            deleter.inner.closed_paths,
             vec![succeeding_path.as_str().to_string()],
             "successfully finalized paths should still be deleted from the backend"
         );

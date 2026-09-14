@@ -134,6 +134,7 @@ impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A> {
     type Writer = WriteFinalizationWriter<A::Writer>;
     type Lister = A::Lister;
     type Deleter = WriteFinalizationDeleter<A::Deleter>;
+    type Copier = A::Copier;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -159,11 +160,19 @@ impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A> {
         ))
     }
 
-    async fn copy(&self, from: &str, to: &str, args: OpCopy) -> Result<RpCopy> {
+    async fn copy(
+        &self,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<(RpCopy, Self::Copier)> {
         let from = EntryPath::parse_opendal(from)?;
         let to = EntryPath::parse_opendal(to)?;
         self.finalizer.collision_preflight(&to).await?;
-        self.inner.copy(from.as_str(), to.as_str(), args).await
+        self.inner
+            .copy(from.as_str(), to.as_str(), args, opts)
+            .await
     }
 
     async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
