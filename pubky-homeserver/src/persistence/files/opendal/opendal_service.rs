@@ -206,9 +206,7 @@ impl OpendalService {
     ) -> Result<Bytes, FileIoError> {
         #[cfg(test)]
         self.range_reads.fetch_add(1, Ordering::Relaxed);
-        Ok(Bytes::from(
-            self.operator.read_with(key).range(range).await?.to_vec(),
-        ))
+        Ok(self.operator.read_with(key).range(range).await?.to_bytes())
     }
 
     /// Delete a backend object by its immutable or legacy key.
@@ -286,7 +284,7 @@ mod tests {
         shared::webdav::StoragePath,
     };
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_blob_stream_roundtrip_across_backends() {
         let path = EntryPath::new(
             pubky_common::crypto::Keypair::random().public_key(),

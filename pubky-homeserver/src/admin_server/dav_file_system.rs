@@ -103,37 +103,26 @@ impl AdminDavFileSystem {
         }
 
         let entry_path = EntryPath::from_str(&path_string).map_err(|_| FsError::NotFound)?;
-        if directory_requested {
-            return if self
+        if !directory_requested {
+            match self
                 .file_service
-                .contains_directory(&entry_path)
+                .get_info(&entry_path, &mut self.file_service.db.pool().into())
                 .await
-                .map_err(map_file_error)?
             {
-                Ok(AdminDavMetadata::directory())
-            } else {
-                Err(FsError::NotFound)
-            };
-        }
-        match self
-            .file_service
-            .get_info(&entry_path, &mut self.file_service.db.pool().into())
-            .await
-        {
-            Ok(entry) => Ok(AdminDavMetadata::file(&entry)),
-            Err(FileIoError::NotFound) => {
-                if self
-                    .file_service
-                    .contains_directory(&entry_path)
-                    .await
-                    .map_err(map_file_error)?
-                {
-                    Ok(AdminDavMetadata::directory())
-                } else {
-                    Err(FsError::NotFound)
-                }
+                Ok(entry) => return Ok(AdminDavMetadata::file(&entry)),
+                Err(FileIoError::NotFound) => {}
+                Err(error) => return Err(map_file_error(error)),
             }
-            Err(error) => Err(map_file_error(error)),
+        }
+        if self
+            .file_service
+            .contains_directory(&entry_path)
+            .await
+            .map_err(map_file_error)?
+        {
+            Ok(AdminDavMetadata::directory())
+        } else {
+            Err(FsError::NotFound)
         }
     }
 }

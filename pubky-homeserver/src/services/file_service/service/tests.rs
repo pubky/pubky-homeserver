@@ -981,7 +981,6 @@ async fn test_replaced_and_deleted_blobs_are_retained_until_cleanup() {
             .await
             .unwrap();
         let blob_key = original.blob_key.as_ref().unwrap();
-        let stream = file_service.get_entry_stream(&original).await.unwrap();
         if overwrite {
             file_service
                 .write(&path, Buffer::from(b"replacement".to_vec()))
@@ -1009,6 +1008,12 @@ async fn test_replaced_and_deleted_blobs_are_retained_until_cleanup() {
                 .as_ref(),
             b"original"
         );
+        let mut original_stream = file_service.get_entry_stream(&original).await.unwrap();
+        let mut original_content = Vec::new();
+        while let Some(chunk) = original_stream.next().await {
+            original_content.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(original_content, b"original");
 
         sqlx::query(
             "UPDATE unreferenced_blobs SET eligible_at = statement_timestamp() \
@@ -1024,7 +1029,6 @@ async fn test_replaced_and_deleted_blobs_are_retained_until_cleanup() {
             file_service.get_entry_range(&original, 0..8).await,
             Err(FileIoError::NotFound)
         ));
-        drop(stream);
         if overwrite {
             assert_eq!(
                 file_service.get(&path).await.unwrap().as_ref(),
@@ -1396,35 +1400,6 @@ async fn test_write_path_policy_rejects_disallowed_mutations() {
     assert_eq!(
         file_service.get(&blocked).await.unwrap().as_ref(),
         b"blocked"
-    );
-}
-
-#[tokio::test]
-#[pubky_test_utils::test]
-async fn test_loaded_entry_selects_one_immutable_version() {
-    let context = AppContext::test().await;
-    let file_service = FileService::new_from_context(&context).unwrap();
-    let pubkey = pubky_common::crypto::Keypair::random().public_key();
-    context.user_service.create(&pubkey).await.unwrap();
-    let path = EntryPath::new(pubkey, StoragePath::new("/pub/state.bin").unwrap());
-    let original = file_service
-        .write(&path, Buffer::from(b"original".to_vec()))
-        .await
-        .unwrap();
-    file_service
-        .write(&path, Buffer::from(b"replacement".to_vec()))
-        .await
-        .unwrap();
-
-    let mut original_stream = file_service.get_entry_stream(&original).await.unwrap();
-    let mut original_content = Vec::new();
-    while let Some(chunk) = original_stream.next().await {
-        original_content.extend_from_slice(&chunk.unwrap());
-    }
-    assert_eq!(original_content, b"original");
-    assert_eq!(
-        file_service.get(&path).await.unwrap().as_ref(),
-        b"replacement"
     );
 }
 
