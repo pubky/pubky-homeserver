@@ -96,6 +96,40 @@ allocations add memory overhead.
 
 In JavaScript, use `Pubky.withClient(new Client({ maxErrorBodyBytes: 1024 }))`.
 
+## Event-stream limits
+
+Event subscriptions are unbounded by default and keep the existing parser.
+Set a client-side limit per subscription to reject oversized or unterminated
+SSE blocks in historical and live streams:
+
+```rust,no_run
+# async fn example(pubky: pubky::Pubky, user: pubky::PublicKey) -> pubky::Result<()> {
+let stream = pubky.event_stream_for_user(&user, None)
+    .max_event_bytes(8192)
+    .live()
+    .subscribe()
+    .await?;
+# Ok(()) }
+```
+
+In JavaScript, use `.maxEventBytes(8192)` on the event-stream builder.
+Rust rejects zero at subscription time; JavaScript requires an integer in
+`1..=4294967295` when setting the limit.
+
+The limit counts all fields, comments, their line endings, and a leading UTF-8
+BOM. It excludes the final blank separator and resets after every block,
+including comment-only blocks. There is no total stream byte limit. This setting
+is independent of `.limit()` (event count) and `max_error_body_bytes`.
+
+On overflow, the SDK closes the response and yields one validation error, then
+ends the Rust stream or errors the JavaScript `ReadableStream`. It still skips
+malformed Pubky events and unknown event types within the limit. The bounded
+decoder replaces invalid UTF-8 and discards incomplete events at EOF.
+
+Parser memory is proportional to the limit, with UTF-8 replacement and URL
+encoding overhead. Transport buffers and events retained by the application are
+outside this limit.
+
 ## Key formats (display vs transport)
 
 `PublicKey` has two string representations:
