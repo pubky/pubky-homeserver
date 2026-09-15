@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::observability::Metrics;
 use crate::AppContext;
-use crate::AppContextConversionError;
+use crate::AppContextBuildError;
 use axum::routing::get;
 use axum::Router;
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
@@ -24,9 +24,9 @@ pub enum MetricsServerBuildError {
     #[error("Failed to create metrics server: {0}")]
     Server(anyhow::Error),
 
-    /// Failed to bootstrap from the data directory.
-    #[error("Failed to bootstrap from the data directory: {0}")]
-    DataDir(AppContextConversionError),
+    /// Failed to build the application context.
+    #[error("Failed to build the application context: {0}")]
+    AppContext(AppContextBuildError),
 }
 
 /// Metrics server

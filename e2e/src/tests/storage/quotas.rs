@@ -7,10 +7,10 @@ async fn put_quota_applied() {
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
 
-    let mut mock_dir = MockDataDir::test();
-    mock_dir.config_toml.storage.default_quota_mb = Some(1); // 1 MB
+    let mut config = pubky_testnet::pubky_homeserver::ConfigToml::default_test_config();
+    config.storage.default_quota_mb = Some(1); // 1 MB
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 
@@ -94,12 +94,12 @@ async fn put_quota_applied_with_bandwidth_throttling() {
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
 
-    let mut mock_dir = MockDataDir::test();
-    mock_dir.config_toml.storage.default_quota_mb = Some(1); // 1 MB
-                                                             // Enable bandwidth throttling so the BandwidthQuotaLimitLayer wraps the body.
-    mock_dir.config_toml.default_quotas.rate_write = Some("10mb/s".parse().unwrap());
+    let mut config = pubky_testnet::pubky_homeserver::ConfigToml::default_test_config();
+    config.storage.default_quota_mb = Some(1);
+    // Enable bandwidth throttling so the BandwidthQuotaLimitLayer wraps the body.
+    config.default_quotas.rate_write = Some("10mb/s".parse().unwrap());
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
 

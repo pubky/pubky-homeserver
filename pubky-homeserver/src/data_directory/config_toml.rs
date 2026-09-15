@@ -213,7 +213,6 @@ impl ConfigToml {
     #[cfg(any(test, feature = "testing"))]
     pub fn default_test_config() -> Self {
         let mut config = Self::default();
-        config.general.database_url = None; // Resolved downstream via env var or default fallback.
         config.general.signup_mode = SignupMode::Open;
         // Use ephemeral ports (0) so parallel tests don't collide.
         config.drive.icann_listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -222,6 +221,12 @@ impl ConfigToml {
         config.admin.listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
         config.pkdns.icann_domain =
             Some(Domain::from_str("localhost").expect("localhost is a valid domain"));
+        // Load-bearing for network isolation, not cosmetic. `config.default.toml` ships the
+        // public pkarr relays, and `AppContext::apply_config_to_pkarr` applies
+        // `dht_relay_nodes` on top of *whatever* builder it is handed — including the
+        // isolated one, whose `no_default_network()` has already run by then. Leaving this
+        // set would put every test that starts from this config on the public relays.
+        // Pinned by `the_test_config_keeps_the_isolated_builder_off_the_public_relays`.
         config.pkdns.dht_relay_nodes = None;
         config.storage.backend = StorageConfigToml::InMemory;
         config.logging = None;
@@ -332,6 +337,24 @@ mod tests {
                     TargetLevel::from_str("tower_http=debug").unwrap()
                 ],
             })
+        );
+    }
+
+    /// The embedded defaults must leave `database_url` unset. That is what lets
+    /// `[general].database_url` mean "someone picked this" wherever it is read — tier 3 of
+    /// `ConnectionString::resolve_for_test`, and the difference between an ephemeral test
+    /// falling through to the default test server or not. Production's own fallback lives
+    /// in code (`DatabaseMode::DEFAULT_DATABASE_URL`) precisely so this stays `None`.
+    #[test]
+    fn embedded_defaults_configure_no_database() {
+        assert_eq!(ConfigToml::default().general.database_url, None);
+        assert_eq!(
+            ConfigToml::from_str_with_defaults("[general]\nsignup_mode = \"open\"\n")
+                .unwrap()
+                .general
+                .database_url,
+            None,
+            "a config that does not mention database_url must not acquire one"
         );
     }
 
