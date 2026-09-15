@@ -88,10 +88,6 @@ type = "file_system"
 # Omit for unlimited. 0 means zero storage (not unlimited).
 # default_quota_mb = 1024
 
-# Maximum combined size of in-progress admin DAV uploads (in MB).
-# Temporary upload files are stored under the homeserver data directory.
-admin_dav_spool_limit_mb = 1024
-
 # Google Cloud Bucket
 # Files are saved in a Google Cloud Bucket.
 # type = "google_bucket"

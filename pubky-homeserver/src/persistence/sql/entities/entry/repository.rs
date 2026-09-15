@@ -985,16 +985,7 @@ mod tests {
             "/literalA_[x]/wrong.txt",
             "/literal%a[x]/wrong.txt",
         ] {
-            EntryRepository::create(
-                user.id,
-                &StoragePath::new(path).unwrap(),
-                &pubky_common::crypto::Hash::from_bytes([0; 32]),
-                100,
-                "text/plain",
-                &mut db.pool().into(),
-            )
-            .await
-            .unwrap();
+            create_entry_for_path(&db, user.id, path).await;
         }
 
         let base = EntryPath::new(
@@ -1540,16 +1531,7 @@ mod tests {
         .unwrap();
         assert!(!exists);
 
-        EntryRepository::create(
-            user.id,
-            &StoragePath::new("/literalA_/wrong.txt").unwrap(),
-            &pubky_common::crypto::Hash::from_bytes([0; 32]),
-            100,
-            "text/plain",
-            &mut db.pool().into(),
-        )
-        .await
-        .unwrap();
+        create_entry_for_path(&db, user.id, "/literalA_/wrong.txt").await;
         let literal = EntryPath::new(
             user_pubkey.clone(),
             StoragePath::new("/literal%_/").unwrap(),
@@ -1560,16 +1542,7 @@ mod tests {
                 .unwrap()
         );
 
-        EntryRepository::create(
-            user.id,
-            &StoragePath::new("/literal%_/file.txt").unwrap(),
-            &pubky_common::crypto::Hash::from_bytes([0; 32]),
-            100,
-            "text/plain",
-            &mut db.pool().into(),
-        )
-        .await
-        .unwrap();
+        create_entry_for_path(&db, user.id, "/literal%_/file.txt").await;
         assert!(
             EntryRepository::contains_directory(&literal, &mut db.pool().into())
                 .await

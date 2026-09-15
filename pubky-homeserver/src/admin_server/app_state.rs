@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
-use dav_server::{DavHandler, DavMethod, DavMethodSet};
+use dav_server::{DavHandler, DavMethodSet};
 
 use crate::ConfigToml;
 use crate::{admin_server::dav_file_system::AdminDavFileSystem, AppContext};
+
+pub(crate) const DAV_METHODS: &[&str] = &[
+    "HEAD", "GET", "PUT", "OPTIONS", "PROPFIND", "COPY", "MOVE", "DELETE",
+];
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -13,30 +17,9 @@ pub(crate) struct AppState {
 
 impl AppState {
     pub fn new(context: Arc<AppContext>) -> Self {
-        let spool_limit = context
-            .config_toml
-            .storage
-            .admin_dav_spool_limit_mb
-            .saturating_mul(1024 * 1024);
-        let webdavfs = Box::new(AdminDavFileSystem::new(
-            context.file_service.clone(),
-            context.data_dir.path().join("tmp/dav"),
-            spool_limit,
-        ));
-        let mut methods = DavMethodSet::none();
-        for method in [
-            DavMethod::Head,
-            DavMethod::Get,
-            DavMethod::Put,
-            DavMethod::Patch,
-            DavMethod::Options,
-            DavMethod::PropFind,
-            DavMethod::Copy,
-            DavMethod::Move,
-            DavMethod::Delete,
-        ] {
-            methods.add(method);
-        }
+        let webdavfs = Box::new(AdminDavFileSystem::new(context.file_service.clone()));
+        let methods =
+            DavMethodSet::from_vec(DAV_METHODS.to_vec()).expect("DAV method names are valid");
         let inner_dav_handler = DavHandler::builder()
             .filesystem(webdavfs)
             .methods(methods)

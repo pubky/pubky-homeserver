@@ -23,33 +23,13 @@ impl FileService {
     }
 
     /// Write through the admin interface without user write-path policy.
-    #[cfg(test)]
     pub(crate) async fn admin_write_stream(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        size_hint: Option<u64>,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, None)
-            .await
-    }
-
-    pub(crate) async fn admin_write_stream_with_size_hint(
-        &self,
-        path: &EntryPath,
-        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-        size_hint: u64,
-    ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, Some(size_hint))
-            .await
-    }
-
-    pub(crate) async fn admin_create_stream_with_size_hint(
-        &self,
-        path: &EntryPath,
-        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-        size_hint: u64,
-    ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::AdminCreate, Some(size_hint))
+        self.write_stream_inner(path, stream, WriteMode::AdminOverwrite, size_hint)
             .await
     }
 
@@ -61,37 +41,6 @@ impl FileService {
             .into_iter()
             .map(|user| user.public_key.z32())
             .collect())
-    }
-
-    pub(crate) async fn admin_spool_limit(
-        &self,
-        path: &EntryPath,
-        existing: Option<&EntryEntity>,
-    ) -> Result<Option<u64>, FileIoError> {
-        let user = match self
-            .user_service
-            .get_in_tx(path.pubkey(), &mut self.db.pool().into())
-            .await
-        {
-            Ok(user) => user,
-            Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
-            Err(error) => return Err(error.into()),
-        };
-        let Some(max_bytes) = crate::persistence::files::storage_quota::resolve_storage_max_bytes(
-            &user,
-            self.default_storage_mb,
-        ) else {
-            return Ok(None);
-        };
-        let existing_usage = existing.map_or(0, |entry| {
-            entry.content_length.saturating_add(FILE_METADATA_SIZE)
-        });
-        let usage_without_file = user.used_bytes.saturating_sub(existing_usage);
-        Ok(Some(
-            max_bytes
-                .saturating_sub(usage_without_file)
-                .saturating_sub(FILE_METADATA_SIZE),
-        ))
     }
 
     pub(crate) async fn contains_directory(&self, path: &EntryPath) -> Result<bool, FileIoError> {
@@ -184,24 +133,19 @@ impl FileService {
                 Err(sqlx::Error::RowNotFound) => {}
                 Err(error) => return Err(error.into()),
             }
-            let source_blob_key = Self::backend_key(&source_entry);
-            EntryRepository::create_with_blob_key(
-                destination_user
-                    .as_ref()
-                    .map_or(source_user.id, |user| user.id),
-                to.path(),
-                Some(&source_blob_key),
-                &source_entry.content_hash,
-                source_entry.content_length,
-                &source_entry.content_type,
-                &mut executor,
-            )
-            .await?;
-            EntryRepository::delete(source_entry.id, &mut executor).await?;
-
             let destination_user_id = destination_user
                 .as_ref()
                 .map_or(source_user.id, |user| user.id);
+            let source_blob_key = Self::backend_key(&source_entry);
+            EntryRepository::move_to(
+                source_entry.id,
+                destination_user_id,
+                to.path(),
+                &source_blob_key,
+                &mut executor,
+            )
+            .await?;
+
             self.events_service
                 .create_event(
                     destination_user_id,
@@ -221,34 +165,15 @@ impl FileService {
                 )
                 .await?;
 
-            if let Some(destination_user) = destination_user.as_mut() {
-                let bytes_delta = source_entry.content_length as i64 + FILE_METADATA_SIZE as i64;
-                let max_bytes = crate::persistence::files::storage_quota::resolve_storage_max_bytes(
-                    destination_user,
-                    self.default_storage_mb,
-                );
-                if crate::persistence::files::storage_quota::would_exceed_limit(
-                    destination_user.used_bytes,
-                    bytes_delta,
-                    max_bytes,
-                ) {
-                    return Err(FileIoError::DiskSpaceQuotaExceeded);
-                }
-                destination_user.used_bytes = destination_user
-                    .used_bytes
-                    .saturating_add_signed(bytes_delta);
-                source_user.used_bytes = source_user.used_bytes.saturating_sub(
-                    source_entry
-                        .content_length
-                        .saturating_add(FILE_METADATA_SIZE),
-                );
-                self.user_service
-                    .update_in_tx(destination_user, &mut executor)
-                    .await?;
-            }
-            self.user_service
-                .update_in_tx(&source_user, &mut executor)
-                .await?;
+            self.transfer_move_usage(
+                &mut source_user,
+                destination_user.as_mut(),
+                source_entry
+                    .content_length
+                    .saturating_add(FILE_METADATA_SIZE),
+                &mut executor,
+            )
+            .await?;
             Ok(())
         }
         .await;
@@ -298,30 +223,13 @@ impl FileService {
                 total.saturating_add(entry.content_length.saturating_add(FILE_METADATA_SIZE))
             });
 
-            if let Some(destination_user) = destination_user.as_mut() {
-                let bounded_delta = moved_bytes.min(i64::MAX as u64) as i64;
-                let max_bytes = crate::persistence::files::storage_quota::resolve_storage_max_bytes(
-                    destination_user,
-                    self.default_storage_mb,
-                );
-                if crate::persistence::files::storage_quota::would_exceed_limit(
-                    destination_user.used_bytes,
-                    bounded_delta,
-                    max_bytes,
-                ) {
-                    return Err(FileIoError::DiskSpaceQuotaExceeded);
-                }
-                destination_user.used_bytes = destination_user
-                    .used_bytes
-                    .saturating_add_signed(bounded_delta);
-                source_user.used_bytes = source_user.used_bytes.saturating_sub(moved_bytes);
-                self.user_service
-                    .update_in_tx(destination_user, &mut executor)
-                    .await?;
-                self.user_service
-                    .update_in_tx(&source_user, &mut executor)
-                    .await?;
-            }
+            self.transfer_move_usage(
+                &mut source_user,
+                destination_user.as_mut(),
+                moved_bytes,
+                &mut executor,
+            )
+            .await?;
 
             let destination_user_id = destination_user
                 .as_ref()
@@ -380,6 +288,35 @@ impl FileService {
             }
         }
         self.events_service.notify_event().await;
+        Ok(())
+    }
+
+    async fn transfer_move_usage(
+        &self,
+        source_user: &mut UserEntity,
+        destination_user: Option<&mut UserEntity>,
+        moved_bytes: u64,
+        executor: &mut UnifiedExecutor<'_>,
+    ) -> Result<(), FileIoError> {
+        let Some(destination_user) = destination_user else {
+            return Ok(());
+        };
+        let max_bytes = crate::persistence::files::storage_quota::resolve_storage_max_bytes(
+            destination_user,
+            self.default_storage_mb,
+        );
+        let destination_usage = destination_user.used_bytes.saturating_add(moved_bytes);
+        if max_bytes.is_some_and(|limit| destination_usage > limit) {
+            return Err(FileIoError::DiskSpaceQuotaExceeded);
+        }
+        destination_user.used_bytes = destination_usage;
+        source_user.used_bytes = source_user.used_bytes.saturating_sub(moved_bytes);
+        self.user_service
+            .update_in_tx(destination_user, executor)
+            .await?;
+        self.user_service
+            .update_in_tx(source_user, executor)
+            .await?;
         Ok(())
     }
 

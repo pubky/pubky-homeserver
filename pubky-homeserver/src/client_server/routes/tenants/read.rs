@@ -434,7 +434,7 @@ mod tests {
             .write(&path, opendal::Buffer::from(vec![2; 64 * 1024]))
             .await
             .unwrap();
-        sqlx::query("UPDATE blob_garbage SET available_at = statement_timestamp()")
+        sqlx::query("UPDATE unreferenced_blobs SET eligible_at = statement_timestamp()")
             .execute(context.sql_db.pool())
             .await
             .unwrap();

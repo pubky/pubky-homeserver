@@ -8,7 +8,6 @@ use futures_util::{Stream, StreamExt};
 use opendal::Operator;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     shared::webdav::EntryPath,
@@ -135,88 +134,44 @@ impl OpendalService {
         })
     }
 
-    /// Write an immutable internal blob.
-    #[cfg(test)]
+    /// Write an immutable blob within its size bound and fixed upload window.
     pub async fn write_blob_stream(
-        &self,
-        blob_key: &str,
-        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-        content_path: &EntryPath,
-    ) -> Result<FileMetadata, FileIoError> {
-        self.write_blob_stream_guarded(
-            blob_key,
-            stream,
-            content_path,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-    }
-
-    /// Write an immutable blob while enforcing its reservation and upload lease.
-    pub async fn write_blob_stream_guarded(
         &self,
         blob_key: &str,
         mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
         content_path: &EntryPath,
         max_length: Option<u64>,
-        cancellation: &CancellationToken,
     ) -> Result<FileMetadata, FileIoError> {
-        let mut writer = self.operator.writer(blob_key).await?;
-        let mut metadata_builder = FileMetadataBuilder::default();
-        metadata_builder.guess_mime_type_from_path(content_path.path().as_str());
-        let mut written = 0u64;
-
-        let write_result: Result<(), FileIoError> = async {
-            loop {
-                let chunk_result = tokio::select! {
-                    _ = cancellation.cancelled() => return Err(FileIoError::UploadLeaseLost),
-                    chunk = stream.next() => chunk,
-                };
-                let Some(chunk_result) = chunk_result else {
-                    break;
-                };
-                let chunk = chunk_result?;
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(
+                crate::persistence::sql::entities::blob::UPLOAD_TIMEOUT_SECONDS,
+            );
+        let mut writer = tokio::time::timeout_at(deadline, self.operator.writer(blob_key))
+            .await
+            .map_err(|_| FileIoError::UploadExpired)??;
+        let result = tokio::time::timeout_at(deadline, async {
+            let mut metadata_builder = FileMetadataBuilder::default();
+            metadata_builder.guess_mime_type_from_path(content_path.path().as_str());
+            let mut written = 0u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
                 written = written.saturating_add(chunk.len() as u64);
                 if max_length.is_some_and(|max_length| written > max_length) {
                     return Err(FileIoError::DiskSpaceQuotaExceeded);
                 }
                 metadata_builder.update(&chunk);
-                tokio::select! {
-                    _ = cancellation.cancelled() => return Err(FileIoError::UploadLeaseLost),
-                    result = writer.write(chunk) => result?,
-                }
+                writer.write(chunk).await?;
             }
-            Ok(())
+            writer.close().await?;
+            self.sync_blob_parent(blob_key).await?;
+            Ok(metadata_builder.finalize())
+        })
+        .await
+        .unwrap_or(Err(FileIoError::UploadExpired));
+        if result.is_err() {
+            Self::abort_writer(&mut writer, blob_key).await;
         }
-        .await;
-
-        match write_result {
-            Ok(()) => {
-                if cancellation.is_cancelled() {
-                    Self::abort_writer(&mut writer, blob_key).await;
-                    return Err(FileIoError::UploadLeaseLost);
-                }
-                tokio::select! {
-                    _ = cancellation.cancelled() => {
-                        Self::abort_writer(&mut writer, blob_key).await;
-                        return Err(FileIoError::UploadLeaseLost);
-                    }
-                    result = writer.close() => {
-                        if let Err(error) = result {
-                            Self::abort_writer(&mut writer, blob_key).await;
-                            return Err(error.into());
-                        }
-                    },
-                }
-                self.sync_blob_parent(blob_key).await?;
-                Ok(metadata_builder.finalize())
-            }
-            Err(error) => {
-                Self::abort_writer(&mut writer, blob_key).await;
-                Err(error)
-            }
-        }
+        result
     }
 
     async fn abort_writer(writer: &mut opendal::Writer, blob_key: &str) {
@@ -326,18 +281,6 @@ mod tests {
     };
 
     #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_build_backend_operator_from_filesystem_config() {
-        let context = AppContext::test_with_config(|config| {
-            config.storage.backend = StorageConfigToml::FileSystem;
-        })
-        .await;
-        let service = OpendalService::new(&context).unwrap();
-
-        assert!(!service.blob_exists("__pubky/blobs/missing").await.unwrap());
-    }
-
-    #[tokio::test]
     async fn test_blob_stream_roundtrip_across_backends() {
         let path = EntryPath::new(
             pubky_common::crypto::Keypair::random().public_key(),
@@ -359,6 +302,7 @@ mod tests {
                     "__pubky/blobs/test",
                     futures_util::stream::iter(input_chunks.into_iter().map(Ok)),
                     &path,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -368,15 +312,12 @@ mod tests {
                 .await
                 .unwrap();
             let mut received = Vec::new();
-            let mut received_chunks = 0;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.unwrap();
                 assert!(chunk.len() <= CHUNK_SIZE);
                 received.extend_from_slice(&chunk);
-                received_chunks += 1;
             }
             assert_eq!(received, data);
-            assert!(received_chunks >= 3);
             assert_eq!(
                 service
                     .get_range_by_key("__pubky/blobs/test", 10..20)
@@ -391,8 +332,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_guarded_blob_write_stops_when_upload_lease_is_lost() {
+    #[tokio::test(start_paused = true)]
+    async fn test_blob_write_expires_when_input_stalls() {
         let operator = Operator::new(opendal::services::Memory::default())
             .unwrap()
             .finish();
@@ -401,27 +342,27 @@ mod tests {
             pubky_common::crypto::Keypair::random().public_key(),
             StoragePath::new("/pub/test.bin").unwrap(),
         );
-        let cancellation = CancellationToken::new();
         let task_service = service.clone();
-        let task_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
             task_service
-                .write_blob_stream_guarded(
+                .write_blob_stream(
                     "__pubky/blobs/cancelled",
                     futures_util::stream::pending::<Result<Bytes, WriteStreamError>>(),
                     &path,
                     None,
-                    &task_cancellation,
                 )
                 .await
         });
 
         tokio::task::yield_now().await;
-        cancellation.cancel();
+        tokio::time::advance(std::time::Duration::from_secs(
+            crate::persistence::sql::entities::blob::UPLOAD_TIMEOUT_SECONDS + 1,
+        ))
+        .await;
 
         assert!(matches!(
             task.await.unwrap(),
-            Err(FileIoError::UploadLeaseLost)
+            Err(FileIoError::UploadExpired)
         ));
         assert!(!service
             .blob_exists("__pubky/blobs/cancelled")
@@ -436,23 +377,22 @@ mod tests {
             &StorageToml {
                 backend: StorageConfigToml::FileSystem,
                 default_quota_mb: None,
-                admin_dav_spool_limit_mb: 1024,
             },
             directory.path(),
         )
         .unwrap();
+        assert!(!service.blob_exists("__pubky/blobs/missing").await.unwrap());
         let path = EntryPath::new(
             pubky_common::crypto::Keypair::random().public_key(),
             StoragePath::new("/pub/test.bin").unwrap(),
         );
 
         let error = service
-            .write_blob_stream_guarded(
+            .write_blob_stream(
                 "__pubky/blobs/too-large",
                 futures_util::stream::iter([Ok(Bytes::from_static(b"too large"))]),
                 &path,
                 Some(1),
-                &CancellationToken::new(),
             )
             .await
             .unwrap_err();

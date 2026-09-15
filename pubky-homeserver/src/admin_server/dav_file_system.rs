@@ -3,15 +3,10 @@
 //! Directories are derived from file paths; empty directories are not persisted.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt,
     io::SeekFrom,
-    path::PathBuf,
     str::FromStr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -24,11 +19,9 @@ use dav_server::{
     },
 };
 use futures_util::{FutureExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio_util::io::ReaderStream;
 
 use crate::{
-    persistence::files::{FileIoError, WriteStreamError},
+    persistence::{files::FileIoError, sql::entry::EntryEntity},
     services::file_service::FileService,
     shared::webdav::{EntryPath, StoragePath},
 };
@@ -38,21 +31,11 @@ const DAV_READ_AHEAD_BYTES: usize = 1024 * 1024;
 #[derive(Clone)]
 pub(crate) struct AdminDavFileSystem {
     file_service: FileService,
-    spool_directory: Arc<PathBuf>,
-    spool_budget: Arc<DavSpoolBudget>,
 }
 
 impl AdminDavFileSystem {
-    pub(crate) fn new(
-        file_service: FileService,
-        spool_directory: PathBuf,
-        spool_limit: u64,
-    ) -> Self {
-        Self {
-            file_service,
-            spool_directory: Arc::new(spool_directory),
-            spool_budget: Arc::new(DavSpoolBudget::new(spool_limit)),
-        }
+    pub(crate) fn new(file_service: FileService) -> Self {
+        Self { file_service }
     }
 
     fn path_string(path: &DavPath) -> Result<String, FsError> {
@@ -66,7 +49,7 @@ impl AdminDavFileSystem {
         EntryPath::from_str(&path).map_err(|_| FsError::NotFound)
     }
 
-    fn file_entry_path(path: &DavPath) -> Result<EntryPath, FsError> {
+    pub(crate) fn file_entry_path(path: &DavPath) -> Result<EntryPath, FsError> {
         let entry_path = Self::entry_path(path)?;
         if entry_path.path().is_file() {
             Ok(entry_path)
@@ -91,7 +74,10 @@ impl AdminDavFileSystem {
         ))
     }
 
-    async fn metadata_for_path(&self, path: &DavPath) -> Result<AdminDavMetadata, FsError> {
+    pub(crate) async fn metadata_for_path(
+        &self,
+        path: &DavPath,
+    ) -> Result<AdminDavMetadata, FsError> {
         let directory_requested = path.as_bytes().ends_with(b"/");
         let path_string = Self::path_string(path)?;
         if path_string.is_empty() {
@@ -156,91 +142,20 @@ impl DavFileSystem for AdminDavFileSystem {
         options: OpenOptions,
     ) -> FsFuture<'a, Box<dyn DavFile>> {
         async move {
+            if options.write || options.append {
+                return Err(FsError::Forbidden);
+            }
             let entry_path = Self::file_entry_path(path)?;
-            let existing = match self
+            let entry = self
                 .file_service
                 .get_info(&entry_path, &mut self.file_service.db.pool().into())
                 .await
-            {
-                Ok(entry) => Some(entry),
-                Err(FileIoError::NotFound) => None,
-                Err(error) => return Err(map_file_error(error)),
-            };
-            if options.create_new && existing.is_some() {
-                return Err(FsError::Exists);
-            }
-            if existing.is_none() && !options.create && !options.create_new {
-                return Err(FsError::NotFound);
-            }
-
-            let writable = options.write || options.append;
-            let spool_limit = if writable {
-                self.file_service
-                    .admin_spool_limit(&entry_path, existing.as_ref())
-                    .await
-                    .map_err(map_file_error)?
-            } else {
-                None
-            };
-            let data = if !writable {
-                let entry = existing.clone().ok_or(FsError::NotFound)?;
-                AdminDavFileData::Remote {
-                    entry: Box::new(entry),
-                    position: 0,
-                    buffer: Bytes::new(),
-                }
-            } else {
-                std::fs::create_dir_all(self.spool_directory.as_ref())
-                    .map_err(|_| FsError::GeneralFailure)?;
-                let std_file = tempfile::tempfile_in(self.spool_directory.as_ref())
-                    .map_err(|_| FsError::GeneralFailure)?;
-                let mut file = tokio::fs::File::from_std(std_file);
-                let mut reservation = DavSpoolReservation::new(Arc::clone(&self.spool_budget));
-                if let Some(existing) = existing.as_ref().filter(|_| !options.truncate) {
-                    if spool_limit.is_some_and(|limit| existing.content_length > limit) {
-                        return Err(FsError::InsufficientStorage);
-                    }
-                    reservation.reserve_to(existing.content_length)?;
-                    let mut stream = self
-                        .file_service
-                        .get_entry_stream(existing)
-                        .await
-                        .map_err(map_file_error)?;
-                    let mut copied = 0u64;
-                    while let Some(chunk) = stream.next().await {
-                        let chunk = chunk.map_err(|_| FsError::GeneralFailure)?;
-                        copied = copied.saturating_add(chunk.len() as u64);
-                        if spool_limit.is_some_and(|limit| copied > limit) {
-                            return Err(FsError::InsufficientStorage);
-                        }
-                        reservation.reserve_to(copied)?;
-                        file.write_all(&chunk)
-                            .await
-                            .map_err(|_| FsError::GeneralFailure)?;
-                    }
-                }
-                let position = if options.append {
-                    SeekFrom::End(0)
-                } else {
-                    SeekFrom::Start(0)
-                };
-                file.seek(position)
-                    .await
-                    .map_err(|_| FsError::GeneralFailure)?;
-                AdminDavFileData::Temporary { file, reservation }
-            };
-
+                .map_err(map_file_error)?;
             Ok(Box::new(AdminDavFile {
                 file_service: self.file_service.clone(),
-                entry_path,
-                data,
-                metadata: existing.as_ref().map(AdminDavMetadata::file),
-                writable,
-                create_new: options.create_new,
-                dirty: writable && (options.truncate || existing.is_none()),
-                spool_limit,
-                expected_write_length: options.size,
-                written_length: 0,
+                entry,
+                position: 0,
+                buffer: Bytes::new(),
             }) as Box<dyn DavFile>)
         }
         .boxed()
@@ -265,17 +180,7 @@ impl DavFileSystem for AdminDavFileSystem {
                     })
                     .collect()
             } else {
-                let base = if path_string.contains('/') {
-                    EntryPath::from_str(&path_string).map_err(|_| FsError::NotFound)?
-                } else {
-                    let pubkey = pubky_common::crypto::PublicKey::try_from_z32(&path_string)
-                        .map_err(|_| FsError::NotFound)?;
-                    EntryPath::new(
-                        pubkey,
-                        StoragePath::new("/").map_err(|_| FsError::NotFound)?,
-                    )
-                };
-                let prefix = format!("{}/", base.path().as_str().trim_end_matches('/'));
+                let base = Self::directory_entry_path(path)?;
                 let children = self
                     .file_service
                     .list_shallow_all(&base)
@@ -283,7 +188,7 @@ impl DavFileSystem for AdminDavFileSystem {
                     .map_err(map_file_error)?;
                 let files = children
                     .iter()
-                    .filter(|child| !child.path().as_str().ends_with('/'))
+                    .filter(|child| child.path().is_file())
                     .cloned()
                     .collect::<Vec<_>>();
                 let mut file_metadata = self
@@ -300,19 +205,16 @@ impl DavFileSystem for AdminDavFileSystem {
                     })
                     .collect::<HashMap<_, _>>();
                 let mut entries = Vec::new();
-                let mut resources = HashSet::new();
                 for child in children {
-                    let relative = child
+                    let name = child
                         .path()
                         .as_str()
-                        .strip_prefix(&prefix)
-                        .unwrap_or(child.path().as_str())
-                        .trim_end_matches('/');
-                    let name = relative.split('/').next().unwrap_or(relative).to_string();
-                    let is_directory = child.path().as_str().ends_with('/');
-                    if !resources.insert((name.clone(), is_directory)) {
-                        continue;
-                    }
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    let is_directory = child.path().is_directory();
                     let metadata = if is_directory {
                         AdminDavMetadata::directory()
                     } else {
@@ -431,274 +333,68 @@ impl DavFileSystem for AdminDavFileSystem {
 
 struct AdminDavFile {
     file_service: FileService,
-    entry_path: EntryPath,
-    data: AdminDavFileData,
-    metadata: Option<AdminDavMetadata>,
-    writable: bool,
-    create_new: bool,
-    dirty: bool,
-    spool_limit: Option<u64>,
-    expected_write_length: Option<u64>,
-    written_length: u64,
-}
-
-enum AdminDavFileData {
-    Remote {
-        entry: Box<crate::persistence::sql::entry::EntryEntity>,
-        position: u64,
-        buffer: Bytes,
-    },
-    Temporary {
-        file: tokio::fs::File,
-        reservation: DavSpoolReservation,
-    },
-}
-
-struct DavSpoolBudget {
-    limit: u64,
-    reserved: AtomicU64,
-}
-
-impl DavSpoolBudget {
-    fn new(limit: u64) -> Self {
-        Self {
-            limit,
-            reserved: AtomicU64::new(0),
-        }
-    }
-
-    fn try_reserve(&self, additional: u64) -> bool {
-        self.reserved
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
-                reserved
-                    .checked_add(additional)
-                    .filter(|next| *next <= self.limit)
-            })
-            .is_ok()
-    }
-
-    fn release(&self, bytes: u64) {
-        self.reserved.fetch_sub(bytes, Ordering::AcqRel);
-    }
-}
-
-struct DavSpoolReservation {
-    budget: Arc<DavSpoolBudget>,
-    bytes: u64,
-}
-
-impl DavSpoolReservation {
-    fn new(budget: Arc<DavSpoolBudget>) -> Self {
-        Self { budget, bytes: 0 }
-    }
-
-    fn reserve_to(&mut self, bytes: u64) -> Result<(), FsError> {
-        let additional = bytes.saturating_sub(self.bytes);
-        if additional > 0 && !self.budget.try_reserve(additional) {
-            return Err(FsError::InsufficientStorage);
-        }
-        self.bytes = self.bytes.max(bytes);
-        Ok(())
-    }
-}
-
-impl Drop for DavSpoolReservation {
-    fn drop(&mut self) {
-        self.budget.release(self.bytes);
-    }
+    entry: EntryEntity,
+    position: u64,
+    buffer: Bytes,
 }
 
 impl fmt::Debug for AdminDavFile {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AdminDavFile")
-            .field("entry_path", &self.entry_path)
-            .field(
-                "storage",
-                &match self.data {
-                    AdminDavFileData::Remote { .. } => "remote",
-                    AdminDavFileData::Temporary { .. } => "temporary",
-                },
-            )
-            .field("writable", &self.writable)
-            .field("dirty", &self.dirty)
+            .field("entry_path", &self.entry.path)
             .finish()
     }
 }
 
 impl DavFile for AdminDavFile {
     fn metadata(&mut self) -> FsFuture<'_, Box<dyn DavMetaData>> {
-        async move {
-            if !self.dirty {
-                if let Some(metadata) = self.metadata.clone() {
-                    return Ok(Box::new(metadata) as Box<dyn DavMetaData>);
-                }
-            }
-            let length = match &self.data {
-                AdminDavFileData::Remote { entry, .. } => entry.content_length,
-                AdminDavFileData::Temporary { file, .. } => file
-                    .metadata()
-                    .await
-                    .map_err(|_| FsError::GeneralFailure)?
-                    .len(),
-            };
-            Ok(Box::new(AdminDavMetadata::temporary_file(length)) as Box<dyn DavMetaData>)
-        }
-        .boxed()
+        async move { Ok(Box::new(AdminDavMetadata::file(&self.entry)) as Box<dyn DavMetaData>) }
+            .boxed()
     }
 
-    fn write_buf(&mut self, mut buffer: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
-        let bytes = buffer.copy_to_bytes(buffer.remaining());
-        self.write_bytes(bytes)
+    fn write_buf(&mut self, _buffer: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
+        async { Err(FsError::Forbidden) }.boxed()
     }
 
-    fn write_bytes(&mut self, bytes: Bytes) -> FsFuture<'_, ()> {
-        async move {
-            if !self.writable {
-                return Err(FsError::Forbidden);
-            }
-            let AdminDavFileData::Temporary { file, reservation } = &mut self.data else {
-                return Err(FsError::GeneralFailure);
-            };
-            let position = file
-                .stream_position()
-                .await
-                .map_err(|_| FsError::GeneralFailure)?;
-            if self
-                .spool_limit
-                .is_some_and(|limit| position.saturating_add(bytes.len() as u64) > limit)
-            {
-                return Err(FsError::InsufficientStorage);
-            }
-            let next_written_length = self
-                .written_length
-                .checked_add(bytes.len() as u64)
-                .ok_or(FsError::TooLarge)?;
-            if self
-                .expected_write_length
-                .is_some_and(|expected| next_written_length > expected)
-            {
-                return Err(FsError::TooLarge);
-            }
-            reservation.reserve_to(position.saturating_add(bytes.len() as u64))?;
-            file.write_all(&bytes)
-                .await
-                .map_err(|_| FsError::GeneralFailure)?;
-            self.written_length = next_written_length;
-            self.dirty = true;
-            Ok(())
-        }
-        .boxed()
+    fn write_bytes(&mut self, _bytes: Bytes) -> FsFuture<'_, ()> {
+        async { Err(FsError::Forbidden) }.boxed()
     }
 
     fn read_bytes(&mut self, count: usize) -> FsFuture<'_, Bytes> {
         async move {
-            match &mut self.data {
-                AdminDavFileData::Remote {
-                    entry,
-                    position,
-                    buffer,
-                } => {
-                    if count == 0 || *position >= entry.content_length {
-                        return Ok(Bytes::new());
-                    }
-                    if buffer.is_empty() {
-                        let end = position
-                            .saturating_add(DAV_READ_AHEAD_BYTES as u64)
-                            .min(entry.content_length);
-                        *buffer = self
-                            .file_service
-                            .get_entry_range(entry, *position..end)
-                            .await
-                            .map_err(map_file_error)?;
-                    }
-                    let bytes = buffer.split_to(count.min(buffer.len()));
-                    *position = position.saturating_add(bytes.len() as u64);
-                    Ok(bytes)
-                }
-                AdminDavFileData::Temporary { file, .. } => {
-                    let mut bytes = vec![0; count];
-                    let read = file
-                        .read(&mut bytes)
-                        .await
-                        .map_err(|_| FsError::GeneralFailure)?;
-                    bytes.truncate(read);
-                    Ok(bytes.into())
-                }
+            if count == 0 || self.position >= self.entry.content_length {
+                return Ok(Bytes::new());
             }
+            if self.buffer.is_empty() {
+                let end = self
+                    .position
+                    .saturating_add(DAV_READ_AHEAD_BYTES as u64)
+                    .min(self.entry.content_length);
+                self.buffer = self
+                    .file_service
+                    .get_entry_range(&self.entry, self.position..end)
+                    .await
+                    .map_err(map_file_error)?;
+            }
+            let bytes = self.buffer.split_to(count.min(self.buffer.len()));
+            self.position = self.position.saturating_add(bytes.len() as u64);
+            Ok(bytes)
         }
         .boxed()
     }
 
     fn seek(&mut self, position: SeekFrom) -> FsFuture<'_, u64> {
         async move {
-            match &mut self.data {
-                AdminDavFileData::Remote {
-                    entry,
-                    position: current,
-                    buffer,
-                    ..
-                } => {
-                    *current = seek_position(*current, entry.content_length, position)?;
-                    *buffer = Bytes::new();
-                    Ok(*current)
-                }
-                AdminDavFileData::Temporary { file, .. } => file
-                    .seek(position)
-                    .await
-                    .map_err(|_| FsError::GeneralFailure),
-            }
+            self.position = seek_position(self.position, self.entry.content_length, position)?;
+            self.buffer = Bytes::new();
+            Ok(self.position)
         }
         .boxed()
     }
 
     fn flush(&mut self) -> FsFuture<'_, ()> {
-        async move {
-            if !self.dirty {
-                return Ok(());
-            }
-            let AdminDavFileData::Temporary { file, .. } = &mut self.data else {
-                return Err(FsError::GeneralFailure);
-            };
-            if self
-                .expected_write_length
-                .is_some_and(|expected| self.written_length != expected)
-            {
-                return Err(FsError::TooLarge);
-            }
-            file.flush().await.map_err(|_| FsError::GeneralFailure)?;
-            let content_length = file
-                .metadata()
-                .await
-                .map_err(|_| FsError::GeneralFailure)?
-                .len();
-
-            let mut reader = file
-                .try_clone()
-                .await
-                .map_err(|_| FsError::GeneralFailure)?;
-            reader
-                .seek(SeekFrom::Start(0))
-                .await
-                .map_err(|_| FsError::GeneralFailure)?;
-            let stream = ReaderStream::new(reader).map(|result| {
-                result.map_err(|error| WriteStreamError::Other(anyhow::Error::new(error)))
-            });
-            let entry = if self.create_new {
-                self.file_service
-                    .admin_create_stream_with_size_hint(&self.entry_path, stream, content_length)
-                    .await
-            } else {
-                self.file_service
-                    .admin_write_stream_with_size_hint(&self.entry_path, stream, content_length)
-                    .await
-            }
-            .map_err(map_file_error)?;
-            self.metadata = Some(AdminDavMetadata::file(&entry));
-            self.dirty = false;
-            Ok(())
-        }
-        .boxed()
+        async { Ok(()) }.boxed()
     }
 }
 
@@ -735,7 +431,7 @@ impl DavDirEntry for AdminDavDirEntry {
 }
 
 #[derive(Debug, Clone)]
-struct AdminDavMetadata {
+pub(crate) struct AdminDavMetadata {
     length: u64,
     modified: SystemTime,
     directory: bool,
@@ -752,7 +448,7 @@ impl AdminDavMetadata {
         }
     }
 
-    fn file(entry: &crate::persistence::sql::entry::EntryEntity) -> Self {
+    pub(crate) fn file(entry: &EntryEntity) -> Self {
         let timestamp = entry.modified_at.and_utc().timestamp().max(0) as u64;
         Self {
             length: entry.content_length,
@@ -762,15 +458,6 @@ impl AdminDavMetadata {
                 &base64::engine::general_purpose::STANDARD,
                 entry.content_hash.as_bytes(),
             )),
-        }
-    }
-
-    fn temporary_file(length: u64) -> Self {
-        Self {
-            length,
-            modified: SystemTime::now(),
-            directory: false,
-            etag: None,
         }
     }
 }
@@ -826,11 +513,7 @@ mod tests {
             .write(&entry_path, opendal::Buffer::from(content.clone()))
             .await
             .unwrap();
-        let filesystem = AdminDavFileSystem::new(
-            context.file_service.clone(),
-            context.data_dir.path().to_path_buf(),
-            u64::MAX,
-        );
+        let filesystem = AdminDavFileSystem::new(context.file_service.clone());
         let path = DavPath::new(&format!("/{}/pub/file.bin", public_key.z32())).unwrap();
         let mut file = filesystem
             .open(
@@ -888,11 +571,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let filesystem = AdminDavFileSystem::new(
-            context.file_service.clone(),
-            context.data_dir.path().to_path_buf(),
-            u64::MAX,
-        );
+        let filesystem = AdminDavFileSystem::new(context.file_service.clone());
         let path = DavPath::new(&format!("/{}/pub/file.bin", public_key.z32())).unwrap();
         let mut file = filesystem
             .open(
@@ -916,7 +595,7 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE blob_garbage SET available_at = statement_timestamp()")
+        sqlx::query("UPDATE unreferenced_blobs SET eligible_at = statement_timestamp() WHERE state != 'uploading'")
             .execute(context.sql_db.pool())
             .await
             .unwrap();
@@ -937,110 +616,5 @@ mod tests {
                 .as_ref(),
             vec![2; DAV_READ_AHEAD_BYTES + 1]
         );
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_create_new_is_checked_when_content_is_committed() {
-        let context = AppContext::test().await;
-        let public_key = pubky_common::crypto::Keypair::random().public_key();
-        context.user_service.create(&public_key).await.unwrap();
-        let filesystem = AdminDavFileSystem::new(
-            context.file_service.clone(),
-            context.data_dir.path().to_path_buf(),
-            u64::MAX,
-        );
-        let path = DavPath::new(&format!("/{}/pub/state.bin", public_key.z32())).unwrap();
-        let options = OpenOptions {
-            write: true,
-            create: true,
-            create_new: true,
-            truncate: true,
-            ..Default::default()
-        };
-        let mut first = filesystem.open(&path, options.clone()).await.unwrap();
-        let mut second = filesystem.open(&path, options).await.unwrap();
-        first
-            .write_bytes(Bytes::from_static(b"first"))
-            .await
-            .unwrap();
-        second
-            .write_bytes(Bytes::from_static(b"second"))
-            .await
-            .unwrap();
-
-        let (first_result, second_result) = tokio::join!(first.flush(), second.flush());
-        assert_ne!(first_result.is_ok(), second_result.is_ok());
-        assert!(matches!(
-            first_result.as_ref().err().or(second_result.as_ref().err()),
-            Some(FsError::Exists)
-        ));
-
-        let entry_path = EntryPath::new(public_key, StoragePath::new("/pub/state.bin").unwrap());
-        let content = context.file_service.get(&entry_path).await.unwrap();
-        assert!(content.as_ref() == b"first" || content.as_ref() == b"second");
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn test_flush_rejects_declared_length_mismatch_before_commit() {
-        let context = AppContext::test().await;
-        let public_key = pubky_common::crypto::Keypair::random().public_key();
-        context.user_service.create(&public_key).await.unwrap();
-        let entry_path = EntryPath::new(
-            public_key.clone(),
-            StoragePath::new("/pub/state.bin").unwrap(),
-        );
-        context
-            .file_service
-            .write(&entry_path, opendal::Buffer::from(b"original".to_vec()))
-            .await
-            .unwrap();
-        let filesystem = AdminDavFileSystem::new(
-            context.file_service.clone(),
-            context.data_dir.path().to_path_buf(),
-            u64::MAX,
-        );
-        let path = DavPath::new(&format!("/{}/pub/state.bin", public_key.z32())).unwrap();
-        let mut file = filesystem
-            .open(
-                &path,
-                OpenOptions {
-                    write: true,
-                    create: true,
-                    truncate: true,
-                    size: Some(5),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        file.write_bytes(Bytes::from_static(b"four")).await.unwrap();
-
-        assert!(matches!(file.flush().await, Err(FsError::TooLarge)));
-        assert_eq!(
-            context
-                .file_service
-                .get(&entry_path)
-                .await
-                .unwrap()
-                .as_ref(),
-            b"original"
-        );
-    }
-
-    #[test]
-    fn test_spool_budget_is_shared_and_released() {
-        let budget = Arc::new(DavSpoolBudget::new(5));
-        let mut first = DavSpoolReservation::new(Arc::clone(&budget));
-        let mut second = DavSpoolReservation::new(Arc::clone(&budget));
-
-        first.reserve_to(3).unwrap();
-        assert!(matches!(
-            second.reserve_to(3),
-            Err(FsError::InsufficientStorage)
-        ));
-        drop(first);
-        second.reserve_to(3).unwrap();
     }
 }

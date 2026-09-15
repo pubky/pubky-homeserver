@@ -18,49 +18,13 @@ impl MigrationTrait for M20260827AddImmutableBlobStorageMigration {
             .await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS blob_storage_namespace (\
-                id INTEGER PRIMARY KEY CHECK (id = 1), namespace TEXT NOT NULL\
-            )",
-        )
-        .execute(&mut **tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO blob_storage_namespace (id, namespace) VALUES (1, $1) \
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(uuid::Uuid::new_v4().simple().to_string())
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS blob_uploads (
-                blob_key TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                content_length BIGINT NOT NULL,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS blob_uploads_updated_at_idx ON blob_uploads (updated_at)",
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS blob_garbage (
+            CREATE TABLE IF NOT EXISTS unreferenced_blobs (
                 blob_key TEXT PRIMARY KEY,
                 user_id INTEGER,
                 content_length BIGINT NOT NULL,
-                available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                retained_for_reads BOOLEAN NOT NULL DEFAULT FALSE,
-                claimed_at TIMESTAMP,
-                claim_token TEXT
+                state TEXT NOT NULL CHECK (state IN ('uploading', 'retained', 'garbage')),
+                eligible_at TIMESTAMP NOT NULL
             )
             "#,
         )
@@ -68,15 +32,12 @@ impl MigrationTrait for M20260827AddImmutableBlobStorageMigration {
         .await?;
 
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS blob_garbage_available_idx ON blob_garbage (available_at, blob_key)",
+            "CREATE INDEX IF NOT EXISTS unreferenced_blobs_eligible_idx ON unreferenced_blobs (eligible_at, blob_key)",
         )
         .execute(&mut **tx)
         .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS blob_uploads_user_idx ON blob_uploads (user_id)")
-            .execute(&mut **tx)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS blob_garbage_user_idx ON blob_garbage (user_id)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS unreferenced_blobs_user_idx ON unreferenced_blobs (user_id)")
             .execute(&mut **tx)
             .await?;
 
@@ -92,7 +53,6 @@ impl MigrationTrait for M20260827AddImmutableBlobStorageMigration {
 mod tests {
     use super::*;
     use crate::persistence::sql::{
-        entities::blob::BlobRepository,
         migrations::{M20250806CreateUserMigration, M20250815CreateEntryMigration},
         migrator::Migrator,
         SqlDb,
@@ -163,45 +123,24 @@ mod tests {
         .unwrap();
         assert!(index.contains("(blob_key)"));
 
-        let namespace = BlobRepository::storage_namespace(&mut db.pool().into())
-            .await
-            .unwrap();
-        assert!(uuid::Uuid::parse_str(&namespace).is_ok());
-
-        for table in ["blob_uploads", "blob_garbage"] {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
-            )
-            .bind(table)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-            assert!(exists, "{table} should exist");
-        }
-        for (table, column) in [
-            ("blob_uploads", "user_id"),
-            ("blob_uploads", "content_length"),
-            ("blob_garbage", "user_id"),
-            ("blob_garbage", "content_length"),
-        ] {
+        for column in ["user_id", "content_length", "state", "eligible_at"] {
             let exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS (\
                     SELECT 1 FROM information_schema.columns \
-                    WHERE table_name = $1 AND column_name = $2\
+                    WHERE table_name = 'unreferenced_blobs' AND column_name = $1\
                 )",
             )
-            .bind(table)
             .bind(column)
             .fetch_one(db.pool())
             .await
             .unwrap();
-            assert!(exists, "{table}.{column} should exist");
+            assert!(exists, "unreferenced_blobs.{column} should exist");
         }
         let garbage_user_nullable: String = sqlx::query_scalar(
             r#"
             SELECT is_nullable
             FROM information_schema.columns
-            WHERE table_name = 'blob_garbage' AND column_name = 'user_id'
+            WHERE table_name = 'unreferenced_blobs' AND column_name = 'user_id'
             "#,
         )
         .fetch_one(db.pool())

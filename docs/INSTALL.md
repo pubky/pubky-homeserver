@@ -330,7 +330,6 @@ The generated `config.toml` works out of the box for local use. Here are a few s
 | `general.database_url` | PostgreSQL connection string. | `postgres://localhost:5432/pubky_homeserver` |
 | `general.signup_mode` | `"open"` or `"token_required"`. | `"token_required"` |
 | `storage.type` | Storage backend: `file_system`, `google_bucket`, or `in_memory`. | `file_system` |
-| `storage.admin_dav_spool_limit_mb` | Combined local disk limit for in-progress admin DAV uploads. | `1024` |
 | `admin.admin_password` | Password for the admin API. | `"admin"` |
 
 The full list of options is documented in [`pubky-homeserver/config.sample.toml`](../pubky-homeserver/config.sample.toml).

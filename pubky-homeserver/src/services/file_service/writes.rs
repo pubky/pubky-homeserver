@@ -13,7 +13,7 @@ use crate::{
 use bytes::Bytes;
 use futures_util::Stream;
 
-use super::{upload_heartbeat::UploadHeartbeat, FileService};
+use super::FileService;
 
 // A failed remote close can complete after the client loses the response.
 const ABANDONED_UPLOAD_SETTLE_SECONDS: i64 = 60 * 60;
@@ -61,19 +61,9 @@ impl FileService {
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        size_hint: Option<u64>,
     ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, None)
-            .await
-    }
-
-    /// Write a streamed file with a trusted upper-bound hint for upload reservation.
-    pub async fn write_stream_with_size_hint(
-        &self,
-        path: &EntryPath,
-        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-        size_hint: u64,
-    ) -> Result<EntryEntity, FileIoError> {
-        self.write_stream_inner(path, stream, WriteMode::Client, Some(size_hint))
+        self.write_stream_inner(path, stream, WriteMode::Client, size_hint)
             .await
     }
 
@@ -95,48 +85,19 @@ impl FileService {
 
         let blob_key = format!("{}{}", self.blob_prefix, uuid::Uuid::new_v4().simple());
         let reservation = self.reserve_upload(path, &blob_key, size_hint).await?;
-        let upload_heartbeat = UploadHeartbeat::start(self.db.clone(), blob_key.clone());
 
         let write_result = self
             .opendal
-            .write_blob_stream_guarded(
-                &blob_key,
-                stream,
-                path,
-                reservation.max_blob_length,
-                upload_heartbeat.cancellation(),
-            )
+            .write_blob_stream(&blob_key, stream, path, reservation.max_blob_length)
             .await;
         let metadata = match write_result {
             Ok(metadata) => metadata,
             Err(error) => {
-                upload_heartbeat.stop().await;
                 self.abandon_upload(&blob_key, reservation.user_id, reservation.tracked_length)
                     .await;
                 return Err(error);
             }
         };
-        let upload_size_result = BlobRepository::set_upload_size(
-            &blob_key,
-            metadata.length as u64,
-            &mut self.db.pool().into(),
-        )
-        .await;
-        upload_heartbeat.stop().await;
-        let upload_is_active = match upload_size_result {
-            Ok(active) => active,
-            Err(error) => {
-                self.abandon_upload(&blob_key, reservation.user_id, metadata.length as u64)
-                    .await;
-                return Err(error.into());
-            }
-        };
-        if !upload_is_active {
-            self.abandon_upload(&blob_key, reservation.user_id, metadata.length as u64)
-                .await;
-            return Err(FileIoError::UploadLeaseLost);
-        }
-
         let result = self.commit_write(path, &blob_key, &metadata, mode).await;
         match result {
             Ok(entry) => {
@@ -201,7 +162,7 @@ impl FileService {
                 Ok(UploadReservation {
                     user_id: user.id,
                     tracked_length: reservation,
-                    max_blob_length: max_bytes,
+                    max_blob_length: size_hint.or(max_bytes),
                 })
             }
             .await;
@@ -271,11 +232,22 @@ impl FileService {
                 &user,
                 self.default_storage_mb,
             );
+            BlobRepository::activate_upload(blob_key, &mut executor)
+                .await
+                .map_err(|error| {
+                    if matches!(error, sqlx::Error::RowNotFound) {
+                        FileIoError::UploadExpired
+                    } else {
+                        error.into()
+                    }
+                })?;
             let tracked_blob_bytes =
                 BlobRepository::tracked_bytes_for_user(user.id, FILE_METADATA_SIZE, &mut executor)
                     .await?;
             if max_bytes.is_some_and(|max_bytes| {
-                user.used_bytes.saturating_add(tracked_blob_bytes)
+                user.used_bytes
+                    .saturating_add(tracked_blob_bytes)
+                    .saturating_add((metadata.length as u64).max(FILE_METADATA_SIZE))
                     > max_bytes.saturating_mul(PHYSICAL_STORAGE_QUOTA_MULTIPLIER)
             }) {
                 return Err(FileIoError::DiskSpaceQuotaExceeded);
@@ -323,7 +295,6 @@ impl FileService {
                 .await?;
             user.used_bytes = user.used_bytes.saturating_add_signed(bytes_delta);
             self.user_service.update_in_tx(&user, &mut executor).await?;
-            BlobRepository::activate_upload(blob_key, &mut executor).await?;
             if let Some(old_blob_key) = old_blob_key {
                 BlobRepository::enqueue_garbage(
                     &old_blob_key,
@@ -366,19 +337,17 @@ impl FileService {
             self.check_write_path_allowed(path).await?;
         }
 
-        match EntryRepository::get_by_path(path, &mut self.db.pool().into()).await {
-            Ok(_) => {}
-            Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
-            Err(error) => return Err(error.into()),
-        }
-
         let mut tx = self.db.pool().begin().await?;
         let result = async {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
             let mut user = self
                 .user_service
                 .get_for_no_key_update(path.pubkey(), &mut executor)
-                .await?;
+                .await
+                .map_err(|error| match error {
+                    sqlx::Error::RowNotFound => FileIoError::NotFound,
+                    error => error.into(),
+                })?;
             let entry = match EntryRepository::get_by_path(path, &mut executor).await {
                 Ok(entry) => entry,
                 Err(sqlx::Error::RowNotFound) => return Err(FileIoError::NotFound),
@@ -434,22 +403,13 @@ impl FileService {
     }
 
     async fn abandon_upload(&self, blob_key: &str, user_id: i32, content_length: u64) {
-        let result: Result<(), sqlx::Error> = async {
-            let mut tx = self.db.pool().begin().await?;
-            {
-                let mut executor = UnifiedExecutor::from_tx(&mut tx);
-                BlobRepository::abandon_upload(
-                    blob_key,
-                    user_id,
-                    content_length,
-                    ABANDONED_UPLOAD_SETTLE_SECONDS,
-                    &mut executor,
-                )
-                .await?;
-            }
-            tx.commit().await?;
-            Ok(())
-        }
+        let result = BlobRepository::abandon_upload(
+            blob_key,
+            user_id,
+            content_length,
+            ABANDONED_UPLOAD_SETTLE_SECONDS,
+            &mut self.db.pool().into(),
+        )
         .await;
         if let Err(error) = result {
             tracing::error!(blob_key, %error, "Failed to queue abandoned blob for cleanup");

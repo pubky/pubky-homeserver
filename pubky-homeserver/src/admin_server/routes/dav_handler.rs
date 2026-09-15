@@ -5,17 +5,22 @@
 //! It is protected by a basic auth header with the username "admin" and the password set in the config.toml file.
 //! The password is set in the config.toml file.
 use super::super::app_state::AppState;
-use crate::admin_server::dav_file_system::AdminDavFileSystem;
-use crate::shared::{HttpError, HttpResult};
+use crate::admin_server::dav_file_system::{AdminDavFileSystem, AdminDavMetadata};
+use crate::persistence::files::{FileIoError, WriteStreamError};
+use crate::shared::HttpResult;
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{HeaderValue, Method, Response, StatusCode, Uri},
+    http::{header, HeaderValue, Method, Response, StatusCode, Uri},
     response::IntoResponse,
 };
-use axum_extra::headers::{ContentLength, ContentRange, HeaderMapExt};
+use axum_extra::headers::{ContentLength, HeaderMapExt, LastModified};
 use base64::Engine;
-use dav_server::{davpath::DavPath, DavMethod};
+use dav_server::{
+    davpath::{DavPath, ParseError},
+    fs::{DavMetaData, FsError},
+    DavMethod,
+};
 use futures_util::StreamExt;
 
 pub async fn dav_handler(
@@ -79,86 +84,163 @@ pub async fn dav_handler(
             .insert("Overwrite", HeaderValue::from_static("F"));
     }
 
-    let expected_length = if matches!(method, Some(DavMethod::Put | DavMethod::Patch)) {
-        expected_upload_length(req.headers())?
-    } else {
-        None
-    };
-    let mut dav_response = if let Some(mut remaining) = expected_length {
-        let (parts, body) = req.into_parts();
-        let mut body = body.into_data_stream();
-        let mut invalid_length = false;
-        let invalid_length_ref = &mut invalid_length;
-        // dav-server flushes before checking the final length. Fail the body stream first
-        // so a rejected upload cannot reach storage publication.
-        let stream = async_stream::stream! {
-            loop {
-                match body.next().await {
-                    Some(Ok(chunk)) if chunk.len() as u64 <= remaining => {
-                        remaining -= chunk.len() as u64;
-                        yield Ok(chunk);
-                    }
-                    None if remaining == 0 => break,
-                    Some(Err(error)) => {
-                        yield Err(error);
-                        break;
-                    }
-                    _ => {
-                        *invalid_length_ref = true;
-                        yield Err(axum::Error::new("DAV upload length mismatch"));
-                        break;
-                    }
-                }
-            }
+    if method == Some(DavMethod::Put) {
+        let result = if has_partial_upload_headers(req.headers()) {
+            Err(StatusCode::NOT_IMPLEMENTED)
+        } else {
+            put_stream(&state, req).await
         };
-        let mut response = state
-            .inner_dav_handler
-            .handle_stream(Request::from_parts(parts, stream))
-            .await;
-        if invalid_length {
-            *response.status_mut() = StatusCode::BAD_REQUEST;
-        }
-        response
-    } else {
-        state.inner_dav_handler.handle(req).await
-    };
-    let status = normalize_dav_status(method, dav_response.status());
-    *dav_response.status_mut() = status;
+        return Ok(result.unwrap_or_else(|status| {
+            Response::builder()
+                .status(status)
+                .header(header::CONTENT_LENGTH, "0")
+                .header(header::CONNECTION, "close")
+                .body(Body::empty())
+                .expect("This response should always be valid")
+        }));
+    }
+
+    let mut dav_response = state.inner_dav_handler.handle(req).await;
+    *dav_response.status_mut() = normalize_dav_status(method, dav_response.status());
     Ok(dav_response.into_response())
 }
 
-fn expected_upload_length(headers: &axum::http::HeaderMap) -> HttpResult<Option<u64>> {
-    let range_length = headers
-        .typed_get::<ContentRange>()
-        .and_then(|range| range.bytes_range())
-        .map(|(start, end)| {
-            end.checked_sub(start)
-                .and_then(|length| length.checked_add(1))
-                .ok_or_else(|| HttpError::bad_request("Invalid Content-Range length"))
+fn has_partial_upload_headers(headers: &axum::http::HeaderMap) -> bool {
+    headers.contains_key(header::CONTENT_RANGE)
+        || headers.contains_key("X-Update-Range")
+        || headers.get(header::CONTENT_TYPE).is_some_and(|value| {
+            value.to_str().is_ok_and(|value| {
+                value.split(';').next().is_some_and(|mime| {
+                    mime.trim()
+                        .eq_ignore_ascii_case("application/x-sabredav-partialupdate")
+                })
+            })
+        })
+}
+
+async fn put_stream(state: &AppState, req: Request<Body>) -> Result<Response<Body>, StatusCode> {
+    let mut path = DavPath::new(req.uri().path()).map_err(|error| match error {
+        ParseError::InvalidPath => StatusCode::BAD_REQUEST,
+        ParseError::ForbiddenPath => StatusCode::FORBIDDEN,
+        ParseError::PrefixMismatch => StatusCode::BAD_GATEWAY,
+    })?;
+    path.set_prefix("/dav")
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let entry_path = AdminDavFileSystem::file_entry_path(&path).map_err(|error| match error {
+        FsError::NotFound | FsError::Exists => StatusCode::CONFLICT,
+        FsError::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })?;
+    let expected_length = expected_upload_length(req.headers())?;
+    let filesystem = AdminDavFileSystem::new(state.context.file_service.clone());
+    let existed = filesystem.metadata_for_path(&path).await.is_ok();
+    let mut body = req.into_body().into_data_stream();
+    let mut invalid_length = false;
+    let invalid_length_ref = &mut invalid_length;
+    let mut remaining = expected_length;
+    // Publication requires EOF after exactly the declared length. Even a body error
+    // after the last expected byte must abort the staged blob.
+    let stream = async_stream::stream! {
+        while let Some(chunk) = body.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    yield Err(WriteStreamError::Axum(error));
+                    return;
+                }
+            };
+            if let Some(left) = remaining.as_mut() {
+                let Some(next) = left.checked_sub(chunk.len() as u64) else {
+                    *invalid_length_ref = true;
+                    yield Err(WriteStreamError::Other(anyhow::anyhow!("DAV upload length mismatch")));
+                    return;
+                };
+                *left = next;
+            }
+            yield Ok(chunk);
+        }
+        if remaining.is_some_and(|left| left != 0) {
+            *invalid_length_ref = true;
+            yield Err(WriteStreamError::Other(anyhow::anyhow!("DAV upload length mismatch")));
+        }
+    };
+    let result = state
+        .context
+        .file_service
+        .admin_write_stream(&entry_path, stream.boxed(), expected_length)
+        .await;
+    if invalid_length {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let entry = result.map_err(|error| match error {
+        FileIoError::NotFound
+        | FileIoError::SqlDb(sqlx::Error::RowNotFound)
+        | FileIoError::PathCollision => StatusCode::CONFLICT,
+        FileIoError::DiskSpaceQuotaExceeded => StatusCode::INSUFFICIENT_STORAGE,
+        FileIoError::WritePathForbidden => StatusCode::FORBIDDEN,
+        FileIoError::StreamBroken(_) => StatusCode::BAD_GATEWAY,
+        error => {
+            tracing::error!(%error, "Admin DAV upload failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+
+    let metadata = AdminDavMetadata::file(&entry);
+    let mut response = Response::builder()
+        .status(if existed {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::CREATED
+        })
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(Body::empty())
+        .expect("This response should always be valid");
+    if !existed {
+        response.headers_mut().typed_insert(ContentLength(0));
+    }
+    if let Some(etag) = metadata.etag() {
+        response.headers_mut().insert(
+            header::ETAG,
+            HeaderValue::from_str(&format!("\"{etag}\""))
+                .expect("Base64 entity tags are valid header values"),
+        );
+    }
+    if let Ok(modified) = metadata.modified() {
+        response
+            .headers_mut()
+            .typed_insert(LastModified::from(modified));
+    }
+    Ok(response)
+}
+
+fn expected_upload_length(headers: &axum::http::HeaderMap) -> Result<Option<u64>, StatusCode> {
+    let content_length = headers
+        .typed_try_get::<ContentLength>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .map(|length| length.0);
+    let expected_length = headers
+        .get("X-Expected-Entity-Length")
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or(StatusCode::BAD_REQUEST)
         })
         .transpose()?;
-    Ok(headers
-        .typed_get::<ContentLength>()
-        .map(|length| length.0)
-        .or_else(|| {
-            headers
-                .get("X-Expected-Entity-Length")?
-                .to_str()
-                .ok()?
-                .parse()
-                .ok()
-        })
-        .or(range_length))
+    if content_length
+        .zip(expected_length)
+        .is_some_and(|(length, expected)| length != expected)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(content_length.or(expected_length))
 }
 
 fn normalize_dav_status(method: Option<DavMethod>, status: StatusCode) -> StatusCode {
     match (method, status) {
-        (Some(DavMethod::Put), StatusCode::METHOD_NOT_ALLOWED) => StatusCode::CONFLICT,
         (Some(DavMethod::Copy | DavMethod::Move), StatusCode::METHOD_NOT_ALLOWED) => {
             StatusCode::PRECONDITION_FAILED
-        }
-        (Some(DavMethod::Put | DavMethod::Patch), StatusCode::PAYLOAD_TOO_LARGE) => {
-            StatusCode::BAD_REQUEST
         }
         _ => status,
     }
@@ -177,35 +259,20 @@ async fn unsupported_collection_source_status(
     let Ok(entry_path) = AdminDavFileSystem::directory_entry_path(&path) else {
         return Ok(None);
     };
-    if state
-        .context
-        .file_service
-        .contains_directory(&entry_path)
-        .await?
+    // Only user roots can exist without descendants. Other sources are resolved by DAV.
+    if !entry_path.path().is_root()
+        || state
+            .context
+            .file_service
+            .contains_directory(&entry_path)
+            .await?
     {
         return Ok(None);
     }
-    if entry_path.path().as_str() == "/" {
-        let user_exists = match state.context.user_service.get(entry_path.pubkey()).await {
-            Ok(_) => true,
-            Err(sqlx::Error::RowNotFound) => false,
-            Err(error) => return Err(error.into()),
-        };
-        return Ok(Some(if user_exists {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::NOT_FOUND
-        }));
-    }
-    match state
-        .context
-        .file_service
-        .get_info(&entry_path, &mut state.context.sql_db.pool().into())
-        .await
-    {
-        Ok(_) => Ok(None),
-        Err(crate::persistence::files::FileIoError::NotFound) => Ok(Some(StatusCode::NOT_FOUND)),
-        Err(error) => Err(error),
+    match state.context.user_service.get(entry_path.pubkey()).await {
+        Ok(_) => Ok(Some(StatusCode::CONFLICT)),
+        Err(sqlx::Error::RowNotFound) => Ok(Some(StatusCode::NOT_FOUND)),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -355,13 +422,10 @@ mod tests {
             "admin:{}",
             context.config_toml.admin.admin_password
         ));
-        let headers = [
-            (Method::PUT, "X-Expected-Entity-Length", "5"),
-            (Method::PUT, "Content-Length", "5"),
-            (Method::PUT, "Content-Range", "bytes 0-4/*"),
-            (Method::PATCH, "X-Expected-Entity-Length", "5"),
-        ];
-        for (index, (method, header, value)) in headers.into_iter().enumerate() {
+        for (index, header) in ["X-Expected-Entity-Length", "Content-Length"]
+            .into_iter()
+            .enumerate()
+        {
             for existing in [false, true] {
                 let path = EntryPath::new(
                     public_key.clone(),
@@ -382,17 +446,13 @@ mod tests {
                     let stream = futures_util::stream::iter(chunks.into_iter().map(|chunk| {
                         Ok::<_, std::io::Error>(Bytes::from_static(chunk.as_bytes()))
                     }));
-                    let mut request = Request::builder()
-                        .method(method.clone())
+                    let request = Request::builder()
+                        .method(Method::PUT)
                         .uri(format!("/dav/{}{}", public_key.z32(), path.path()))
                         .header("Authorization", format!("Basic {auth}"))
-                        .header(header, value);
-                    if method == Method::PATCH {
-                        request = request
-                            .header("Content-Type", "application/x-sabredav-partialupdate")
-                            .header("X-Update-Range", "bytes=0-4");
-                    }
-                    let request = request.body(Body::from_stream(stream)).unwrap();
+                        .header(header, "5")
+                        .body(Body::from_stream(stream))
+                        .unwrap();
                     let response = dav_handler(State(AppState::new(context.clone())), request)
                         .await
                         .unwrap()
@@ -404,15 +464,7 @@ mod tests {
                     match context.file_service.get(&path).await {
                         Ok(content) => {
                             assert!(existing || valid);
-                            let expected: &[u8] = if !valid {
-                                b"original"
-                            } else if existing
-                                && (header == "Content-Range" || method == Method::PATCH)
-                            {
-                                b"firstnal"
-                            } else {
-                                b"first"
-                            };
+                            let expected: &[u8] = if !valid { b"original" } else { b"first" };
                             assert_eq!(content.as_ref(), expected);
                         }
                         Err(crate::persistence::files::FileIoError::NotFound) => {
@@ -423,25 +475,105 @@ mod tests {
                 }
             }
         }
-        let path = EntryPath::new(
-            public_key.clone(),
-            StoragePath::new("/pub/overflow").unwrap(),
-        );
-        let request = Request::builder()
-            .method(Method::PUT)
-            .uri(format!("/dav/{}{}", public_key.z32(), path.path()))
-            .header("Authorization", format!("Basic {auth}"))
-            .header("Content-Range", "bytes 0-18446744073709551615/*")
-            .body(Body::from("first"))
-            .unwrap();
-        let response = dav_handler(State(AppState::new(context.clone())), request)
-            .await
-            .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(matches!(
-            context.file_service.get(&path).await,
-            Err(crate::persistence::files::FileIoError::NotFound)
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_rejects_partial_uploads_without_publication() {
+        use crate::shared::webdav::{EntryPath, StoragePath};
+
+        let context = crate::AppContext::test().await;
+        let public_key = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&public_key).await.unwrap();
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!(
+            "admin:{}",
+            context.config_toml.admin.admin_password
         ));
+        let partial_headers = [
+            ("Content-Range", "bytes 0-4/*"),
+            ("Content-Range", "bytes 0-18446744073709551615/*"),
+            ("Content-Range", "invalid"),
+            ("X-Update-Range", "bytes=0-4"),
+            ("X-Update-Range", "append"),
+            ("Content-Type", "application/x-sabredav-partialupdate"),
+        ];
+        for existing in [false, true] {
+            let path = EntryPath::new(
+                public_key.clone(),
+                StoragePath::new("/pub/partial").unwrap(),
+            );
+            if existing {
+                context
+                    .file_service
+                    .write(&path, opendal::Buffer::from(b"original".to_vec()))
+                    .await
+                    .unwrap();
+            }
+            for method in [Method::PUT, Method::PATCH] {
+                for (header, value) in partial_headers {
+                    let request = Request::builder()
+                        .method(method.clone())
+                        .uri(format!("/dav/{}{}", public_key.z32(), path.path()))
+                        .header("Authorization", format!("Basic {auth}"))
+                        .header(header, value)
+                        .body(Body::from("first"))
+                        .unwrap();
+                    let response = dav_handler(State(AppState::new(context.clone())), request)
+                        .await
+                        .unwrap()
+                        .into_response();
+                    assert_eq!(
+                        response.status(),
+                        if method == Method::PATCH {
+                            StatusCode::METHOD_NOT_ALLOWED
+                        } else {
+                            StatusCode::NOT_IMPLEMENTED
+                        },
+                        "{method} {header}"
+                    );
+                    if existing {
+                        assert_eq!(
+                            context.file_service.get(&path).await.unwrap().as_ref(),
+                            b"original"
+                        );
+                    } else {
+                        assert!(matches!(
+                            context.file_service.get(&path).await,
+                            Err(FileIoError::NotFound)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_expected_upload_length() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert_eq!(expected_upload_length(&headers), Ok(None));
+        headers.insert("X-Expected-Entity-Length", HeaderValue::from_static("5"));
+        assert_eq!(expected_upload_length(&headers), Ok(Some(5)));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("5"));
+        assert_eq!(expected_upload_length(&headers), Ok(Some(5)));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("4"));
+        assert_eq!(
+            expected_upload_length(&headers),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("invalid"));
+        assert_eq!(
+            expected_upload_length(&headers),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        headers.remove(header::CONTENT_LENGTH);
+        headers.insert(
+            "X-Expected-Entity-Length",
+            HeaderValue::from_static("invalid"),
+        );
+        assert_eq!(
+            expected_upload_length(&headers),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[tokio::test]
@@ -461,33 +593,45 @@ mod tests {
             public_key.clone(),
             StoragePath::new("/pub/chunked").unwrap(),
         );
-        for fail in [false, true] {
-            let mut chunks = vec![Ok(Bytes::from_static(b"first"))];
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/dav/{}{}", public_key.z32(), path.path()))
+            .header("Authorization", format!("Basic {auth}"))
+            .body(Body::from_stream(futures_util::stream::iter([
+                Ok::<_, std::io::Error>(Bytes::from_static(b"first")),
+                Ok(Bytes::from_static(b"second")),
+            ])))
+            .unwrap();
+        let response = dav_handler(State(AppState::new(context.clone())), request)
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        for length_header in [
+            None,
+            Some("Content-Length"),
+            Some("X-Expected-Entity-Length"),
+        ] {
             let mut request = Request::builder()
                 .method(Method::PUT)
                 .uri(format!("/dav/{}{}", public_key.z32(), path.path()))
                 .header("Authorization", format!("Basic {auth}"));
-            if fail {
-                request = request.header("X-Expected-Entity-Length", "5");
-                chunks.push(Err(std::io::Error::other("interrupted upload")));
-            } else {
-                chunks.push(Ok(Bytes::from_static(b"second")));
+            if let Some(header) = length_header {
+                request = request.header(header, "5");
             }
             let request = request
-                .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                .body(Body::from_stream(futures_util::stream::iter([
+                    Ok(Bytes::from_static(b"first")),
+                    Err(std::io::Error::other("interrupted upload")),
+                ])))
                 .unwrap();
             let response = dav_handler(State(AppState::new(context.clone())), request)
                 .await
                 .unwrap()
                 .into_response();
-            assert_eq!(
-                response.status(),
-                if fail {
-                    StatusCode::BAD_GATEWAY
-                } else {
-                    StatusCode::CREATED
-                }
-            );
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(response.headers().get(header::CONNECTION).unwrap(), "close");
             assert_eq!(
                 context.file_service.get(&path).await.unwrap().as_ref(),
                 b"firstsecond"
@@ -556,17 +700,11 @@ mod tests {
 
     #[test]
     fn test_normalizes_dav_storage_errors() {
-        assert_eq!(
-            normalize_dav_status(Some(DavMethod::Put), StatusCode::METHOD_NOT_ALLOWED),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            normalize_dav_status(Some(DavMethod::Patch), StatusCode::PAYLOAD_TOO_LARGE),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            normalize_dav_status(Some(DavMethod::Copy), StatusCode::METHOD_NOT_ALLOWED),
-            StatusCode::PRECONDITION_FAILED
-        );
+        for method in [DavMethod::Copy, DavMethod::Move] {
+            assert_eq!(
+                normalize_dav_status(Some(method), StatusCode::METHOD_NOT_ALLOWED),
+                StatusCode::PRECONDITION_FAILED
+            );
+        }
     }
 }

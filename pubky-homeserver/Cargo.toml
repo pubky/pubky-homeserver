@@ -95,6 +95,7 @@ async-dropper = { version = "0.3", features = ["tokio", "simple"] }
 axum-test = "21"
 hex = "0.4"
 mainline.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = ["storage-gcs"]

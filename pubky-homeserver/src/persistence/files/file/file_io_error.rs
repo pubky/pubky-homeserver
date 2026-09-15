@@ -17,8 +17,8 @@ pub enum FileIoError {
     WritePathForbidden,
     #[error("File/folder path collision")]
     PathCollision,
-    #[error("Upload ownership was lost during streaming")]
-    UploadLeaseLost,
+    #[error("Upload exceeded its publication window")]
+    UploadExpired,
 }
 
 impl From<opendal::Error> for FileIoError {

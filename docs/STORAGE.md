@@ -24,16 +24,24 @@ current files still applies.
 The homeserver also scans storage at startup and once a day to find completed blobs
 missing from its database records. This is separate from the regular cleanup queue.
 
+Uploads have one hour to finish and publish. Expired uploads must be retried; they
+cannot publish during the additional five-minute cleanup grace. Known failed uploads
+retain at least one hour of settling time for late backend completion.
+
+Cleanup holds PostgreSQL row locks while deleting a bounded batch of blobs. Backend
+deletes have a five-second timeout, and each cleanup pass has a 45-second budget,
+including database waits. Slow storage can occupy a database connection until that
+budget expires; deletion retries remain durable after rollback or restart.
+
 ## Backups
 
 Back up PostgreSQL and file storage together. Blobs are stored under
-`__pubky/blobs/{namespace}/`, with the namespace recorded in the
-`blob_storage_namespace` database table. Include that table in database backups.
+`__pubky/blobs/{server_public_key}/`. Back up the server key with the database and blobs.
 
-Homeserver instances sharing a database use the same namespace. Separate databases
-use different namespaces and can share a bucket. A restored database still points
-to its original namespace: do not run it against the original deployment's live
-storage, where its cleanup could remove newer files.
+Instances using the same server key and storage backend must share one authoritative
+database. Different server keys can share a bucket. Do not run a separate or restored
+database with the original server key against live storage: its cleanup could mistake
+the other database's files for orphans and delete them.
 
 ## Upgrading to Immutable Blob Storage
 

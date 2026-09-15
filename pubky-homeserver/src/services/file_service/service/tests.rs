@@ -1,14 +1,10 @@
-use crate::persistence::sql::entry::EntryRepository;
-use crate::services::file_service::{
-    cleanup::STALE_GARBAGE_CLAIM_SECONDS, upload_heartbeat::UploadHeartbeat,
-};
+use crate::persistence::sql::{entities::blob::BlobRepository, entry::EntryRepository};
 use crate::{
     services::user_service::FILE_METADATA_SIZE,
     shared::{quota::UserQuota, webdav::StoragePath},
     storage_config::StorageConfigToml,
 };
 use futures_lite::StreamExt;
-use std::time::Duration;
 
 use super::*;
 
@@ -71,7 +67,10 @@ async fn test_write_get_delete_db_and_opendal() {
     let chunks = vec![Ok(Bytes::from(test_data.as_slice()))];
     let stream = futures_util::stream::iter(chunks);
 
-    file_service.write_stream(&path, stream).await.unwrap();
+    file_service
+        .write_stream(&path, stream, None)
+        .await
+        .unwrap();
     let user = user_service.get(&pubkey).await.unwrap();
     assert_eq!(
         user.used_bytes,
@@ -104,48 +103,6 @@ async fn test_write_get_delete_db_and_opendal() {
         user.used_bytes, 0,
         "Data usage should be 0 after deleting file"
     );
-
-    // Test OpenDal location
-    let path = EntryPath::new(
-        pubkey.clone(),
-        StoragePath::new("/test_opendal.txt").unwrap(),
-    );
-    let chunks = vec![Ok(Bytes::from(test_data.as_slice()))];
-    let stream = futures_util::stream::iter(chunks);
-    file_service.write_stream(&path, stream).await.unwrap();
-    let user = user_service.get(&pubkey).await.unwrap();
-    assert_eq!(
-        user.used_bytes,
-        test_data.len() as u64 + FILE_METADATA_SIZE,
-        "Data usage should be the size of the file"
-    );
-
-    // Get the file content and verify
-    let mut stream = file_service
-        .get_stream(&path)
-        .await
-        .expect("File should exist");
-    let mut collected_data = Vec::new();
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.unwrap();
-        collected_data.extend_from_slice(&chunk);
-    }
-
-    assert_eq!(
-        collected_data,
-        test_data.to_vec(),
-        "Content should match original data for OpenDal location"
-    );
-
-    // Clean up
-    file_service.delete(&path).await.unwrap();
-    let result = file_service.get_stream(&path).await;
-    assert!(result.is_err(), "Should error for deleted file");
-    let user = user_service.get(&pubkey).await.unwrap();
-    assert_eq!(
-        user.used_bytes, 0,
-        "Data usage should be 0 after deleting file"
-    );
 }
 
 #[tokio::test]
@@ -161,43 +118,13 @@ async fn test_write_get_basic() {
     let test_data = b"Hello, world!";
     let buffer = Buffer::from(test_data.as_slice());
 
-    let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
-    file_service.write(&path, buffer.clone()).await.unwrap();
+    let path = EntryPath::new(pubkey, StoragePath::new("/test_file.txt").unwrap());
+    file_service.write(&path, buffer).await.unwrap();
     let content = file_service.get(&path).await.unwrap();
     assert_eq!(content.as_ref(), test_data);
-
-    // Test OpenDal
-    let opendal_path = EntryPath::new(pubkey, StoragePath::new("/test_opendal.txt").unwrap());
-    file_service.write(&opendal_path, buffer).await.unwrap();
-    let content = file_service.get(&opendal_path).await.unwrap();
-    assert_eq!(content.as_ref(), test_data);
 }
 
-#[tokio::test]
-#[pubky_test_utils::test]
-async fn test_data_usage_update_basic() {
-    let context = AppContext::test().await;
-    let file_service = FileService::new_from_context(&context).unwrap();
-    let user_service = context.user_service.clone();
-
-    let pubkey = pubky_common::crypto::Keypair::random().public_key();
-    user_service.create_with_quota_mb(&pubkey, 1).await;
-
-    let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
-    let test_data = vec![1u8; 1024];
-    let buffer = Buffer::from(test_data.clone());
-
-    file_service.write(&path, buffer).await.unwrap();
-    let user = user_service.get(&pubkey).await.unwrap();
-    assert_eq!(user.used_bytes, test_data.len() as u64 + FILE_METADATA_SIZE);
-
-    // Delete the file and check if the data usage is updated correctly.
-    file_service.delete(&path).await.unwrap();
-    let user = user_service.get(&pubkey).await.unwrap();
-    assert_eq!(user.used_bytes, 0);
-}
-
-/// Override and existing entry and check if the data usage is updated correctly.
+/// Overwrite an existing entry and check that data usage is updated correctly.
 #[tokio::test]
 #[pubky_test_utils::test]
 async fn test_data_usage_override_existing_entry() {
@@ -213,10 +140,11 @@ async fn test_data_usage_override_existing_entry() {
     let buffer = Buffer::from(test_data.clone());
 
     file_service.write(&path, buffer).await.unwrap();
+    let user = user_service.get(&pubkey).await.unwrap();
+    assert_eq!(user.used_bytes, test_data.len() as u64 + FILE_METADATA_SIZE);
 
     let test_data2 = vec![2u8; 1024];
     let buffer2 = Buffer::from(test_data2.clone());
-    let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test_file.txt").unwrap());
 
     file_service.write(&path, buffer2).await.unwrap();
 
@@ -224,48 +152,25 @@ async fn test_data_usage_override_existing_entry() {
         user_service.get(&pubkey).await.unwrap().used_bytes,
         test_data2.len() as u64 + FILE_METADATA_SIZE
     );
+
+    file_service.delete(&path).await.unwrap();
+    let user = user_service.get(&pubkey).await.unwrap();
+    assert_eq!(user.used_bytes, 0);
 }
 
 #[tokio::test]
 #[pubky_test_utils::test]
 async fn test_rejects_descendant_when_exact_file_exists() {
-    let context = AppContext::test().await;
-    let file_service = FileService::new_from_context(&context).unwrap();
-    let db = context.sql_db.clone();
-    let user_service = context.user_service.clone();
-
-    let pubkey = pubky_common::crypto::Keypair::random().public_key();
-    user_service.create(&pubkey).await.unwrap();
-
-    let exact_path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/foo").unwrap());
-    let descendant_path = EntryPath::new(
-        pubkey.clone(),
-        StoragePath::new("/pub/app/foo/bar.json").unwrap(),
-    );
-
-    file_service
-        .write(&exact_path, Buffer::from(vec![1; 10]))
-        .await
-        .unwrap();
-    let err = file_service
-        .write(&descendant_path, Buffer::from(vec![2; 10]))
-        .await
-        .expect_err("descendant write should be rejected");
-
-    assert!(matches!(err, FileIoError::PathCollision));
-    file_service
-        .get_info(&descendant_path, &mut db.pool().into())
-        .await
-        .expect_err("Rejected descendant should not create metadata");
-    file_service
-        .get(&descendant_path)
-        .await
-        .expect_err("Rejected descendant should not create a blob");
+    assert_rejects_file_folder_collision("/pub/app/foo", "/pub/app/foo/bar.json").await;
 }
 
 #[tokio::test]
 #[pubky_test_utils::test]
 async fn test_rejects_exact_file_when_descendant_exists() {
+    assert_rejects_file_folder_collision("/pub/app/foo/bar.json", "/pub/app/foo").await;
+}
+
+async fn assert_rejects_file_folder_collision(existing_path: &str, rejected_path: &str) {
     let context = AppContext::test().await;
     let file_service = FileService::new_from_context(&context).unwrap();
     let db = context.sql_db.clone();
@@ -274,28 +179,27 @@ async fn test_rejects_exact_file_when_descendant_exists() {
     let pubkey = pubky_common::crypto::Keypair::random().public_key();
     user_service.create(&pubkey).await.unwrap();
 
-    let exact_path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/app/foo").unwrap());
-    let descendant_path =
-        EntryPath::new(pubkey, StoragePath::new("/pub/app/foo/bar.json").unwrap());
+    let existing_path = EntryPath::new(pubkey.clone(), StoragePath::new(existing_path).unwrap());
+    let rejected_path = EntryPath::new(pubkey, StoragePath::new(rejected_path).unwrap());
 
     file_service
-        .write(&descendant_path, Buffer::from(vec![1; 10]))
+        .write(&existing_path, Buffer::from(vec![1; 10]))
         .await
         .unwrap();
     let err = file_service
-        .write(&exact_path, Buffer::from(vec![2; 10]))
+        .write(&rejected_path, Buffer::from(vec![2; 10]))
         .await
-        .expect_err("exact-file write should be rejected");
+        .expect_err("colliding write should be rejected");
 
     assert!(matches!(err, FileIoError::PathCollision));
     file_service
-        .get_info(&exact_path, &mut db.pool().into())
+        .get_info(&rejected_path, &mut db.pool().into())
         .await
-        .expect_err("Rejected exact file should not create metadata");
+        .expect_err("Rejected write should not create metadata");
     file_service
-        .get(&exact_path)
+        .get(&rejected_path)
         .await
-        .expect_err("Rejected exact file should not create a blob");
+        .expect_err("Rejected write should not create a blob");
 }
 
 /// Write a file that is exactly at the quota and check if the data usage is updated correctly.
@@ -396,6 +300,7 @@ async fn test_legacy_entry_is_readable_and_rewritten_to_immutable_blob() {
             path.as_str(),
             futures_util::stream::iter([Ok(legacy.clone())]),
             &path,
+            None,
         )
         .await
         .unwrap();
@@ -423,10 +328,12 @@ async fn test_legacy_entry_is_readable_and_rewritten_to_immutable_blob() {
         .await
         .unwrap());
 
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE unreferenced_blobs SET eligible_at = CURRENT_TIMESTAMP WHERE state = 'retained'",
+    )
+    .execute(context.sql_db.pool())
+    .await
+    .unwrap();
     file_service.recover_blob_storage().await.unwrap();
     assert!(!file_service
         .opendal
@@ -457,6 +364,7 @@ async fn test_legacy_entry_remains_readable_after_directory_move() {
             source.as_str(),
             futures_util::stream::iter([Ok(content.clone())]),
             &source,
+            None,
         )
         .await
         .unwrap();
@@ -539,36 +447,7 @@ async fn test_failed_pointer_switch_preserves_previous_content() {
         b"original"
     );
 
-    let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_uploads")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
-    let abandoned_key: String = sqlx::query_scalar("SELECT blob_key FROM blob_garbage")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
-    assert_eq!(staged, 0);
-    assert!(restarted_service
-        .opendal
-        .blob_exists(&abandoned_key)
-        .await
-        .unwrap());
-    restarted_service.recover_blob_storage().await.unwrap();
-    assert!(restarted_service
-        .opendal
-        .blob_exists(&abandoned_key)
-        .await
-        .unwrap());
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
-    restarted_service.recover_blob_storage().await.unwrap();
-    assert!(!restarted_service
-        .opendal
-        .blob_exists(&abandoned_key)
-        .await
-        .unwrap());
+    assert_abandoned_upload_cleanup(&context, &restarted_service).await;
 }
 
 #[tokio::test]
@@ -599,33 +478,41 @@ async fn test_event_failure_rolls_back_write_and_cleans_blob() {
         .fetch_one(context.sql_db.pool())
         .await
         .unwrap();
-    let uploads: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_uploads")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
-    let abandoned_key: String = sqlx::query_scalar("SELECT blob_key FROM blob_garbage")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
     assert_eq!(events, 0);
+    assert_abandoned_upload_cleanup(&context, &restarted_service).await;
+}
+
+async fn assert_abandoned_upload_cleanup(context: &AppContext, file_service: &FileService) {
+    let uploads: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs WHERE state = 'uploading'")
+            .fetch_one(context.sql_db.pool())
+            .await
+            .unwrap();
+    let abandoned_key: String =
+        sqlx::query_scalar("SELECT blob_key FROM unreferenced_blobs WHERE state = 'garbage'")
+            .fetch_one(context.sql_db.pool())
+            .await
+            .unwrap();
     assert_eq!(uploads, 0);
-    assert!(restarted_service
+    assert!(file_service
         .opendal
         .blob_exists(&abandoned_key)
         .await
         .unwrap());
-    restarted_service.recover_blob_storage().await.unwrap();
-    assert!(restarted_service
+    file_service.recover_blob_storage().await.unwrap();
+    assert!(file_service
         .opendal
         .blob_exists(&abandoned_key)
         .await
         .unwrap());
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
-    restarted_service.recover_blob_storage().await.unwrap();
-    assert!(!restarted_service
+    sqlx::query(
+        "UPDATE unreferenced_blobs SET eligible_at = CURRENT_TIMESTAMP WHERE state = 'garbage'",
+    )
+    .execute(context.sql_db.pool())
+    .await
+    .unwrap();
+    file_service.recover_blob_storage().await.unwrap();
+    assert!(!file_service
         .opendal
         .blob_exists(&abandoned_key)
         .await
@@ -639,53 +526,63 @@ async fn test_recovery_removes_stale_uploaded_blob() {
     let file_service = FileService::new_from_context(&context).unwrap();
     let pubkey = pubky_common::crypto::Keypair::random().public_key();
     let path = EntryPath::new(pubkey, StoragePath::new("/pub/orphan.bin").unwrap());
-    let blob_key = "__pubky/blobs/stale-upload";
+    let blob_key = format!("{}stale-upload", file_service.blob_prefix);
 
-    BlobRepository::stage_upload(blob_key, 1, 6, &mut context.sql_db.pool().into())
+    BlobRepository::stage_upload(&blob_key, 1, 6, &mut context.sql_db.pool().into())
         .await
         .unwrap();
     file_service
         .opendal
         .write_blob_stream(
-            blob_key,
+            &blob_key,
             futures_util::stream::iter([Ok(Bytes::from_static(b"orphan"))]),
             &path,
+            None,
         )
         .await
         .unwrap();
-    sqlx::query("UPDATE blob_uploads SET updated_at = CURRENT_TIMESTAMP - INTERVAL '2 hours'")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE unreferenced_blobs SET eligible_at = statement_timestamp() + INTERVAL '1 minute' \
+         WHERE blob_key = $1 AND state = 'uploading'",
+    )
+    .bind(&blob_key)
+    .execute(context.sql_db.pool())
+    .await
+    .unwrap();
 
     let restarted_service = FileService::new_from_context(&context).unwrap();
     restarted_service.recover_blob_storage().await.unwrap();
-    let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_uploads")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
-    let garbage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
-    assert_eq!(staged, 0);
-    assert_eq!(garbage, 1);
+    let staged: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs WHERE state = 'uploading'")
+            .fetch_one(context.sql_db.pool())
+            .await
+            .unwrap();
+    assert_eq!(staged, 1);
     assert!(restarted_service
         .opendal
-        .blob_exists(blob_key)
+        .blob_exists(&blob_key)
         .await
         .unwrap());
 
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE unreferenced_blobs SET eligible_at = statement_timestamp() - INTERVAL '1 second' \
+         WHERE blob_key = $1 AND state = 'uploading'",
+    )
+    .bind(&blob_key)
+    .execute(context.sql_db.pool())
+    .await
+    .unwrap();
     restarted_service.recover_blob_storage().await.unwrap();
     assert!(!restarted_service
         .opendal
-        .blob_exists(blob_key)
+        .blob_exists(&blob_key)
         .await
         .unwrap());
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs")
+        .fetch_one(context.sql_db.pool())
+        .await
+        .unwrap();
+    assert_eq!(pending, 0);
 }
 
 #[tokio::test]
@@ -708,6 +605,7 @@ async fn test_reconciliation_removes_untracked_blob_only() {
             &orphan_blob_key,
             futures_util::stream::iter([Ok(Bytes::from_static(b"orphan"))]),
             &path,
+            None,
         )
         .await
         .unwrap();
@@ -732,6 +630,7 @@ async fn test_reconciliation_removes_untracked_blob_only() {
             &orphan_blob_key,
             futures_util::stream::iter([Ok(Bytes::from_static(b"late"))]),
             &path,
+            None,
         )
         .await
         .unwrap();
@@ -747,19 +646,20 @@ async fn test_reconciliation_removes_untracked_blob_only() {
 
 #[tokio::test]
 #[pubky_test_utils::test]
-async fn test_reconciliation_is_isolated_between_databases_sharing_storage() {
+async fn test_reconciliation_is_isolated_between_server_keys_sharing_storage() {
     let first = filesystem_context().await;
     let second = AppContext::test().await;
     let first_service = &first.file_service;
     let second_service = FileService::new_from_config(
         &first.config_toml,
         first.data_dir.path(),
+        &second.keypair.public_key(),
         second.sql_db.clone(),
         second.events_service.clone(),
         second.user_service.clone(),
     )
-    .await
     .unwrap();
+    assert_ne!(first.keypair.public_key(), second.keypair.public_key());
     assert_ne!(first_service.blob_prefix, second_service.blob_prefix);
     let public_key = pubky_common::crypto::Keypair::random().public_key();
     first.user_service.create(&public_key).await.unwrap();
@@ -781,6 +681,7 @@ async fn test_reconciliation_is_isolated_between_databases_sharing_storage() {
             &orphan,
             futures_util::stream::iter([Ok(Bytes::from_static(b"orphan"))]),
             &path,
+            None,
         )
         .await
         .unwrap();
@@ -788,11 +689,11 @@ async fn test_reconciliation_is_isolated_between_databases_sharing_storage() {
     let restarted = FileService::new_from_config(
         &first.config_toml,
         first.data_dir.path(),
+        &first.keypair.public_key(),
         first.sql_db.clone(),
         first.events_service.clone(),
         first.user_service.clone(),
     )
-    .await
     .unwrap();
     assert_eq!(first_service.blob_prefix, restarted.blob_prefix);
     assert_eq!(second_service.reconcile_untracked_blobs().await.unwrap(), 0);
@@ -827,9 +728,9 @@ async fn test_blob_cleanup_retries_backend_delete_failure() {
     file_service.delete(&first_path).await.unwrap();
     file_service.delete(&second_path).await.unwrap();
     sqlx::query(
-        "UPDATE blob_garbage SET available_at = CASE \
+        "UPDATE unreferenced_blobs SET eligible_at = CASE \
          WHEN blob_key = $1 THEN CURRENT_TIMESTAMP - INTERVAL '2 minutes' \
-         ELSE CURRENT_TIMESTAMP - INTERVAL '1 minute' END",
+         ELSE CURRENT_TIMESTAMP - INTERVAL '1 minute' END WHERE state = 'retained'",
     )
     .bind(&first_blob_key)
     .execute(context.sql_db.pool())
@@ -848,14 +749,14 @@ async fn test_blob_cleanup_retries_backend_delete_failure() {
         .blob_exists(&second_blob_key)
         .await
         .unwrap());
-    let pending: (i64, i64) =
-        sqlx::query_as("SELECT COUNT(*), COUNT(claim_token) FROM blob_garbage WHERE blob_key = $1")
+    let retry_deferred: bool =
+        sqlx::query_scalar("SELECT state = 'garbage' AND eligible_at > statement_timestamp() FROM unreferenced_blobs WHERE blob_key = $1")
             .bind(&first_blob_key)
             .fetch_one(context.sql_db.pool())
             .await
             .unwrap();
-    assert_eq!(pending, (1, 1));
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP WHERE blob_key = $1")
+    assert!(retry_deferred);
+    sqlx::query("UPDATE unreferenced_blobs SET eligible_at = CURRENT_TIMESTAMP WHERE blob_key = $1 AND state = 'garbage'")
         .bind(&first_blob_key)
         .execute(context.sql_db.pool())
         .await
@@ -866,11 +767,12 @@ async fn test_blob_cleanup_retries_backend_delete_failure() {
         .blob_exists(&first_blob_key)
         .await
         .unwrap());
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage WHERE blob_key = $1")
-        .bind(&first_blob_key)
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
+    let pending: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs WHERE blob_key = $1")
+            .bind(&first_blob_key)
+            .fetch_one(context.sql_db.pool())
+            .await
+            .unwrap();
     assert_eq!(pending, 0);
 }
 
@@ -888,28 +790,21 @@ async fn test_cleanup_recovers_after_blob_delete_before_acknowledgement() {
         .unwrap();
     let blob_key = entry.blob_key.unwrap();
     file_service.delete(&path).await.unwrap();
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
-    let claim = BlobRepository::claim_garbage(
-        1,
-        STALE_GARBAGE_CLAIM_SECONDS,
-        &mut context.sql_db.pool().into(),
+    sqlx::query(
+        "UPDATE unreferenced_blobs SET eligible_at = CURRENT_TIMESTAMP WHERE state = 'retained'",
     )
+    .execute(context.sql_db.pool())
     .await
-    .unwrap()
-    .remove(0);
-    file_service
-        .opendal
-        .delete_by_key(&claim.blob_key)
+    .unwrap();
+    let mut tx = context.sql_db.pool().begin().await.unwrap();
+    let locked = BlobRepository::lock_garbage(1, None, &mut tx)
         .await
         .unwrap();
+    assert_eq!(locked, std::slice::from_ref(&blob_key));
+    file_service.opendal.delete_by_key(&blob_key).await.unwrap();
 
-    sqlx::query("UPDATE blob_garbage SET claimed_at = CURRENT_TIMESTAMP - INTERVAL '10 minutes'")
-        .execute(context.sql_db.pool())
-        .await
-        .unwrap();
+    // A crash after physical deletion leaves cleanup tracking unacknowledged.
+    tx.rollback().await.unwrap();
     let restarted_service = FileService::new_from_context(&context).unwrap();
     restarted_service.recover_blob_storage().await.unwrap();
 
@@ -918,7 +813,7 @@ async fn test_cleanup_recovers_after_blob_delete_before_acknowledgement() {
         .blob_exists(&blob_key)
         .await
         .unwrap());
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage")
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs")
         .fetch_one(context.sql_db.pool())
         .await
         .unwrap();
@@ -942,10 +837,10 @@ async fn test_quota_pressure_reclaims_retained_versions() {
     for byte in [1, 2, 3] {
         entries.push(
             file_service
-                .write_stream_with_size_hint(
+                .write_stream(
                     &path,
                     futures_util::stream::iter([Ok(Bytes::from(vec![byte; content_length]))]),
-                    content_length as u64,
+                    Some(content_length as u64),
                 )
                 .await
                 .unwrap(),
@@ -953,10 +848,10 @@ async fn test_quota_pressure_reclaims_retained_versions() {
     }
 
     file_service
-        .write_stream_with_size_hint(
+        .write_stream(
             &path,
             futures_util::stream::iter([Ok(Bytes::from(vec![4; content_length]))]),
-            content_length as u64,
+            Some(content_length as u64),
         )
         .await
         .unwrap();
@@ -1008,10 +903,10 @@ async fn test_quota_cleanup_failure_preserves_storage_limit_and_retry_delay() {
 
     file_service.opendal.fail_next_delete();
     let error = file_service
-        .write_stream_with_size_hint(
+        .write_stream(
             &path,
             futures_util::stream::iter([Ok(Bytes::from(vec![3; length]))]),
-            length as u64,
+            Some(length as u64),
         )
         .await
         .unwrap_err();
@@ -1027,25 +922,22 @@ async fn test_quota_cleanup_failure_preserves_storage_limit_and_retry_delay() {
         .unwrap());
 
     let retry_deferred: bool = sqlx::query_scalar(
-        "SELECT NOT retained_for_reads AND available_at > statement_timestamp() \
-         FROM blob_garbage WHERE blob_key = $1",
+        "SELECT state = 'garbage' AND eligible_at > statement_timestamp() \
+         FROM unreferenced_blobs WHERE blob_key = $1",
     )
     .bind(old.blob_key.as_ref().unwrap())
     .fetch_one(context.sql_db.pool())
     .await
     .unwrap();
     assert!(retry_deferred);
-    assert!(BlobRepository::claim_garbage_for_quota(
-        user.id,
-        64,
-        STALE_GARBAGE_CLAIM_SECONDS,
-        &mut context.sql_db.pool().into()
-    )
-    .await
-    .unwrap()
-    .is_empty());
+    let mut tx = context.sql_db.pool().begin().await.unwrap();
+    assert!(BlobRepository::lock_garbage(64, Some(user.id), &mut tx)
+        .await
+        .unwrap()
+        .is_empty());
+    tx.rollback().await.unwrap();
     let staged: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM blob_uploads WHERE blob_key = 'active-upload'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs WHERE blob_key = 'active-upload' AND state = 'uploading'")
             .fetch_one(context.sql_db.pool())
             .await
             .unwrap();
@@ -1077,8 +969,8 @@ async fn test_replaced_and_deleted_blobs_are_retained_until_cleanup() {
             file_service.delete(&path).await.unwrap();
         }
         let retained: bool = sqlx::query_scalar(
-            "SELECT available_at >= statement_timestamp() + INTERVAL '59 minutes' \
-             FROM blob_garbage WHERE blob_key = $1",
+            "SELECT state = 'retained' AND eligible_at >= statement_timestamp() + INTERVAL '59 minutes' \
+             FROM unreferenced_blobs WHERE blob_key = $1",
         )
         .bind(blob_key)
         .fetch_one(context.sql_db.pool())
@@ -1097,7 +989,8 @@ async fn test_replaced_and_deleted_blobs_are_retained_until_cleanup() {
         );
 
         sqlx::query(
-            "UPDATE blob_garbage SET available_at = statement_timestamp() WHERE blob_key = $1",
+            "UPDATE unreferenced_blobs SET eligible_at = statement_timestamp() \
+             WHERE blob_key = $1 AND state = 'retained'",
         )
         .bind(blob_key)
         .execute(context.sql_db.pool())
@@ -1136,7 +1029,7 @@ async fn test_copy_stream_failure_does_not_publish_destination() {
     let first = stream.next().await.unwrap().unwrap();
     assert!(first.len() < entry.content_length as usize);
     file_service.delete(&source).await.unwrap();
-    sqlx::query("UPDATE blob_garbage SET available_at = statement_timestamp()")
+    sqlx::query("UPDATE unreferenced_blobs SET eligible_at = statement_timestamp() WHERE state = 'retained'")
         .execute(context.sql_db.pool())
         .await
         .unwrap();
@@ -1176,23 +1069,57 @@ async fn test_copy_stream_failure_does_not_publish_destination() {
 
 #[tokio::test]
 #[pubky_test_utils::test]
-async fn test_upload_heartbeat_times_out_while_row_is_locked() {
-    let context = AppContext::test().await;
-    BlobRepository::stage_upload("blob-a", 1, 10, &mut context.sql_db.pool().into())
-        .await
-        .unwrap();
-    let mut tx = context.sql_db.pool().begin().await.unwrap();
-    sqlx::query("SELECT blob_key FROM blob_uploads WHERE blob_key = 'blob-a' FOR UPDATE")
-        .execute(&mut *tx)
+async fn test_expired_upload_preserves_previous_content() {
+    let context = filesystem_context().await;
+    let file_service = FileService::new_from_context(&context).unwrap();
+    let pubkey = pubky_common::crypto::Keypair::random().public_key();
+    context.user_service.create(&pubkey).await.unwrap();
+    let path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/state.bin").unwrap());
+    let original = file_service
+        .write(&path, Buffer::from(b"original".to_vec()))
         .await
         .unwrap();
 
-    let error = UploadHeartbeat::touch_upload(&context.sql_db, "blob-a", Duration::from_millis(25))
+    let stream = futures_util::stream::once(async {
+        // The backend can finish during settling, but publication has already expired.
+        let expired = sqlx::query(
+            "UPDATE unreferenced_blobs SET eligible_at = statement_timestamp() + INTERVAL '1 minute' \
+             WHERE state = 'uploading'",
+        )
+        .execute(context.sql_db.pool())
+        .await
+        .unwrap();
+        assert_eq!(expired.rows_affected(), 1);
+        Ok(Bytes::from_static(b"replacement"))
+    });
+    futures_util::pin_mut!(stream);
+
+    let error = file_service
+        .write_stream(&path, stream, Some(11))
         .await
         .unwrap_err();
-    tx.rollback().await.unwrap();
+    assert!(matches!(error, FileIoError::UploadExpired));
 
-    assert!(matches!(error, FileIoError::UploadLeaseLost));
+    let restarted_service = FileService::new_from_context(&context).unwrap();
+    let entry = restarted_service
+        .get_info(&path, &mut context.sql_db.pool().into())
+        .await
+        .unwrap();
+    assert_eq!(entry.blob_key, original.blob_key);
+    assert_eq!(
+        context.user_service.get(&pubkey).await.unwrap().used_bytes,
+        original.content_length + FILE_METADATA_SIZE
+    );
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(context.sql_db.pool())
+        .await
+        .unwrap();
+    assert_eq!(events, 1);
+    assert_abandoned_upload_cleanup(&context, &restarted_service).await;
+    assert_eq!(
+        restarted_service.get(&path).await.unwrap().as_ref(),
+        b"original"
+    );
 }
 
 #[tokio::test]
@@ -1205,13 +1132,14 @@ async fn test_cleanup_drains_more_than_one_batch() {
     let content_path = EntryPath::new(public_key, StoragePath::new("/pub/blob").unwrap());
 
     for index in 0..80 {
-        let blob_key = format!("__pubky/blobs/cleanup-{index}");
+        let blob_key = format!("{}cleanup-{index}", file_service.blob_prefix);
         file_service
             .opendal
             .write_blob_stream(
                 &blob_key,
                 futures_util::stream::iter([Ok(Bytes::from_static(b"x"))]),
                 &content_path,
+                None,
             )
             .await
             .unwrap();
@@ -1228,7 +1156,7 @@ async fn test_cleanup_drains_more_than_one_batch() {
 
     file_service.recover_blob_storage().await.unwrap();
 
-    let garbage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage")
+    let garbage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs")
         .fetch_one(context.sql_db.pool())
         .await
         .unwrap();
@@ -1236,7 +1164,7 @@ async fn test_cleanup_drains_more_than_one_batch() {
     for index in 0..80 {
         assert!(!file_service
             .opendal
-            .blob_exists(&format!("__pubky/blobs/cleanup-{index}"))
+            .blob_exists(&format!("{}cleanup-{index}", file_service.blob_prefix))
             .await
             .unwrap());
     }
@@ -1262,6 +1190,7 @@ async fn test_admin_overwrite_allows_legacy_file_directory_collisions() {
         .admin_write_stream(
             &parent,
             futures_util::stream::iter([Ok(Bytes::from_static(b"parent"))]),
+            None,
         )
         .await
         .unwrap();
@@ -1276,6 +1205,7 @@ async fn test_admin_overwrite_allows_legacy_file_directory_collisions() {
         .admin_write_stream(
             &descendant,
             futures_util::stream::iter([Ok(Bytes::from_static(b"child"))]),
+            None,
         )
         .await
         .unwrap();
@@ -1325,7 +1255,7 @@ async fn test_event_failure_rolls_back_delete() {
         .fetch_one(context.sql_db.pool())
         .await
         .unwrap();
-    let garbage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage")
+    let garbage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs")
         .fetch_one(context.sql_db.pool())
         .await
         .unwrap();
@@ -1426,6 +1356,7 @@ async fn test_write_path_policy_rejects_disallowed_mutations() {
         .admin_write_stream(
             &blocked,
             futures_util::stream::iter([Ok(Bytes::from_static(b"blocked"))]),
+            None,
         )
         .await
         .unwrap();
@@ -1584,18 +1515,19 @@ async fn test_concurrent_write_and_delete_leave_consistent_state() {
         }
         Err(error) => panic!("unexpected read error after concurrent mutation: {error}"),
     }
-    let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_uploads")
-        .fetch_one(context.sql_db.pool())
-        .await
-        .unwrap();
+    let staged: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs WHERE state = 'uploading'")
+            .fetch_one(context.sql_db.pool())
+            .await
+            .unwrap();
     assert_eq!(staged, 0);
 
-    sqlx::query("UPDATE blob_garbage SET available_at = CURRENT_TIMESTAMP")
+    sqlx::query("UPDATE unreferenced_blobs SET eligible_at = CURRENT_TIMESTAMP WHERE state IN ('retained', 'garbage')")
         .execute(context.sql_db.pool())
         .await
         .unwrap();
     restarted_service.recover_blob_storage().await.unwrap();
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage")
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs")
         .fetch_one(context.sql_db.pool())
         .await
         .unwrap();

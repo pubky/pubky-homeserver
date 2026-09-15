@@ -1,15 +1,10 @@
-use crate::persistence::{
-    files::FileIoError,
-    sql::entities::blob::{BlobGarbageEntity, BlobRepository},
-};
+use crate::persistence::{files::FileIoError, sql::entities::blob::BlobRepository};
 use futures_util::StreamExt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use super::FileService;
 
-const ABANDONED_UPLOAD_AGE_SECONDS: i64 = 60 * 60;
-const STALE_UPLOAD_RECOVERY_GRACE_SECONDS: i64 = 5 * 60;
-pub(super) const STALE_GARBAGE_CLAIM_SECONDS: i64 = 5 * 60;
 const FAILED_CLEANUP_RETRY_SECONDS: i64 = 60;
 const CLEANUP_BATCH_SIZE: usize = 64;
 const CLEANUP_CONCURRENCY: usize = 8;
@@ -17,24 +12,18 @@ const CLEANUP_TIME_BUDGET: Duration = Duration::from_secs(45);
 const CLEANUP_DELETE_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl FileService {
-    /// Recover orphaned uploads and retry deferred backend deletion.
+    /// Retry deletion of expired uploads and unreferenced blobs.
     pub(crate) async fn recover_blob_storage(&self) -> Result<(), FileIoError> {
-        BlobRepository::enqueue_stale_uploads(
-            ABANDONED_UPLOAD_AGE_SECONDS,
-            STALE_UPLOAD_RECOVERY_GRACE_SECONDS,
-            &mut self.db.pool().into(),
-        )
-        .await?;
-        self.drain_blob_garbage().await;
+        let deadline = Instant::now() + CLEANUP_TIME_BUDGET;
+        while Instant::now() < deadline && self.cleanup_batch(None, deadline).await? > 0 {}
         Ok(())
     }
 
-    /// Queue immutable backend objects that are no longer represented in PostgreSQL.
+    /// Queue immutable backend objects no longer represented in PostgreSQL.
     pub(crate) async fn reconcile_untracked_blobs(&self) -> Result<u64, FileIoError> {
         let mut lister = self.opendal.blob_lister(&self.blob_prefix).await?;
         let mut blob_keys = Vec::with_capacity(CLEANUP_BATCH_SIZE);
         let mut queued = 0;
-
         while let Some(entry) = lister.next().await {
             let entry = entry?;
             if !entry.metadata().is_file() {
@@ -53,90 +42,70 @@ impl FileService {
         Ok(queued)
     }
 
-    async fn drain_blob_garbage(&self) {
-        let started_at = Instant::now();
-        loop {
-            if started_at.elapsed() >= CLEANUP_TIME_BUDGET.saturating_sub(CLEANUP_DELETE_TIMEOUT) {
-                break;
-            }
-            let claims = match BlobRepository::claim_garbage(
-                CLEANUP_BATCH_SIZE as i64,
-                STALE_GARBAGE_CLAIM_SECONDS,
-                &mut self.db.pool().into(),
-            )
-            .await
-            {
-                Ok(claims) if claims.is_empty() => break,
-                Ok(claims) => claims,
-                Err(error) => {
-                    tracing::error!(%error, "Failed to claim blob cleanup work");
-                    return;
-                }
-            };
-
-            futures_util::stream::iter(claims)
-                .for_each_concurrent(CLEANUP_CONCURRENCY, |claim| self.delete_claimed_blob(claim))
-                .await;
-        }
-    }
-
     pub(super) async fn cleanup_for_quota(&self, user_id: i32) {
-        let claims = match BlobRepository::claim_garbage_for_quota(
-            user_id,
-            CLEANUP_BATCH_SIZE as i64,
-            STALE_GARBAGE_CLAIM_SECONDS,
-            &mut self.db.pool().into(),
-        )
-        .await
+        if let Err(error) = self
+            .cleanup_batch(Some(user_id), Instant::now() + CLEANUP_TIME_BUDGET)
+            .await
         {
-            Ok(claims) => claims,
-            Err(error) => {
-                tracing::error!(user_id, %error, "Failed to claim quota cleanup work");
-                return;
-            }
-        };
-        futures_util::stream::iter(claims)
-            .for_each_concurrent(CLEANUP_CONCURRENCY, |claim| self.delete_claimed_blob(claim))
-            .await;
-    }
-
-    async fn delete_claimed_blob(&self, claim: BlobGarbageEntity) {
-        match tokio::time::timeout(
-            CLEANUP_DELETE_TIMEOUT,
-            self.opendal.delete_by_key(&claim.blob_key),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
-                if let Err(error) =
-                    BlobRepository::finish_garbage(&claim, &mut self.db.pool().into()).await
-                {
-                    tracing::error!(blob_key = claim.blob_key, %error, "Failed to finish blob cleanup");
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(blob_key = claim.blob_key, %error, "Blob cleanup will be retried");
-                self.defer_garbage_claim(&claim).await;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    blob_key = claim.blob_key,
-                    "Blob cleanup timed out and will be retried"
-                );
-                self.defer_garbage_claim(&claim).await;
-            }
+            tracing::error!(%error, "Failed to clean up unreferenced blobs for quota");
         }
     }
 
-    async fn defer_garbage_claim(&self, claim: &BlobGarbageEntity) {
-        if let Err(error) = BlobRepository::defer_garbage(
-            claim,
-            FAILED_CLEANUP_RETRY_SECONDS,
-            &mut self.db.pool().into(),
-        )
-        .await
-        {
-            tracing::error!(blob_key = claim.blob_key, %error, "Failed to defer blob cleanup claim");
+    async fn cleanup_batch(
+        &self,
+        quota_user_id: Option<i32>,
+        deadline: Instant,
+    ) -> Result<usize, sqlx::Error> {
+        let batch = async {
+            let mut tx = self.db.pool().begin().await?;
+            let keys =
+                BlobRepository::lock_garbage(CLEANUP_BATCH_SIZE as i64, quota_user_id, &mut tx)
+                    .await?;
+            let count = keys.len();
+            // Only backend I/O runs concurrently; ownership and acknowledgments use this transaction.
+            let results = futures_util::stream::iter(keys)
+                .map(|key| async move {
+                    let deleted = match tokio::time::timeout(
+                        CLEANUP_DELETE_TIMEOUT,
+                        self.opendal.delete_by_key(&key),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => true,
+                        Ok(Err(error)) => {
+                            tracing::warn!(blob_key = key, %error, "Blob cleanup will be retried");
+                            false
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                blob_key = key,
+                                "Blob cleanup timed out and will be retried"
+                            );
+                            false
+                        }
+                    };
+                    (key, deleted)
+                })
+                .buffer_unordered(CLEANUP_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            for (key, deleted) in results {
+                if deleted {
+                    BlobRepository::finish_garbage(&key, &mut tx).await?;
+                } else {
+                    BlobRepository::defer_garbage(&key, FAILED_CLEANUP_RETRY_SECONDS, &mut tx)
+                        .await?;
+                }
+            }
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(count)
+        };
+        match tokio::time::timeout_at(deadline, batch).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!("Blob cleanup reached its time budget");
+                Ok(0)
+            }
         }
     }
 }

@@ -293,8 +293,9 @@ paths:
       GET/PUT/DELETE shown here, this route supports HEAD, PROPFIND, and
       non-overwriting COPY/MOVE. Empty collections are not persisted, so MKCOL
       returns 501 and COPY/MOVE require an absent destination. Conditional
-      mutations and WebDAV locks are not supported. The route does not advertise
-      full WebDAV compliance.
+      mutations and WebDAV locks are not supported. PUT replaces the complete file;
+      PATCH and ranged or append uploads are not supported. The route does not
+      advertise full WebDAV compliance.
     get:
       tags:
       - Admin
@@ -327,12 +328,14 @@ paths:
         required: true
         schema:
           type: string
-      - name: Content-Range
+      - name: X-Expected-Entity-Length
         in: header
         required: false
-        description: Optional byte range for an Apache-style partial update
+        description: Expected full body length, including when using chunked transfer encoding
         schema:
-          type: string
+          type: integer
+          format: int64
+          minimum: 0
       requestBody:
         content:
           application/octet-stream:
@@ -353,52 +356,7 @@ paths:
         '507':
           description: Storage quota exceeded
         '501':
-          description: Conditional WebDAV mutations are not supported
-    patch:
-      tags:
-      - Admin
-      summary: WebDAV-style partial file update
-      operationId: adminDavPatch
-      security:
-      - adminBasicAuth: []
-      parameters:
-      - name: path
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: X-Update-Range
-        in: header
-        required: true
-        description: Byte range for the SabreDAV-style partial update
-        schema:
-          type: string
-      requestBody:
-        required: true
-        content:
-          application/x-sabredav-partialupdate:
-            schema:
-              type: string
-              format: binary
-      responses:
-        '201':
-          description: File created
-        '204':
-          description: File updated
-        '400':
-          description: Missing or malformed update range, or body length mismatch
-        '401':
-          description: Unauthorized
-        '411':
-          description: Content-Length is required
-        '415':
-          description: Content-Type must be application/x-sabredav-partialupdate
-        '416':
-          description: Update range is not satisfiable
-        '507':
-          description: Storage quota exceeded
-        '501':
-          description: Conditional WebDAV mutations are not supported
+          description: Conditional mutations and partial uploads are not supported
     delete:
       tags:
       - Admin

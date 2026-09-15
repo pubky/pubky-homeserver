@@ -9,7 +9,10 @@ use super::routes::{
     generate_signup_token, info, root, signup_tokens, user_quota,
 };
 use super::trace::with_trace_layer;
-use super::{app_state::AppState, auth_middleware::AdminAuthLayer};
+use super::{
+    app_state::{AppState, DAV_METHODS},
+    auth_middleware::AdminAuthLayer,
+};
 use crate::AppContext;
 #[cfg(any(test, feature = "testing"))]
 use crate::MockDataDir;
@@ -84,9 +87,8 @@ async fn normalize_dav_headers(request: Request, next: Next) -> Response {
     if is_dav_options {
         response.headers_mut().insert(
             header::ALLOW,
-            HeaderValue::from_static(
-                "HEAD, GET, PUT, PATCH, OPTIONS, PROPFIND, COPY, MOVE, DELETE",
-            ),
+            HeaderValue::from_str(&DAV_METHODS.join(", "))
+                .expect("DAV method names are valid header values"),
         );
     }
     response
@@ -713,8 +715,9 @@ mod tests {
         assert!(!response.headers().contains_key("DAV"));
         assert!(!response.headers().contains_key("MS-Author-Via"));
         let allow = response.headers().get("Allow").unwrap().to_str().unwrap();
-        for unsupported in ["MKCOL", "LOCK", "UNLOCK", "PROPPATCH"] {
-            assert!(!allow.split(',').any(|method| method == unsupported));
+        assert_eq!(allow, DAV_METHODS.join(", "));
+        for unsupported in ["PATCH", "MKCOL", "LOCK", "UNLOCK", "PROPPATCH"] {
+            assert!(!allow.split(',').any(|method| method.trim() == unsupported));
         }
 
         server
@@ -790,6 +793,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_dav_put_get_delete_file() {
+        use crate::shared::webdav::{EntryPath, StoragePath};
         use pubky_common::crypto::Keypair;
 
         let context = AppContext::test().await;
@@ -812,6 +816,18 @@ mod tests {
             .expect_success()
             .await;
         response.assert_status(axum::http::StatusCode::CREATED);
+        assert_eq!(response.headers().get(header::CONTENT_LENGTH).unwrap(), "0");
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+        let created_etag = response.headers().get(header::ETAG).unwrap().clone();
+        let created_modified = response
+            .headers()
+            .get(header::LAST_MODIFIED)
+            .unwrap()
+            .clone();
+        assert!(!response.headers().contains_key(header::CONNECTION));
 
         // GET it back
         let response = server
@@ -821,6 +837,11 @@ mod tests {
             .await;
         response.assert_status_ok();
         assert_eq!(response.as_bytes().as_ref(), file_content);
+        assert_eq!(response.headers().get(header::ETAG).unwrap(), &created_etag);
+        assert_eq!(
+            response.headers().get(header::LAST_MODIFIED).unwrap(),
+            &created_modified
+        );
 
         // Replacing a file with shorter content must truncate the old bytes.
         let replacement = b"short";
@@ -831,6 +852,14 @@ mod tests {
             .expect_success()
             .await;
         response.assert_status(axum::http::StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+        let replacement_etag = response.headers().get(header::ETAG).unwrap().clone();
+        assert_ne!(replacement_etag, created_etag);
+        assert!(response.headers().contains_key(header::LAST_MODIFIED));
+        assert!(!response.headers().contains_key(header::CONNECTION));
         let response = server
             .get(&file_url)
             .add_header("Authorization", auth_value.as_str())
@@ -838,6 +867,10 @@ mod tests {
             .await;
         response.assert_status_ok();
         assert_eq!(response.as_bytes().as_ref(), replacement);
+        assert_eq!(
+            response.headers().get(header::ETAG).unwrap(),
+            &replacement_etag
+        );
 
         let head = server
             .method(Method::HEAD, &file_url)
@@ -879,6 +912,12 @@ mod tests {
             .expect_success()
             .await;
         response.assert_status(axum::http::StatusCode::CREATED);
+        let copy_path = EntryPath::new(pubkey.clone(), StoragePath::new("/pub/copy.txt").unwrap());
+        let copied_entry = context
+            .file_service
+            .get_info(&copy_path, &mut context.sql_db.pool().into())
+            .await
+            .unwrap();
         let response = server
             .method(Method::from_bytes(b"MOVE").unwrap(), &copy_url)
             .add_header("Authorization", auth_value.as_str())
@@ -886,6 +925,16 @@ mod tests {
             .expect_success()
             .await;
         response.assert_status(axum::http::StatusCode::CREATED);
+        let moved_path =
+            EntryPath::new(pubkey.clone(), StoragePath::new("/pub/moved.txt").unwrap());
+        let moved_entry = context
+            .file_service
+            .get_info(&moved_path, &mut context.sql_db.pool().into())
+            .await
+            .unwrap();
+        assert_eq!(moved_entry.id, copied_entry.id);
+        assert_eq!(moved_entry.created_at, copied_entry.created_at);
+        assert_eq!(moved_entry.blob_key, copied_entry.blob_key);
         let response = server
             .get(&moved_url)
             .add_header("Authorization", auth_value.as_str())
@@ -1041,10 +1090,12 @@ mod tests {
             user.used_bytes,
             2 * (b"nested".len() as u64 + crate::services::user_service::FILE_METADATA_SIZE)
         );
-        let garbage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_garbage")
-            .fetch_one(context.sql_db.pool())
-            .await
-            .unwrap();
+        let garbage: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM unreferenced_blobs WHERE state != 'uploading'",
+        )
+        .fetch_one(context.sql_db.pool())
+        .await
+        .unwrap();
         assert_eq!(garbage, 1);
 
         server

@@ -107,19 +107,11 @@ pub async fn put(
     let converted_stream =
         body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
-    if let Some(content_length) = content_length {
-        state
-            .context
-            .file_service
-            .write_stream_with_size_hint(&entry_path, converted_stream, content_length)
-            .await?;
-    } else {
-        state
-            .context
-            .file_service
-            .write_stream(&entry_path, converted_stream)
-            .await?;
-    }
+    state
+        .context
+        .file_service
+        .write_stream(&entry_path, converted_stream, content_length)
+        .await?;
     Ok((StatusCode::CREATED, ()))
 }
 

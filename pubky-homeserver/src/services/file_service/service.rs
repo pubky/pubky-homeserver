@@ -1,7 +1,7 @@
 use crate::{
     persistence::{
         files::{events::EventsService, FileIoError, OpendalService},
-        sql::{entities::blob::BlobRepository, entry::EntryEntity, SqlDb},
+        sql::{entry::EntryEntity, SqlDb},
     },
     services::user_service::UserService,
     ConfigToml,
@@ -46,22 +46,22 @@ impl FileService {
         }
     }
 
-    pub async fn new_from_config(
+    pub fn new_from_config(
         config: &ConfigToml,
         data_directory: &Path,
+        server_key: &pubky_common::crypto::PublicKey,
         db: SqlDb,
         events_service: EventsService,
         user_service: crate::services::user_service::UserService,
     ) -> Result<Self, FileIoError> {
         let opendal_service = OpendalService::new_from_config(&config.storage, data_directory)?;
-        let namespace = BlobRepository::storage_namespace(&mut db.pool().into()).await?;
         Ok(Self::new(
             opendal_service,
             db,
             events_service,
             user_service,
             config.storage.default_quota_mb,
-            format!("__pubky/blobs/{namespace}/"),
+            format!("__pubky/blobs/{}/", server_key.z32()),
         ))
     }
 
@@ -104,7 +104,7 @@ impl FileService {
     /// Write a complete file through the streamed storage path.
     pub async fn write(&self, path: &EntryPath, data: Buffer) -> Result<EntryEntity, FileIoError> {
         let stream = futures_util::stream::iter(vec![Ok(Bytes::from(data.to_vec()))]);
-        let entry = self.write_stream(path, stream).await?;
+        let entry = self.write_stream(path, stream, None).await?;
         Ok(entry)
     }
 }

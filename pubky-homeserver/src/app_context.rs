@@ -184,11 +184,11 @@ impl AppContext {
         let file_service = FileService::new_from_config(
             &conf,
             dir.path(),
+            &keypair.public_key(),
             sql_db.clone(),
             events_service.clone(),
             user_service.clone(),
         )
-        .await
         .map_err(AppContextConversionError::Storage)?;
         file_service
             .recover_blob_storage()
