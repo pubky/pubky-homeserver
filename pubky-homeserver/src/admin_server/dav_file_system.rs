@@ -50,6 +50,9 @@ impl AdminDavFileSystem {
     }
 
     pub(crate) fn file_entry_path(path: &DavPath) -> Result<EntryPath, FsError> {
+        if path.as_bytes().ends_with(b"/") {
+            return Err(FsError::NotImplemented);
+        }
         let entry_path = Self::entry_path(path)?;
         if entry_path.path().is_file() {
             Ok(entry_path)
@@ -298,33 +301,19 @@ impl DavFileSystem for AdminDavFileSystem {
 
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let from = Self::entry_path(from)?;
-            let to = Self::entry_path(to)?;
-            match self
-                .file_service
-                .get_info(&from, &mut self.file_service.db.pool().into())
-                .await
-            {
-                Ok(_) => self
-                    .file_service
-                    .admin_rename(&from, &to)
+            if from.as_bytes().ends_with(b"/") {
+                self.file_service
+                    .admin_rename_directory(
+                        &Self::directory_entry_path(from)?,
+                        &Self::directory_entry_path(to)?,
+                    )
                     .await
-                    .map_err(map_file_error),
-                Err(FileIoError::NotFound) => {
-                    if !self
-                        .file_service
-                        .contains_directory(&from)
-                        .await
-                        .map_err(map_file_error)?
-                    {
-                        return Err(FsError::NotFound);
-                    }
-                    self.file_service
-                        .admin_rename_directory(&from, &to)
-                        .await
-                        .map_err(map_file_error)
-                }
-                Err(error) => Err(map_file_error(error)),
+                    .map_err(map_file_error)
+            } else {
+                self.file_service
+                    .admin_rename(&Self::file_entry_path(from)?, &Self::file_entry_path(to)?)
+                    .await
+                    .map_err(map_file_error)
             }
         }
         .boxed()

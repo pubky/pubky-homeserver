@@ -3,7 +3,6 @@
 //! Empty collections are not persisted, and COPY/MOVE require an absent destination because
 //! `dav-server` removes overwrite destinations before invoking the filesystem callback.
 //! It is protected by a basic auth header with the username "admin" and the password set in the config.toml file.
-//! The password is set in the config.toml file.
 use super::super::app_state::AppState;
 use crate::admin_server::dav_file_system::{AdminDavFileSystem, AdminDavMetadata};
 use crate::persistence::files::{FileIoError, WriteStreamError};
@@ -66,8 +65,10 @@ pub async fn dav_handler(
                 .body(Body::from("User collections cannot be overwritten"))
                 .expect("This response should always be valid"));
         }
+        let depth_zero_copy = method == Some(DavMethod::Copy)
+            && req.headers().get("Depth").is_some_and(|depth| depth == "0");
         if let Some(status) =
-            unsupported_collection_source_status(&state, req.uri().clone()).await?
+            unsupported_collection_source_status(&state, req.uri().clone(), depth_zero_copy).await?
         {
             return Ok(Response::builder()
                 .status(status)
@@ -249,12 +250,21 @@ fn normalize_dav_status(method: Option<DavMethod>, status: StatusCode) -> Status
 async fn unsupported_collection_source_status(
     state: &AppState,
     uri: Uri,
+    depth_zero_copy: bool,
 ) -> Result<Option<StatusCode>, crate::persistence::files::FileIoError> {
     let Ok(mut path) = DavPath::new(uri.path()) else {
         return Ok(None);
     };
     if path.set_prefix("/dav").is_err() {
         return Ok(None);
+    }
+    if depth_zero_copy
+        && AdminDavFileSystem::new(state.context.file_service.clone())
+            .metadata_for_path(&path)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Ok(Some(StatusCode::NOT_IMPLEMENTED));
     }
     let Ok(entry_path) = AdminDavFileSystem::directory_entry_path(&path) else {
         return Ok(None);

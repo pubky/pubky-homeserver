@@ -521,6 +521,28 @@ async fn assert_abandoned_upload_cleanup(context: &AppContext, file_service: &Fi
 
 #[tokio::test]
 #[pubky_test_utils::test]
+async fn test_recovery_releases_upload_without_backend_directory() {
+    let context = filesystem_context().await;
+    let file_service = &context.file_service;
+    let blob_key = format!("{}unstarted", file_service.blob_prefix);
+    BlobRepository::stage_upload(&blob_key, 1, 6, &mut context.sql_db.pool().into())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE unreferenced_blobs SET eligible_at = statement_timestamp()")
+        .execute(context.sql_db.pool())
+        .await
+        .unwrap();
+
+    file_service.recover_blob_storage().await.unwrap();
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unreferenced_blobs")
+        .fetch_one(context.sql_db.pool())
+        .await
+        .unwrap();
+    assert_eq!(pending, 0);
+}
+
+#[tokio::test]
+#[pubky_test_utils::test]
 async fn test_recovery_removes_stale_uploaded_blob() {
     let context = filesystem_context().await;
     let file_service = FileService::new_from_context(&context).unwrap();
@@ -1783,6 +1805,45 @@ async fn test_admin_rename_across_users_updates_accounting_and_events() {
             ),
         ]
     );
+}
+
+#[tokio::test]
+#[pubky_test_utils::test]
+async fn test_admin_directory_renames_do_not_merge() {
+    let context = AppContext::test().await;
+    let file_service = &context.file_service;
+    let pubkey = pubky_common::crypto::Keypair::random().public_key();
+    context.user_service.create(&pubkey).await.unwrap();
+    let path = |value| EntryPath::new(pubkey.clone(), StoragePath::new(value).unwrap());
+    let first = path("/pub/first");
+    let second = path("/pub/second");
+    let destination = path("/pub/destination");
+    let first_child = path("/pub/first/a");
+    let second_child = path("/pub/second/b");
+    for child in [&first_child, &second_child] {
+        file_service
+            .write(child, Buffer::from(b"contents".to_vec()))
+            .await
+            .unwrap();
+    }
+
+    let (first_result, second_result) = tokio::join!(
+        file_service.admin_rename_directory(&first, &destination),
+        file_service.admin_rename_directory(&second, &destination),
+    );
+    let (loser, source, moved) = if first_result.is_ok() {
+        (second_result, second_child, path("/pub/destination/a"))
+    } else {
+        second_result.unwrap();
+        (first_result, first_child, path("/pub/destination/b"))
+    };
+    assert!(matches!(loser, Err(FileIoError::PathCollision)));
+    for entry in [source, moved] {
+        assert_eq!(
+            file_service.get(&entry).await.unwrap().as_ref(),
+            b"contents"
+        );
+    }
 }
 
 #[tokio::test]

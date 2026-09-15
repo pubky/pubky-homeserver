@@ -291,8 +291,8 @@ paths:
     description: |
       Database-backed WebDAV-style view of logical homeserver files. In addition to
       GET/PUT/DELETE shown here, this route supports HEAD, PROPFIND, and
-      non-overwriting COPY/MOVE. Empty collections are not persisted, so MKCOL
-      returns 501 and COPY/MOVE require an absent destination. Conditional
+      non-overwriting COPY/MOVE. Empty collections are not persisted, so MKCOL and
+      depth-zero collection COPY return 501. COPY/MOVE require an absent destination. Conditional
       mutations and WebDAV locks are not supported. PUT replaces the complete file;
       PATCH and ranged or append uploads are not supported. The route does not
       advertise full WebDAV compliance.

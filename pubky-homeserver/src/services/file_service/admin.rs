@@ -214,6 +214,9 @@ impl FileService {
             if entries.is_empty() {
                 return Err(FileIoError::NotFound);
             }
+            if EntryRepository::contains_directory(to, &mut executor).await? {
+                return Err(FileIoError::PathCollision);
+            }
             match EntryRepository::get_by_path(to, &mut executor).await {
                 Ok(_) => return Err(FileIoError::PathCollision),
                 Err(sqlx::Error::RowNotFound) => {}

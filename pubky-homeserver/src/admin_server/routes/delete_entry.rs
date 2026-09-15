@@ -73,11 +73,11 @@ mod tests {
         EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
             .await
             .expect_err("Should be deleted");
-        // Verify the blob is also gone from the storage backend
+        // The deleted file is no longer readable through its logical path.
         file_service
             .get(&entry_path)
             .await
-            .expect_err("Blob should be deleted from storage");
+            .expect_err("Deleted file should not be readable");
         let events = EventRepository::get_by_cursor(
             None,
             Some(10),

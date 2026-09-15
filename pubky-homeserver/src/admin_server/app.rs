@@ -497,7 +497,7 @@ mod tests {
         context.user_service.create(&source_key).await.unwrap();
         context.user_service.create(&destination_key).await.unwrap();
         let source = format!("/dav/{}", source_key.z32());
-        let destination = format!("/dav/{}/pub/copied/", destination_key.z32());
+        let destination = format!("/dav/{}/copied/", destination_key.z32());
 
         server
             .method(Method::from_bytes(b"COPY").unwrap(), &source)
@@ -506,6 +506,27 @@ mod tests {
             .expect_failure()
             .await
             .assert_status(axum::http::StatusCode::CONFLICT);
+
+        server
+            .put(&format!("{source}/pub/file"))
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"file".to_vec().into())
+            .expect_success()
+            .await;
+        server
+            .method(Method::from_bytes(b"COPY").unwrap(), &source)
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", &destination)
+            .add_header("Depth", "0")
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_IMPLEMENTED);
+        server
+            .get(&destination)
+            .add_header("Authorization", auth_value.as_str())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -551,6 +572,13 @@ mod tests {
             .bytes(b"parent".to_vec().into())
             .expect_success()
             .await;
+        server
+            .put(&format!("{parent}/"))
+            .add_header("Authorization", auth_value.as_str())
+            .bytes(b"replacement".to_vec().into())
+            .expect_failure()
+            .await
+            .assert_status(axum::http::StatusCode::NOT_IMPLEMENTED);
         assert_eq!(
             server
                 .get(&parent)
@@ -648,12 +676,35 @@ mod tests {
             );
         }
 
+        let moved_child = format!("{source}moved/child.txt");
+        server
+            .method(Method::from_bytes(b"MOVE").unwrap(), &format!("{source}x/"))
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", format!("{source}moved/"))
+            .expect_success()
+            .await;
+        for (path, contents) in [
+            (&source_file, b"file".as_slice()),
+            (&moved_child, b"child".as_slice()),
+        ] {
+            assert_eq!(
+                server
+                    .get(path)
+                    .add_header("Authorization", auth_value.as_str())
+                    .expect_success()
+                    .await
+                    .as_bytes()
+                    .as_ref(),
+                contents
+            );
+        }
+
         server
             .delete(&source)
             .add_header("Authorization", auth_value.as_str())
             .expect_success()
             .await;
-        for path in [&source_file, &source_child] {
+        for path in [&source_file, &source_child, &moved_child] {
             server
                 .get(path)
                 .add_header("Authorization", auth_value.as_str())

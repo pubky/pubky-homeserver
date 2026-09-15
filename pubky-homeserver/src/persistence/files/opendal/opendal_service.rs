@@ -71,7 +71,11 @@ fn build_backend_operator(
 fn sync_directory_tree(root: &Path, leaf: &Path) -> Result<(), std::io::Error> {
     let mut current = leaf.to_path_buf();
     loop {
-        sync_directory(&current)?;
+        match sync_directory(&current) {
+            // An interrupted upload may not have created its directory yet.
+            Err(error) if current != root && error.kind() == std::io::ErrorKind::NotFound => {}
+            result => result?,
+        }
         if current == root {
             break;
         }
@@ -96,8 +100,10 @@ fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
     use std::os::windows::fs::OpenOptionsExt;
 
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+    // FlushFileBuffers requires write access even for directory handles.
     std::fs::OpenOptions::new()
         .read(true)
+        .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?
         .sync_all()
