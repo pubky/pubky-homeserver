@@ -125,6 +125,9 @@ impl From<FileIoError> for HttpError {
             FileIoError::PathCollision => {
                 Self::new_with_message(StatusCode::CONFLICT, "File/folder path collision")
             }
+            FileIoError::PreconditionFailed => {
+                Self::new_with_message(StatusCode::PRECONDITION_FAILED, "Write precondition failed")
+            }
             FileIoError::StreamBroken(_) => Self::bad_request("Stream broken"),
             e => Self::internal_server_and_log(format!("FileIoError: {}", e)),
         }

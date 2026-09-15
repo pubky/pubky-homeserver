@@ -19,12 +19,15 @@ pub enum FileIoError {
     PathCollision,
     #[error("Upload exceeded its publication window")]
     UploadExpired,
+    #[error("Write precondition failed")]
+    PreconditionFailed,
 }
 
 impl From<opendal::Error> for FileIoError {
     fn from(e: opendal::Error) -> Self {
         match e.kind() {
             opendal::ErrorKind::NotFound => FileIoError::NotFound,
+            opendal::ErrorKind::ConditionNotMatch => FileIoError::PreconditionFailed,
             _ => FileIoError::OpenDAL(e),
         }
     }
