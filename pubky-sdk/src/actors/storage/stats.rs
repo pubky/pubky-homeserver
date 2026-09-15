@@ -63,13 +63,7 @@ impl ResourceStats {
 fn clean_etag(raw: &str) -> String {
     let s = raw.trim();
 
-    // Preserve the wire form so an opaque strong value beginning with `W/`
-    // cannot be confused with a weak validator.
-    if s.starts_with("W/\"") && s.ends_with('"') && s.len() >= 4 {
-        return s.to_string();
-    }
-
-    // Strong: "abc" -> abc
+    // Unquote strong tags; preserve weak tags' wire form to distinguish them.
     if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
         return s[1..s.len() - 1].to_string();
     }

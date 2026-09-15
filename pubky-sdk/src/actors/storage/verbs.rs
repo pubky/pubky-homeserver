@@ -199,10 +199,9 @@ impl SessionStorage {
 }
 
 fn strong_etag_header_value(etag: &str) -> Result<HeaderValue> {
-    if (etag.starts_with("W/\"") && etag.ends_with('"'))
-        || !etag
-            .bytes()
-            .all(|byte| byte == b'!' || (b'#'..=b'~').contains(&byte))
+    if !etag
+        .bytes()
+        .all(|byte| byte == b'!' || (b'#'..=b'~').contains(&byte))
     {
         return Err(RequestError::Validation {
             message: "ETag must be an ASCII strong validator".into(),

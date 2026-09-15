@@ -1,4 +1,58 @@
 use super::*;
+use pubky_testnet::pubky::{PubkyResource, ResourcePath};
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn list_encoded_directory_paths() {
+    let testnet = build_full_testnet().await;
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let session = signer
+        .signup_cookie(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let storage = session.storage();
+
+    for directory in ["a b", "100%", "literal%20", "caf\u{e9}"] {
+        let path = format!("/pub/{directory}/");
+        for name in ["a.txt", "b.txt"] {
+            storage.put(format!("{path}{name}"), vec![1]).await.unwrap();
+        }
+        let first = storage
+            .list(&path)
+            .unwrap()
+            .reverse(true)
+            .shallow(true)
+            .limit(1)
+            .send()
+            .await
+            .unwrap();
+        let expected = PubkyResource::new(session.public_key(), format!("{path}b.txt")).unwrap();
+        assert_eq!(first, vec![expected]);
+        let next = storage
+            .list(ResourcePath::parse(&path).unwrap())
+            .unwrap()
+            .reverse(true)
+            .shallow(true)
+            .cursor(&first[0].to_pubky_url())
+            .send()
+            .await
+            .unwrap();
+        let expected = PubkyResource::new(session.public_key(), format!("{path}a.txt")).unwrap();
+        assert_eq!(next, vec![expected]);
+        let public_next = pubky
+            .public_storage()
+            .list((session.public_key(), path.as_str()))
+            .unwrap()
+            .reverse(true)
+            .shallow(true)
+            .cursor(&format!("{}{path}b.txt", session.public_key().z32()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(public_next, next);
+    }
+}
 
 #[tokio::test]
 #[pubky_testnet::test]

@@ -8,7 +8,6 @@ use crate::{
 };
 use axum::http::{header, HeaderMap, HeaderValue};
 use futures_lite::StreamExt;
-use std::sync::Arc;
 use tokio::sync::Barrier;
 
 use super::*;
@@ -94,31 +93,24 @@ async fn race_preconditioned_commits(
     second_blob: (&str, FileMetadata),
     preconditions: WritePreconditions,
 ) -> [Result<(EntryEntity, WriteOutcome), CommitWriteError>; 2] {
-    let barrier = Arc::new(Barrier::new(2));
-    let first_service = service.clone();
-    let first_path = path.clone();
-    let first_barrier = barrier.clone();
-    let first_preconditions = preconditions.clone();
-    let first = async move {
-        first_barrier.wait().await;
-        first_service
+    let barrier = Barrier::new(2);
+    let first = async {
+        barrier.wait().await;
+        service
             .commit_write(
-                &first_path,
+                path,
                 first_blob.0,
                 &first_blob.1,
                 WriteMode::Client,
-                &first_preconditions,
+                &preconditions,
             )
             .await
     };
-    let second_service = service.clone();
-    let second_path = path.clone();
-    let second_barrier = barrier.clone();
-    let second = async move {
-        second_barrier.wait().await;
-        second_service
+    let second = async {
+        barrier.wait().await;
+        service
             .commit_write(
-                &second_path,
+                path,
                 second_blob.0,
                 &second_blob.1,
                 WriteMode::Client,

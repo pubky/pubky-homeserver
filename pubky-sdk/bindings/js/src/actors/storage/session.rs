@@ -303,12 +303,7 @@ fn strong_response_etag(etag: &HeaderValue) -> JsResult<String> {
                 "conditional write response contains an invalid strong ETag",
             )
         })?;
-    String::from_utf8(opaque.to_vec()).map_err(|_| {
-        PubkyError::new(
-            PubkyErrorName::InternalError,
-            "conditional write response contains a non-ASCII ETag",
-        )
-    })
+    Ok(String::from_utf8(opaque.to_vec()).expect("validated ASCII ETag is UTF-8"))
 }
 
 fn conditional_write_error(error: pubky::Error) -> PubkyError {

@@ -279,45 +279,14 @@ async fn conditional_puts_prevent_lost_updates() {
 #[tokio::test]
 #[pubky_testnet::test]
 #[allow(deprecated, reason = "E2E tests cover the deprecated cookie flow")]
-async fn storage_rejects_cookie_credential_after_homeserver_change() {
+async fn storage_rejects_credentials_after_homeserver_change() {
     let testnet = build_full_testnet().await;
     let first_homeserver = testnet.homeserver_app().public_key();
     let second_homeserver = Keypair::random().public_key();
     let pubky = testnet.sdk().unwrap();
     let signer = pubky.signer(Keypair::random());
-    let session = signer.signup_cookie(&first_homeserver, None).await.unwrap();
-
-    signer
-        .pkdns()
-        .publish_homeserver_force(Some(&second_homeserver))
-        .await
-        .unwrap();
-
-    let error = session
-        .storage()
-        .put("/pub/app/state.bin", vec![1])
-        .await
-        .expect_err("cookie credentials must remain bound to their issuing homeserver");
-    assert_credential_homeserver_mismatch(error);
-
-    let error = session
-        .storage()
-        .put_if_absent("/pub/app/state.bin", vec![1])
-        .await
-        .expect_err("cookie credentials must remain bound to their issuing homeserver");
-    assert_credential_homeserver_mismatch(error);
-}
-
-#[tokio::test]
-#[pubky_testnet::test]
-async fn storage_rejects_grant_credential_after_homeserver_change() {
-    let testnet = build_full_testnet().await;
-    let first_homeserver = testnet.homeserver_app().public_key();
-    let second_homeserver = Keypair::random().public_key();
-    let pubky = testnet.sdk().unwrap();
-    let signer = pubky.signer(Keypair::random());
-    signer.signup(&first_homeserver, None).await.unwrap();
-    let session = signer
+    let cookie_session = signer.signup_cookie(&first_homeserver, None).await.unwrap();
+    let grant_session = signer
         .signin_blocking(ClientId::new("storage.test").unwrap())
         .await
         .unwrap();
@@ -328,19 +297,30 @@ async fn storage_rejects_grant_credential_after_homeserver_change() {
         .await
         .unwrap();
 
-    let error = session
-        .storage()
-        .put("/pub/app/state.bin", vec![1])
-        .await
-        .expect_err("grant credentials must remain bound to their issuing homeserver");
-    assert_credential_homeserver_mismatch(error);
+    for session in [&cookie_session, &grant_session] {
+        let error = session
+            .storage()
+            .put("/pub/app/state.bin", vec![1])
+            .await
+            .expect_err("credentials must remain bound to their issuing homeserver");
+        assert_credential_homeserver_mismatch(error);
 
-    let error = session
-        .storage()
-        .put_if_absent("/pub/app/state.bin", vec![1])
-        .await
-        .expect_err("grant credentials must remain bound to their issuing homeserver");
-    assert_credential_homeserver_mismatch(error);
+        let error = session
+            .storage()
+            .put_if_absent("/pub/app/state.bin", vec![1])
+            .await
+            .expect_err("credentials must remain bound to their issuing homeserver");
+        assert_credential_homeserver_mismatch(error);
+
+        let error = session
+            .storage()
+            .list("/pub/app/")
+            .unwrap()
+            .send()
+            .await
+            .expect_err("credentials must remain bound to their issuing homeserver");
+        assert_credential_homeserver_mismatch(error);
+    }
 }
 
 #[tokio::test]

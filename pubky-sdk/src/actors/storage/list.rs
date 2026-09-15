@@ -1,3 +1,4 @@
+use percent_encoding::percent_decode_str;
 use reqwest::Method;
 use url::Url;
 
@@ -5,7 +6,7 @@ use super::core::{PublicStorage, SessionStorage, dir_trailing_slash_error};
 use crate::actors::storage::resource::{
     IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath,
 };
-use crate::{Result, cross_log};
+use crate::{Result, cross_log, errors::RequestError};
 
 impl SessionStorage {
     /// Directory listing **as me** (authenticated).
@@ -33,15 +34,12 @@ impl SessionStorage {
     ///
     /// # Errors
     /// - Returns [`crate::errors::RequestError::Validation`] if `path` cannot be converted into an absolute resource path ending with `/`.
-    /// - Propagates transport preparation failures when building the request URL.
     pub fn list<P: IntoResourcePath>(&self, path: P) -> Result<ListBuilder<'_>> {
         let path: ResourcePath = path.into_abs_path()?;
         if !path.as_str().ends_with('/') {
             return Err(dir_trailing_slash_error().into());
         }
-        let resource = PubkyResource::new(self.user.clone(), path.as_str())?;
-        let url = resource.to_transport_url()?;
-        Ok(ListBuilder::session(self, url))
+        Ok(ListBuilder::session(self, path))
     }
 }
 
@@ -69,8 +67,8 @@ impl PublicStorage {
 /// Internal scope for a listing request.
 #[derive(Debug)]
 enum ListScope<'a> {
-    Session(&'a SessionStorage),
-    Public(&'a PublicStorage),
+    Session(&'a SessionStorage, ResourcePath),
+    Public(&'a PublicStorage, Url),
 }
 
 /// Unified builder for homeserver `LIST` queries (works for session & public).
@@ -87,7 +85,6 @@ enum ListScope<'a> {
 #[must_use]
 pub struct ListBuilder<'a> {
     scope: ListScope<'a>,
-    url: Url,
     reverse: bool,
     shallow: bool,
     limit: Option<u16>,
@@ -96,10 +93,9 @@ pub struct ListBuilder<'a> {
 
 impl<'a> ListBuilder<'a> {
     #[inline]
-    const fn new(scope: ListScope<'a>, url: Url) -> Self {
+    const fn new(scope: ListScope<'a>) -> Self {
         Self {
             scope,
-            url,
             reverse: false,
             shallow: false,
             limit: None,
@@ -108,13 +104,13 @@ impl<'a> ListBuilder<'a> {
     }
 
     #[inline]
-    const fn session(storage: &'a SessionStorage, url: Url) -> Self {
-        Self::new(ListScope::Session(storage), url)
+    const fn session(storage: &'a SessionStorage, path: ResourcePath) -> Self {
+        Self::new(ListScope::Session(storage, path))
     }
 
     #[inline]
     const fn public(storage: &'a PublicStorage, url: Url) -> Self {
-        Self::new(ListScope::Public(storage), url)
+        Self::new(ListScope::Public(storage, url))
     }
 
     /// List newest-first instead of oldest-first.
@@ -149,46 +145,46 @@ impl<'a> ListBuilder<'a> {
     ///
     /// # Errors
     /// - Propagates transport failures while issuing the HTTP request.
-    /// - Returns [`crate::errors::RequestError::Validation`] if any resource line returned by the server is invalid.
+    /// - Returns [`crate::errors::RequestError::Validation`] if the session credential belongs to a different homeserver, the cursor URI contains invalid UTF-8, or any resource line returned by the server is invalid.
     pub async fn send(self) -> Result<Vec<PubkyResource>> {
-        // 1) Build query params
-        let mut url = self.url;
+        let (client, rb) = match self.scope {
+            ListScope::Public(storage, url) => (
+                &storage.client,
+                storage.client.cross_request(Method::GET, url).await?,
+            ),
+            ListScope::Session(storage, path) => {
+                (&storage.client, storage.request(Method::GET, path).await?)
+            }
+        };
+        let (http_client, request) = rb.build_split();
+        let mut request = request?;
         {
-            let mut q = url.query_pairs_mut();
+            let mut query = request.url_mut().query_pairs_mut();
             if self.reverse {
-                q.append_key_only("reverse");
+                query.append_key_only("reverse");
             }
             if self.shallow {
-                q.append_key_only("shallow");
+                query.append_key_only("shallow");
             }
             if let Some(limit) = self.limit {
-                q.append_pair("limit", &limit.to_string());
+                query.append_pair("limit", &limit.to_string());
             }
             if let Some(cursor) = self.cursor {
-                q.append_pair("cursor", &cursor);
+                // The homeserver cursor is a decoded owner/path, not a URI.
+                if cursor.starts_with("pubky://") {
+                    let cursor = percent_decode_str(&cursor).decode_utf8().map_err(|_err| {
+                        RequestError::Validation {
+                            message: "cursor URI is not valid UTF-8".into(),
+                        }
+                    })?;
+                    query.append_pair("cursor", &cursor);
+                } else {
+                    query.append_pair("cursor", &cursor);
+                }
             }
         }
 
-        // 2) Build request per scope
-        let (client, rb) = match self.scope {
-            ListScope::Public(storage) => (
-                &storage.client,
-                storage
-                    .client
-                    .cross_request(Method::GET, url.clone())
-                    .await?,
-            ),
-            ListScope::Session(storage) => {
-                let rb = storage
-                    .client
-                    .cross_request(Method::GET, url.clone())
-                    .await?;
-                (&storage.client, storage.attach_credential(rb).await?)
-            }
-        };
-
-        // 3) Send and parse
-        let resp = rb.send().await?;
+        let resp = http_client.execute(request).await?;
         cross_log!(
             debug,
             "Request completed with status {} (LIST {})",
