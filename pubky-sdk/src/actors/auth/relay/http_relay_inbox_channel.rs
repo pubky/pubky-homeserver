@@ -748,7 +748,7 @@ mod tests {
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(GET).path_contains("/inbox/");
+            when.method(GET).path_includes("/inbox/");
             then.status(500).body("Internal Server Error");
         });
 

@@ -68,7 +68,7 @@ futures-lite = { version = "2", default-features = false }
 
 [dev-dependencies]
 pubky-testnet.workspace = true # used in docstring tests
-httpmock = "0.7"
+httpmock = "0.8"
 http-relay = { workspace = true, features = ["server", "link-compat"] }
 
 [package.metadata.docs.rs]
