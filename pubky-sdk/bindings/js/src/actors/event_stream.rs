@@ -115,6 +115,28 @@ impl EventStreamBuilder {
         EventStreamBuilder(self.0.limit(limit))
     }
 
+    /// Set a client-side byte limit per SSE block. Unbounded by default.
+    /// Protects against oversized or unterminated blocks in historical and live streams.
+    /// Counts fields, comments, their line endings and a leading BOM; excludes
+    /// the final blank separator. Resets after each block.
+    /// Overflow cancels the response and errors the ReadableStream.
+    ///
+    /// @param {number} limit - Integer in 1..=4294967295.
+    /// @throws {InvalidInput} If the limit is not a positive 32-bit integer.
+    #[wasm_bindgen(js_name = "maxEventBytes")]
+    pub fn max_event_bytes(self, limit: f64) -> crate::js_error::JsResult<Self> {
+        let limit = serde_wasm_bindgen::from_value::<u32>(JsValue::from_f64(limit))
+            .ok()
+            .filter(|limit| *limit > 0)
+            .ok_or_else(|| {
+                crate::js_error::PubkyError::new(
+                    crate::js_error::PubkyErrorName::InvalidInput,
+                    "maxEventBytes must be an integer in 1..=4294967295",
+                )
+            })?;
+        Ok(EventStreamBuilder(self.0.max_event_bytes(limit as usize)))
+    }
+
     /// Enable live streaming mode.
     ///
     /// When called, the stream will:
