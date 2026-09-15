@@ -92,6 +92,9 @@ type = "file_system"
 # Files are saved in a Google Cloud Bucket.
 # type = "google_bucket"
 # Name of the Google Cloud Bucket. The bucket must exist already.
+# Disable soft delete and Object Versioning so cleanup reclaims physical storage immediately.
+# Configure an AbortIncompleteMultipartUpload lifecycle rule for the __pubky/blobs/ prefix so
+# process crashes cannot leave multipart upload parts stored indefinitely.
 # bucket_name = "my_bucket"
 # Path to the service account file. The content of the service account file can also be added directly in here.
 # This must be absolute/full path.

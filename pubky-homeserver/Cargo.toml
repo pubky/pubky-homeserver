@@ -61,7 +61,6 @@ serde_valid = "2"
 opendal = { version = "0.57", features = ["services-fs"] }
 infer = "0.22"
 mime_guess = "2"
-dav-server-opendalfs = "=0.7.2" # Pinned because higher versions need an MSRV bump
 dav-server = "0.11"
 sea-query = { version = "1", features = ["with-chrono", "postgres-array"] }
 sea-query-sqlx = { version = "0.8", features = [
@@ -96,6 +95,7 @@ async-dropper = { version = "0.3", features = ["tokio", "simple"] }
 axum-test = "21"
 hex = "0.4"
 mainline.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = ["storage-gcs"]

@@ -7,6 +7,7 @@
 mod app;
 mod app_state;
 mod auth_middleware;
+mod dav_file_system;
 mod routes;
 mod trace;
 

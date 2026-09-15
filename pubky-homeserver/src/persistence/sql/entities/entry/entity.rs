@@ -12,6 +12,9 @@ pub struct EntryEntity {
     pub id: i64,
     pub user_id: i32,
     pub path: EntryPath,
+    /// Immutable backend object currently referenced by this logical entry.
+    /// Existing rows use the legacy logical backend path until first rewritten.
+    pub blob_key: Option<String>,
     pub content_hash: pubky_common::crypto::Hash,
     pub content_length: u64,
     pub content_type: String,
@@ -30,6 +33,7 @@ impl FromRow<'_, PgRow> for EntryEntity {
         let path: String = row.try_get(EntryIden::Path.to_string().as_str())?;
         let storage_path = StoragePath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
         let entry_path = EntryPath::new(user_pubkey, storage_path);
+        let blob_key: Option<String> = row.try_get(EntryIden::BlobKey.to_string().as_str())?;
         let content_hash_vec: Vec<u8> = row.try_get(EntryIden::ContentHash.to_string().as_str())?;
 
         // Ensure content_hash is exactly 32 bytes
@@ -47,6 +51,7 @@ impl FromRow<'_, PgRow> for EntryEntity {
             id,
             user_id,
             path: entry_path,
+            blob_key,
             content_hash,
             content_length: content_length as u64,
             content_type,
