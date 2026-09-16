@@ -30,9 +30,8 @@ async fn events_stream_sdk_accepts_maximum_storage_path() {
     let testnet = build_full_testnet().await;
     let (user, session) = signed_in_user(&testnet, "events-max-path.test").await;
     let path = format!(
-        "/pub/{}{}",
-        format!("{}/", "a".repeat(240)).repeat(3),
-        "b".repeat(244)
+        "/pub{}",
+        "/a".repeat((MAX_STORAGE_PATH_TOTAL_LENGTH - 4) / 2)
     );
     assert_eq!(path.len(), MAX_STORAGE_PATH_TOTAL_LENGTH);
     session

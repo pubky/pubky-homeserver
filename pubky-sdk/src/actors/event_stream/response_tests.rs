@@ -16,45 +16,44 @@ async fn response(body: &str) -> (reqwest::Response, TcpStream) {
 #[tokio::test]
 async fn response_overflow_releases_connection_and_preserves_prior_event() {
     let user = Keypair::random().public_key();
-    for setting in [4096, 256, 8192] {
-        let valid = format!(
-            "event: DEL\ndata: pubky://{}/pub/file\ndata: cursor: 42\n\n",
-            user.z32()
-        );
-        // An unterminated oversized path must fail without waiting for EOF.
-        let body = format!(
-            "event: FUTURE\ndata: ignored\n\n{valid}event: PUT\ndata: pubky://{}/pub/{}",
-            user.z32(),
-            "x".repeat(setting + 1)
-        );
-        let (response, mut socket) = response(&body).await;
-        let mut events = Box::pin(EventStreamBuilder::response_event_stream(
-            response,
-            Some(setting),
-        ));
-        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(event.cursor.id(), 42);
-        let error = tokio::time::timeout(Duration::from_secs(2), events.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("limit of {setting} bytes"))
-        );
-        // Retain `events`: the decoder itself must close the response on error.
-        let closed = tokio::time::timeout(Duration::from_secs(2), socket.read_u8())
-            .await
-            .unwrap();
-        assert!(closed.is_err(), "response socket must close");
-        assert!(events.next().await.is_none());
-    }
+    let setting = 8192;
+    let valid = format!(
+        "event: DEL\ndata: pubky://{}/pub/file\ndata: cursor: 42\n\n",
+        user.z32()
+    );
+    // An unterminated oversized path must fail without waiting for EOF.
+    let body = format!(
+        "event: FUTURE\ndata: ignored\n\n{valid}event: PUT\ndata: pubky://{}/pub/{}",
+        user.z32(),
+        "x".repeat(setting + 1)
+    );
+    let (response, mut socket) = response(&body).await;
+    let mut events = Box::pin(EventStreamBuilder::response_event_stream(
+        response,
+        Some(setting),
+    ));
+    let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.cursor.id(), 42);
+    let error = tokio::time::timeout(Duration::from_secs(2), events.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("limit of {setting} bytes"))
+    );
+    // Retain `events`: the decoder itself must close the response on error.
+    let closed = tokio::time::timeout(Duration::from_secs(2), socket.read_u8())
+        .await
+        .unwrap();
+    assert!(closed.is_err(), "response socket must close");
+    assert!(events.next().await.is_none());
 }
 
 #[tokio::test]

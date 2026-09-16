@@ -15,7 +15,6 @@ pub(super) struct Decoder {
     event: Event,
     first_line: bool,
     after_cr: bool,
-    count_lf: bool,
 }
 
 impl Decoder {
@@ -27,7 +26,6 @@ impl Decoder {
             event: Event::default(),
             first_line: true,
             after_cr: false,
-            count_lf: false,
         }
     }
 
@@ -47,7 +45,7 @@ impl Decoder {
 
     fn push(&mut self, byte: u8) -> Result<Option<Event>> {
         if std::mem::take(&mut self.after_cr) && byte == b'\n' {
-            if self.count_lf {
+            if self.block_bytes != 0 {
                 self.count_byte()?;
             }
             return Ok(None);
@@ -67,7 +65,6 @@ impl Decoder {
             };
         let empty = self.line.len() == bom_bytes;
         self.after_cr = byte == b'\r';
-        self.count_lf = !empty;
 
         if empty {
             self.line.clear();
@@ -135,6 +132,7 @@ impl Decoder {
                             }
                         }
                     }
+                    // Release the consumed chunk before waiting for more bytes.
                     drop(chunk.take());
                     match source.next().await {
                         Some(bytes) => {
