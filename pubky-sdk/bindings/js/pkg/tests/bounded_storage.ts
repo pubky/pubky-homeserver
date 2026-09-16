@@ -1,6 +1,6 @@
 import test, { type Test } from "tape";
 import { Client, Keypair, Pubky, PublicKey, type Path } from "../index.js";
-import { assertPubkyError, createSignupToken, getStatusCode } from "./utils.js";
+import { assertPubkyError, createSignupToken, getStatusCode, mockStreamingResponse } from "./utils.js";
 
 const PATH: Path = "/priv/bounded-reader/value";
 const ERROR_PREFIX = "Request failed: Server responded with an error: 500 Internal Server Error - ";
@@ -40,32 +40,18 @@ for (const setting of [undefined, 16, 8192, 0]) {
     const signer = await createSigner(setting);
     const session = await signer.signin("bounded-reader.test");
     await session.storage.exists(PATH);
-    const originalFetch = globalThis.fetch;
     const encoder = new TextEncoder();
     const chunkings = limit === 0
       ? [[]]
       : [["x".repeat(limit + 1)], ["x".repeat(limit), "y"]];
 
     for (const chunks of chunkings) {
-      let cancelled = false;
-      let pulls = 0;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      globalThis.fetch = async (input, init) => {
-        const request = input instanceof Request ? input : new Request(input, init);
-        if (!new URL(request.url).pathname.endsWith(PATH)) return originalFetch(input, init);
-        t.ok(request.headers.has("authorization"), "GET remains authenticated");
-        const body = new ReadableStream<Uint8Array>({
-          pull(controller) {
-            const chunk = chunks[pulls++];
-            if (chunk !== undefined) controller.enqueue(encoder.encode(chunk));
-            // Withhold EOF to catch readers that drain the body.
-          },
-          cancel() { cancelled = true; },
-        }, { highWaterMark: 0 });
-        const response = new Response(body, { status: 500 });
-        Object.defineProperty(response, "url", { value: request.url });
-        return response;
-      };
+      const response = mockStreamingResponse(chunks.map((chunk) => encoder.encode(chunk)), {
+        matches: (request) => new URL(request.url).pathname.endsWith(PATH),
+        response: { status: 500 },
+        onRequest: (request) => t.ok(request.headers.has("authorization"), "GET remains authenticated"),
+      });
 
       try {
         const deadline = new Promise<never>((_, reject) => {
@@ -73,11 +59,11 @@ for (const setting of [undefined, 16, 8192, 0]) {
         });
         await assertServerError(t, Promise.race([session.storage.get(PATH), deadline]), overflowMessage);
         await new Promise((resolve) => setTimeout(resolve, 0));
-        t.ok(cancelled, "error reader releases the stream");
-        if (limit === 0) t.equal(pulls, 0, "zero limit never polls the body");
+        t.ok(response.cancelled, "error reader releases the stream");
+        if (limit === 0) t.equal(response.pulls, 0, "zero limit never polls the body");
       } finally {
         clearTimeout(timer);
-        globalThis.fetch = originalFetch;
+        response.restore();
       }
     }
     t.end();

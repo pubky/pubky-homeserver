@@ -545,7 +545,7 @@ impl EventStreamBuilder {
                     }
                 },
                 Err(e) => {
-                    cross_log!(error, "SSE stream error: {}", e);
+                    cross_log!(error, "{}", e);
                     Some(Err(e))
                 }
             }

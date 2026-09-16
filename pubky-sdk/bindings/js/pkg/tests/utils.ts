@@ -77,6 +77,39 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function mockStreamingResponse(
+  chunks: Uint8Array[],
+  options: {
+    matches: (request: Request) => boolean;
+    response?: ResponseInit;
+    onRequest?: (request: Request) => void;
+  },
+) {
+  const originalFetch = globalThis.fetch;
+  const state = {
+    pulls: 0,
+    cancelled: false,
+    restore() { globalThis.fetch = originalFetch; },
+  };
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (!options.matches(request)) return originalFetch(input, init);
+    options.onRequest?.(request);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[state.pulls++];
+        if (chunk !== undefined) controller.enqueue(chunk);
+        // Withhold EOF to catch readers that wait for the response to close.
+      },
+      cancel() { state.cancelled = true; },
+    }, { highWaterMark: 0 });
+    const response = new Response(body, options.response);
+    Object.defineProperty(response, "url", { value: request.url });
+    return response;
+  };
+  return state;
+}
+
 export function getStatusCode(error: PubkyError): number | undefined {
   if (
     typeof error.data === "object" &&

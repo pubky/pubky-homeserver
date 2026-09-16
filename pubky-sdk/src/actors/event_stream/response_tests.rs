@@ -1,34 +1,16 @@
 use super::*;
-use crate::{Keypair, ResourcePath};
+use crate::{Keypair, ResourcePath, util::tests::serve_response};
 use pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH;
 use std::time::Duration;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
+use tokio::{io::AsyncReadExt, net::TcpStream};
 
 async fn response(body: &str) -> (reqwest::Response, TcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = reqwest::Client::new();
-    let send = client
-        .get(format!("http://{}", listener.local_addr().unwrap()))
-        .send();
-    let serve = async {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        while !request.ends_with(b"\r\n\r\n") {
-            request.push(socket.read_u8().await.unwrap());
-            assert!(request.len() < 16384);
-        }
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
-        socket
-            .write_all(format!("{:x}\r\n{body}\r\n", body.len()).as_bytes())
-            .await
-            .unwrap();
-        socket // Withhold the terminal HTTP chunk to keep the response open.
-    };
-    let (response, socket) = tokio::join!(send, serve);
-    (response.unwrap(), socket)
+    serve_response(
+        200,
+        "Content-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n",
+        format!("{:x}\r\n{body}\r\n", body.len()).as_bytes(),
+    )
+    .await
 }
 
 #[tokio::test]

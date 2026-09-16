@@ -1,9 +1,9 @@
 //! SSE decoding with a byte limit per block.
 
-use std::{fmt::Display, task::Poll};
+use std::fmt::Display;
 
 use eventsource_stream::Event;
-use futures_util::{Stream, StreamExt, future::poll_fn, stream};
+use futures_util::{Stream, StreamExt, stream};
 
 use crate::errors::{RequestError, Result};
 
@@ -130,17 +130,7 @@ impl Decoder {
                             if processed == 64 * 1024 {
                                 // A peer can send unlimited comment-only blocks. Yield
                                 // cooperatively even when the source is always ready.
-                                let mut yielded = false;
-                                poll_fn(|cx| {
-                                    if yielded {
-                                        Poll::Ready(())
-                                    } else {
-                                        yielded = true;
-                                        cx.waker().wake_by_ref();
-                                        Poll::Pending
-                                    }
-                                })
-                                .await;
+                                futures_lite::future::yield_now().await;
                                 processed = 0;
                             }
                         }

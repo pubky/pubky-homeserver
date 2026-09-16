@@ -124,7 +124,8 @@ is independent of `.limit()` (event count) and `max_error_body_bytes`.
 On overflow, the SDK closes the response and yields one validation error, then
 ends the Rust stream or errors the JavaScript `ReadableStream`. It still skips
 malformed Pubky events and unknown event types within the limit. The bounded
-decoder replaces invalid UTF-8 and discards incomplete events at EOF.
+decoder replaces invalid UTF-8 and discards incomplete events at EOF, including
+truncated UTF-8 that the default parser reports as an error.
 
 Parser memory is proportional to the limit, with UTF-8 replacement and URL
 encoding overhead. Transport buffers and events retained by the application are

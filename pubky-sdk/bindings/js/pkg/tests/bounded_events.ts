@@ -1,6 +1,6 @@
 import test from "tape";
-import { Keypair, Pubky, PublicKey } from "../index.js";
-import { assertPubkyError } from "./utils.js";
+import { Keypair, Pubky, PublicKey, type EventStreamBuilder } from "../index.js";
+import { assertPubkyError, mockStreamingResponse } from "./utils.js";
 
 const HOMESERVER = PublicKey.from("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo");
 const USER = Keypair.random().publicKey;
@@ -15,28 +15,10 @@ function event(cursor: number, path = "/pub/café") {
 }
 
 function mockEventResponse(chunks: Uint8Array[]) {
-  const originalFetch = globalThis.fetch;
-  const state = {
-    pulls: 0,
-    cancelled: false,
-    restore() { globalThis.fetch = originalFetch; },
-  };
-  globalThis.fetch = async (input, init) => {
-    const request = input instanceof Request ? input : new Request(input, init);
-    if (new URL(request.url).pathname !== "/events-stream") return originalFetch(input, init);
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        const chunk = chunks[state.pulls++];
-        if (chunk !== undefined) controller.enqueue(chunk);
-        // Withhold EOF to catch readers that wait for the response to close.
-      },
-      cancel() { state.cancelled = true; },
-    }, { highWaterMark: 0 });
-    const response = new Response(body, { headers: { "content-type": "text/event-stream" } });
-    Object.defineProperty(response, "url", { value: request.url });
-    return response;
-  };
-  return state;
+  return mockStreamingResponse(chunks, {
+    matches: (request) => new URL(request.url).pathname === "/events-stream",
+    response: { headers: { "content-type": "text/event-stream" } },
+  });
 }
 
 test("event byte limit rejects invalid JavaScript numbers", (t) => {
@@ -53,6 +35,32 @@ test("event byte limit rejects invalid JavaScript numbers", (t) => {
   for (const limit of [1, 4096, 4294967295]) {
     subscription(sdk, limit).free();
     t.pass(`accepts ${limit}`);
+  }
+  t.end();
+});
+
+test("event stream builders survive rejected options", async (t) => {
+  const sdk = Pubky.testnet();
+  const encoder = new TextEncoder();
+  for (const reject of [
+    (builder: EventStreamBuilder) => builder.maxEventBytes(0),
+    (builder: EventStreamBuilder) => builder.addUsers([[USER.z32(), "invalid"]]),
+  ]) {
+    const builder = subscription(sdk);
+    t.throws(() => reject(builder), "invalid option throws");
+    const response = mockEventResponse([encoder.encode(event(42))]);
+    try {
+      const reader = (await builder.subscribe()).getReader();
+      try {
+        t.equal((await reader.read()).value.cursor, "42", "original builder still subscribes");
+        await reader.cancel();
+        t.ok(response.cancelled, "caller cancellation releases the response");
+      } finally {
+        reader.releaseLock();
+      }
+    } finally {
+      response.restore();
+    }
   }
   t.end();
 });

@@ -41,7 +41,7 @@ impl EventStreamBuilder {
     /// their cursor value is overwritten.
     ///
     /// @param {Array<[string, string | null]>} users - Array of [z32PublicKey, cursor] tuples
-    /// @returns {EventStreamBuilder} - Builder for chaining
+    /// @returns {EventStreamBuilder} - New builder; this builder stays unchanged.
     /// @throws {Error} - If total users would exceed 50 or if any cursor/pubkey is invalid
     ///
     /// @example
@@ -56,7 +56,7 @@ impl EventStreamBuilder {
     ///   .subscribe();
     /// ```
     #[wasm_bindgen(js_name = "addUsers")]
-    pub fn add_users(self, users: js_sys::Array) -> Result<EventStreamBuilder, JsValue> {
+    pub fn add_users(&self, users: js_sys::Array) -> Result<EventStreamBuilder, JsValue> {
         // Parse all users first
         let mut parsed_users: Vec<(pubky::PublicKey, Option<pubky::EventCursor>)> = Vec::new();
 
@@ -96,6 +96,7 @@ impl EventStreamBuilder {
         let user_refs: Vec<_> = parsed_users.iter().map(|(u, c)| (u, *c)).collect();
         let builder = self
             .0
+            .clone()
             .add_users(user_refs)
             .map_err(|e| JsValue::from_str(&format!("Failed to add users: {e}")))?;
 
@@ -120,11 +121,12 @@ impl EventStreamBuilder {
     /// Counts fields, comments, their line endings and a leading BOM; excludes
     /// the final blank separator. Resets after each block.
     /// Overflow cancels the response and errors the ReadableStream.
+    /// Returns a new builder without changing this one.
     ///
     /// @param {number} limit - Integer in 1..=4294967295.
     /// @throws {InvalidInput} If the limit is not a positive 32-bit integer.
     #[wasm_bindgen(js_name = "maxEventBytes")]
-    pub fn max_event_bytes(self, limit: f64) -> crate::js_error::JsResult<Self> {
+    pub fn max_event_bytes(&self, limit: f64) -> crate::js_error::JsResult<Self> {
         let limit = serde_wasm_bindgen::from_value::<u32>(JsValue::from_f64(limit))
             .ok()
             .filter(|limit| *limit > 0)
@@ -134,7 +136,9 @@ impl EventStreamBuilder {
                     "maxEventBytes must be an integer in 1..=4294967295",
                 )
             })?;
-        Ok(EventStreamBuilder(self.0.max_event_bytes(limit as usize)))
+        Ok(EventStreamBuilder(
+            self.0.clone().max_event_bytes(limit as usize),
+        ))
     }
 
     /// Enable live streaming mode.

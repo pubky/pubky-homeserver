@@ -17,7 +17,11 @@ fn client(limit: Option<usize>) -> PubkyHttpClient {
 
 // Keep the server socket alive after returning headers/body. Tests decide when
 // EOF happens, so a response reader cannot pass by waiting for the whole body.
-async fn serve_response(status: u16, framing: &str, body: &[u8]) -> (Response, TcpStream) {
+pub(crate) async fn serve_response(
+    status: u16,
+    framing: &str,
+    body: &[u8],
+) -> (Response, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let client = reqwest::Client::new();
