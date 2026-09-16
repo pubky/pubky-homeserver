@@ -318,6 +318,7 @@ mod conditional_write_tests {
     use crate::app_context::AppContext;
     use crate::client_server::ClientServer;
     use crate::persistence::files::content_hash_etag;
+    use crate::storage_config::StorageConfigToml;
 
     struct Env {
         server: TestServer,
@@ -326,7 +327,10 @@ mod conditional_write_tests {
     }
 
     async fn environment() -> Env {
-        let context = AppContext::test().await;
+        environment_in(AppContext::test().await).await
+    }
+
+    async fn environment_in(context: Arc<AppContext>) -> Env {
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router);
 
@@ -516,6 +520,62 @@ mod conditional_write_tests {
             .assert_status(StatusCode::PRECONDITION_FAILED);
 
         assert_eq!(env.get_body().await, b"v1");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn if_none_match_with_a_tag_writes_only_when_content_differs() {
+        let env = environment().await;
+
+        env.put(b"v1").expect_success().await;
+        let etag_v1 = env.get_etag().await;
+
+        env.put(b"v2")
+            .add_header(header::IF_NONE_MATCH, &etag_v1)
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+        assert_eq!(env.get_body().await, b"v1");
+
+        env.put(b"v2")
+            .add_header(header::IF_NONE_MATCH, "\"other\"")
+            .expect_success()
+            .await
+            .assert_status(StatusCode::CREATED);
+        assert_eq!(env.get_body().await, b"v2");
+    }
+
+    /// A row whose blob is gone (a lost volume, or a restore in progress) is
+    /// never deleted by the server. Over HTTP it answers conditions as if
+    /// nothing were stored, so a create-only write restores it in place.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn a_row_whose_blob_is_missing_counts_as_absent() {
+        let context = AppContext::test_with_config(|config| {
+            config.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
+        let env = environment_in(Arc::clone(&context)).await;
+
+        env.put(b"v1").expect_success().await;
+        let etag_v1 = env.get_etag().await;
+        let blob = context
+            .data_dir
+            .path()
+            .join("data/files")
+            .join(&env.host)
+            .join("pub/foo");
+        std::fs::remove_file(&blob).expect("the blob should be on disk");
+
+        env.put(b"v2")
+            .add_header(header::IF_MATCH, &etag_v1)
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+        env.put(b"v2")
+            .add_header(header::IF_NONE_MATCH, "*")
+            .expect_success()
+            .await
+            .assert_status(StatusCode::CREATED);
+        assert_eq!(env.get_body().await, b"v2");
     }
 
     #[tokio::test]
