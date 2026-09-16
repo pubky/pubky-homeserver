@@ -10,7 +10,7 @@ use std::fmt;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{random_bytes, Keypair};
+use crate::crypto::{random_bytes, Keypair, PublicKey};
 
 /// JWS header `typ` for Grant tokens.
 pub const GRANT_JWS_TYP: &str = "pubky-grant";
@@ -35,7 +35,7 @@ const CLIENT_ID_MAX_LENGTH: usize = 253;
 ///
 /// Returns the canonical compact form `<header>.<payload>.<signature>` so it can
 /// be passed straight into the homeserver's JSON request body or any RFC-7515
-/// JWS verifier (e.g. `jsonwebtoken::decode`).
+/// JWS verifier.
 pub fn sign_jws<T: Serialize>(keypair: &Keypair, typ: &str, claims: &T) -> String {
     let signing_input = jws_signing_input(typ, claims);
     let signature = keypair.sign(signing_input.as_bytes());
@@ -70,7 +70,77 @@ pub fn finish_jws(signing_input: String, signature: impl AsRef<[u8]>) -> String 
     format!("{signing_input}.{signature_b64}")
 }
 
-// ── JWS Decoding ────────────────────────────────────────────────────────────
+// ── JWS Decoding ─────────────────────────────────────────────────────────────
+
+/// Verify and decode an Ed25519 JWS Compact Serialization string.
+///
+/// The protected header must contain `alg: "EdDSA"` and the supplied `typ`.
+/// Claims are deserialized only after the signature has been verified.
+pub fn verify_jws<T: serde::de::DeserializeOwned>(
+    public_key: &PublicKey,
+    expected_type: &str,
+    compact: &str,
+) -> Result<T, VerifyError> {
+    let mut parts = compact.split('.');
+    let (Some(header_b64), Some(payload_b64), Some(signature_b64), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(VerifyError::InvalidFormat(
+            "JWS compact must have 3 dot-separated parts",
+        ));
+    };
+
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(signature_b64)
+        .map_err(|_| VerifyError::InvalidSignature)?;
+    let signature_bytes: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| VerifyError::InvalidSignature)?;
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+    let signing_input = &compact[..header_b64.len() + 1 + payload_b64.len()];
+    public_key
+        .verify(signing_input.as_bytes(), &signature)
+        .map_err(|_| VerifyError::InvalidSignature)?;
+
+    fn header_parameter_present<'de, D>(deserializer: D) -> Result<bool, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(true)
+    }
+
+    #[derive(Deserialize)]
+    struct Header {
+        alg: String,
+        typ: Option<String>,
+        #[serde(default, deserialize_with = "header_parameter_present")]
+        crit: bool,
+        #[serde(default, deserialize_with = "header_parameter_present")]
+        b64: bool,
+    }
+
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(header_b64)
+        .map_err(|_| VerifyError::InvalidFormat("invalid base64url in JWS header"))?;
+    let header: Header = serde_json::from_slice(&header_bytes)
+        .map_err(|_| VerifyError::InvalidFormat("invalid JSON in JWS header"))?;
+    if header.crit || header.b64 {
+        return Err(VerifyError::UnsupportedHeader);
+    }
+    if header.alg != "EdDSA" {
+        return Err(VerifyError::InvalidAlgorithm);
+    }
+    if header.typ.as_deref() != Some(expected_type) {
+        return Err(VerifyError::InvalidHeaderType);
+    }
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|_| VerifyError::InvalidFormat("invalid base64url in JWS payload"))?;
+    serde_json::from_slice(&payload_bytes)
+        .map_err(|error| VerifyError::JsonParse(error.to_string()))
+}
 
 /// Decode a JWS Compact Serialization string's payload WITHOUT signature verification.
 ///
@@ -227,7 +297,35 @@ impl From<ClientId> for String {
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
-/// Errors from JWS decoding and ID parsing.
+/// Errors from verified JWS decoding.
+#[derive(thiserror::Error, Debug)]
+pub enum VerifyError {
+    /// The compact serialization or one of its encoded segments is invalid.
+    #[error("{0}")]
+    InvalidFormat(&'static str),
+
+    /// JSON parsing failed.
+    #[error("JSON parse error: {0}")]
+    JsonParse(String),
+
+    /// The protected JWS header does not select EdDSA.
+    #[error("JWS algorithm must be EdDSA")]
+    InvalidAlgorithm,
+
+    /// The protected JWS header does not contain the expected `typ` value.
+    #[error("unexpected JWS header type")]
+    InvalidHeaderType,
+
+    /// The JWS signature is malformed or does not match the public key.
+    #[error("invalid JWS signature")]
+    InvalidSignature,
+
+    /// The protected JWS header requests unsupported processing semantics.
+    #[error("unsupported JWS header parameter")]
+    UnsupportedHeader,
+}
+
+/// Errors from unverified JWS decoding and ID parsing.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// The input format is invalid.
@@ -376,6 +474,82 @@ mod tests {
         kp.public_key()
             .verify(signing_input.as_bytes(), &signature)
             .expect("signature must verify against the keypair's public key");
+    }
+
+    #[test]
+    fn verify_jws_round_trips_signed_claims() {
+        let keypair = Keypair::random();
+        let claims = serde_json::json!({"sub": "alice"});
+        let compact = sign_jws(&keypair, "pubky-test", &claims);
+
+        let verified: serde_json::Value =
+            verify_jws(&keypair.public_key(), "pubky-test", &compact).unwrap();
+
+        assert_eq!(verified, claims);
+    }
+
+    #[test]
+    fn verify_jws_rejects_wrong_key() {
+        let signer = Keypair::random();
+        let verifier = Keypair::random();
+        let compact = sign_jws(&signer, "pubky-test", &serde_json::json!({}));
+
+        let result =
+            verify_jws::<serde_json::Value>(&verifier.public_key(), "pubky-test", &compact);
+
+        assert!(matches!(result, Err(VerifyError::InvalidSignature)));
+    }
+
+    #[test]
+    fn verify_jws_rejects_wrong_header_type() {
+        let keypair = Keypair::random();
+        let compact = sign_jws(&keypair, "wrong-type", &serde_json::json!({}));
+
+        let result = verify_jws::<serde_json::Value>(&keypair.public_key(), "pubky-test", &compact);
+
+        assert!(matches!(result, Err(VerifyError::InvalidHeaderType)));
+    }
+
+    #[test]
+    fn verify_jws_rejects_non_eddsa_algorithm() {
+        let keypair = Keypair::random();
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"pubky-test"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(b"{}");
+        let signing_input = format!("{header}.{payload}");
+        let signature = keypair.sign(signing_input.as_bytes());
+        let compact = finish_jws(signing_input, signature.to_bytes());
+
+        let result = verify_jws::<serde_json::Value>(&keypair.public_key(), "pubky-test", &compact);
+
+        assert!(matches!(result, Err(VerifyError::InvalidAlgorithm)));
+    }
+
+    #[test]
+    fn verify_jws_rejects_unsupported_critical_header() {
+        let keypair = Keypair::random();
+        let header = URL_SAFE_NO_PAD
+            .encode(br#"{"alg":"EdDSA","typ":"pubky-test","crit":["custom"],"custom":true}"#);
+        let payload = URL_SAFE_NO_PAD.encode(b"{}");
+        let signing_input = format!("{header}.{payload}");
+        let signature = keypair.sign(signing_input.as_bytes());
+        let compact = finish_jws(signing_input, signature.to_bytes());
+
+        let result = verify_jws::<serde_json::Value>(&keypair.public_key(), "pubky-test", &compact);
+
+        assert!(matches!(result, Err(VerifyError::UnsupportedHeader)));
+    }
+
+    #[test]
+    fn verify_jws_rejects_extra_compact_segment() {
+        let keypair = Keypair::random();
+        let compact = format!(
+            "{}.extra",
+            sign_jws(&keypair, "pubky-test", &serde_json::json!({}))
+        );
+
+        let result = verify_jws::<serde_json::Value>(&keypair.public_key(), "pubky-test", &compact);
+
+        assert!(matches!(result, Err(VerifyError::InvalidFormat(_))));
     }
 
     #[test]

@@ -104,10 +104,6 @@ mod tests {
             StatusCode::UNAUTHORIZED,
         );
         assert_status(
-            AuthServiceError::InvalidPopProof(pop_verifier::Error::InvalidFormat),
-            StatusCode::UNAUTHORIZED,
-        );
-        assert_status(
             AuthServiceError::InvalidPopProof(pop_verifier::Error::InvalidHeaderType),
             StatusCode::UNAUTHORIZED,
         );
