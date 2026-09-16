@@ -19,6 +19,8 @@ pub enum FileIoError {
     WritePathForbidden,
     #[error("File/folder path collision")]
     PathCollision,
+    #[error("Write precondition failed")]
+    PreconditionFailed,
 }
 
 impl From<opendal::Error> for FileIoError {
@@ -33,6 +35,7 @@ impl From<opendal::Error> for FileIoError {
                 LayerDomainError::WritePathForbidden => FileIoError::WritePathForbidden,
                 LayerDomainError::DiskSpaceQuotaExceeded => FileIoError::DiskSpaceQuotaExceeded,
                 LayerDomainError::PathCollision => FileIoError::PathCollision,
+                LayerDomainError::PreconditionFailed => FileIoError::PreconditionFailed,
             };
         }
         match e.kind() {

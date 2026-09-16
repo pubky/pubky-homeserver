@@ -44,6 +44,10 @@ A successful response prints `Pubky Homeserver`.
 - Back up the homeserver's state regularly:
   - The keypair at `~/.pubky/secret` — this is the homeserver's identity. If lost, the server cannot be recovered.
   - User data — by default stored in `~/.pubky/data/files` (depends on `storage.type`).
+  - Upload staging — `~/.pubky/data/files-tmp`, a sibling of `data/files`. Uploads
+    are written here and renamed into `data/files` once accepted, so the two must
+    be on the same filesystem. It holds nothing durable and is wiped on every
+    startup; there is no need to back it up.
   - The PostgreSQL database.
 - Change the default admin password in `[admin].admin_password`.
 

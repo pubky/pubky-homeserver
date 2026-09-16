@@ -14,13 +14,15 @@
 mod file;
 mod layer_domain_error;
 mod opendal;
+mod write_preconditions;
 
 pub(crate) mod events;
 pub(crate) mod write_finalization_layer;
 pub(crate) mod write_path_layer;
 
 pub use file::file_io_error::{FileIoError, WriteStreamError};
-pub(crate) use file::file_metadata::{FileMetadata, FileMetadataBuilder};
+pub(crate) use file::file_metadata::{content_hash_etag, FileMetadata, FileMetadataBuilder};
 pub use file::file_service::FileService;
 pub use file::file_stream_type::FileStream;
 pub use opendal::opendal_service::OpendalService;
+pub(crate) use write_preconditions::{if_none_match_matches, WritePreconditions};

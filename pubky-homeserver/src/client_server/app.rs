@@ -327,7 +327,7 @@ mod tests {
         response.assert_header(header::CONTENT_TYPE, "application/json");
         response.assert_header(header::CACHE_CONTROL, "no-store");
         response.assert_json(&serde_json::json!({
-            "features": ["path-addressed-storage"]
+            "features": ["path-addressed-storage", "conditional-writes"]
         }));
     }
 
