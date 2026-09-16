@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::persistence::files::{
-    events::EventsService, layer_domain_error::LayerDomainError, WritePreconditions,
+    events::{EventType, EventsService},
+    layer_domain_error::LayerDomainError,
+    WritePreconditions,
 };
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
 use crate::services::user_service::UserService;
@@ -17,13 +19,20 @@ use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
 /// App-facing operators also reject path collisions; admin operators allow them
 /// so they can repair legacy data.
 ///
-/// Blob storage cannot be part of the database transaction. If the database
-/// update after a write fails, the blob may remain without a matching entry.
-/// If deleting a blob fails after its database update, an unreferenced blob may
-/// remain.
+/// Blob storage cannot be part of the database transaction. A write commits
+/// its database effects only after the blob is published, so a failed commit
+/// or a crash in between leaves the entry row describing the previous
+/// content. Conditional writes and deletes verify the row against the blob
+/// before evaluating their precondition and repair it if needed (see
+/// [`verify`](super::verify)). If deleting a blob fails after its database
+/// update, an unreferenced blob may remain.
 #[derive(Clone)]
 pub struct WriteFinalizationLayer {
-    finalizer: Arc<Finalizer>,
+    user_service: UserService,
+    sql_db: SqlDb,
+    events_service: EventsService,
+    default_storage_mb: Option<u64>,
+    collision_policy: CollisionPolicy,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +62,8 @@ pub(super) struct Finalizer {
     pub(super) events_service: EventsService,
     pub(super) default_storage_mb: Option<u64>,
     pub(super) collision_policy: CollisionPolicy,
+    /// The backend beneath this layer, for verifying blobs against entry rows.
+    pub(super) probe: Accessor,
 }
 
 impl WriteFinalizationLayer {
@@ -64,13 +75,11 @@ impl WriteFinalizationLayer {
         enforce_path_collisions: bool,
     ) -> Self {
         Self {
-            finalizer: Arc::new(Finalizer::new(
-                user_service,
-                sql_db,
-                events_service,
-                default_storage_mb,
-                CollisionPolicy::from_enforcement(enforce_path_collisions),
-            )),
+            user_service,
+            sql_db,
+            events_service,
+            default_storage_mb,
+            collision_policy: CollisionPolicy::from_enforcement(enforce_path_collisions),
         }
     }
 }
@@ -101,6 +110,13 @@ pub(super) fn precondition_failed_error(entry_path: &EntryPath) -> opendal::Erro
     .set_source(LayerDomainError::PreconditionFailed)
 }
 
+/// Whether `error` came from [`precondition_failed_error`].
+pub(super) fn is_precondition_failure(error: &opendal::Error) -> bool {
+    std::error::Error::source(error)
+        .and_then(|source| source.downcast_ref::<LayerDomainError>())
+        .is_some_and(|domain| matches!(domain, LayerDomainError::PreconditionFailed))
+}
+
 /// Rebuild `args` without its entity-tag conditions.
 ///
 /// Conditions are enforced by the finalizer against entry content hashes, so
@@ -108,7 +124,7 @@ pub(super) fn precondition_failed_error(entry_path: &EntryPath) -> opendal::Erro
 /// for backends without native support, and backends with support would
 /// compare them against their own ETags. `OpWrite` has no way to unset them.
 ///
-/// The copied field list is exhaustive for opendal 0.54.1; re-check it when
+/// The copied field list is exhaustive for opendal 0.57.0; re-check it when
 /// bumping the dependency.
 fn strip_preconditions(args: &OpWrite) -> OpWrite {
     let mut stripped = OpWrite::new()
@@ -153,13 +169,23 @@ pub(super) async fn check_no_path_collision(
     Ok(())
 }
 
-impl<A: Access> Layer<A> for WriteFinalizationLayer {
-    type LayeredAccess = WriteFinalizationAccessor<A>;
+/// Layered over the type-erased accessor an `Operator` holds, so the
+/// finalizer can keep a handle to the backend for verifying blobs.
+impl Layer<Accessor> for WriteFinalizationLayer {
+    type LayeredAccess = WriteFinalizationAccessor<Accessor>;
 
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
+    fn layer(&self, inner: Accessor) -> Self::LayeredAccess {
+        let finalizer = Finalizer::new(
+            self.user_service.clone(),
+            self.sql_db.clone(),
+            self.events_service.clone(),
+            self.default_storage_mb,
+            self.collision_policy,
+            inner.clone(),
+        );
         WriteFinalizationAccessor {
             inner: Arc::new(inner),
-            finalizer: self.finalizer.clone(),
+            finalizer: Arc::new(finalizer),
         }
     }
 }
@@ -266,6 +292,7 @@ impl Finalizer {
         events_service: EventsService,
         default_storage_mb: Option<u64>,
         collision_policy: CollisionPolicy,
+        probe: Accessor,
     ) -> Self {
         Self {
             user_service,
@@ -273,6 +300,7 @@ impl Finalizer {
             events_service,
             default_storage_mb,
             collision_policy,
+            probe,
         }
     }
 
@@ -296,9 +324,9 @@ impl Finalizer {
             return Ok(());
         }
 
-        let existing_entry =
+        let current_hash =
             match EntryRepository::get_by_path(entry_path, &mut self.sql_db.pool().into()).await {
-                Ok(entry) => Some(entry),
+                Ok(entry) => self.verified_content_hash(entry).await?,
                 Err(sqlx::Error::RowNotFound) => None,
                 Err(error) => {
                     return Err(unexpected(
@@ -307,12 +335,28 @@ impl Finalizer {
                     ));
                 }
             };
-        if !preconditions.is_satisfied_by(existing_entry.as_ref().map(|entry| &entry.content_hash))
-        {
+        if !preconditions.is_satisfied_by(current_hash.as_ref()) {
             return Err(precondition_failed_error(entry_path));
         }
 
         Ok(())
+    }
+
+    /// Insert an event. Its insert takes a homeserver-wide advisory lock that
+    /// is held until commit, so callers place it as late in a transaction as
+    /// possible and never before a backend operation.
+    pub(super) async fn record_event(
+        &self,
+        user_id: i32,
+        event: EventType,
+        entry_path: &EntryPath,
+        executor: &mut UnifiedExecutor<'_>,
+    ) -> Result<()> {
+        self.events_service
+            .create_event(user_id, event, entry_path, executor)
+            .await
+            .map(|_| ())
+            .map_err(|error| unexpected(format!("Failed to create event for {entry_path}"), error))
     }
 
     pub(super) fn notify_event(&self) {
@@ -324,7 +368,7 @@ impl Finalizer {
 }
 
 #[cfg(test)]
-pub(super) mod test_support {
+pub(crate) mod test_support {
     use pubky_common::crypto::Keypair;
 
     use crate::persistence::files::{
@@ -342,10 +386,11 @@ pub(super) mod test_support {
             EventsService::new(db.clone(), 100),
             None,
             CollisionPolicy::Enforce,
+            get_memory_operator().into_inner(),
         )
     }
 
-    pub(in super::super) fn test_operator(db: &SqlDb) -> opendal::Operator {
+    pub(crate) fn test_operator(db: &SqlDb) -> opendal::Operator {
         get_memory_operator().layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
@@ -373,7 +418,7 @@ pub(super) mod test_support {
         UserService::new(db.clone())
     }
 
-    pub(in super::super) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
+    pub(crate) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
         let pubkey = Keypair::random().public_key();
         let user_service = test_user_service(db);
         user_service.create(&pubkey).await.unwrap();
@@ -388,7 +433,7 @@ pub(super) mod test_support {
         user_service.get(pubkey).await.unwrap().used_bytes
     }
 
-    pub(in super::super) async fn all_events(db: &SqlDb) -> Vec<EventEntity> {
+    pub(crate) async fn all_events(db: &SqlDb) -> Vec<EventEntity> {
         EventRepository::get_by_cursor(
             None,
             Some(9999),
