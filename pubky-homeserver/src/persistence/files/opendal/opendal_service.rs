@@ -47,7 +47,6 @@ pub fn build_storage_operators(
             // be on the same filesystem as the root, and outside it so staged
             // files never show up in listings.
             let staging_dir = data_directory.join("data/files-tmp");
-            sweep_staging_dir(&staging_dir)?;
             let (Some(files_dir), Some(staging_dir)) = (files_dir.to_str(), staging_dir.to_str())
             else {
                 return Err(FileIoError::OpenDAL(opendal::Error::new(
@@ -96,19 +95,6 @@ pub fn build_storage_operators(
         ))
         .layer(WritePathLayer::new(user_service));
     Ok((operator, admin_operator))
-}
-
-/// Remove staged uploads left behind by a previous process.
-///
-/// An upload whose connection drops while the server is running is aborted by
-/// [`AbortOnDrop`]; only a crash mid-upload can leave a file here. Nothing is
-/// in flight while the operators are being built, so everything is stale.
-fn sweep_staging_dir(staging_dir: &Path) -> Result<(), FileIoError> {
-    match std::fs::remove_dir_all(staging_dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(FileIoError::TempFile(error)),
-    }
 }
 
 /// Aborts a backend write if the owning future is dropped before it completes,
@@ -208,30 +194,11 @@ impl OpendalService {
         })
     }
 
-    /// Delete a file if the `If-Match` condition in `preconditions` holds.
-    /// Deleting a non-existing file will NOT return an error unless a condition is set.
-    ///
-    /// The condition travels as OpenDAL's delete `version`, which is the only
-    /// argument a delete op carries; the finalization layer interprets it as an
-    /// `If-Match` list and does not forward it to the backend. This borrows a
-    /// field with a different native meaning: if versioned deletes are ever
-    /// wanted, this channel must be replaced first.
-    pub async fn delete(
-        &self,
-        path: &EntryPath,
-        preconditions: &WritePreconditions,
-    ) -> Result<(), FileIoError> {
+    /// Delete a file. Deleting a non-existing file will NOT return an error.
+    pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
         let operator = self.operator.clone();
         let path = path.as_str().to_string();
-        let if_match = preconditions.if_match_header();
-        spawn_finalization(async move {
-            let mut delete = operator.delete_with(&path);
-            if let Some(if_match) = &if_match {
-                delete = delete.version(if_match);
-            }
-            delete.await
-        })
-        .await?;
+        spawn_finalization(async move { operator.delete(&path).await }).await?;
         Ok(())
     }
 
@@ -478,11 +445,7 @@ mod tests {
         install_slow_event_insert(&db).await;
 
         let request_path = path.clone();
-        let request = tokio::spawn(async move {
-            service
-                .delete(&request_path, &WritePreconditions::default())
-                .await
-        });
+        let request = tokio::spawn(async move { service.delete(&request_path).await });
 
         wait_for_active_query(&db, "%INSERT INTO \"events\"%").await;
         request.abort();
@@ -573,19 +536,6 @@ mod tests {
         panic!("entry {path} was never committed");
     }
 
-    #[test]
-    fn sweep_staging_dir_removes_leftovers_and_tolerates_absence() {
-        let dir = tempfile::tempdir().unwrap();
-        let staging_dir = dir.path().join("files-tmp");
-        std::fs::create_dir_all(&staging_dir).unwrap();
-        std::fs::write(staging_dir.join("stale.tmp"), b"x").unwrap();
-
-        sweep_staging_dir(&staging_dir).unwrap();
-        assert!(!staging_dir.exists());
-
-        sweep_staging_dir(&staging_dir).unwrap();
-    }
-
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_build_storage_operator_from_config_file_system() {
@@ -674,7 +624,7 @@ mod tests {
             );
 
             file_service
-                .delete(&path, &WritePreconditions::default())
+                .delete(&path)
                 .await
                 .expect("Should delete file");
             assert!(
@@ -730,7 +680,7 @@ mod tests {
             );
 
             file_service
-                .delete(&path, &WritePreconditions::default())
+                .delete(&path)
                 .await
                 .expect("Should delete file");
             assert!(

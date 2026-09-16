@@ -483,11 +483,12 @@ mod tests {
         response.assert_status(StatusCode::NOT_MODIFIED);
     }
 
-    /// GET and PUT share one entity-tag parser: weak tags and `*` match on
-    /// reads exactly as they fail `If-None-Match` on writes.
+    /// GET and PUT share one entity-tag parser: a single strong tag or `*`.
+    /// Forms it does not accept (lists, weak tags) fall through to a full
+    /// response on reads, where writes would reject them.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn if_none_match_handles_weak_tags_and_star() {
+    async fn if_none_match_accepts_a_single_strong_tag_or_star() {
         let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
 
         server
@@ -510,10 +511,11 @@ mod tests {
             .to_string();
 
         for (value, expected) in [
-            (format!("W/{etag}"), StatusCode::NOT_MODIFIED),
+            (etag.clone(), StatusCode::NOT_MODIFIED),
             ("*".to_string(), StatusCode::NOT_MODIFIED),
-            (format!("\"other\", {etag}"), StatusCode::NOT_MODIFIED),
             ("\"other\"".to_string(), StatusCode::OK),
+            (format!("W/{etag}"), StatusCode::OK),
+            (format!("\"other\", {etag}"), StatusCode::OK),
             ("unquoted".to_string(), StatusCode::OK),
         ] {
             let response = server

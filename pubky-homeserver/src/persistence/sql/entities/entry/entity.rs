@@ -15,10 +15,6 @@ pub struct EntryEntity {
     pub content_hash: pubky_common::crypto::Hash,
     pub content_length: u64,
     pub content_type: String,
-    /// Identity of the stored blob as the backend reported it when this row
-    /// was committed. `None` for rows written before it was recorded, or on
-    /// backends that report nothing usable. See `write_finalization_layer::verify`.
-    pub blob_fingerprint: Option<String>,
     pub modified_at: sqlx::types::chrono::NaiveDateTime,
     pub created_at: sqlx::types::chrono::NaiveDateTime,
 }
@@ -43,8 +39,6 @@ impl FromRow<'_, PgRow> for EntryEntity {
         let content_hash = pubky_common::crypto::Hash::from_bytes(content_hash);
         let content_length: i64 = row.try_get(EntryIden::ContentLength.to_string().as_str())?;
         let content_type: String = row.try_get(EntryIden::ContentType.to_string().as_str())?;
-        let blob_fingerprint: Option<String> =
-            row.try_get(EntryIden::BlobFingerprint.to_string().as_str())?;
         let modified_at: sqlx::types::chrono::NaiveDateTime =
             row.try_get(EntryIden::ModifiedAt.to_string().as_str())?;
         let created_at: sqlx::types::chrono::NaiveDateTime =
@@ -56,7 +50,6 @@ impl FromRow<'_, PgRow> for EntryEntity {
             content_hash,
             content_length: content_length as u64,
             content_type,
-            blob_fingerprint,
             modified_at,
             created_at,
         })

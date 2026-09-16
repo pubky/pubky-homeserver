@@ -19,9 +19,7 @@ use super::{
         check_no_path_collision, is_precondition_failure, precondition_failed_error, unexpected,
         Finalizer,
     },
-    resolve_storage_max_bytes,
-    verify::blob_fingerprint,
-    would_exceed_limit,
+    resolve_storage_max_bytes, would_exceed_limit,
 };
 
 struct PreparedWrite {
@@ -34,7 +32,6 @@ struct PreparedWrite {
 
 /// Database effects of a write that precede the backend publish.
 struct StagedWrite {
-    entry_id: i64,
     user_id: i32,
     repair_event: Option<EventType>,
 }
@@ -209,8 +206,7 @@ impl Finalizer {
         // 2. Backend publish. From here on a failure leaves the blob
         //    published and the row stale; the next conditional write
         //    repairs that.
-        // 3. Fingerprint of the published blob.
-        // 4. Events, last: their insert takes a homeserver-wide advisory
+        // 3. Events, last: their insert takes a homeserver-wide advisory
         //    lock held until commit, which must not span the publish.
         let staged = match self
             .prepare_write(entry_path, file_metadata, preconditions, executor)
@@ -231,22 +227,6 @@ impl Finalizer {
             }
         };
         let backend_metadata = backend_writer.close().await?;
-
-        // Record the published blob's identity so a later conditional write
-        // can trust this row with a `stat` instead of reading the blob.
-        // Some backends report it on close, others only on `stat`.
-        let fingerprint = match blob_fingerprint(&backend_metadata) {
-            Some(fingerprint) => Some(fingerprint),
-            None => self.stat_blob_fingerprint(entry_path).await?,
-        };
-        EntryRepository::set_blob_fingerprint(staged.entry_id, fingerprint.as_deref(), executor)
-            .await
-            .map_err(|error| {
-                unexpected(
-                    format!("Failed to record blob fingerprint for {entry_path}"),
-                    error,
-                )
-            })?;
 
         if let Some(repair_event) = staged.repair_event {
             self.record_event(staged.user_id, repair_event, entry_path, executor)
@@ -350,26 +330,23 @@ impl Finalizer {
             bytes_delta,
             repair_event,
         } = prepared;
-        let entry_id = match existing_entry {
+        match existing_entry {
             Some(mut entry) => {
                 entry.content_hash = file_metadata.hash;
                 entry.content_length = file_metadata.length as u64;
                 entry.content_type = file_metadata.content_type.clone();
-                EntryRepository::update(&entry, executor)
-                    .await
-                    .map(|()| entry.id)
+                EntryRepository::update(&entry, executor).await
             }
-            None => {
-                EntryRepository::create(
-                    user.id,
-                    entry_path.path(),
-                    &file_metadata.hash,
-                    file_metadata.length as u64,
-                    &file_metadata.content_type,
-                    executor,
-                )
-                .await
-            }
+            None => EntryRepository::create(
+                user.id,
+                entry_path.path(),
+                &file_metadata.hash,
+                file_metadata.length as u64,
+                &file_metadata.content_type,
+                executor,
+            )
+            .await
+            .map(|_| ()),
         }
         .map_err(|error| unexpected(format!("Failed to write entry {}", entry_path), error))?;
         user.used_bytes = user.used_bytes.saturating_add_signed(bytes_delta);
@@ -384,7 +361,6 @@ impl Finalizer {
             })?;
 
         Ok(StagedWrite {
-            entry_id,
             user_id: user.id,
             repair_event,
         })
@@ -456,14 +432,6 @@ mod tests {
         ));
     }
 
-    /// `opendal::Writer` is not `Debug`, so `expect_err` cannot be used on it.
-    fn writer_error(result: Result<opendal::Writer>, context: &str) -> opendal::Error {
-        match result {
-            Ok(_) => panic!("{context}"),
-            Err(error) => error,
-        }
-    }
-
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn if_match_with_current_etag_replaces_content() {
@@ -488,39 +456,10 @@ mod tests {
         assert_eq!(all_events(&db).await.len(), 2);
     }
 
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn stale_if_match_is_rejected_before_any_bytes_are_accepted() {
-        let db = SqlDb::test().await;
-        let operator = test_operator(&db);
-        let pubkey = create_user(&db).await;
-        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
-
-        operator.write(path.as_str(), vec![1; 10]).await.unwrap();
-
-        let error = writer_error(
-            conditional_writer(&operator, &path, &if_match("\"stale\"")).await,
-            "stale If-Match must fail at writer creation",
-        );
-        assert_precondition_failed(error);
-
-        let missing = EntryPath::new(pubkey.clone(), StoragePath::new("/missing.txt").unwrap());
-        let error = writer_error(
-            conditional_writer(&operator, &missing, &if_match("*")).await,
-            "If-Match: * must fail for a missing path",
-        );
-        assert_precondition_failed(error);
-
-        assert_eq!(
-            operator.read(path.as_str()).await.unwrap().to_vec(),
-            vec![1; 10]
-        );
-        assert_eq!(user_usage(&db, &pubkey).await, 10 + FILE_METADATA_SIZE);
-        assert_eq!(all_events(&db).await.len(), 1);
-    }
-
     /// The memory backend advertises no conditional write support, so this
-    /// also proves conditions are stripped before reaching the backend.
+    /// also proves conditions are stripped before reaching the backend. It
+    /// reports no fingerprint either, so the rejection comes at close, from
+    /// the check under the lock, rather than from the preflight.
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn if_none_match_star_creates_only_when_absent() {
@@ -533,10 +472,9 @@ mod tests {
             .await
             .unwrap();
 
-        let error = writer_error(
-            conditional_writer(&operator, &path, &if_none_match("*")).await,
-            "second create-only write must fail",
-        );
+        let error = conditional_write(&operator, &path, vec![2; 20], &if_none_match("*"))
+            .await
+            .expect_err("second create-only write must fail");
         assert_precondition_failed(error);
 
         assert_eq!(

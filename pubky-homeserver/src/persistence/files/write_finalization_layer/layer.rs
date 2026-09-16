@@ -229,9 +229,6 @@ impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A> {
                 )
             })?;
         self.finalizer.collision_preflight(&entry_path).await?;
-        self.finalizer
-            .precondition_preflight(&entry_path, &preconditions)
-            .await?;
         let (rp, writer) = self
             .inner
             .write(entry_path.as_str(), strip_preconditions(&args))
@@ -311,36 +308,6 @@ impl Finalizer {
         }
 
         check_no_path_collision(entry_path, &mut self.sql_db.pool().into()).await
-    }
-
-    /// Reject a write whose precondition already fails before any bytes are
-    /// accepted. The authoritative check runs again under the user lock in
-    /// [`prepare_write`](Finalizer::prepare_write).
-    async fn precondition_preflight(
-        &self,
-        entry_path: &EntryPath,
-        preconditions: &WritePreconditions,
-    ) -> Result<()> {
-        if preconditions.is_empty() {
-            return Ok(());
-        }
-
-        let current_hash =
-            match EntryRepository::get_by_path(entry_path, &mut self.sql_db.pool().into()).await {
-                Ok(entry) => self.verified_content_hash(entry).await?,
-                Err(sqlx::Error::RowNotFound) => None,
-                Err(error) => {
-                    return Err(unexpected(
-                        format!("Failed to load existing entry {entry_path}"),
-                        error,
-                    ));
-                }
-            };
-        if !preconditions.is_satisfied_by(current_hash.as_ref()) {
-            return Err(precondition_failed_error(entry_path));
-        }
-
-        Ok(())
     }
 
     /// Insert an event. Its insert takes a homeserver-wide advisory lock that

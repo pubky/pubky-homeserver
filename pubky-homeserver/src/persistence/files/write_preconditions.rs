@@ -1,9 +1,12 @@
-//! Entity-tag preconditions for storage writes (`If-Match`, `If-None-Match`).
+//! Entity-tag preconditions for storage `PUT` (`If-Match`, `If-None-Match`).
 //!
-//! Semantics follow RFC 9110 §13.1.1 and §13.1.2: `If-Match` uses strong
-//! comparison, `If-None-Match` uses weak comparison, and `If-Match` is
-//! evaluated first. The "current" entity tag of a stored file is its content
-//! hash, see [`content_hash_etag`](super::file::file_metadata::content_hash_etag).
+//! Each header carries a single strong entity tag, or `*`. RFC 9110 also
+//! allows lists and weak tags; those are rejected rather than interpreted, so
+//! a client that sends them gets an error, never a silently unconditional
+//! write. `If-Match` requires the stored content to carry the tag (or to
+//! exist, for `*`); `If-None-Match` requires it not to (or not to exist).
+//! The current entity tag of a stored file is its content hash, see
+//! [`content_hash_etag`](super::file::file_metadata::content_hash_etag).
 
 use axum::http::{header, HeaderMap, HeaderName};
 use pubky_common::crypto::Hash;
@@ -14,29 +17,30 @@ use super::file::file_metadata::content_hash_etag_value;
 ///
 /// Travels from the HTTP route through OpenDAL's `OpWrite::if_match` /
 /// `OpWrite::if_none_match` to the write finalization layer, which enforces it
-/// against the entry table. See [`Self::if_match_header`] for the wire form.
+/// against the stored content. See [`Self::if_match_header`] for the wire form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WritePreconditions {
-    if_match: Option<EntityTagList>,
-    if_none_match: Option<EntityTagList>,
+    if_match: Option<Condition>,
+    if_none_match: Option<Condition>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PreconditionParseError {
-    #[error("invalid If-Match header")]
+    #[error("invalid If-Match header: expected a single strong entity tag or `*`")]
     IfMatch,
-    #[error("invalid If-None-Match header")]
+    #[error("invalid If-None-Match header: expected a single strong entity tag or `*`")]
     IfNoneMatch,
 }
 
 impl WritePreconditions {
-    /// Parse the conditional headers of a request. Missing headers impose no condition.
+    /// Parse the conditional headers of a request. Missing headers impose no
+    /// condition; a header sent more than once is invalid.
     pub fn from_headers(headers: &HeaderMap) -> Result<Self, PreconditionParseError> {
-        let if_match = joined_header(headers, header::IF_MATCH)
+        let if_match = single_header(headers, header::IF_MATCH)
             .map_err(|()| PreconditionParseError::IfMatch)?;
-        let if_none_match = joined_header(headers, header::IF_NONE_MATCH)
+        let if_none_match = single_header(headers, header::IF_NONE_MATCH)
             .map_err(|()| PreconditionParseError::IfNoneMatch)?;
-        Self::parse(if_match.as_deref(), if_none_match.as_deref())
+        Self::parse(if_match, if_none_match)
     }
 
     /// Parse raw header values, as sent on the wire or as forwarded through OpenDAL.
@@ -46,11 +50,11 @@ impl WritePreconditions {
     ) -> Result<Self, PreconditionParseError> {
         Ok(Self {
             if_match: if_match
-                .map(EntityTagList::parse)
+                .map(Condition::parse)
                 .transpose()
                 .map_err(|()| PreconditionParseError::IfMatch)?,
             if_none_match: if_none_match
-                .map(EntityTagList::parse)
+                .map(Condition::parse)
                 .transpose()
                 .map_err(|()| PreconditionParseError::IfNoneMatch)?,
         })
@@ -62,14 +66,12 @@ impl WritePreconditions {
 
     /// Canonical `If-Match` header value, for forwarding through OpenDAL.
     pub fn if_match_header(&self) -> Option<String> {
-        self.if_match.as_ref().map(EntityTagList::to_header_value)
+        self.if_match.as_ref().map(Condition::to_header_value)
     }
 
     /// Canonical `If-None-Match` header value, for forwarding through OpenDAL.
     pub fn if_none_match_header(&self) -> Option<String> {
-        self.if_none_match
-            .as_ref()
-            .map(EntityTagList::to_header_value)
+        self.if_none_match.as_ref().map(Condition::to_header_value)
     }
 
     /// Whether a write may proceed given the content hash of the file currently
@@ -78,126 +80,77 @@ impl WritePreconditions {
         let current = current.map(content_hash_etag_value);
         let current = current.as_deref();
 
-        self.if_match
-            .as_ref()
-            .is_none_or(|list| list.if_match_passes(current))
-            && self
-                .if_none_match
-                .as_ref()
-                .is_none_or(|list| list.if_none_match_passes(current))
+        let if_match_passes = match &self.if_match {
+            None => true,
+            Some(Condition::Any) => current.is_some(),
+            Some(Condition::Tag(tag)) => current == Some(tag.as_str()),
+        };
+        let if_none_match_passes = match &self.if_none_match {
+            None => true,
+            Some(Condition::Any) => current.is_none(),
+            Some(Condition::Tag(tag)) => current != Some(tag.as_str()),
+        };
+        if_match_passes && if_none_match_passes
     }
 }
 
 /// Whether an `If-None-Match` request header matches the stored file, i.e. a
-/// `GET` may answer `304 Not Modified` (RFC 9110 §13.1.2, weak comparison).
+/// `GET` may answer `304 Not Modified`.
 ///
-/// A malformed value never matches, so a read falls back to a full response
-/// rather than failing; writes are stricter and reject malformed headers.
+/// A value this module does not accept never matches, so a read falls back to
+/// a full response rather than failing; writes are stricter and reject it.
 pub fn if_none_match_matches(raw: &str, current: &Hash) -> bool {
-    let current = content_hash_etag_value(current);
-    EntityTagList::parse(raw).is_ok_and(|list| !list.if_none_match_passes(Some(&current)))
+    match Condition::parse(raw) {
+        Ok(Condition::Any) => true,
+        Ok(Condition::Tag(tag)) => tag == content_hash_etag_value(current),
+        Err(()) => false,
+    }
 }
 
-/// A header may be sent several times; RFC 9110 §5.3 allows joining them with commas.
-/// Errors if any value is not visible ASCII.
-fn joined_header(headers: &HeaderMap, name: HeaderName) -> Result<Option<String>, ()> {
-    let values = headers
-        .get_all(name)
-        .iter()
-        .map(|value| value.to_str().map_err(|_| ()))
-        .collect::<Result<Vec<_>, ()>>()?;
-    Ok((!values.is_empty()).then(|| values.join(", ")))
+/// The value of a header that must not be repeated. Errors on repetition or
+/// a value that is not visible ASCII.
+fn single_header(headers: &HeaderMap, name: HeaderName) -> Result<Option<&str>, ()> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    value.to_str().map(Some).map_err(|_| ())
 }
 
+/// A single condition: any current representation, or one strong entity tag
+/// (its opaque value, without quotes).
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum EntityTagList {
+enum Condition {
     Any,
-    Tags(Vec<EntityTag>),
+    Tag(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct EntityTag {
-    weak: bool,
-    opaque: String,
-}
-
-impl EntityTagList {
+impl Condition {
     fn parse(raw: &str) -> Result<Self, ()> {
         let raw = raw.trim();
         if raw == "*" {
             return Ok(Self::Any);
         }
-
-        // `"` and `,` are not valid entity-tag characters, so splitting on
-        // commas cannot split a tag. Empty list elements are permitted (§5.6.1).
-        let tags = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(EntityTag::parse)
-            .collect::<Result<Vec<_>, ()>>()?;
-        if tags.is_empty() {
+        let opaque = raw
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .ok_or(())?;
+        // RFC 9110 §8.8.3: etagc = "!" / %x23-7E. This excludes `"` and `,`,
+        // so a list can never parse as one tag.
+        let is_etagc = |byte: u8| byte == b'!' || (b'#'..=b'~').contains(&byte);
+        if opaque.is_empty() || !opaque.bytes().all(is_etagc) {
             return Err(());
         }
-        Ok(Self::Tags(tags))
+        Ok(Self::Tag(opaque.to_string()))
     }
 
     fn to_header_value(&self) -> String {
         match self {
             Self::Any => "*".to_string(),
-            Self::Tags(tags) => tags
-                .iter()
-                .map(EntityTag::to_header_value)
-                .collect::<Vec<_>>()
-                .join(", "),
-        }
-    }
-
-    /// RFC 9110 §13.1.1: strong comparison, `*` requires the resource to exist.
-    fn if_match_passes(&self, current: Option<&str>) -> bool {
-        match self {
-            Self::Any => current.is_some(),
-            Self::Tags(tags) => current
-                .is_some_and(|current| tags.iter().any(|tag| !tag.weak && tag.opaque == current)),
-        }
-    }
-
-    /// RFC 9110 §13.1.2: weak comparison, `*` requires the resource to be absent.
-    fn if_none_match_passes(&self, current: Option<&str>) -> bool {
-        match self {
-            Self::Any => current.is_none(),
-            Self::Tags(tags) => {
-                current.is_none_or(|current| tags.iter().all(|tag| tag.opaque != current))
-            }
-        }
-    }
-}
-
-impl EntityTag {
-    fn parse(item: &str) -> Result<Self, ()> {
-        let (weak, quoted) = match item.strip_prefix("W/") {
-            Some(rest) => (true, rest),
-            None => (false, item),
-        };
-        let opaque = quoted
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-            .ok_or(())?;
-        let is_etagc = |byte: u8| byte == b'!' || (b'#'..=b'~').contains(&byte);
-        if !opaque.bytes().all(is_etagc) {
-            return Err(());
-        }
-        Ok(Self {
-            weak,
-            opaque: opaque.to_string(),
-        })
-    }
-
-    fn to_header_value(&self) -> String {
-        if self.weak {
-            format!("W/\"{}\"", self.opaque)
-        } else {
-            format!("\"{}\"", self.opaque)
+            Self::Tag(opaque) => format!("\"{opaque}\""),
         }
     }
 }
@@ -230,16 +183,11 @@ mod tests {
     }
 
     #[test]
-    fn if_match_uses_strong_comparison() {
+    fn if_match_requires_the_tag_or_any_content() {
         let current = hash(1);
         let matching = content_hash_etag(&current);
 
         assert!(preconditions(Some(&matching), None).is_satisfied_by(Some(&current)));
-        assert!(preconditions(Some(&format!("\"other\", {matching}")), None)
-            .is_satisfied_by(Some(&current)));
-        assert!(
-            !preconditions(Some(&format!("W/{matching}")), None).is_satisfied_by(Some(&current))
-        );
         assert!(!preconditions(Some("\"other\""), None).is_satisfied_by(Some(&current)));
         assert!(!preconditions(Some(&matching), None).is_satisfied_by(None));
         assert!(preconditions(Some("*"), None).is_satisfied_by(Some(&current)));
@@ -247,14 +195,11 @@ mod tests {
     }
 
     #[test]
-    fn if_none_match_uses_weak_comparison() {
+    fn if_none_match_requires_a_different_tag_or_no_content() {
         let current = hash(2);
         let matching = content_hash_etag(&current);
 
         assert!(!preconditions(None, Some(&matching)).is_satisfied_by(Some(&current)));
-        assert!(
-            !preconditions(None, Some(&format!("W/{matching}"))).is_satisfied_by(Some(&current))
-        );
         assert!(preconditions(None, Some("\"other\"")).is_satisfied_by(Some(&current)));
         assert!(preconditions(None, Some("\"other\"")).is_satisfied_by(None));
         assert!(!preconditions(None, Some("*")).is_satisfied_by(Some(&current)));
@@ -273,29 +218,38 @@ mod tests {
         );
     }
 
+    /// Lists and weak tags are valid HTTP but not supported here; they are
+    /// rejected rather than partially interpreted.
     #[test]
-    fn rejects_malformed_headers() {
+    fn rejects_lists_weak_tags_and_malformed_values() {
         assert_eq!(
             WritePreconditions::parse(Some("unquoted"), None).unwrap_err(),
             PreconditionParseError::IfMatch
         );
         assert_eq!(
-            WritePreconditions::parse(None, Some("W/not-quoted")).unwrap_err(),
+            WritePreconditions::parse(None, Some("W/\"weak\"")).unwrap_err(),
             PreconditionParseError::IfNoneMatch
         );
-        WritePreconditions::parse(Some("*, \"tag\""), None).unwrap_err();
-        WritePreconditions::parse(Some(""), None).unwrap_err();
-        WritePreconditions::parse(Some("\"has space\""), None).unwrap_err();
-        WritePreconditions::parse(Some("\"a\", W/\"b\", \"c\""), None).unwrap();
+        for bad in [
+            "\"a\", \"b\"",
+            "*, \"tag\"",
+            "W/\"weak\"",
+            "",
+            "\"\"",
+            "\"has space\"",
+            "\"has\"quote\"",
+        ] {
+            assert!(
+                WritePreconditions::parse(Some(bad), None).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     #[test]
     fn header_values_round_trip_through_canonical_form() {
-        let parsed = preconditions(Some(" \"a\" ,W/\"b\",, \"c\""), Some("*"));
-        assert_eq!(
-            parsed.if_match_header().as_deref(),
-            Some("\"a\", W/\"b\", \"c\"")
-        );
+        let parsed = preconditions(Some("  \"a\" "), Some("*"));
+        assert_eq!(parsed.if_match_header().as_deref(), Some("\"a\""));
         assert_eq!(parsed.if_none_match_header().as_deref(), Some("*"));
         assert_eq!(
             WritePreconditions::parse(
@@ -308,33 +262,37 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_header_is_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::IF_MATCH, HeaderValue::from_static("\"first\""));
+        headers.append(header::IF_MATCH, HeaderValue::from_static("\"second\""));
+        assert_eq!(
+            WritePreconditions::from_headers(&headers).unwrap_err(),
+            PreconditionParseError::IfMatch
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_MATCH, HeaderValue::from_static("\"only\""));
+        assert_eq!(
+            WritePreconditions::from_headers(&headers).unwrap(),
+            preconditions(Some("\"only\""), None)
+        );
+    }
+
+    #[test]
     fn if_none_match_matches_for_reads() {
         let current = hash(6);
         let matching = content_hash_etag(&current);
 
         assert!(if_none_match_matches(&matching, &current));
-        assert!(if_none_match_matches(&format!("W/{matching}"), &current));
-        assert!(if_none_match_matches(
+        assert!(if_none_match_matches("*", &current));
+        assert!(!if_none_match_matches("\"other\"", &current));
+        // Unsupported forms never match, so the read is answered in full.
+        assert!(!if_none_match_matches(&format!("W/{matching}"), &current));
+        assert!(!if_none_match_matches(
             &format!("\"other\", {matching}"),
             &current
         ));
-        assert!(if_none_match_matches("*", &current));
-        assert!(!if_none_match_matches("\"other\"", &current));
         assert!(!if_none_match_matches("unquoted", &current));
-    }
-
-    #[test]
-    fn repeated_headers_are_joined() {
-        let current = hash(4);
-        let mut headers = HeaderMap::new();
-        headers.append(header::IF_MATCH, HeaderValue::from_static("\"first\""));
-        headers.append(
-            header::IF_MATCH,
-            HeaderValue::from_str(&content_hash_etag(&current)).unwrap(),
-        );
-
-        let parsed = WritePreconditions::from_headers(&headers).unwrap();
-        assert!(parsed.is_satisfied_by(Some(&current)));
-        assert!(!parsed.is_satisfied_by(Some(&hash(5))));
     }
 }

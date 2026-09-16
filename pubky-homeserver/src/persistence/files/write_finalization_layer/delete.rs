@@ -1,6 +1,6 @@
 use std::{mem::take, sync::Arc};
 
-use crate::persistence::files::{events::EventType, WritePreconditions};
+use crate::persistence::files::events::EventType;
 use crate::persistence::sql::{
     entry::{EntryEntity, EntryRepository},
     user::UserEntity,
@@ -11,7 +11,7 @@ use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
 use opendal::{Error, Result};
 
-use super::layer::{is_precondition_failure, precondition_failed_error, unexpected, Finalizer};
+use super::layer::{unexpected, Finalizer};
 
 struct StagedDelete {
     user: UserEntity,
@@ -20,7 +20,7 @@ struct StagedDelete {
 
 struct PendingDelete {
     entry_path: EntryPath,
-    preconditions: WritePreconditions,
+    args: OpDelete,
 }
 
 #[derive(Default)]
@@ -77,11 +77,7 @@ impl<R: oio::Delete> WriteFinalizationDeleter<R> {
         pending: &PendingDelete,
     ) -> Result<DeleteOutcome> {
         // Only forward the blob delete after its database finalization succeeds.
-        let outcome = match self
-            .finalizer
-            .finalize_delete(&pending.entry_path, &pending.preconditions)
-            .await
-        {
+        let outcome = match self.finalizer.finalize_delete(&pending.entry_path).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 tracing::error!(
@@ -93,9 +89,8 @@ impl<R: oio::Delete> WriteFinalizationDeleter<R> {
             }
         };
 
-        // The condition was consumed above; the backend gets a plain delete.
         self.inner
-            .delete(pending.entry_path.as_str(), OpDelete::default())
+            .delete(pending.entry_path.as_str(), pending.args.clone())
             .await
             .map_err(|error| {
                 tracing::error!(
@@ -126,20 +121,9 @@ impl<R: oio::Delete> WriteFinalizationDeleter<R> {
 }
 
 impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
-    /// A delete `version`, the only argument a delete op carries, is read as
-    /// the `If-Match` condition for this path (see `OpendalService::delete`).
     async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         let entry_path = EntryPath::parse_opendal(path)?;
-        let preconditions = WritePreconditions::parse(args.version(), None).map_err(|error| {
-            unexpected(
-                format!("Invalid delete precondition for {entry_path}"),
-                error,
-            )
-        })?;
-        self.delete_queue.push(PendingDelete {
-            entry_path,
-            preconditions,
-        });
+        self.delete_queue.push(PendingDelete { entry_path, args });
         Ok(())
     }
 
@@ -155,19 +139,14 @@ impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
 }
 
 impl Finalizer {
-    async fn finalize_delete(
-        &self,
-        entry_path: &EntryPath,
-        preconditions: &WritePreconditions,
-    ) -> Result<DeleteOutcome> {
+    async fn finalize_delete(&self, entry_path: &EntryPath) -> Result<DeleteOutcome> {
         let mut tx = self.sql_db.pool().begin().await.map_err(|error| {
             unexpected("Failed to begin delete finalization transaction", error)
         })?;
 
         let result = {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            self.delete_in_transaction(entry_path, preconditions, &mut executor)
-                .await
+            self.delete_in_transaction(entry_path, &mut executor).await
         };
 
         match result {
@@ -178,21 +157,10 @@ impl Finalizer {
                 Ok(DeleteOutcome::Deleted)
             }
             Ok(DeleteOutcome::NotFound) => {
-                // The user or the entry is missing, so nothing was staged,
-                // not even a repair: that needs both to exist.
                 tx.rollback()
                     .await
                     .map_err(|error| unexpected("Failed to roll back empty delete", error))?;
                 Ok(DeleteOutcome::NotFound)
-            }
-            Err(error) if is_precondition_failure(&error) => {
-                // The condition is checked before the row is deleted, so the
-                // transaction holds at most a repair of the entry row. Keep it.
-                tx.commit().await.map_err(|commit_error| {
-                    unexpected("Failed to commit entry repair", commit_error)
-                })?;
-                self.notify_event();
-                Err(error)
             }
             Err(error) => {
                 if let Err(rollback_error) = tx.rollback().await {
@@ -210,13 +178,9 @@ impl Finalizer {
     async fn delete_in_transaction(
         &self,
         entry_path: &EntryPath,
-        preconditions: &WritePreconditions,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<DeleteOutcome> {
-        let Some(staged) = self
-            .stage_delete(entry_path, preconditions, executor)
-            .await?
-        else {
+        let Some(staged) = self.stage_delete(entry_path, executor).await? else {
             return Ok(DeleteOutcome::NotFound);
         };
         self.apply_delete_effects(staged, entry_path, executor)
@@ -227,16 +191,15 @@ impl Finalizer {
     async fn stage_delete(
         &self,
         entry_path: &EntryPath,
-        preconditions: &WritePreconditions,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<Option<StagedDelete>> {
-        let mut user = match self
+        let user = match self
             .user_service
             .get_for_no_key_update(entry_path.pubkey(), executor)
             .await
         {
-            Ok(user) => Some(user),
-            Err(sqlx::Error::RowNotFound) => None,
+            Ok(user) => user,
+            Err(sqlx::Error::RowNotFound) => return Ok(None),
             Err(error) => {
                 return Err(unexpected(
                     format!("Failed to lock user {}", entry_path.pubkey()),
@@ -245,47 +208,15 @@ impl Finalizer {
             }
         };
 
-        let existing_entry = match user {
-            Some(_) => match EntryRepository::get_by_path(entry_path, executor).await {
-                Ok(entry) => Some(entry),
-                Err(sqlx::Error::RowNotFound) => None,
-                Err(error) => {
-                    return Err(unexpected(
-                        format!("Failed to delete entry {entry_path}"),
-                        error,
-                    ));
-                }
-            },
-            None => None,
-        };
-
-        // A conditional delete depends on the row describing the blob, so
-        // verify (and repair) it first. See `prepare_write`.
-        let (existing_entry, current_hash) = match (user.as_mut(), existing_entry) {
-            (Some(user), Some(entry)) if !preconditions.is_empty() => {
-                let reconciled = self.reconcile_entry(user, entry, executor).await?;
-                if let Some(event) = reconciled.event {
-                    self.record_event(user.id, event, entry_path, executor)
-                        .await?;
-                }
-                (Some(reconciled.entry), reconciled.content_hash)
+        let deleted_entry = match EntryRepository::get_by_path(entry_path, executor).await {
+            Ok(entry) => entry,
+            Err(sqlx::Error::RowNotFound) => return Ok(None),
+            Err(error) => {
+                return Err(unexpected(
+                    format!("Failed to delete entry {entry_path}"),
+                    error,
+                ));
             }
-            (_, entry) => {
-                let current_hash = entry.as_ref().map(|entry| entry.content_hash);
-                (entry, current_hash)
-            }
-        };
-
-        // Checked under the user lock, like writes. A missing entry fails
-        // `If-Match` (RFC 9110 §13.1.1) rather than being a silent no-op.
-        // Nothing but the repair above may precede it: on failure the
-        // transaction is committed to keep that repair.
-        if !preconditions.is_satisfied_by(current_hash.as_ref()) {
-            return Err(precondition_failed_error(entry_path));
-        }
-
-        let (Some(user), Some(deleted_entry)) = (user, existing_entry) else {
-            return Ok(None);
         };
         EntryRepository::delete(deleted_entry.id, executor)
             .await
@@ -342,9 +273,7 @@ mod tests {
     use opendal::raw::oio::Delete;
     use tokio::sync::Barrier;
 
-    use crate::persistence::files::{
-        content_hash_etag, events::EventType, FileIoError, WritePreconditions,
-    };
+    use crate::persistence::files::events::EventType;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
@@ -353,95 +282,6 @@ mod tests {
         all_events, create_user, test_finalizer, test_operator, user_usage,
     };
     use super::*;
-
-    /// Delete carrying an `If-Match` condition, mirroring `OpendalService::delete`.
-    async fn delete_if_match(
-        operator: &opendal::Operator,
-        path: &EntryPath,
-        if_match: &str,
-    ) -> Result<()> {
-        operator.delete_with(path.as_str()).version(if_match).await
-    }
-
-    async fn current_etag(db: &SqlDb, path: &EntryPath) -> String {
-        let entry = EntryRepository::get_by_path(path, &mut db.pool().into())
-            .await
-            .unwrap();
-        content_hash_etag(&entry.content_hash)
-    }
-
-    fn assert_precondition_failed(error: opendal::Error) {
-        assert!(matches!(
-            FileIoError::from(error),
-            FileIoError::PreconditionFailed
-        ));
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn if_match_delete_removes_only_the_matching_version() {
-        let db = SqlDb::test().await;
-        let operator = test_operator(&db);
-        let pubkey = create_user(&db).await;
-        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
-
-        operator.write(path.as_str(), vec![1; 10]).await.unwrap();
-        let etag = current_etag(&db, &path).await;
-
-        let error = delete_if_match(&operator, &path, "\"stale\"")
-            .await
-            .expect_err("stale If-Match must not delete");
-        assert_precondition_failed(error);
-        assert_eq!(
-            operator.read(path.as_str()).await.unwrap().to_vec(),
-            vec![1; 10],
-            "rejected delete must leave the blob"
-        );
-        EntryRepository::get_by_path(&path, &mut db.pool().into())
-            .await
-            .expect("rejected delete must leave the entry");
-        assert_eq!(user_usage(&db, &pubkey).await, 10 + FILE_METADATA_SIZE);
-        assert_eq!(all_events(&db).await.len(), 1);
-
-        delete_if_match(&operator, &path, &etag).await.unwrap();
-        EntryRepository::get_by_path(&path, &mut db.pool().into())
-            .await
-            .expect_err("matching If-Match must delete the entry");
-        assert!(!operator.exists(path.as_str()).await.unwrap());
-        assert_eq!(user_usage(&db, &pubkey).await, 0);
-        assert_eq!(
-            all_events(&db).await.last().unwrap().event_type,
-            EventType::Delete
-        );
-    }
-
-    /// Unconditional deletes of a missing path are a no-op, but `If-Match`
-    /// requires a current representation (RFC 9110 §13.1.1).
-    ///
-    /// Over HTTP a plainly missing file is 404 before this check runs (RFC
-    /// 9110 §13.2.1: preconditions are ignored when the unconditional response
-    /// would not be 2xx). This branch is reached when the file vanished
-    /// between the route's existence check and taking the user lock.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn if_match_delete_of_a_missing_path_fails() {
-        let db = SqlDb::test().await;
-        let operator = test_operator(&db);
-        let pubkey = create_user(&db).await;
-        let path = EntryPath::new(pubkey.clone(), StoragePath::new("/missing.txt").unwrap());
-
-        operator.delete(path.as_str()).await.unwrap();
-
-        let error = delete_if_match(&operator, &path, "\"any\"")
-            .await
-            .expect_err("If-Match on a missing path must fail");
-        assert_precondition_failed(error);
-        let error = delete_if_match(&operator, &path, "*")
-            .await
-            .expect_err("If-Match: * on a missing path must fail");
-        assert_precondition_failed(error);
-        assert!(all_events(&db).await.is_empty());
-    }
 
     #[derive(Default)]
     struct BatchDelete {
@@ -563,15 +403,11 @@ mod tests {
 
         let first = async move {
             first_barrier.wait().await;
-            first_finalizer
-                .finalize_delete(&first_path, &WritePreconditions::default())
-                .await
+            first_finalizer.finalize_delete(&first_path).await
         };
         let second = async move {
             second_barrier.wait().await;
-            second_finalizer
-                .finalize_delete(&second_path, &WritePreconditions::default())
-                .await
+            second_finalizer.finalize_delete(&second_path).await
         };
         let (first_result, second_result) = tokio::join!(first, second);
 

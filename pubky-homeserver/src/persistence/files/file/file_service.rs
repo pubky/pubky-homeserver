@@ -93,21 +93,12 @@ impl FileService {
     /// Delete a file if `preconditions` hold for the entry currently at `path`.
     /// Only `If-Match` is meaningful for deletes; see [`OpendalService::delete`].
     ///
-    /// A missing file is `NotFound` even with `If-Match` set: RFC 9110 §13.2.1
-    /// requires preconditions to be ignored when the unconditional response
-    /// would not be 2xx. (A `PUT` to a missing path would be 2xx, which is why
-    /// `If-Match: *` fails there but not here.) The finalizer still evaluates
-    /// the condition under the user lock, which catches a file that vanishes
-    /// after this check.
-    pub async fn delete(
-        &self,
-        path: &EntryPath,
-        preconditions: &WritePreconditions,
-    ) -> Result<(), FileIoError> {
+    /// Delete a file. A missing file is `NotFound`.
+    pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
         if !self.opendal.exists(path).await? {
             return Err(FileIoError::NotFound);
         }
-        self.opendal.delete(path, preconditions).await?;
+        self.opendal.delete(path).await?;
         Ok(())
     }
 
@@ -214,10 +205,7 @@ mod tests {
             "Content should match original data"
         );
 
-        file_service
-            .delete(&path, &WritePreconditions::default())
-            .await
-            .unwrap();
+        file_service.delete(&path).await.unwrap();
         let result = file_service.get_stream(&path).await;
         assert!(result.is_err(), "Should error for deleted file");
         let user = user_service.get(&pubkey).await.unwrap();
@@ -262,10 +250,7 @@ mod tests {
         );
 
         // Clean up
-        file_service
-            .delete(&path, &WritePreconditions::default())
-            .await
-            .unwrap();
+        file_service.delete(&path).await.unwrap();
         let result = file_service.get_stream(&path).await;
         assert!(result.is_err(), "Should error for deleted file");
         let user = user_service.get(&pubkey).await.unwrap();
@@ -319,10 +304,7 @@ mod tests {
         assert_eq!(user.used_bytes, test_data.len() as u64 + FILE_METADATA_SIZE);
 
         // Delete the file and check if the data usage is updated correctly.
-        file_service
-            .delete(&path, &WritePreconditions::default())
-            .await
-            .unwrap();
+        file_service.delete(&path).await.unwrap();
         let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(user.used_bytes, 0);
     }

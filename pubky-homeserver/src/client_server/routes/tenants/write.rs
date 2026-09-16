@@ -56,18 +56,21 @@ pub async fn delete(
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
-    let preconditions = parse_preconditions(&headers)?;
-    if preconditions.if_none_match_header().is_some() {
-        return Err(HttpError::bad_request(
-            "If-None-Match is not supported on DELETE",
-        ));
+    // Deletes are unconditional. The headers are rejected rather than ignored,
+    // so a client never gets a silently unconditional delete.
+    for name in [
+        header::IF_MATCH,
+        header::IF_NONE_MATCH,
+        header::IF_UNMODIFIED_SINCE,
+    ] {
+        if headers.contains_key(&name) {
+            return Err(HttpError::bad_request(format!(
+                "{name} is not supported on DELETE"
+            )));
+        }
     }
 
-    state
-        .context
-        .file_service
-        .delete(&entry_path, &preconditions)
-        .await?;
+    state.context.file_service.delete(&entry_path).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -446,39 +449,28 @@ mod conditional_write_tests {
         assert_eq!(put_etag, content_hash_etag(&hasher.finalize()));
     }
 
+    /// Deletes are unconditional; a conditional header is rejected rather
+    /// than ignored, whatever tag it carries.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn if_match_delete_compare_and_delete() {
+    async fn conditional_delete_is_rejected() {
         let env = environment().await;
 
         env.put(b"v1").expect_success().await;
         let etag_v1 = env.get_etag().await;
 
         env.delete()
-            .add_header(header::IF_MATCH, "\"stale\"")
-            .await
-            .assert_status(StatusCode::PRECONDITION_FAILED);
-        assert_eq!(env.get_body().await, b"v1");
-
-        env.delete()
             .add_header(header::IF_MATCH, &etag_v1)
             .await
-            .assert_status(StatusCode::NO_CONTENT);
-        assert_eq!(env.get_status().await, StatusCode::NOT_FOUND);
-
-        // Gone now: 404 whether or not If-Match is sent. RFC 9110 §13.2.1
-        // ignores preconditions when the unconditional response is not 2xx,
-        // unlike PUT to a missing path, where If-Match: * is evaluated and
-        // fails with 412.
-        env.delete().await.assert_status(StatusCode::NOT_FOUND);
-        env.delete()
-            .add_header(header::IF_MATCH, &etag_v1)
-            .await
-            .assert_status(StatusCode::NOT_FOUND);
+            .assert_status(StatusCode::BAD_REQUEST);
         env.delete()
             .add_header(header::IF_MATCH, "*")
             .await
-            .assert_status(StatusCode::NOT_FOUND);
+            .assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(env.get_body().await, b"v1");
+
+        env.delete().await.assert_status(StatusCode::NO_CONTENT);
+        assert_eq!(env.get_status().await, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
