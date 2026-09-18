@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 
 #[cfg(test)]
@@ -20,7 +21,10 @@ use futures_util::{stream::StreamExt, Stream};
 use opendal::Buffer;
 use opendal::Operator;
 
-use super::super::{FileIoError, FileMetadata, FileMetadataBuilder, FileStream, WriteStreamError};
+use super::super::{
+    FileIoError, FileMetadata, FileMetadataBuilder, FileStream, WritePreconditions,
+    WriteStreamError,
+};
 
 /// Build storage operators with one transactional finalization layer and an
 /// app-facing operator that additionally enforces write paths and collisions.
@@ -37,16 +41,22 @@ pub fn build_storage_operators(
 ) -> Result<(Operator, Operator), FileIoError> {
     let backend_operator = match &storage_config.backend {
         StorageConfigToml::FileSystem => {
-            let files_dir = match data_directory.join("data/files").to_str() {
-                Some(path) => path.to_string(),
-                None => {
-                    return Err(FileIoError::OpenDAL(opendal::Error::new(
-                        opendal::ErrorKind::Unexpected,
-                        "Invalid path",
-                    )))
-                }
+            let files_dir = data_directory.join("data/files");
+            // Uploads are staged here and renamed into place on close, so a
+            // rejected or aborted write never touches the existing file. Must
+            // be on the same filesystem as the root, and outside it so staged
+            // files never show up in listings.
+            let staging_dir = data_directory.join("data/files-tmp");
+            let (Some(files_dir), Some(staging_dir)) = (files_dir.to_str(), staging_dir.to_str())
+            else {
+                return Err(FileIoError::OpenDAL(opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    "Invalid path",
+                )));
             };
-            let builder = opendal::services::Fs::default().root(files_dir.as_str());
+            let builder = opendal::services::Fs::default()
+                .root(files_dir)
+                .atomic_write_dir(staging_dir);
             opendal::Operator::new(builder)?.finish()
         }
         #[cfg(feature = "storage-gcs")]
@@ -85,6 +95,52 @@ pub fn build_storage_operators(
         ))
         .layer(WritePathLayer::new(user_service));
     Ok((operator, admin_operator))
+}
+
+/// Aborts a backend write if the owning future is dropped before it completes,
+/// e.g. when the client disconnects mid-upload and the request handler is
+/// cancelled. Without this the staged bytes would never be cleaned up.
+struct AbortOnDrop(Option<opendal::Writer>);
+
+impl AbortOnDrop {
+    fn take(&mut self) -> opendal::Writer {
+        self.0.take().expect("writer is taken at most once")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(mut writer) = self.0.take() {
+            drop(tokio::spawn(async move {
+                if let Err(error) = writer.abort().await {
+                    tracing::debug!(error = %error, "Could not abort dropped upload");
+                }
+            }));
+        }
+    }
+}
+
+/// Run a finalization step to completion on its own task.
+///
+/// Finalizing a write publishes the blob and then commits the entry row;
+/// finalizing a delete commits the row removal and then removes the blob.
+/// If the request future is dropped between those two steps, for example
+/// because the client disconnected, the entry row and the blob would end up
+/// disagreeing. A spawned task keeps running after the caller is dropped,
+/// so the step always completes. The client only loses the response.
+async fn spawn_finalization<T: Send + 'static>(
+    finalization: impl Future<Output = Result<T, opendal::Error>> + Send + 'static,
+) -> Result<T, FileIoError> {
+    match tokio::spawn(finalization).await {
+        Ok(result) => Ok(result?),
+        Err(error) => Err(FileIoError::OpenDAL(
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "Finalization task did not complete",
+            )
+            .set_source(error),
+        )),
+    }
 }
 
 /// Build the storage operators from an `AppContext` (test-only convenience).
@@ -138,10 +194,12 @@ impl OpendalService {
         })
     }
 
-    /// Delete a file.
-    /// Deleting a non-existing file will NOT return an error.
+    /// Delete a file. Deleting a non-existing file will NOT return an error.
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        Ok(self.operator.delete(path.as_str()).await?)
+        let operator = self.operator.clone();
+        let path = path.as_str().to_string();
+        spawn_finalization(async move { operator.delete(&path).await }).await?;
+        Ok(())
     }
 
     /// Delete a file bypassing write-path restrictions.
@@ -150,17 +208,30 @@ impl OpendalService {
         Ok(self.admin_operator.delete(path.as_str()).await?)
     }
 
-    /// Write a stream to the storage.
+    /// Write a stream to the storage if `preconditions` hold for the current entry.
+    ///
+    /// Conditions are checked before any bytes are accepted and again inside
+    /// the finalization transaction; a failed condition is
+    /// [`FileIoError::PreconditionFailed`] and leaves the existing file untouched.
     pub async fn write_stream(
         &self,
         path: &EntryPath,
         mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        preconditions: &WritePreconditions,
     ) -> Result<FileMetadata, FileIoError> {
-        let mut writer = self.operator.writer(path.as_str()).await?;
+        let mut writer = self.operator.writer_with(path.as_str());
+        if let Some(if_match) = preconditions.if_match_header() {
+            writer = writer.if_match(&if_match);
+        }
+        if let Some(if_none_match) = preconditions.if_none_match_header() {
+            writer = writer.if_none_match(&if_none_match);
+        }
+        let mut guard = AbortOnDrop(Some(writer.await?));
         let mut metadata_builder = FileMetadataBuilder::default();
         metadata_builder.guess_mime_type_from_path(path.path().as_str());
 
         let write_result: Result<(), FileIoError> = async {
+            let writer = guard.0.as_mut().expect("writer is present while streaming");
             while let Some(chunk_result) = stream.next().await {
                 let chunk = chunk_result?;
                 metadata_builder.update(&chunk);
@@ -170,9 +241,12 @@ impl OpendalService {
         }
         .await;
 
+        // Past this point the write either completes or is aborted explicitly;
+        // the guard must not abort a second time.
+        let mut writer = guard.take();
         match write_result {
             Ok(()) => {
-                writer.close().await?;
+                spawn_finalization(async move { writer.close().await }).await?;
                 Ok(metadata_builder.finalize())
             }
             Err(e) => {
@@ -253,15 +327,214 @@ impl OpendalService {
         // Create a single-item stream from the buffer
         let stream = Box::pin(futures_util::stream::once(async move { Ok(bytes) }));
         // Use the existing streaming implementation
-        self.write_stream(path, stream).await
+        self.write_stream(path, stream, &WritePreconditions::default())
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
+    use crate::persistence::files::opendal::opendal_test_operators::{
+        get_atomic_fs_operator, OpendalTestOperators,
+    };
+    use crate::persistence::files::write_finalization_layer::test_support::{
+        all_events, create_user, test_operator,
+    };
+    use crate::persistence::sql::{
+        entry::{EntryEntity, EntryRepository},
+        SqlDb,
+    };
     use crate::shared::webdav::StoragePath;
+
+    /// A client that disconnects mid-upload drops the request future. The
+    /// staged bytes must still be cleaned up.
+    #[tokio::test]
+    async fn dropped_upload_is_aborted_and_leaves_no_staged_file() {
+        let (operator, dir) = get_atomic_fs_operator();
+        let staging_dir = dir.path().join("files-tmp");
+        let service = OpendalService::new_from_operator(operator);
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+
+        // One chunk, then the body never completes.
+        let stream = futures_util::stream::iter([Ok(Bytes::from_static(b"partial"))])
+            .chain(futures_util::stream::pending());
+        let upload = tokio::spawn(async move {
+            service
+                .write_stream(&path, Box::pin(stream), &WritePreconditions::default())
+                .await
+        });
+        wait_for_staged_count(&staging_dir, 1, "upload should be staged while in flight").await;
+
+        upload.abort();
+        let _ = upload.await;
+
+        // Abort runs on a spawned task.
+        wait_for_staged_count(
+            &staging_dir,
+            0,
+            "staged file was not removed after the upload future was dropped",
+        )
+        .await;
+    }
+
+    async fn wait_for_staged_count(staging_dir: &Path, expected: usize, message: &str) {
+        for _ in 0..200 {
+            let count = std::fs::read_dir(staging_dir).map_or(0, Iterator::count);
+            if count == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{message}");
+    }
+
+    /// A client that disconnects while the write is being finalized drops
+    /// the request future. The finalization must still run to completion so
+    /// the entry row and the blob never end up disagreeing.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn finalization_completes_after_the_request_is_dropped() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let service = OpendalService::new_from_operator(operator.clone());
+        let pubkey = create_user(&db).await;
+        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        install_slow_event_insert(&db).await;
+
+        let request_path = path.clone();
+        let request = tokio::spawn(async move {
+            let stream = futures_util::stream::iter([Ok(Bytes::from_static(b"committed"))]);
+            service
+                .write_stream(
+                    &request_path,
+                    Box::pin(stream),
+                    &WritePreconditions::default(),
+                )
+                .await
+        });
+
+        wait_for_active_query(&db, "%INSERT INTO \"events\"%").await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        let entry = wait_for_entry(&db, &path).await;
+        assert_eq!(entry.content_length, 9);
+        assert_eq!(
+            operator.read(path.as_str()).await.unwrap().to_vec(),
+            b"committed"
+        );
+        assert_eq!(all_events(&db).await.len(), 1);
+    }
+
+    /// The delete counterpart: the row removal must commit and the blob must
+    /// go even though the request was dropped mid-finalization.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn delete_finalization_completes_after_the_request_is_dropped() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let service = OpendalService::new_from_operator(operator.clone());
+        let pubkey = create_user(&db).await;
+        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        operator
+            .write(path.as_str(), b"doomed".to_vec())
+            .await
+            .unwrap();
+        install_slow_event_insert(&db).await;
+
+        let request_path = path.clone();
+        let request = tokio::spawn(async move { service.delete(&request_path).await });
+
+        wait_for_active_query(&db, "%INSERT INTO \"events\"%").await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        wait_until(
+            || async {
+                let row_gone = EntryRepository::get_by_path(&path, &mut db.pool().into())
+                    .await
+                    .is_err();
+                row_gone && !operator.exists(path.as_str()).await.unwrap()
+            },
+            &format!("entry {path} was never deleted"),
+        )
+        .await;
+        assert_eq!(all_events(&db).await.len(), 2);
+    }
+
+    /// Hold every event insert for a while so a request can be dropped while
+    /// its finalization transaction is open.
+    async fn install_slow_event_insert(db: &SqlDb) {
+        sqlx::query(
+            r#"
+            CREATE FUNCTION slow_event_insert() RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(1);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER slow_event_insert_trigger
+            BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION slow_event_insert()
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    /// Poll until `condition` holds, for a few seconds at most.
+    async fn wait_until<F, Fut>(condition: F, message: &str)
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        for _ in 0..500 {
+            if condition().await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{message}");
+    }
+
+    /// Poll until a statement matching `pattern` is executing on this database.
+    async fn wait_for_active_query(db: &SqlDb, pattern: &str) {
+        for _ in 0..500 {
+            let (active,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND state = 'active' AND query LIKE $1",
+            )
+            .bind(pattern)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            if active > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("no active query matching {pattern:?}");
+    }
+
+    async fn wait_for_entry(db: &SqlDb, path: &EntryPath) -> EntryEntity {
+        for _ in 0..500 {
+            if let Ok(entry) = EntryRepository::get_by_path(path, &mut db.pool().into()).await {
+                return entry;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("entry {path} was never committed");
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]
@@ -387,7 +660,10 @@ mod tests {
             let stream = futures_util::stream::iter(chunks);
 
             // Write the stream to storage
-            file_service.write_stream(&path, stream).await.unwrap();
+            file_service
+                .write_stream(&path, stream, &WritePreconditions::default())
+                .await
+                .unwrap();
 
             // Read the content back and verify it matches
             let read_content = file_service.get(&path).await.unwrap();

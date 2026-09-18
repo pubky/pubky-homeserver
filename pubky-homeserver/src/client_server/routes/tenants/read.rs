@@ -1,3 +1,4 @@
+use crate::persistence::files::{content_hash_etag, if_none_match_matches};
 use crate::persistence::sql::entry::{EntryEntity, EntryRepository};
 use crate::shared::{HttpError, HttpResult};
 use crate::{
@@ -106,19 +107,7 @@ pub async fn get(
         .get(header::IF_NONE_MATCH)
         .and_then(|h| h.to_str().ok())
     {
-        let current_etag = format!(
-            "\"{}\"",
-            base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                entry.content_hash.as_bytes()
-            )
-        );
-        if request_etag
-            .trim()
-            .split(',')
-            .map(|s| s.trim())
-            .any(|tag| tag == current_etag)
-        {
+        if if_none_match_matches(request_etag, &entry.content_hash) {
             return not_modified_response(&entry);
         }
     } else if let Some(condition_http_date) = headers
@@ -212,16 +201,7 @@ fn parse_cursor(cursor: Option<String>) -> anyhow::Result<Option<EntryPath>> {
 fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<Body>> {
     Ok(Response::builder()
         .status(StatusCode::NOT_MODIFIED)
-        .header(
-            header::ETAG,
-            format!(
-                "\"{}\"",
-                base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    entry.content_hash.as_bytes()
-                )
-            ),
-        )
+        .header(header::ETAG, content_hash_etag(&entry.content_hash))
         .header(
             header::LAST_MODIFIED,
             to_http_date(&entry.modified_at).to_string().as_str(),
@@ -255,15 +235,9 @@ impl EntryEntity {
         );
         headers.insert(
             header::ETAG,
-            format!(
-                "\"{}\"",
-                base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    self.content_hash.as_bytes()
-                )
-            )
-            .try_into()
-            .expect("base64 string is valid"),
+            content_hash_etag(&self.content_hash)
+                .try_into()
+                .expect("base64 string is valid"),
         );
         headers.insert(
             header::CACHE_CONTROL,
@@ -507,6 +481,50 @@ mod tests {
             .await;
 
         response.assert_status(StatusCode::NOT_MODIFIED);
+    }
+
+    /// GET and PUT share one entity-tag parser: a single strong tag or `*`.
+    /// Forms it does not accept (lists, weak tags) fall through to a full
+    /// response on reads, where writes would reject them.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn if_none_match_accepts_a_single_strong_tag_or_star() {
+        let (_, _, server, public_key, cookie) = create_environment().await.unwrap();
+
+        server
+            .put("/pub/foo")
+            .add_header("host", public_key.z32())
+            .add_header(header::COOKIE, cookie)
+            .bytes(vec![1_u8, 2, 3].into())
+            .expect_success()
+            .await;
+        let etag = server
+            .get("/pub/foo")
+            .add_header("host", public_key.z32())
+            .expect_success()
+            .await
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        for (value, expected) in [
+            (etag.clone(), StatusCode::NOT_MODIFIED),
+            ("*".to_string(), StatusCode::NOT_MODIFIED),
+            ("\"other\"".to_string(), StatusCode::OK),
+            (format!("W/{etag}"), StatusCode::OK),
+            (format!("\"other\", {etag}"), StatusCode::OK),
+            ("unquoted".to_string(), StatusCode::OK),
+        ] {
+            let response = server
+                .get("/pub/foo")
+                .add_header("host", public_key.z32())
+                .add_header(header::IF_NONE_MATCH, &value)
+                .await;
+            assert_eq!(response.status_code(), expected, "If-None-Match: {value}");
+        }
     }
 
     #[tokio::test]
