@@ -8,8 +8,7 @@ use crate::wrappers::event_stream::Event;
 /// Builder for creating an event stream subscription.
 ///
 /// Construct via `Pubky.eventStreamForUser()` or `Pubky.eventStreamFor()`.
-/// Setters update this builder and return a copy for chaining. Rejected options
-/// leave it unchanged. `subscribe()` consumes the builder.
+/// Configuration methods consume this builder unless documented otherwise.
 ///
 /// @example
 /// ```typescript
@@ -41,6 +40,8 @@ impl EventStreamBuilder {
     ///
     /// Each user can have an independent cursor position. If a user already exists,
     /// their cursor value is overwritten.
+    /// Updates this builder and returns a copy for chaining. Rejected input
+    /// leaves this builder unchanged.
     ///
     /// @param {Array<[string, string | null]>} users - Array of [z32PublicKey, cursor] tuples
     /// @returns {EventStreamBuilder} - Builder for chaining
@@ -114,9 +115,8 @@ impl EventStreamBuilder {
     /// @param {number} limit - Maximum number of events (1-65535)
     /// @returns {EventStreamBuilder} - Builder for chaining
     #[wasm_bindgen]
-    pub fn limit(&mut self, limit: u16) -> Self {
-        self.0 = self.0.clone().limit(limit);
-        EventStreamBuilder(self.0.clone())
+    pub fn limit(self, limit: u16) -> Self {
+        EventStreamBuilder(self.0.limit(limit))
     }
 
     /// Set a client-side byte limit per SSE block. Unbounded by default.
@@ -124,6 +124,8 @@ impl EventStreamBuilder {
     /// Counts fields, comments, their line endings and a leading BOM; excludes
     /// the final blank separator. Resets after each block.
     /// Overflow cancels the response and errors the ReadableStream.
+    /// Updates this builder and returns a copy for chaining. Rejected input
+    /// leaves this builder unchanged.
     ///
     /// @param {number} limit - Integer in 1..=4294967295.
     /// @throws {InvalidInput} If the limit is not a positive 32-bit integer.
@@ -166,9 +168,8 @@ impl EventStreamBuilder {
     ///
     /// @returns {EventStreamBuilder} - Builder for chaining
     #[wasm_bindgen]
-    pub fn live(&mut self) -> Self {
-        self.0 = self.0.clone().live();
-        EventStreamBuilder(self.0.clone())
+    pub fn live(self) -> Self {
+        EventStreamBuilder(self.0.live())
     }
 
     /// Return events in reverse chronological order (newest first).
@@ -181,9 +182,8 @@ impl EventStreamBuilder {
     ///
     /// @returns {EventStreamBuilder} - Builder for chaining
     #[wasm_bindgen]
-    pub fn reverse(&mut self) -> Self {
-        self.0 = self.0.clone().reverse();
-        EventStreamBuilder(self.0.clone())
+    pub fn reverse(self) -> Self {
+        EventStreamBuilder(self.0.reverse())
     }
 
     /// Filter events by path. Call once per path to receive the
@@ -199,9 +199,8 @@ impl EventStreamBuilder {
     /// @param {string} path - Path filter (repeatable)
     /// @returns {EventStreamBuilder} - Builder for chaining
     #[wasm_bindgen]
-    pub fn path(&mut self, path: String) -> Self {
-        self.0 = self.0.clone().path(path);
-        EventStreamBuilder(self.0.clone())
+    pub fn path(self, path: String) -> Self {
+        EventStreamBuilder(self.0.path(path))
     }
 
     /// Authenticate the subscription with a user `Session`.
@@ -215,9 +214,8 @@ impl EventStreamBuilder {
     /// @param {Session} session - The authenticated session
     /// @returns {EventStreamBuilder} - Builder for chaining
     #[wasm_bindgen]
-    pub fn session(&mut self, session: &Session) -> Self {
-        self.0 = self.0.clone().session(&session.0);
-        EventStreamBuilder(self.0.clone())
+    pub fn session(self, session: &Session) -> Self {
+        EventStreamBuilder(self.0.session(&session.0))
     }
 
     /// Subscribe to the event stream.

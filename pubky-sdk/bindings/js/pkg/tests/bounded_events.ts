@@ -70,7 +70,7 @@ test("event stream builders survive rejected options", async (t) => {
   t.end();
 });
 
-test("event stream setters update the receiver and support chaining", async (t) => {
+test("event stream validation setters update the receiver and support chaining", async (t) => {
   const sdk = Pubky.testnet();
   const signer = sdk.signer(Keypair.random());
   await signer.signup(HOMESERVER, await createSignupToken());
@@ -82,17 +82,18 @@ test("event stream setters update the receiver and support chaining", async (t) 
       let builder = sdk.eventStreamForUser(user, null);
       for (const configure of [
         (b: EventStreamBuilder) => b.addUsers([[privateStream ? user.z32() : USER.z32(), "12"]]),
-        (b: EventStreamBuilder) => b.limit(3),
         (b: EventStreamBuilder) => b.maxEventBytes(256),
-        (b: EventStreamBuilder) => b.path("/pub/"),
-        (b: EventStreamBuilder) => b.path(privateStream ? "/priv/app/" : "/pub/app/"),
-        (b: EventStreamBuilder) => b.session(session),
-        (b: EventStreamBuilder) => b.reverse(),
       ]) {
         const updated = configure(builder);
         if (chain) builder = updated;
         else updated.free();
       }
+      builder = builder
+        .limit(3)
+        .path("/pub/")
+        .path(privateStream ? "/priv/app/" : "/pub/app/")
+        .session(session)
+        .reverse();
 
       const body = event(42) + event(43, `/pub/${"x".repeat(256)}`);
       const response = mockEventResponse([new TextEncoder().encode(body)], (request) => {
@@ -140,9 +141,9 @@ test("oversized SSE cancels the response", async (t) => {
 
       let reader: ReadableStreamDefaultReader | undefined;
       try {
-        const builder = subscription(sdk);
+        let builder = subscription(sdk);
         builder.maxEventBytes(limit);
-        if (live) builder.live();
+        if (live) builder = builder.live();
         const stream = await builder.subscribe();
         reader = stream.getReader();
         t.equal((await reader.read()).value.cursor, "42", "prior valid event survives");
