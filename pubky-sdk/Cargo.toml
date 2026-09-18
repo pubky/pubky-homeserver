@@ -29,6 +29,7 @@ pubky-common.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 eventsource-stream.workspace = true
+sse-core = { version = "0.2.3", default-features = false, features = ["stream"] }
 url.workspace = true
 base64.workspace = true
 pkarr = { workspace = true, features = ["full"] }

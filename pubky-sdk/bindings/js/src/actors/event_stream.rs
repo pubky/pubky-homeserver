@@ -119,10 +119,11 @@ impl EventStreamBuilder {
         EventStreamBuilder(self.0.limit(limit))
     }
 
-    /// Set a client-side byte limit per SSE block. Unbounded by default.
-    /// Protects against oversized or unterminated blocks in historical and live streams.
-    /// Counts fields, comments, their line endings and a leading BOM; excludes
-    /// the final blank separator. Resets after each block.
+    /// Set a client-side byte limit for SSE payloads. Unbounded by default.
+    /// Limits accumulated data (including newlines joining data fields), each
+    /// event name, and each ID separately in historical and live streams.
+    /// Comments, unknown fields and framing bytes are excluded.
+    /// There is no total block or stream byte limit.
     /// Overflow cancels the response and errors the ReadableStream.
     /// Updates this builder and returns a copy for chaining. Rejected input
     /// leaves this builder unchanged.

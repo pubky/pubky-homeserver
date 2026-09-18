@@ -84,18 +84,17 @@
 //! # }
 //! ```
 
-use std::pin::Pin;
 use std::sync::Arc;
+use std::{fmt::Display, io::Cursor, num::NonZeroUsize, pin::Pin};
 
 use crate::PublicKey;
 use base64::Engine;
 use eventsource_stream::Eventsource;
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use pubky_common::{StoragePath, constants::storage::PRIVATE_ROOT, crypto::Hash};
 use reqwest::Method;
+use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
 use url::Url;
-
-mod decoder;
 
 pub use pubky_common::events::{EventCursor, EventType};
 
@@ -305,13 +304,14 @@ impl EventStreamBuilder {
         self
     }
 
-    /// Set a client-side byte limit per SSE block. Unbounded by default.
+    /// Set a client-side byte limit for SSE payloads. Unbounded by default.
     ///
-    /// Protects against oversized or unterminated blocks in historical and live
+    /// Protects against oversized or unterminated payloads in historical and live
     /// streams. Without a limit, subscriptions use the existing SSE parser.
     ///
-    /// Counts all fields, comments and their line endings, including a leading
-    /// UTF-8 BOM, excluding the final blank separator. Resets after each block.
+    /// Limits accumulated event data (including newlines joining `data` fields),
+    /// each event name, and each ID separately. Comments, unknown fields and
+    /// framing bytes are excluded. There is no total block or stream byte limit.
     /// Parser-owned memory is proportional to this limit; the HTTP transport
     /// may already have allocated a larger incoming chunk.
     ///
@@ -522,7 +522,7 @@ impl EventStreamBuilder {
     ) -> impl Stream<Item = Result<Event>> {
         let source = response.bytes_stream();
         let sse_stream = if let Some(limit) = max_event_bytes {
-            decoder::Decoder::decode(source, limit).left_stream()
+            Self::bounded_sse_stream(source, limit).left_stream()
         } else {
             // Preserve existing parsing and error behavior unless a limit is set.
             source
@@ -549,6 +549,51 @@ impl EventStreamBuilder {
                     Some(Err(e))
                 }
             }
+        })
+    }
+
+    fn bounded_sse_stream<S, B, E>(
+        source: S,
+        limit: usize,
+    ) -> impl Stream<Item = Result<eventsource_stream::Event>>
+    where
+        S: Stream<Item = std::result::Result<B, E>>,
+        B: AsRef<[u8]>,
+        E: Display,
+    {
+        let limit =
+            NonZeroUsize::new(limit).expect("event byte limit was validated before decoding");
+        let mut events = SseStream::with_decoder(SseDecoder::with_limit(limit));
+        events.attach(source.then(|chunk| async move {
+            // Allow cancellation even when incoming chunks are always ready.
+            futures_lite::future::yield_now().await;
+            chunk.map(Cursor::new)
+        }));
+        // Drop the response before yielding an error; sse-core otherwise allows recovery.
+        stream::try_unfold(Box::pin(events), move |mut events| async move {
+            while let Some(event) =
+                events
+                    .try_next()
+                    .await
+                    .map_err(|error| RequestError::Validation {
+                        message: match error {
+                            SseStreamError::PayloadTooLarge(_) => {
+                                format!("SSE event exceeds the configured limit of {limit} bytes")
+                            }
+                            SseStreamError::Inner(error) => format!("SSE stream error: {error}"),
+                        },
+                    })?
+            {
+                if let SseEvent::Message(message) = event {
+                    let event = eventsource_stream::Event {
+                        event: message.event.into_owned(),
+                        data: message.data,
+                        ..Default::default()
+                    };
+                    return Ok(Some((event, events)));
+                }
+            }
+            Ok(None)
         })
     }
 
@@ -599,6 +644,9 @@ impl EventStreamBuilder {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod response_tests;
+
+#[cfg(test)]
+mod bounded_tests;
 
 /// Parse a Server-Sent Event into our Event type.
 ///

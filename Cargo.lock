@@ -4016,6 +4016,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sse-core",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5660,6 +5661,19 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "sse-core"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28f4c044039e70ba5724b7e9dacf9fb610394773d15df2bb629170ca30391c88"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "memchr",
+ "pin-project-lite",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

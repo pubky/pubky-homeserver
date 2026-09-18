@@ -202,10 +202,11 @@ test("SSE event size is unbounded by default in historical and live mode", async
   t.end();
 });
 
-test("SSE limits allow long streams, fragmented UTF-8 and explicit cancellation", async (t) => {
+test("SSE limits allow ignored fields, long streams, fragmented UTF-8 and cancellation", async (t) => {
   const sdk = Pubky.testnet();
   const encoder = new TextEncoder();
-  const body = encoder.encode(Array.from({ length: 100 }, (_, i) => `:keepalive\n\n${event(i)}`).join(""));
+  const ignored = `:${"x".repeat(256)}\nunknown: ${"x".repeat(256)}\nretry: 10\n\n`;
+  const body = encoder.encode(ignored + Array.from({ length: 100 }, (_, i) => `:keepalive\n\n${event(i)}`).join(""));
   for (const fragmented of [false, true]) {
     const chunks = fragmented ? Array.from(body, (byte) => Uint8Array.of(byte)) : [body];
     const response = mockEventResponse(chunks);
