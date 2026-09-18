@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use dav_server::{fakels::FakeLs, DavHandler};
-use dav_server_opendalfs::OpendalFs;
+use dav_server::{DavHandler, DavMethodSet};
 
-use crate::AppContext;
 use crate::ConfigToml;
+use crate::{admin_server::dav_file_system::AdminDavFileSystem, AppContext};
+
+pub(crate) const DAV_METHODS: &[&str] = &[
+    "HEAD", "GET", "PUT", "OPTIONS", "PROPFIND", "COPY", "MOVE", "DELETE",
+];
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -14,10 +17,12 @@ pub(crate) struct AppState {
 
 impl AppState {
     pub fn new(context: Arc<AppContext>) -> Self {
-        let webdavfs = OpendalFs::new(context.file_service.opendal.admin_operator.clone());
+        let webdavfs = Box::new(AdminDavFileSystem::new(context.file_service.clone()));
+        let methods =
+            DavMethodSet::from_vec(DAV_METHODS.to_vec()).expect("DAV method names are valid");
         let inner_dav_handler = DavHandler::builder()
             .filesystem(webdavfs)
-            .locksystem(FakeLs::new())
+            .methods(methods)
             .strip_prefix("/dav")
             .autoindex(true)
             .build_handler();

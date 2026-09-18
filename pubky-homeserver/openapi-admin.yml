@@ -289,8 +289,13 @@ paths:
           description: Entry not found
   "/dav/{path}":
     description: |
-      Full WebDAV endpoint. In addition to GET/PUT/DELETE shown here, this route
-      accepts any HTTP method (via `any()` handler) including PROPFIND, MKCOL, etc.
+      Database-backed WebDAV-style view of logical homeserver files. In addition to
+      GET/PUT/DELETE shown here, this route supports HEAD, PROPFIND, and
+      non-overwriting COPY/MOVE. Empty collections are not persisted, so MKCOL and
+      depth-zero collection COPY return 501. COPY/MOVE require an absent destination. Conditional
+      mutations and WebDAV locks are not supported. PUT replaces the complete file;
+      PATCH and ranged or append uploads are not supported. The route does not
+      advertise full WebDAV compliance.
     get:
       tags:
       - Admin
@@ -323,6 +328,14 @@ paths:
         required: true
         schema:
           type: string
+      - name: X-Expected-Entity-Length
+        in: header
+        required: false
+        description: Expected full body length, including when using chunked transfer encoding
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
       requestBody:
         content:
           application/octet-stream:
@@ -332,6 +345,18 @@ paths:
       responses:
         '201':
           description: File created
+        '204':
+          description: File replaced
+        '401':
+          description: Unauthorized
+        '409':
+          description: Path conflict
+        '400':
+          description: Request body does not match the declared size
+        '507':
+          description: Storage quota exceeded
+        '501':
+          description: Conditional mutations and partial uploads are not supported
     delete:
       tags:
       - Admin
@@ -348,6 +373,14 @@ paths:
       responses:
         '204':
           description: File deleted
+        '401':
+          description: Unauthorized
+        '403':
+          description: User collection deletion is forbidden
+        '404':
+          description: File not found
+        '501':
+          description: Conditional WebDAV mutations are not supported
   "/users/{pubkey}/disable":
     post:
       tags:

@@ -16,7 +16,7 @@ pub enum StorageConfigToml {
     FileSystem,
 }
 
-/// The `[storage]` TOML section: backend selection and storage quota.
+/// The `[storage]` TOML section: backend selection and storage limits.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StorageToml {
     /// Which backend to use (file_system, google_bucket, in_memory).

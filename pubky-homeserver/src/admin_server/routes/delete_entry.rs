@@ -25,12 +25,9 @@ mod tests {
 
     use super::super::super::app_state::AppState;
     use super::*;
-    use crate::persistence::files::{
-        events::{EventRepository, EventType, EventVisibility},
-        FileService,
-    };
+    use crate::persistence::files::events::{EventRepository, EventType, EventVisibility};
     use crate::persistence::sql::entry::EntryRepository;
-    use crate::services::user_service::UserService;
+    use crate::services::{file_service::FileService, user_service::UserService};
     use crate::shared::webdav::{EntryPath, StoragePath};
     use crate::AppContext;
     use axum::{routing::delete, Router};
@@ -76,11 +73,11 @@ mod tests {
         EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
             .await
             .expect_err("Should be deleted");
-        // Verify the blob is also gone from the storage backend
+        // The deleted file is no longer readable through its logical path.
         file_service
             .get(&entry_path)
             .await
-            .expect_err("Blob should be deleted from storage");
+            .expect_err("Deleted file should not be readable");
         let events = EventRepository::get_by_cursor(
             None,
             Some(10),
