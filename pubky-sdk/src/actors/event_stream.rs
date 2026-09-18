@@ -84,15 +84,16 @@
 //! # }
 //! ```
 
-use std::pin::Pin;
 use std::sync::Arc;
+use std::{fmt::Display, io::Cursor, num::NonZeroUsize, pin::Pin};
 
 use crate::PublicKey;
 use base64::Engine;
 use eventsource_stream::Eventsource;
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use pubky_common::{StoragePath, constants::storage::PRIVATE_ROOT, crypto::Hash};
 use reqwest::Method;
+use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
 use url::Url;
 
 pub use pubky_common::events::{EventCursor, EventType};
@@ -124,6 +125,7 @@ pub struct EventStreamBuilder {
     users: Vec<(PublicKey, Option<EventCursor>)>,
     homeserver: Option<PublicKey>,
     limit: Option<u16>,
+    max_event_bytes: Option<usize>,
     live: bool,
     reverse: bool,
     paths: Vec<String>,
@@ -186,6 +188,7 @@ impl EventStreamBuilder {
             users: vec![(user.clone(), cursor)],
             homeserver: None,
             limit: None,
+            max_event_bytes: None,
             live: false,
             reverse: false,
             paths: Vec::new(),
@@ -232,6 +235,7 @@ impl EventStreamBuilder {
             users: Vec::new(),
             homeserver: Some(homeserver.clone()),
             limit: None,
+            max_event_bytes: None,
             live: false,
             reverse: false,
             paths: Vec::new(),
@@ -297,6 +301,26 @@ impl EventStreamBuilder {
     #[must_use]
     pub const fn limit(mut self, limit: u16) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    /// Set a client-side byte limit for SSE payloads. Unbounded by default.
+    ///
+    /// Protects against oversized or unterminated payloads in historical and live
+    /// streams. Without a limit, subscriptions use the existing SSE parser.
+    ///
+    /// Limits accumulated event data (including newlines joining `data` fields),
+    /// each event name, and each ID separately. Comments, unknown fields and
+    /// framing bytes are excluded. There is no total block or stream byte limit.
+    /// Parser-owned memory is proportional to this limit; the HTTP transport
+    /// may already have allocated a larger incoming chunk.
+    ///
+    /// Overflow closes the response body and yields one validation error, then
+    /// ends the stream. Zero is rejected by [`Self::subscribe`]. This setting is
+    /// independent of [`Self::limit`] and the client's HTTP error-body limit.
+    #[must_use]
+    pub const fn max_event_bytes(mut self, limit: usize) -> Self {
+        self.max_event_bytes = Some(limit);
         self
     }
 
@@ -419,6 +443,12 @@ impl EventStreamBuilder {
 
     /// Internal helper that contains the shared subscription logic.
     async fn subscribe_internal(self) -> Result<impl Stream<Item = Result<Event>>> {
+        if self.max_event_bytes == Some(0) {
+            return Err(RequestError::Validation {
+                message: "max_event_bytes must be greater than zero".into(),
+            }
+            .into());
+        }
         if self.live && self.reverse {
             return Err(Error::from(RequestError::Validation {
                 message: "Cannot use live mode with reverse ordering".into(),
@@ -483,30 +513,88 @@ impl EventStreamBuilder {
         // and the server's message, rather than a hand-rolled string.
         let response = self.client.check_http_status(response).await?;
 
-        let sse_stream = response.bytes_stream().eventsource();
-        let event_stream = sse_stream.filter_map(|result| async move {
+        Ok(Self::response_event_stream(response, self.max_event_bytes))
+    }
+
+    fn response_event_stream(
+        response: reqwest::Response,
+        max_event_bytes: Option<usize>,
+    ) -> impl Stream<Item = Result<Event>> {
+        let source = response.bytes_stream();
+        let sse_stream = if let Some(limit) = max_event_bytes {
+            Self::bounded_sse_stream(source, limit).left_stream()
+        } else {
+            // Preserve existing parsing and error behavior unless a limit is set.
+            source
+                .eventsource()
+                .map_err(|error| {
+                    Error::from(RequestError::Validation {
+                        message: format!("SSE stream error: {error}"),
+                    })
+                })
+                .right_stream()
+        };
+        sse_stream.filter_map(|result| async move {
             match result {
                 Ok(sse_event) => match parse_sse_event(&sse_event) {
                     Ok(event) => Some(Ok(event)),
                     Err(e) => {
-                        // Skip unparseable events rather than failing the entire stream.
-                        // We don't control what homeservers return, and we shouldn't panic
-                        // on unexpected data.
-                        // This also provides forward compatibility for new event types.
+                        // Skip malformed and unknown events for forward compatibility.
                         cross_log!(error, "Failed to parse SSE event, skipping: {}", e);
                         None
                     }
                 },
                 Err(e) => {
-                    cross_log!(error, "SSE stream error: {}", e);
-                    Some(Err(Error::from(RequestError::Validation {
-                        message: format!("SSE stream error: {e}"),
-                    })))
+                    cross_log!(error, "{}", e);
+                    Some(Err(e))
                 }
             }
-        });
+        })
+    }
 
-        Ok(event_stream)
+    fn bounded_sse_stream<S, B, E>(
+        source: S,
+        limit: usize,
+    ) -> impl Stream<Item = Result<eventsource_stream::Event>>
+    where
+        S: Stream<Item = std::result::Result<B, E>>,
+        B: AsRef<[u8]>,
+        E: Display,
+    {
+        let limit =
+            NonZeroUsize::new(limit).expect("event byte limit was validated before decoding");
+        let mut events = SseStream::with_decoder(SseDecoder::with_limit(limit));
+        events.attach(source.then(|chunk| async move {
+            // Allow cancellation even when incoming chunks are always ready.
+            futures_lite::future::yield_now().await;
+            chunk.map(Cursor::new)
+        }));
+        // Drop the response before yielding an error; sse-core otherwise allows recovery.
+        stream::try_unfold(Box::pin(events), move |mut events| async move {
+            while let Some(event) =
+                events
+                    .try_next()
+                    .await
+                    .map_err(|error| RequestError::Validation {
+                        message: match error {
+                            SseStreamError::PayloadTooLarge(_) => {
+                                format!("SSE event exceeds the configured limit of {limit} bytes")
+                            }
+                            SseStreamError::Inner(error) => format!("SSE stream error: {error}"),
+                        },
+                    })?
+            {
+                if let SseEvent::Message(message) = event {
+                    let event = eventsource_stream::Event {
+                        event: message.event.into_owned(),
+                        data: message.data,
+                        ..Default::default()
+                    };
+                    return Ok(Some((event, events)));
+                }
+            }
+            Ok(None)
+        })
     }
 
     /// Subscribe to the event stream.
@@ -522,6 +610,8 @@ impl EventStreamBuilder {
     /// # Errors
     /// - Returns [`Error::Request`] if the homeserver cannot be resolved
     /// - Returns [`Error::Request`] if `live=true` and `reverse=true` (invalid combination)
+    /// - Returns [`Error::Request`] if `max_event_bytes` is zero
+    /// - If configured, exceeding the SSE byte limit yields one error and ends the stream
     /// - Propagates HTTP request errors
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn subscribe(self) -> Result<Pin<Box<dyn Stream<Item = Result<Event>> + Send>>> {
@@ -542,6 +632,8 @@ impl EventStreamBuilder {
     /// # Errors
     /// - Returns [`Error::Request`] if the homeserver cannot be resolved
     /// - Returns [`Error::Request`] if `live=true` and `reverse=true` (invalid combination)
+    /// - Returns [`Error::Request`] if `max_event_bytes` is zero
+    /// - If configured, exceeding the SSE byte limit yields one error and ends the stream
     /// - Propagates HTTP request errors
     #[cfg(target_arch = "wasm32")]
     pub async fn subscribe(self) -> Result<Pin<Box<dyn Stream<Item = Result<Event>>>>> {
@@ -549,6 +641,12 @@ impl EventStreamBuilder {
         Ok(Box::pin(stream))
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod response_tests;
+
+#[cfg(test)]
+mod bounded_tests;
 
 /// Parse a Server-Sent Event into our Event type.
 ///

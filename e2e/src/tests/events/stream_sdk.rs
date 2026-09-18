@@ -1,7 +1,10 @@
 use super::*;
 use futures::StreamExt;
 use pubky_testnet::pubky::errors::{Error, RequestError};
-use pubky_testnet::pubky::{ClientId, EventCursor, PubkySession, PublicKey};
+use pubky_testnet::pubky::{
+    ClientId, EventCursor, EventType, PubkySession, PublicKey, ResourcePath,
+};
+use pubky_testnet::pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH;
 use tokio::time::{timeout, Duration};
 
 /// Sign up a fresh user and return its public key plus an authenticated
@@ -19,6 +22,46 @@ async fn signed_in_user(
         .await
         .unwrap();
     (signer.public_key(), session)
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_sdk_accepts_maximum_storage_path() {
+    let testnet = build_full_testnet().await;
+    let (user, session) = signed_in_user(&testnet, "events-max-path.test").await;
+    let path = format!(
+        "/pub{}",
+        "/a".repeat((MAX_STORAGE_PATH_TOTAL_LENGTH - 4) / 2)
+    );
+    assert_eq!(path.len(), MAX_STORAGE_PATH_TOTAL_LENGTH);
+    session
+        .storage()
+        .put(&path, b"maximum path".to_vec())
+        .await
+        .unwrap();
+    let pubky = testnet.sdk().unwrap();
+    for live in [false, true] {
+        let builder = pubky.event_stream_for_user(&user, None).limit(1);
+        let builder = if live { builder.live() } else { builder };
+        let mut events = builder.clone().subscribe().await.unwrap();
+        let event = timeout(Duration::from_secs(5), events.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.resource.path, ResourcePath::parse(&path).unwrap());
+        assert!(matches!(event.event_type, EventType::Put { .. }));
+        assert!(events.next().await.is_none());
+
+        let mut small = builder.max_event_bytes(128).subscribe().await.unwrap();
+        let error = timeout(Duration::from_secs(5), small.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("limit of 128 bytes"));
+        assert!(small.next().await.is_none());
+    }
 }
 
 /// Test the SDK builder API: `event_stream_for()` and `add_users()`

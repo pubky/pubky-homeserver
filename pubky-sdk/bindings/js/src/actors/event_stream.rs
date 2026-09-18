@@ -8,6 +8,7 @@ use crate::wrappers::event_stream::Event;
 /// Builder for creating an event stream subscription.
 ///
 /// Construct via `Pubky.eventStreamForUser()` or `Pubky.eventStreamFor()`.
+/// Configuration methods consume this builder unless documented otherwise.
 ///
 /// @example
 /// ```typescript
@@ -39,6 +40,8 @@ impl EventStreamBuilder {
     ///
     /// Each user can have an independent cursor position. If a user already exists,
     /// their cursor value is overwritten.
+    /// Updates this builder and returns a copy for chaining. Rejected input
+    /// leaves this builder unchanged.
     ///
     /// @param {Array<[string, string | null]>} users - Array of [z32PublicKey, cursor] tuples
     /// @returns {EventStreamBuilder} - Builder for chaining
@@ -56,7 +59,7 @@ impl EventStreamBuilder {
     ///   .subscribe();
     /// ```
     #[wasm_bindgen(js_name = "addUsers")]
-    pub fn add_users(self, users: js_sys::Array) -> Result<EventStreamBuilder, JsValue> {
+    pub fn add_users(&mut self, users: js_sys::Array) -> Result<EventStreamBuilder, JsValue> {
         // Parse all users first
         let mut parsed_users: Vec<(pubky::PublicKey, Option<pubky::EventCursor>)> = Vec::new();
 
@@ -94,12 +97,13 @@ impl EventStreamBuilder {
 
         // Use add_users with references
         let user_refs: Vec<_> = parsed_users.iter().map(|(u, c)| (u, *c)).collect();
-        let builder = self
+        self.0 = self
             .0
+            .clone()
             .add_users(user_refs)
             .map_err(|e| JsValue::from_str(&format!("Failed to add users: {e}")))?;
 
-        Ok(EventStreamBuilder(builder))
+        Ok(EventStreamBuilder(self.0.clone()))
     }
 
     /// Set maximum number of events to receive before closing the connection.
@@ -113,6 +117,29 @@ impl EventStreamBuilder {
     #[wasm_bindgen]
     pub fn limit(self, limit: u16) -> Self {
         EventStreamBuilder(self.0.limit(limit))
+    }
+
+    /// Set a client-side byte limit for SSE payloads. Unbounded by default.
+    /// Limits accumulated data (including newlines joining data fields), each
+    /// event name, and each ID separately in historical and live streams.
+    /// Comments, unknown fields and framing bytes are excluded.
+    /// There is no total block or stream byte limit.
+    /// Overflow cancels the response and errors the ReadableStream.
+    /// Updates this builder and returns a copy for chaining. Rejected input
+    /// leaves this builder unchanged.
+    ///
+    /// @param {number} limit - Integer in 1..=4294967295.
+    /// @throws {InvalidInput} If the limit is not a positive 32-bit integer.
+    #[wasm_bindgen(js_name = "maxEventBytes")]
+    pub fn max_event_bytes(&mut self, limit: f64) -> crate::js_error::JsResult<Self> {
+        if limit.fract() != 0.0 || !(1.0..=f64::from(u32::MAX)).contains(&limit) {
+            return Err(crate::js_error::PubkyError::new(
+                crate::js_error::PubkyErrorName::InvalidInput,
+                "maxEventBytes must be an integer in 1..=4294967295",
+            ));
+        }
+        self.0 = self.0.clone().max_event_bytes(limit as usize);
+        Ok(EventStreamBuilder(self.0.clone()))
     }
 
     /// Enable live streaming mode.

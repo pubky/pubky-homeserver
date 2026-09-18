@@ -29,6 +29,7 @@ pubky-common.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 eventsource-stream.workspace = true
+sse-core = { version = "0.2.3", default-features = false, features = ["stream"] }
 url.workspace = true
 base64.workspace = true
 pkarr = { workspace = true, features = ["full"] }
@@ -36,6 +37,7 @@ percent-encoding.workspace = true
 cookie = "0.18"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 futures-util.workspace = true
+futures-lite.workspace = true
 lru = { version = "0.18", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
@@ -64,7 +66,6 @@ webpki-roots = "1"
 reqwest = { workspace = true, features = ["json", "stream"] }
 log.workspace = true
 wasm-bindgen-futures.workspace = true
-futures-lite = { version = "2", default-features = false }
 
 [dev-dependencies]
 pubky-testnet.workspace = true # used in docstring tests
