@@ -1243,19 +1243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dav-server-opendalfs"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3854e79b351f12bbeab0c53e72e88fcf5cebc07683014de572eed2144369bf4"
-dependencies = [
- "anyhow",
- "bytes",
- "dav-server",
- "futures",
- "opendal",
-]
-
-[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4065,7 +4052,6 @@ dependencies = [
  "clap",
  "dashmap",
  "dav-server",
- "dav-server-opendalfs",
  "dirs",
  "dyn-clone",
  "fast-glob",

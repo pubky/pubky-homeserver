@@ -15,7 +15,7 @@ use crate::{
     },
     persistence::{
         files::{
-            write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
+            storage_quota::{resolve_storage_max_bytes, would_exceed_limit},
             WriteStreamError,
         },
         sql::{entry::EntryRepository, user::UserEntity, UnifiedExecutor},
@@ -110,7 +110,7 @@ pub async fn put(
     state
         .context
         .file_service
-        .write_stream(&entry_path, converted_stream)
+        .write_stream(&entry_path, converted_stream, content_length)
         .await?;
     Ok((StatusCode::CREATED, ()))
 }
