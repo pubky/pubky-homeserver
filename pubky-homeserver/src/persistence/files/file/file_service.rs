@@ -19,21 +19,21 @@ use futures_util::StreamExt;
 use opendal::Buffer;
 use std::path::Path;
 
-use super::super::{FileIoError, FileStream, OpendalService, WriteStreamError};
+use super::super::{
+    FileIoError, FileMetadata, FileStream, OpendalService, WritePreconditions, WriteStreamError,
+};
 
 /// The file service creates an abstraction layer over the SqlDb and OpenDAL services.
 /// This way, files can be managed in a unified way.
 #[derive(Debug, Clone)]
 pub struct FileService {
     pub(crate) opendal: OpendalService,
-    pub(crate) db: SqlDb,
 }
 
 impl FileService {
-    pub fn new(opendal_service: OpendalService, db: SqlDb) -> Self {
+    pub fn new(opendal_service: OpendalService) -> Self {
         Self {
             opendal: opendal_service,
-            db,
         }
     }
 
@@ -51,7 +51,7 @@ impl FileService {
             events_service,
             user_service,
         )?;
-        Ok(Self::new(opendal_service, db))
+        Ok(Self::new(opendal_service))
     }
 
     /// Get the metadata of a file.
@@ -75,21 +75,25 @@ impl FileService {
         Ok(stream)
     }
 
-    /// Write a file to the database and storage depending on the selected target location.
+    /// Write a file to the database and storage if `preconditions` hold for
+    /// the entry currently at `path`. See [`OpendalService::write_stream`].
+    ///
+    /// Returns the metadata of the bytes just written. It is deliberately not
+    /// re-read from the database: a concurrent write could land between commit
+    /// and re-read, and the caller would then hold another write's ETag.
     pub async fn write_stream(
         &self,
         path: &EntryPath,
         stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-    ) -> Result<EntryEntity, FileIoError> {
-        self.opendal.write_stream(path, stream).await?;
-        match EntryRepository::get_by_path(path, &mut self.db.pool().into()).await {
-            Ok(entry) => Ok(entry),
-            Err(sqlx::Error::RowNotFound) => Err(FileIoError::NotFound),
-            Err(e) => Err(e.into()),
-        }
+        preconditions: &WritePreconditions,
+    ) -> Result<FileMetadata, FileIoError> {
+        self.opendal.write_stream(path, stream, preconditions).await
     }
 
-    /// Delete a file.
+    /// Delete a file if `preconditions` hold for the entry currently at `path`.
+    /// Only `If-Match` is meaningful for deletes; see [`OpendalService::delete`].
+    ///
+    /// Delete a file. A missing file is `NotFound`.
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
         if !self.opendal.exists(path).await? {
             return Err(FileIoError::NotFound);
@@ -114,7 +118,7 @@ impl FileService {
 impl FileService {
     pub fn new_from_context(context: &AppContext) -> Result<Self, FileIoError> {
         let opendal_service = OpendalService::new(context)?;
-        Ok(Self::new(opendal_service, context.sql_db.clone()))
+        Ok(Self::new(opendal_service))
     }
 
     /// Get the content of a file as bytes.
@@ -132,10 +136,10 @@ impl FileService {
     }
 
     /// Write a file to the database and storage depending on the selected target location.
-    pub async fn write(&self, path: &EntryPath, data: Buffer) -> Result<EntryEntity, FileIoError> {
+    pub async fn write(&self, path: &EntryPath, data: Buffer) -> Result<FileMetadata, FileIoError> {
         let stream = futures_util::stream::iter(vec![Ok(Bytes::from(data.to_vec()))]);
-        let entry = self.write_stream(path, stream).await?;
-        Ok(entry)
+        self.write_stream(path, stream, &WritePreconditions::default())
+            .await
     }
 }
 
@@ -173,7 +177,10 @@ mod tests {
         let chunks = vec![Ok(Bytes::from(test_data.as_slice()))];
         let stream = futures_util::stream::iter(chunks);
 
-        file_service.write_stream(&path, stream).await.unwrap();
+        file_service
+            .write_stream(&path, stream, &WritePreconditions::default())
+            .await
+            .unwrap();
         let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(
             user.used_bytes,
@@ -214,7 +221,10 @@ mod tests {
         );
         let chunks = vec![Ok(Bytes::from(test_data.as_slice()))];
         let stream = futures_util::stream::iter(chunks);
-        file_service.write_stream(&path, stream).await.unwrap();
+        file_service
+            .write_stream(&path, stream, &WritePreconditions::default())
+            .await
+            .unwrap();
         let user = user_service.get(&pubkey).await.unwrap();
         assert_eq!(
             user.used_bytes,

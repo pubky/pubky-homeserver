@@ -3,9 +3,13 @@
 mod delete;
 mod layer;
 mod quota;
+mod verify;
 mod write;
 
 pub use delete::WriteFinalizationDeleter;
 pub use layer::WriteFinalizationLayer;
 pub(crate) use quota::{resolve_storage_max_bytes, would_exceed_limit};
 pub use write::WriteFinalizationWriter;
+
+#[cfg(test)]
+pub(crate) use layer::test_support;
