@@ -382,25 +382,38 @@ let signer = pubky.signer_from_recovery_file("/path/to/alice.pkarr", "passphrase
 # Ok(()) }
 ```
 
-Session secrets (`.sess`):
+Grant session secrets:
+
+`signin` creates a grant-backed session. Export its secret with
+[`GrantSessionView::export_local_secret`] and restore it with [`Pubky::restore_session`].
+This example loads the keypair of an account that has already signed up.
 
 ```rust no_run
-use pubky::{ClientId, Keypair, Pubky};
+use pubky::{ClientId, Pubky};
 # async fn run() -> pubky::Result<()> {
 let pubky = Pubky::new()?;
-let keypair = Keypair::random();
-let session = pubky
-    .signer(keypair)
+let signer = pubky.signer_from_recovery_file("/path/to/alice.pkarr", "passphrase")?;
+let session = signer
     .signin(ClientId::new("my-cool-app").unwrap())
     .await?;
-session.write_secret_file("alice.sess").unwrap();
-let restored = pubky.session_from_file("alice.sess").await?;
+let grant = session
+    .as_grant()
+    .expect("signin creates a grant-backed session");
+let secret = grant
+    .export_local_secret()
+    .await
+    .expect("signin creates an exportable local PoP key");
 
-# let _ = std::fs::remove_file("alice.sess");
+// Store `secret` securely, then load it when the application restarts.
+let restored = pubky.restore_session(&secret).await?;
+
 # Ok(()) }
 ```
 
-> Security: the `.sess` secret is a **bearer token**. Anyone holding it can act as the user within the granted capabilities. Treat it like a password.
+The deprecated `.sess` helpers are cookie-only; [`write_secret_file`](PubkySession::write_secret_file)
+panics on grant sessions.
+
+> Security: the exported secret is unencrypted and contains the grant and its private proof-of-possession key. Anyone holding it can act within the granted capabilities until the grant expires or is revoked. Store it securely and never log it.
 
 ## Example code
 
