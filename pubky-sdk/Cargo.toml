@@ -28,6 +28,7 @@ json = ["reqwest/json"]
 pubky-common.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+# v0.2.0 has a bug where some cases bypass the payload size limit.
 sse-core = { version = "0.2.3", default-features = false, features = ["stream"] }
 url.workspace = true
 base64.workspace = true
