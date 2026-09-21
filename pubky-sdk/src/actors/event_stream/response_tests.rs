@@ -28,10 +28,7 @@ async fn response_overflow_releases_connection_and_preserves_prior_event() {
         "x".repeat(setting + 1)
     );
     let (response, mut socket) = response(&body).await;
-    let mut events = Box::pin(EventStreamBuilder::response_event_stream(
-        response,
-        Some(setting),
-    ));
+    let mut events = Box::pin(EventStreamBuilder::response_event_stream(response, setting));
     let event = tokio::time::timeout(Duration::from_secs(2), events.next())
         .await
         .unwrap()
@@ -69,11 +66,8 @@ async fn zero_event_limit_fails_before_resolution() {
             .add_users([(&key, None)])
             .unwrap(),
     ] {
-        assert_eq!(builder.max_event_bytes, None);
-        assert_eq!(
-            builder.clone().max_event_bytes(123).max_event_bytes,
-            Some(123)
-        );
+        assert_eq!(builder.max_event_bytes, usize::MAX);
+        assert_eq!(builder.clone().max_event_bytes(123).max_event_bytes, 123);
         let Err(error) = builder.max_event_bytes(0).subscribe().await else {
             panic!("zero limit accepted")
         };
@@ -102,10 +96,7 @@ async fn configured_limit_accepts_maximum_path_cursor_and_hash() {
         u64::MAX
     );
     let (response, _socket) = response(&body).await;
-    let mut events = Box::pin(EventStreamBuilder::response_event_stream(
-        response,
-        Some(4096),
-    ));
+    let mut events = Box::pin(EventStreamBuilder::response_event_stream(response, 4096));
     let event = tokio::time::timeout(Duration::from_secs(2), events.next())
         .await
         .unwrap()
@@ -137,7 +128,10 @@ async fn unbounded_default_accepts_legacy_and_large_events() {
             u64::MAX
         );
         let (response, _socket) = response(&body).await;
-        let mut events = Box::pin(EventStreamBuilder::response_event_stream(response, None));
+        let mut events = Box::pin(EventStreamBuilder::response_event_stream(
+            response,
+            usize::MAX,
+        ));
         let event = tokio::time::timeout(Duration::from_secs(2), events.next())
             .await
             .unwrap()

@@ -173,7 +173,7 @@ test("oversized SSE cancels the response", async (t) => {
 test("SSE event size is unbounded by default in historical and live mode", async (t) => {
   const sdk = Pubky.testnet();
   const encoder = new TextEncoder();
-  for (const pathBytes of [4096, 16384]) {
+  for (const pathBytes of [4096, 16384, 1024 * 1024]) {
     // Includes the legacy homeserver path maximum, whose frame exceeds 4 KiB.
     const path = `/pub/${`${"a".repeat(255)}/`.repeat(Math.floor((pathBytes - 5) / 256))}${"b".repeat((pathBytes - 5) % 256)}`;
     for (const live of [false, true]) {

@@ -1,7 +1,7 @@
 use super::EventStreamBuilder;
 use crate::errors::Result;
-use eventsource_stream::Event;
 use futures_util::{FutureExt, StreamExt, TryStreamExt, stream};
+use sse_core::MessageEvent;
 use std::{
     sync::{
         Arc,
@@ -10,13 +10,10 @@ use std::{
     time::Duration,
 };
 
-async fn collect(chunks: Vec<Vec<u8>>, limit: usize) -> Result<Vec<Event>> {
-    EventStreamBuilder::bounded_sse_stream(
-        stream::iter(chunks.into_iter().map(Ok::<_, &str>)),
-        limit,
-    )
-    .try_collect()
-    .await
+async fn collect(chunks: Vec<Vec<u8>>, limit: usize) -> Result<Vec<MessageEvent>> {
+    EventStreamBuilder::sse_stream(stream::iter(chunks.into_iter().map(Ok::<_, &str>)), limit)
+        .try_collect()
+        .await
 }
 
 struct DropFlag(Arc<AtomicBool>);
@@ -27,23 +24,25 @@ impl Drop for DropFlag {
 }
 
 #[tokio::test]
-async fn bounded_stream_converts_whole_and_fragmented_sse_messages() {
+async fn stream_parses_whole_and_fragmented_sse_messages() {
     let body = b"\xef\xbb\xbf: keepalive\r\nretry: 10\r\nevent: PUT\r\n\
                  data: caf\xc3\xa9\r\ndata: \xff\r\n\r\ndata: next\n\n";
     let expected = vec![
-        Event {
+        MessageEvent {
             event: "PUT".into(),
             data: "café\n\u{fffd}".into(),
-            ..Event::default()
+            last_event_id: None,
         },
-        Event {
+        MessageEvent {
             event: "message".into(),
             data: "next".into(),
-            ..Event::default()
+            last_event_id: None,
         },
     ];
-    for chunks in [vec![body.to_vec()], body.iter().map(|b| vec![*b]).collect()] {
-        assert_eq!(collect(chunks, 32).await.unwrap(), expected);
+    for limit in [32, usize::MAX] {
+        for chunks in [vec![body.to_vec()], body.iter().map(|b| vec![*b]).collect()] {
+            assert_eq!(collect(chunks, limit).await.unwrap(), expected);
+        }
     }
 }
 
@@ -117,7 +116,7 @@ async fn ready_chunks_yield_to_allow_cancellation() {
         body.chunks(1024).map(<[u8]>::to_vec).collect(),
     ] {
         let source = stream::iter(chunks.into_iter().map(Ok::<_, &str>));
-        let mut decoded = Box::pin(EventStreamBuilder::bounded_sse_stream(source, 1));
+        let mut decoded = Box::pin(EventStreamBuilder::sse_stream(source, 1));
         assert!(decoded.next().now_or_never().is_none());
         assert_eq!(decoded.next().await.unwrap().unwrap().data, "x");
     }
@@ -152,7 +151,7 @@ async fn overflow_drops_source_before_yielding_without_waiting_for_eof() {
                 }
             },
         );
-        let mut decoded = Box::pin(EventStreamBuilder::bounded_sse_stream(source, 16));
+        let mut decoded = Box::pin(EventStreamBuilder::sse_stream(source, 16));
         let error = tokio::time::timeout(Duration::from_secs(1), decoded.next())
             .await
             .unwrap()
@@ -171,34 +170,42 @@ async fn overflow_drops_source_before_yielding_without_waiting_for_eof() {
 
 #[tokio::test]
 async fn transport_error_terminates_and_eof_discards_partial_event() {
-    let results: Vec<_> = EventStreamBuilder::bounded_sse_stream(
-        stream::iter([Ok("data: x\n\n"), Err("broken"), Ok("data: never\n\n")]),
-        32,
-    )
-    .collect()
-    .await;
-    assert_eq!(results.len(), 2);
-    assert!(
-        results[1]
-            .as_ref()
-            .unwrap_err()
-            .to_string()
-            .contains("broken")
-    );
-    for body in ["data: x", "data: x\n", "data: x\r", "data: x\r\n"] {
+    for limit in [32, usize::MAX] {
+        let results: Vec<_> = EventStreamBuilder::sse_stream(
+            stream::iter([Ok("data: x\n\n"), Err("broken"), Ok("data: never\n\n")]),
+            limit,
+        )
+        .collect()
+        .await;
+        assert_eq!(results.len(), 2);
         assert!(
-            collect(vec![body.as_bytes().to_vec()], 32)
-                .await
-                .unwrap()
-                .is_empty()
+            results[1]
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("broken")
         );
+        for body in [
+            &b"data: x"[..],
+            b"data: x\n",
+            b"data: x\r",
+            b"data: x\r\n",
+            b"data: \xe2",
+        ] {
+            assert!(
+                collect(vec![body.to_vec()], limit)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 }
 
 #[tokio::test]
 async fn cr_terminated_event_does_not_wait_for_another_byte() {
     let source = stream::iter([Ok::<_, &str>("data: x\r\r")]).chain(stream::pending());
-    let mut decoded = Box::pin(EventStreamBuilder::bounded_sse_stream(source, 32));
+    let mut decoded = Box::pin(EventStreamBuilder::sse_stream(source, 32));
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), decoded.next())
             .await

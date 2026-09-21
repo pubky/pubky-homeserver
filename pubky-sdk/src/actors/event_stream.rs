@@ -89,11 +89,10 @@ use std::{fmt::Display, io::Cursor, num::NonZeroUsize, pin::Pin};
 
 use crate::PublicKey;
 use base64::Engine;
-use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use pubky_common::{StoragePath, constants::storage::PRIVATE_ROOT, crypto::Hash};
 use reqwest::Method;
-use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
+use sse_core::{MessageEvent, SseDecoder, SseEvent, SseStream, SseStreamError};
 use url::Url;
 
 pub use pubky_common::events::{EventCursor, EventType};
@@ -125,7 +124,7 @@ pub struct EventStreamBuilder {
     users: Vec<(PublicKey, Option<EventCursor>)>,
     homeserver: Option<PublicKey>,
     limit: Option<u16>,
-    max_event_bytes: Option<usize>,
+    max_event_bytes: usize,
     live: bool,
     reverse: bool,
     paths: Vec<String>,
@@ -188,7 +187,7 @@ impl EventStreamBuilder {
             users: vec![(user.clone(), cursor)],
             homeserver: None,
             limit: None,
-            max_event_bytes: None,
+            max_event_bytes: usize::MAX,
             live: false,
             reverse: false,
             paths: Vec::new(),
@@ -235,7 +234,7 @@ impl EventStreamBuilder {
             users: Vec::new(),
             homeserver: Some(homeserver.clone()),
             limit: None,
-            max_event_bytes: None,
+            max_event_bytes: usize::MAX,
             live: false,
             reverse: false,
             paths: Vec::new(),
@@ -304,10 +303,10 @@ impl EventStreamBuilder {
         self
     }
 
-    /// Set a client-side byte limit for SSE payloads. Unbounded by default.
+    /// Set a client-side byte limit for SSE payloads.
     ///
     /// Protects against oversized or unterminated payloads in historical and live
-    /// streams. Without a limit, subscriptions use the existing SSE parser.
+    /// streams. Defaults to `usize::MAX`, effectively unbounded.
     ///
     /// Limits accumulated event data (including newlines joining `data` fields),
     /// each event name, and each ID separately. Comments, unknown fields and
@@ -320,7 +319,7 @@ impl EventStreamBuilder {
     /// independent of [`Self::limit`] and the client's HTTP error-body limit.
     #[must_use]
     pub const fn max_event_bytes(mut self, limit: usize) -> Self {
-        self.max_event_bytes = Some(limit);
+        self.max_event_bytes = limit;
         self
     }
 
@@ -443,7 +442,7 @@ impl EventStreamBuilder {
 
     /// Internal helper that contains the shared subscription logic.
     async fn subscribe_internal(self) -> Result<impl Stream<Item = Result<Event>>> {
-        if self.max_event_bytes == Some(0) {
+        if self.max_event_bytes == 0 {
             return Err(RequestError::Validation {
                 message: "max_event_bytes must be greater than zero".into(),
             }
@@ -518,22 +517,10 @@ impl EventStreamBuilder {
 
     fn response_event_stream(
         response: reqwest::Response,
-        max_event_bytes: Option<usize>,
+        max_event_bytes: usize,
     ) -> impl Stream<Item = Result<Event>> {
         let source = response.bytes_stream();
-        let sse_stream = if let Some(limit) = max_event_bytes {
-            Self::bounded_sse_stream(source, limit).left_stream()
-        } else {
-            // Preserve existing parsing and error behavior unless a limit is set.
-            source
-                .eventsource()
-                .map_err(|error| {
-                    Error::from(RequestError::Validation {
-                        message: format!("SSE stream error: {error}"),
-                    })
-                })
-                .right_stream()
-        };
+        let sse_stream = Self::sse_stream(source, max_event_bytes);
         sse_stream.filter_map(|result| async move {
             match result {
                 Ok(sse_event) => match parse_sse_event(&sse_event) {
@@ -552,10 +539,7 @@ impl EventStreamBuilder {
         })
     }
 
-    fn bounded_sse_stream<S, B, E>(
-        source: S,
-        limit: usize,
-    ) -> impl Stream<Item = Result<eventsource_stream::Event>>
+    fn sse_stream<S, B, E>(source: S, limit: usize) -> impl Stream<Item = Result<MessageEvent>>
     where
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]>,
@@ -569,7 +553,8 @@ impl EventStreamBuilder {
             futures_lite::future::yield_now().await;
             chunk.map(Cursor::new)
         }));
-        // Drop the response before yielding an error; sse-core otherwise allows recovery.
+        // Consume the decoder state on error so the attached response body is
+        // dropped before yielding the error; sse-core can otherwise recover after overflow.
         stream::try_unfold(Box::pin(events), move |mut events| async move {
             while let Some(event) =
                 events
@@ -584,12 +569,7 @@ impl EventStreamBuilder {
                         },
                     })?
             {
-                if let SseEvent::Message(message) = event {
-                    let event = eventsource_stream::Event {
-                        event: message.event.into_owned(),
-                        data: message.data,
-                        ..Default::default()
-                    };
+                if let SseEvent::Message(event) = event {
                     return Ok(Some((event, events)));
                 }
             }
@@ -657,7 +637,7 @@ mod bounded_tests;
 /// data: cursor: 42
 /// data: content_hash: <base64 of raw 32-byte blake3 digest> (required for PUT events)
 /// ```
-fn parse_sse_event(sse: &eventsource_stream::Event) -> Result<Event> {
+fn parse_sse_event(sse: &MessageEvent) -> Result<Event> {
     // Parse SSE data by prefix
     let mut path: Option<String> = None;
     let mut cursor: Option<EventCursor> = None;
@@ -697,7 +677,7 @@ fn parse_sse_event(sse: &eventsource_stream::Event) -> Result<Event> {
         })
     })?;
 
-    let event_type = match sse.event.as_str() {
+    let event_type = match sse.event.as_ref() {
         "PUT" => {
             let content_hash = decode_content_hash(content_hash_base64.as_deref())?;
             EventType::Put { content_hash }
@@ -761,12 +741,11 @@ mod tests {
     };
 
     /// Helper to create an SSE event for testing
-    fn make_sse(event: &str, data: &str) -> eventsource_stream::Event {
-        eventsource_stream::Event {
-            event: event.to_string(),
+    fn make_sse(event: &str, data: &str) -> MessageEvent {
+        MessageEvent {
+            event: event.to_owned().into(),
             data: data.to_string(),
-            id: String::new(),
-            retry: None,
+            last_event_id: None,
         }
     }
 
