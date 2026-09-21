@@ -36,19 +36,19 @@ info:
 
     `/storage/{user_z32}/{path}` accepts the WebDAV `LOCK` and `UNLOCK` methods
     (RFC 4918) on file paths, advertised as the `webdav-locks` feature. The
-    deprecated owner-relative routes do not; their writes return `423` while a
-    path is locked. OpenAPI cannot list these methods,
-    so they are described here.
+    deprecated owner-relative routes do not, but their writes obey locks the
+    same way. OpenAPI cannot list these methods, so they are described here.
 
     `LOCK` takes an exclusive write lock on one file path, mapped or not, for the
     caller with write capability on it. `Timeout: Second-N` requests a lifetime
-    (capped at 300 seconds, default 30, `Infinite` grants the cap). An optional
+    (capped at 60 seconds, default 30, `Infinite` grants the cap; refresh to
+    hold a lock longer). An optional
     `lockinfo` body is accepted but only `exclusive` `write` is granted. The
     response is `200` with a `lockdiscovery` XML body, a `Timeout` header and a
     `Lock-Token: <opaquelocktoken:...>` header. A `LOCK` carrying the held token
     in `If` refreshes the lock instead. Errors: `423` when another live lock
     exists, `412` when a refresh names no live lock, `400` for a directory path
-    or a shared lock request.
+    or a shared lock request, `413` for a `lockinfo` body over 16 KiB.
 
     `UNLOCK` with `Lock-Token: <opaquelocktoken:...>` releases the lock: `204`,
     or `409` when no lock with that token exists on the path.
@@ -66,7 +66,8 @@ info:
     second unlocked write to the same path, returns `423` and should be
     retried. While a write is in flight the server keeps its lock alive, the
     implicit one or the client's own, so a lock cannot expire under a slow
-    upload.
+    upload. An upload that delivers no data for 60 seconds is abandoned with
+    `408`, so a client that goes silent cannot hold a path.
   version: 0.9.0
   license:
     name: MIT
@@ -602,6 +603,8 @@ paths:
             Session user does not match `user_z32`, the session lacks write
             capability for the path, the path is outside `pub/` and `priv/`,
             or the user account is disabled.
+        '408':
+          description: The upload delivered no data for 60 seconds and was abandoned.
         '409':
           description: File/folder path collision.
         '412':
@@ -869,6 +872,8 @@ paths:
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfLockToken"
       requestBody:
         required: true
         content:
@@ -885,8 +890,12 @@ paths:
           description: |
             Session user does not match target tenant, path is outside `/pub/` and
             `/priv/`, session lacks write capability for path, or user account is disabled.
+        '408':
+          description: The upload delivered no data for 60 seconds and was abandoned
         '409':
           description: File/folder path collision
+        '412':
+          description: The `If` header names a token that is not the live lock on this path
         '423':
           description: The path is locked, or another write to it is in flight (see Locking)
         '507':
@@ -905,6 +914,8 @@ paths:
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfLockToken"
       responses:
         '204':
           description: File deleted
@@ -914,6 +925,8 @@ paths:
           description: Insufficient permissions or path outside `/pub/` and `/priv/`
         '404':
           description: File not found
+        '412':
+          description: The `If` header names a token that is not the live lock on this path
         '423':
           description: The path is locked, or another write to it is in flight (see Locking)
   "/events/":

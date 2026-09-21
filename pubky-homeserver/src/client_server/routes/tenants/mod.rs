@@ -6,7 +6,8 @@
 //! Session management routes are provided by the auth module via
 //! [`crate::client_server::auth::tenant_router`].
 //! `LOCK`/`UNLOCK` (see [`lock`]) reach the `/storage` route through the
-//! method-router fallback; the deprecated routes do not offer them. Write handlers call [`crate::client_server::auth::has_write_permission`] and
+//! method-router fallback; the deprecated routes do not offer them.
+//! Write handlers call [`crate::client_server::auth::has_write_permission`] and
 //! read handlers call [`crate::client_server::auth::has_read_permission`] to
 //! enforce capability-based access control.
 

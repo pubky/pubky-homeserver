@@ -14,7 +14,12 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use axum::{http::header::RETRY_AFTER, middleware as axum_middleware, routing::get, Router};
+use axum::{
+    http::{header::RETRY_AFTER, HeaderName},
+    middleware as axum_middleware,
+    routing::get,
+    Router,
+};
 use axum_server::{
     tls_rustls::{RustlsAcceptor, RustlsConfig},
     Handle,
@@ -245,7 +250,12 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
     Ok(with_trace_layer(app)
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
-        .layer(CorsLayer::very_permissive().expose_headers([RETRY_AFTER])))
+        .layer(CorsLayer::very_permissive().expose_headers([
+            RETRY_AFTER,
+            // Browsers must be able to read a granted lock.
+            HeaderName::from_static("lock-token"),
+            HeaderName::from_static("timeout"),
+        ])))
 }
 
 #[cfg(test)]
@@ -301,7 +311,11 @@ mod tests {
         assert!(response.headers().contains_key(header::RETRY_AFTER));
 
         // Retry-After is not CORS-safelisted, so browsers need it explicitly exposed.
-        response.assert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "retry-after");
+        // Lock-Token and Timeout ride along so browsers can read a granted lock.
+        response.assert_header(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "retry-after,lock-token,timeout",
+        );
     }
 
     #[tokio::test]
