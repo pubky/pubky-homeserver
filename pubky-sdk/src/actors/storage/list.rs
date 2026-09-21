@@ -10,10 +10,10 @@ use crate::{Result, cross_log};
 impl SessionStorage {
     /// Directory listing **as me** (authenticated).
     ///
-    /// Requirements:
-    /// - Path **must** point to a directory and **must end with `/`**.
+    /// Path **must end with `/`**. Call [`ListBuilder::send`] on the returned
+    /// builder to fetch addressed [`PubkyResource`] entries.
     ///
-    /// Returns addressed [`PubkyResource`] entries.
+    /// An empty page yields an empty vector; a missing directory is a server error (404).
     ///
     /// # Example
     /// ```no_run
@@ -32,8 +32,9 @@ impl SessionStorage {
     /// ```
     ///
     /// # Errors
-    /// - Returns [`crate::errors::RequestError::Validation`] if `path` cannot be converted into an absolute resource path ending with `/`.
-    /// - Propagates transport preparation failures when building the request URL.
+    /// Building validates the path (including its trailing `/`) and prepares the URL.
+    /// Sending can fail on invalid cursors (400), invalid response entries, or body
+    /// reads. See [`SessionStorage`] for shared errors.
     pub fn list<P: IntoResourcePath>(&self, path: P) -> Result<ListBuilder<'_>> {
         let path: ResourcePath = path.into_abs_path()?;
         if !path.as_str().ends_with('/') {
