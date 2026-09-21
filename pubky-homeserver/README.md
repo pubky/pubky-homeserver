@@ -91,6 +91,8 @@ pubky-homeserver --data-dir ~/.pubky
 
 `/pub/` is public; `/priv/` requires an authenticated session and a covering
 capability. See [Private Storage](../docs/PRIVATE_STORAGE.md) for the full contract.
+Files can be locked for read-modify-write cycles with WebDAV `LOCK`/`UNLOCK`;
+see [Locking](../docs/LOCKING.md).
 
 ## Caching and Proxies
 

@@ -7,6 +7,7 @@ use axum::{
 };
 use futures_util::stream::StreamExt;
 
+use super::lock;
 use crate::{
     client_server::{
         auth::{has_write_permission, AuthSession},
@@ -32,15 +33,17 @@ pub async fn legacy_delete(
     session: AuthSession,
     tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
-    delete(state, session, entry_path).await
+    delete(state, session, entry_path, headers).await
 }
 
 pub async fn delete(
     State(state): State<AppState>,
     session: AuthSession,
     entry_path: EntryPath,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
     if !entry_path.path().is_file() {
         return Err(HttpError::bad_request("Target path must be a file"));
@@ -53,7 +56,10 @@ pub async fn delete(
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
+    let write_guard = lock::guard_write(&state, &entry_path, &headers).await?;
+
     state.context.file_service.delete(&entry_path).await?;
+    write_guard.release().await;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -86,6 +92,7 @@ pub async fn put(
         .user_service
         .get_or_http_error(entry_path.pubkey(), true)
         .await?;
+    let write_guard = lock::guard_write(&state, &entry_path, &headers).await?;
 
     // Early fail: check Content-Length header against the user's storage quota
     // so we can reject before streaming the entire body.
@@ -112,6 +119,7 @@ pub async fn put(
         .file_service
         .write_stream(&entry_path, converted_stream)
         .await?;
+    write_guard.release().await;
     Ok((StatusCode::CREATED, ()))
 }
 

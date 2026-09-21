@@ -31,6 +31,42 @@ info:
 
     All PUT/DELETE operations require paths under `/pub/` or `/priv/`. Attempts to
     write elsewhere return `403 Forbidden`.
+
+    ## Locking
+
+    `/storage/{user_z32}/{path}` accepts the WebDAV `LOCK` and `UNLOCK` methods
+    (RFC 4918) on file paths, advertised as the `webdav-locks` feature. The
+    deprecated owner-relative routes do not; their writes return `423` while a
+    path is locked. OpenAPI cannot list these methods,
+    so they are described here.
+
+    `LOCK` takes an exclusive write lock on one file path, mapped or not, for the
+    caller with write capability on it. `Timeout: Second-N` requests a lifetime
+    (capped at 300 seconds, default 30, `Infinite` grants the cap). An optional
+    `lockinfo` body is accepted but only `exclusive` `write` is granted. The
+    response is `200` with a `lockdiscovery` XML body, a `Timeout` header and a
+    `Lock-Token: <opaquelocktoken:...>` header. A `LOCK` carrying the held token
+    in `If` refreshes the lock instead. Errors: `423` when another live lock
+    exists, `412` when a refresh names no live lock, `400` for a directory path
+    or a shared lock request.
+
+    `UNLOCK` with `Lock-Token: <opaquelocktoken:...>` releases the lock: `204`,
+    or `409` when no lock with that token exists on the path.
+
+    While a lock lives, `PUT` and `DELETE` on the path must carry the token in
+    the `If` header, e.g. `If: (<opaquelocktoken:...>)`. Without it they return
+    `423 Locked`. An `If` header naming a token that is not the live lock on the
+    path returns `412 Precondition Failed`, so a client whose lock expired never
+    writes unlocked by accident. Only tokens are read from `If`; resource tags,
+    entity tags and `Not` are ignored.
+
+    Every write holds the path's lock for its whole duration. A `PUT` or
+    `DELETE` without a token takes an implicit lock before its body streams and
+    releases it once the write has committed, so a `LOCK` during an upload, or a
+    second unlocked write to the same path, returns `423` and should be
+    retried. While a write is in flight the server keeps its lock alive, the
+    implicit one or the client's own, so a lock cannot expire under a slow
+    upload.
   version: 0.9.0
   license:
     name: MIT
@@ -92,6 +128,7 @@ paths:
               example:
                 features:
                 - path-addressed-storage
+                - webdav-locks
   "/signup_tokens/{token}":
     get:
       tags:
@@ -538,11 +575,14 @@ paths:
         The path must be under `pub/` or `priv/`. The authenticated user must
         match `user_z32` and have write capability covering the storage path.
         If `Content-Length` is provided, the user's quota is checked before the
-        request body is streamed.
+        request body is streamed. A locked path requires the lock token in `If`
+        (see Locking).
       operationId: putPathAddressedEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfLockToken"
       requestBody:
         required: true
         content:
@@ -564,6 +604,12 @@ paths:
             or the user account is disabled.
         '409':
           description: File/folder path collision.
+        '412':
+          description: The `If` header names a token that is not the live lock on this path.
+        '423':
+          description: |
+            The path is locked and the request carries no lock token. Also
+            returned while another unlocked write to the path is in flight.
         '507':
           description: Storage quota exceeded.
     delete:
@@ -576,11 +622,14 @@ paths:
         but ignored.
 
         The authenticated user must match `user_z32` and have write capability
-        covering the storage path.
+        covering the storage path. A locked path requires the lock token in
+        `If` (see Locking).
       operationId: deletePathAddressedEntry
       security:
       - bearerAuth: []
       - cookieAuth: []
+      parameters:
+      - "$ref": "#/components/parameters/IfLockToken"
       responses:
         '204':
           description: File deleted.
@@ -592,6 +641,10 @@ paths:
           description: Insufficient permissions or path outside `pub/` and `priv/`.
         '404':
           description: File or storage owner not found.
+        '412':
+          description: The `If` header names a token that is not the live lock on this path.
+        '423':
+          description: The path is locked and the request carries no lock token.
   "/{path}":
     parameters:
     - name: path
@@ -834,6 +887,8 @@ paths:
             `/priv/`, session lacks write capability for path, or user account is disabled.
         '409':
           description: File/folder path collision
+        '423':
+          description: The path is locked, or another write to it is in flight (see Locking)
         '507':
           description: Storage quota exceeded
     delete:
@@ -859,6 +914,8 @@ paths:
           description: Insufficient permissions or path outside `/pub/` and `/priv/`
         '404':
           description: File not found
+        '423':
+          description: The path is locked, or another write to it is in flight (see Locking)
   "/events/":
     get:
       tags:
@@ -1026,6 +1083,16 @@ components:
         public key and the value is the session secret. The `name` field here
         is a placeholder; the actual name varies per user.
   parameters:
+    IfLockToken:
+      name: If
+      in: header
+      required: false
+      description: |
+        WebDAV `If` header carrying the lock token for a locked path, for
+        example `(<opaquelocktoken:6b1a...>)`. Required while the path is
+        locked; must not name a token that is not the live lock. See Locking.
+      schema:
+        type: string
     PubkyHost:
       name: pubky-host
       in: header

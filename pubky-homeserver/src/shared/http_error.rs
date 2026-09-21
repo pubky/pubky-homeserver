@@ -1,7 +1,7 @@
 //! Server error
 use axum::{http::StatusCode, response::IntoResponse};
 
-use crate::persistence::files::FileIoError;
+use crate::persistence::{files::FileIoError, sql::entry_lock::LockViolation};
 
 pub(crate) type HttpResult<T, E = HttpError> = core::result::Result<T, E>;
 
@@ -66,6 +66,22 @@ impl HttpError {
     pub fn unauthorized_with_message(message: impl ToString) -> HttpError {
         Self::new_with_message(StatusCode::UNAUTHORIZED, message)
     }
+
+    pub fn conflict(message: impl ToString) -> HttpError {
+        Self::new_with_message(StatusCode::CONFLICT, message)
+    }
+
+    pub fn precondition_failed(message: impl ToString) -> HttpError {
+        Self::new_with_message(StatusCode::PRECONDITION_FAILED, message)
+    }
+
+    pub fn locked() -> HttpError {
+        Self::new_with_message(StatusCode::LOCKED, "Resource is locked")
+    }
+
+    pub fn lock_token_mismatch() -> HttpError {
+        Self::precondition_failed("The If header does not name the live lock on this path")
+    }
 }
 
 impl IntoResponse for HttpError {
@@ -127,6 +143,15 @@ impl From<FileIoError> for HttpError {
             }
             FileIoError::StreamBroken(_) => Self::bad_request("Stream broken"),
             e => Self::internal_server_and_log(format!("FileIoError: {}", e)),
+        }
+    }
+}
+
+impl From<LockViolation> for HttpError {
+    fn from(violation: LockViolation) -> Self {
+        match violation {
+            LockViolation::Locked => Self::locked(),
+            LockViolation::TokenMismatch => Self::lock_token_mismatch(),
         }
     }
 }

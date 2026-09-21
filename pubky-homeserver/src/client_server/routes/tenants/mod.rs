@@ -5,7 +5,8 @@
 //!
 //! Session management routes are provided by the auth module via
 //! [`crate::client_server::auth::tenant_router`].
-//! Write handlers call [`crate::client_server::auth::has_write_permission`] and
+//! `LOCK`/`UNLOCK` (see [`lock`]) reach the `/storage` route through the
+//! method-router fallback; the deprecated routes do not offer them. Write handlers call [`crate::client_server::auth::has_write_permission`] and
 //! read handlers call [`crate::client_server::auth::has_read_permission`] to
 //! enforce capability-based access control.
 
@@ -16,6 +17,7 @@ use crate::client_server::{
 };
 use crate::observability::Metrics;
 
+pub mod lock;
 pub mod read;
 pub mod write;
 
@@ -26,7 +28,9 @@ pub fn router(metrics: Metrics) -> Router<AppState> {
             get(read::get)
                 .head(read::head)
                 .put(write::put)
-                .delete(write::delete),
+                .delete(write::delete)
+                // LOCK and UNLOCK are not in axum's method filter set.
+                .fallback(lock::dispatch),
         )
         .route(
             "/{*path}",
