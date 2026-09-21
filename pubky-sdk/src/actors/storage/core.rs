@@ -15,6 +15,16 @@ use crate::{
 /// you only supply **absolute paths** (e.g. `"/pub/my.app/file.txt"`).
 /// The SDK resolves the homeserver and attaches credentials automatically.
 ///
+/// # Request failures
+///
+/// Invalid paths return [`RequestError::Validation`] inside [`crate::Error::Request`];
+/// URL parsing returns [`crate::Error::Parse`]. Homeserver resolution, credential
+/// preparation or refresh, and transport errors propagate.
+///
+/// Non-success HTTP statuses return [`RequestError::Server`] with the status and
+/// server message, including authentication/permission failures (401/403) and 5xx.
+/// Only [`exists`](Self::exists) and [`stats`](Self::stats) treat 404/410 as missing.
+///
 /// # Path conventions
 ///
 /// - Paths under `/pub/` are **publicly readable** by anyone via [`PublicStorage`].

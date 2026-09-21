@@ -45,6 +45,8 @@ async fn send_head(client: &PubkyHttpClient, rb: RequestBuilder) -> Result<Optio
 impl SessionStorage {
     /// HTTP `GET` (as me) for an **absolute path**.
     ///
+    /// Returns a successful response; reading its body can still fail.
+    ///
     /// # Examples
     /// ```no_run
     /// # async fn ex(session: pubky::PubkySession) -> pubky::Result<()> {
@@ -56,10 +58,8 @@ impl SessionStorage {
     /// ```
     ///
     /// # Errors
-    /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
-    ///   responds with a non-success status (the server message is captured).
-    /// - [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid
-    ///   resource/URL.
+    /// Missing resources (404/410) return [`crate::errors::RequestError::Server`].
+    /// See [`SessionStorage`] for shared errors.
     pub async fn get<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::GET, path).await?;
         send_checked(&self.client, rb).await
@@ -67,9 +67,10 @@ impl SessionStorage {
 
     /// Lightweight existence check (HEAD) for an **absolute path**.
     ///
+    /// Returns `Ok(true)` on success or `Ok(false)` on HTTP 404/410.
+    ///
     /// # Errors
-    /// - Propagates transport failures while issuing the `HEAD` request.
-    /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource.
+    /// Other failures return `Err`; see [`SessionStorage`].
     pub async fn exists<P: IntoResourcePath>(&self, path: P) -> Result<bool> {
         let rb = self.request(Method::HEAD, path).await?;
         Ok(send_head(&self.client, rb).await?.is_some())
@@ -77,9 +78,12 @@ impl SessionStorage {
 
     /// Retrieve metadata via `HEAD` for an **absolute path** (no body).
     ///
+    /// Returns `Ok(Some(stats))` on success or `Ok(None)` on HTTP 404/410.
+    /// Missing or unparseable headers leave the corresponding [`ResourceStats`]
+    /// fields `None`.
+    ///
     /// # Errors
-    /// - Propagates transport failures while issuing the `HEAD` request.
-    /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource.
+    /// Other failures return `Err`; see [`SessionStorage`].
     pub async fn stats<P: IntoResourcePath>(&self, path: P) -> Result<Option<ResourceStats>> {
         let rb = self.request(Method::HEAD, path).await?;
         Ok(send_head(&self.client, rb)
@@ -89,13 +93,13 @@ impl SessionStorage {
 
     /// HTTP `PUT` (write) for an **absolute path**.
     ///
-    /// Requires a valid session; this handle is authenticated already.
+    /// Creates or replaces a file and returns the successful response.
+    /// Requires write permission.
     ///
     /// # Errors
-    /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
-    ///   responds with a non-success status (the server message is captured).
-    /// - [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid
-    ///   resource/URL.
+    /// Directory targets (400), file/directory conflicts (409), and exceeded quotas
+    /// (507) return server errors. Body uploads can also fail.
+    /// See [`SessionStorage`] for shared errors.
     pub async fn put<P, B>(&self, path: P, body: B) -> Result<Response>
     where
         P: IntoResourcePath,
@@ -105,13 +109,13 @@ impl SessionStorage {
         send_checked(&self.client, rb).await
     }
 
-    /// HTTP `DELETE` for an **absolute path**.
+    /// Delete a file at an **absolute path** and return the successful response.
+    ///
+    /// Requires write permission.
     ///
     /// # Errors
-    /// - [`crate::errors::Error::Request`] on HTTP transport failures or when the server
-    ///   responds with a non-success status (the server message is captured).
-    /// - [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid
-    ///   resource/URL.
+    /// Missing files return 404; directory targets return 400.
+    /// See [`SessionStorage`] for shared errors.
     pub async fn delete<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::DELETE, path).await?;
         send_checked(&self.client, rb).await
