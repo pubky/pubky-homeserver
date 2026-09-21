@@ -12,19 +12,37 @@ use crate::js_error::{JsResult, serialize_ts};
 const TS_PATH: &'static str = r#"export type Path = `/pub/${string}` | `/priv/${string}`;"#;
 
 /// Read/write storage scoped to **your** session (absolute paths: `/pub/...` or `/priv/...`).
+///
+/// Storage operations return Promises. SDK failures reject with a {@link PubkyError};
+/// inspect `name`, `message`, and `data.statusCode` when present. Invalid resource
+/// paths (empty paths, internal `//`, or `.`/`..` segments), transport failures,
+/// and non-success HTTP statuses use `RequestError`. HTTP errors include a
+/// status code; local path validation and network failures generally do not.
+/// URL parsing failures use `InvalidInput`. Session credential preparation or
+/// refresh can also fail.
+///
+/// HTTP errors include authentication or permission failures (401/403) and server
+/// failures (5xx). Only {@link SessionStorage.exists} and {@link SessionStorage.stats}
+/// treat 404 and 410 as successful missing-resource results. Writes require a valid session with
+/// write permission and can fail on file/directory path conflicts (409) or
+/// exceeded storage quotas (507).
 #[wasm_bindgen]
 pub struct SessionStorage(pub(crate) pubky::SessionStorage);
 
 #[wasm_bindgen]
 impl SessionStorage {
-    /// List a directory (absolute session path). Returns `pubky://…` URLs.
+    /// List a directory (absolute session path).
     ///
     /// @param {Path} path Must end with `/`.
-    /// @param {string|null=} cursor Optional suffix or full URL to start **after**.
+    /// @param {string|null=} cursor Optional last entry URL to start **after**.
     /// @param {boolean=} reverse Default `false`.
     /// @param {number=} limit Optional result limit.
     /// @param {boolean=} shallow Default `false`.
-    /// @returns {Promise<string[]>}
+    /// @returns {Promise<string[]>} `pubky://…` entry URLs; an empty array for a successful
+    /// page with no entries.
+    /// @throws {PubkyError} Rejects for a missing directory (404), invalid path or cursor,
+    /// invalid response entries, body-read failures, or shared request failures described
+    /// on {@link SessionStorage}.
     #[wasm_bindgen]
     pub async fn list(
         &self,
@@ -40,8 +58,12 @@ impl SessionStorage {
 
     /// GET a streaming response for an absolute session path.
     ///
+    /// Reading the returned response body can still fail after this resolves.
+    ///
     /// @param {Path} path
-    /// @returns {Promise<Response>}
+    /// @returns {Promise<Response>} A response with a successful HTTP status and an unread body.
+    /// @throws {PubkyError} Rejects for missing resources (404/410), response-construction
+    /// failures, or shared request failures described on {@link SessionStorage}.
     #[wasm_bindgen]
     pub async fn get(
         &self,
@@ -54,7 +76,9 @@ impl SessionStorage {
     /// GET bytes from an absolute session path.
     ///
     /// @param {Path} path
-    /// @returns {Promise<Uint8Array>}
+    /// @returns {Promise<Uint8Array>} The complete response body.
+    /// @throws {PubkyError} Rejects for missing resources (404/410), body-read failures, or
+    /// shared request failures described on {@link SessionStorage}.
     #[wasm_bindgen(js_name = "getBytes")]
     pub async fn get_bytes(
         &self,
@@ -68,7 +92,9 @@ impl SessionStorage {
     /// GET text from an absolute session path.
     ///
     /// @param {Path} path
-    /// @returns {Promise<string>}
+    /// @returns {Promise<string>} The complete response body decoded as text.
+    /// @throws {PubkyError} Rejects for missing resources (404/410), body-read failures, or
+    /// shared request failures described on {@link SessionStorage}.
     #[wasm_bindgen(js_name = "getText")]
     pub async fn get_text(
         &self,
@@ -81,7 +107,10 @@ impl SessionStorage {
     /// GET JSON from an absolute session path.
     ///
     /// @param {Path} path
-    /// @returns {Promise<any>}
+    /// @returns {Promise<any>} The parsed JSON value.
+    /// @throws {PubkyError} Rejects for missing resources (404/410), invalid JSON,
+    /// body-read or value-conversion failures, or shared request failures described on
+    /// {@link SessionStorage}.
     #[wasm_bindgen(js_name = "getJson")]
     pub async fn get_json(
         &self,
@@ -92,10 +121,14 @@ impl SessionStorage {
         Ok(v.serialize(&ser)?)
     }
 
-    /// Check existence.
+    /// Check existence with a HEAD request.
     ///
     /// @param {Path} path
-    /// @returns {Promise<boolean>}
+    /// @returns {Promise<boolean>} `true` on success; `false` only for HTTP 404 Not Found
+    /// or 410 Gone.
+    /// @throws {PubkyError} Rejects for other non-success statuses (including 401/403 and
+    /// 5xx) or shared request failures described on {@link SessionStorage}; these do not
+    /// resolve to `false`.
     #[wasm_bindgen]
     pub async fn exists(
         &self,
@@ -106,9 +139,15 @@ impl SessionStorage {
 
     /// Get metadata for an absolute, session-scoped path (e.g. `"/pub/app/file.json"`).
     ///
+    /// On a successful HEAD response, missing headers or metadata values that
+    /// cannot be parsed leave the corresponding properties absent.
+    ///
     /// @param {Path} path Absolute path under your user (starts with `/`).
-    /// @returns {Promise<ResourceStats|undefined>} `undefined` if the resource does not exist.
-    /// @throws {PubkyError} On invalid input or transport/server errors.
+    /// @returns {Promise<ResourceStats|undefined>} Metadata on success; `undefined` only
+    /// for HTTP 404 Not Found or 410 Gone.
+    /// @throws {PubkyError} Rejects for other non-success statuses (including 401/403 and
+    /// 5xx) or shared request failures described on {@link SessionStorage}; these do not
+    /// resolve to `undefined`.
     #[wasm_bindgen(js_name = "stats")]
     pub async fn stats(
         &self,
@@ -120,11 +159,13 @@ impl SessionStorage {
         }
     }
 
-    /// PUT binary at an absolute session path.
+    /// Create or replace a file with binary data at an absolute session path.
     ///
-    /// @param {Path} path
-    /// @param {Uint8Array} bytes
-    /// @returns {Promise<void>}
+    /// @param {Path} path File path; must not end with `/`.
+    /// @param {Uint8Array} body
+    /// @returns {Promise<void>} Resolves after the server accepts the write.
+    /// @throws {PubkyError} Rejects for directory targets (400), upload failures, or shared
+    /// write/request failures described on {@link SessionStorage}.
     #[wasm_bindgen(js_name = "putBytes")]
     pub async fn put_bytes(
         &self,
@@ -135,11 +176,13 @@ impl SessionStorage {
         Ok(())
     }
 
-    /// PUT text at an absolute session path.
+    /// Create or replace a file with text at an absolute session path.
     ///
-    /// @param {Path} path
-    /// @param {string} text
-    /// @returns {Promise<void>}
+    /// @param {Path} path File path; must not end with `/`.
+    /// @param {string} body
+    /// @returns {Promise<void>} Resolves after the server accepts the write.
+    /// @throws {PubkyError} Rejects for directory targets (400), upload failures, or shared
+    /// write/request failures described on {@link SessionStorage}.
     #[wasm_bindgen(js_name = "putText")]
     pub async fn put_text(
         &self,
@@ -150,11 +193,14 @@ impl SessionStorage {
         Ok(())
     }
 
-    /// PUT JSON at an absolute session path.
+    /// Create or replace a file with JSON at an absolute session path.
     ///
-    /// @param {Path} path Absolute path (e.g. `"/pub/app/data.json"`).
-    /// @param {any} value JSON-serializable value.
-    /// @returns {Promise<void>}
+    /// @param {Path} path File path (e.g. `"/pub/app/data.json"`); must not end with `/`.
+    /// @param {any} body JSON-serializable value.
+    /// @returns {Promise<void>} Resolves after the server accepts the write.
+    /// @throws {PubkyError} Rejects with `InvalidInput` if the value cannot be converted to
+    /// JSON; also rejects for directory targets (400), serialization/upload failures, or
+    /// shared write/request failures described on {@link SessionStorage}.
     #[wasm_bindgen(js_name = "putJson")]
     pub async fn put_json(
         &self,
@@ -166,10 +212,13 @@ impl SessionStorage {
         Ok(())
     }
 
-    /// Delete a path (file or empty directory).
+    /// Delete a file. Directory targets are unsupported.
     ///
-    /// @param {Path} path
-    /// @returns {Promise<void>}
+    /// @param {Path} path File path; must not end with `/`.
+    /// @returns {Promise<void>} Resolves after the server accepts the deletion.
+    /// @throws {PubkyError} Rejects for a missing file (404), directory targets (400), or
+    /// shared request failures described on {@link SessionStorage}. Deleting a missing file
+    /// does not succeed silently.
     #[wasm_bindgen]
     pub async fn delete(
         &self,

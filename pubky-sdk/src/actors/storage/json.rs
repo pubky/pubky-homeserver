@@ -16,8 +16,10 @@ impl SessionStorage {
     /// *Requires the **`json`** crate feature.*
     ///
     /// # Errors
-    /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource path.
-    /// - Propagates transport failures or JSON deserialization errors from the underlying HTTP request.
+    /// Missing resources (404 or 410) are server errors. Reading the response body
+    /// or deserializing invalid JSON (including a mismatch with `T`) can also
+    /// fail with [`crate::Error::Request`]. See [`SessionStorage`] for shared
+    /// path, credential, transport, and HTTP failures.
     pub async fn get_json<P, T>(&self, path: P) -> Result<T>
     where
         P: IntoResourcePath + Send,
@@ -35,13 +37,15 @@ impl SessionStorage {
 
     /// PUT JSON to an **absolute path** and return the raw `Response`.
     ///
-    /// Serializes `body` as JSON.
+    /// Serializes `body` as JSON and creates or replaces a file. Requires write
+    /// permission; directory targets are unsupported.
     ///
     /// *Requires the **`json`** crate feature.*
     ///
     /// # Errors
-    /// - Returns [`crate::errors::Error::Parse`] if `path` cannot be converted into a valid resource path.
-    /// - Propagates transport failures or serialization errors encountered while sending the request.
+    /// Serialization and request-body failures return [`crate::Error::Request`].
+    /// See [`Self::put`] for write-specific server errors and [`SessionStorage`]
+    /// for shared path, credential, transport, and HTTP failures.
     pub async fn put_json<P, B>(&self, path: P, body: &B) -> Result<Response>
     where
         P: IntoResourcePath + Send,
