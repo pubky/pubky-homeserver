@@ -99,6 +99,8 @@ impl SessionStorage {
     /// # Errors
     /// Directory targets (400), file/directory conflicts (409), and exceeded quotas
     /// (507) return server errors. Body uploads can also fail.
+    /// A path that is locked, or that another write is still writing, returns 423;
+    /// the write is not sent again, so retry it if that suits the caller.
     /// See [`SessionStorage`] for shared errors.
     pub async fn put<P, B>(&self, path: P, body: B) -> Result<Response>
     where
@@ -114,7 +116,8 @@ impl SessionStorage {
     /// Requires write permission.
     ///
     /// # Errors
-    /// Missing files return 404; directory targets return 400.
+    /// Missing files return 404; directory targets return 400. A locked path
+    /// returns 423, as for [`Self::put`].
     /// See [`SessionStorage`] for shared errors.
     pub async fn delete<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::DELETE, path).await?;
