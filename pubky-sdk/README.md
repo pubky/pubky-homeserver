@@ -96,6 +96,48 @@ allocations add memory overhead.
 
 In JavaScript, use `Pubky.withClient(new Client({ maxErrorBodyBytes: 1024 }))`.
 
+## Event-stream limits
+
+Event subscriptions use `sse-core` with a default limit of `usize::MAX`,
+which is effectively unbounded.
+Set a client-side limit per subscription to reject oversized or unterminated
+SSE payloads in historical and live streams:
+
+```rust,no_run
+# async fn example(pubky: pubky::Pubky, user: pubky::PublicKey) -> pubky::Result<()> {
+let stream = pubky.event_stream_for_user(&user, None)
+    .max_event_bytes(8192)
+    .live()
+    .subscribe()
+    .await?;
+# Ok(()) }
+```
+
+In JavaScript, use `.maxEventBytes(8192)` on the event-stream builder.
+Rust rejects zero at subscription time; JavaScript requires an integer in
+`1..=4294967295` when setting the limit.
+
+The limit applies separately to accumulated event data, each event name, and
+each ID. Data includes the newlines joining
+`data` fields; repeated `event` and `id` fields replace their previous values.
+Comments and unknown fields are skipped without buffering their contents.
+Field prefixes, framing line endings and a leading UTF-8 BOM do not count.
+There is no total block or stream byte limit. This setting is independent of
+`.limit()` (event count) and `max_error_body_bytes`.
+
+On overflow, the SDK closes the response and yields one validation error, then
+ends the Rust stream or errors the JavaScript `ReadableStream`. It still skips
+malformed Pubky events and unknown event types within the limit.
+
+All subscriptions replace invalid UTF-8 and discard incomplete events at EOF.
+Transport errors release the response and end the stream. This changes the
+previous default parser's behavior, which reported UTF-8 errors and could
+continue after a transport error.
+
+Parser memory is a multiple of the limit because data, event names and IDs have
+separate buffers, with additional UTF-8 replacement and URL encoding overhead.
+Transport buffers and events retained by the application are outside this limit.
+
 ## Key formats (display vs transport)
 
 `PublicKey` has two string representations:

@@ -30,7 +30,7 @@ base64.workspace = true
 bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 dirs.workspace = true
-futures-lite = "2"
+futures-lite = { workspace = true, features = ["default"] }
 futures-util.workspace = true
 httpdate.workspace = true
 pkarr = { workspace = true, features = ["default", "dht", "tls"] }
