@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use axum::http::HeaderMap;
 use axum::{
     body::Body,
@@ -7,7 +5,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures_util::stream::{self, Stream, StreamExt};
+use futures_util::stream::StreamExt;
 
 use super::{authorize::authorize_write, lock};
 use crate::{
@@ -25,13 +23,6 @@ use crate::{
         HttpError, HttpResult,
     },
 };
-
-/// Longest an upload may go without delivering a chunk. A write holds its
-/// path's lock while its body streams, so a client that goes silent without
-/// closing its connection would otherwise block the path for as long as the
-/// request lives. Set to the longest lock lifetime: a vanished uploader blocks
-/// a path no longer than a vanished lock holder does.
-const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(lock::MAX_LOCK_TIMEOUT_SECS as u64);
 
 pub async fn legacy_delete(
     state: State<AppState>,
@@ -97,10 +88,8 @@ pub async fn put(
 
     // Convert body stream to the format expected by file_service
     let body_stream = body.into_data_stream();
-    let converted_stream = abandon_when_idle(
-        body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum)),
-        UPLOAD_IDLE_TIMEOUT,
-    );
+    let converted_stream =
+        body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
     lock::with_write_lock(&state.context.sql_db, &entry_path, &headers, async {
         let file_service = &state.context.file_service;
@@ -110,26 +99,6 @@ pub async fn put(
     })
     .await?;
     Ok((StatusCode::CREATED, ()))
-}
-
-/// End `chunks` with [`WriteStreamError::Stalled`] once no chunk arrives for
-/// `idle`. The timer restarts on every chunk, so a slow upload that keeps
-/// moving is not cut off.
-fn abandon_when_idle<T, S>(
-    chunks: S,
-    idle: Duration,
-) -> impl Stream<Item = Result<T, WriteStreamError>> + Unpin + Send
-where
-    S: Stream<Item = Result<T, WriteStreamError>> + Unpin + Send,
-    T: Send,
-{
-    Box::pin(stream::unfold(Some(chunks), move |chunks| async move {
-        let mut chunks = chunks?;
-        match tokio::time::timeout(idle, chunks.next()).await {
-            Ok(chunk) => Some((chunk?, Some(chunks))),
-            Err(_) => Some((Err(WriteStreamError::Stalled), None)),
-        }
-    }))
 }
 
 /// Parse the `Content-Length` header into a `u64`, returning `None` if absent or unparseable.
@@ -184,24 +153,6 @@ mod tests {
     use crate::shared::webdav::StoragePath;
 
     use super::*;
-
-    /// A body that stops arriving ends the stream with `Stalled` instead of
-    /// holding the write, and its path's lock, open.
-    #[tokio::test]
-    async fn abandon_when_idle_ends_a_stalled_stream() {
-        let idle = Duration::from_millis(50);
-
-        let complete = stream::iter([Ok(1), Ok(2)]);
-        let chunks: Vec<_> = abandon_when_idle(complete, idle).collect().await;
-        assert!(matches!(chunks[..], [Ok(1), Ok(2)]));
-
-        let stalled = stream::iter([Ok(1)]).chain(stream::pending());
-        let chunks: Vec<_> = abandon_when_idle(stalled, idle).collect().await;
-        assert!(matches!(
-            chunks[..],
-            [Ok(1), Err(WriteStreamError::Stalled)]
-        ));
-    }
 
     /// Helper to build the function args and call `fail_if_size_hint_exceeds_quota`.
     async fn check_hint(

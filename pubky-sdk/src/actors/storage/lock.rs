@@ -77,12 +77,14 @@ impl SessionStorage {
     ///
     /// The file need not exist; locking a free path reserves it. `timeout` is
     /// the lifetime asked for; the homeserver caps it, and
-    /// [`StorageLock::timeout`] tells what was granted.
+    /// [`StorageLock::timeout`] tells what was granted. A write made under the
+    /// lock keeps it alive until the write ends, so it need not cover the
+    /// upload itself.
     ///
     /// # Errors
-    /// A path that is already locked, or that a write is still writing, returns
-    /// 423. Directory targets return 400. A homeserver without lock support
-    /// returns 405. See [`SessionStorage`] for shared errors.
+    /// A path that is already locked returns 423. Directory targets return 400.
+    /// A homeserver without lock support returns 405. See [`SessionStorage`]
+    /// for shared errors.
     pub async fn lock<P: IntoResourcePath>(
         &self,
         path: P,

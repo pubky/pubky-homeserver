@@ -99,8 +99,8 @@ impl SessionStorage {
     /// # Errors
     /// Directory targets (400), file/directory conflicts (409), and exceeded quotas
     /// (507) return server errors. Body uploads can also fail.
-    /// A path that is locked, or that another write is still writing, returns 423;
-    /// the write is not sent again, so retry it if that suits the caller.
+    /// A locked path returns 423; the write is not sent again, so retry it if
+    /// that suits the caller. See [`Self::put_locked`](SessionStorage::put_locked).
     /// See [`SessionStorage`] for shared errors.
     pub async fn put<P, B>(&self, path: P, body: B) -> Result<Response>
     where

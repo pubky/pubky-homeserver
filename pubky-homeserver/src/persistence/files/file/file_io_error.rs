@@ -47,8 +47,6 @@ impl From<opendal::Error> for FileIoError {
 pub enum WriteStreamError {
     #[error("Axum error: {0}")]
     Axum(#[from] axum::Error),
-    #[error("Upload stalled: no data received in time")]
-    Stalled,
     #[error("Other error: {0}")]
     Other(#[from] anyhow::Error),
 }

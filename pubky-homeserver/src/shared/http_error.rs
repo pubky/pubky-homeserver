@@ -1,7 +1,7 @@
 //! Server error
 use axum::{http::StatusCode, response::IntoResponse};
 
-use crate::persistence::files::{FileIoError, WriteStreamError};
+use crate::persistence::files::FileIoError;
 
 pub(crate) type HttpResult<T, E = HttpError> = core::result::Result<T, E>;
 
@@ -139,9 +139,6 @@ impl From<FileIoError> for HttpError {
             }
             FileIoError::PathCollision => {
                 Self::new_with_message(StatusCode::CONFLICT, "File/folder path collision")
-            }
-            FileIoError::StreamBroken(WriteStreamError::Stalled) => {
-                Self::new_with_message(StatusCode::REQUEST_TIMEOUT, "Upload stalled")
             }
             FileIoError::StreamBroken(_) => Self::bad_request("Stream broken"),
             e => Self::internal_server_and_log(format!("FileIoError: {}", e)),

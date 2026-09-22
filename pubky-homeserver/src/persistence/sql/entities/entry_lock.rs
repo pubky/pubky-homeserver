@@ -100,7 +100,6 @@ impl EntryLockRepository {
     }
 
     /// The live lock on `path`, if any.
-    #[cfg(test)]
     pub async fn get_active<'a>(
         path: &EntryPath,
         executor: &mut UnifiedExecutor<'a>,

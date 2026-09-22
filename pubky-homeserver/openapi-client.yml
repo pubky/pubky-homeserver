@@ -60,14 +60,12 @@ info:
     writes unlocked by accident. Only tokens are read from `If`; resource tags,
     entity tags and `Not` are ignored.
 
-    Every write holds the path's lock for its whole duration. A `PUT` or
-    `DELETE` without a token takes an implicit lock before its body streams and
-    releases it once the write has committed, so a `LOCK` during an upload, or a
-    second unlocked write to the same path, returns `423` and should be
-    retried. While a write is in flight the server keeps its lock alive, the
-    implicit one or the client's own, so a lock cannot expire under a slow
-    upload. An upload that delivers no data for 60 seconds is abandoned with
-    `408`, so a client that goes silent cannot hold a path.
+    A write checks the lock once, before it starts. An unlocked write holds
+    nothing: a `LOCK` taken while it is still streaming is granted and does not
+    stop it from landing. A write that presents the token runs under the lock
+    and the server keeps that lock alive until the write ends, so a lock cannot
+    expire under a slow upload. Its expiry may therefore end up later than the
+    last granted `Timeout`.
   version: 0.9.0
   license:
     name: MIT
@@ -603,16 +601,12 @@ paths:
             Session user does not match `user_z32`, the session lacks write
             capability for the path, the path is outside `pub/` and `priv/`,
             or the user account is disabled.
-        '408':
-          description: The upload delivered no data for 60 seconds and was abandoned.
         '409':
           description: File/folder path collision.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
         '423':
-          description: |
-            The path is locked and the request carries no lock token. Also
-            returned while another unlocked write to the path is in flight.
+          description: The path is locked and the request carries no lock token.
         '507':
           description: Storage quota exceeded.
     delete:
@@ -890,14 +884,12 @@ paths:
           description: |
             Session user does not match target tenant, path is outside `/pub/` and
             `/priv/`, session lacks write capability for path, or user account is disabled.
-        '408':
-          description: The upload delivered no data for 60 seconds and was abandoned
         '409':
           description: File/folder path collision
         '412':
           description: The `If` header names a token that is not the live lock on this path
         '423':
-          description: The path is locked, or another write to it is in flight (see Locking)
+          description: The path is locked and the request carries no lock token (see Locking)
         '507':
           description: Storage quota exceeded
     delete:
@@ -928,7 +920,7 @@ paths:
         '412':
           description: The `If` header names a token that is not the live lock on this path
         '423':
-          description: The path is locked, or another write to it is in flight (see Locking)
+          description: The path is locked and the request carries no lock token (see Locking)
   "/events/":
     get:
       tags:
