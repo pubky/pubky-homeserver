@@ -15,10 +15,13 @@ use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
 /// App-facing operators also reject path collisions; admin operators allow them
 /// so they can repair legacy data.
 ///
-/// Blob storage cannot be part of the database transaction. If the database
-/// update after a write fails, the blob may remain without a matching entry.
-/// If deleting a blob fails after its database update, an unreferenced blob may
-/// remain.
+/// Blob storage cannot be part of the database transaction. A write that is
+/// rejected before publication, by quota or a collision, aborts its upload and
+/// leaves the existing blob untouched. After publication the two can still
+/// diverge: if the database update fails, or the request is dropped before it
+/// commits, the blob holds the new content while the entry describes the old,
+/// or no entry exists. If deleting a blob fails after its database update, an
+/// unreferenced blob may remain.
 #[derive(Clone)]
 pub struct WriteFinalizationLayer {
     finalizer: Arc<Finalizer>,

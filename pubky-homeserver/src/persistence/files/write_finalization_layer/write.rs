@@ -144,9 +144,24 @@ impl Finalizer {
         file_metadata: &FileMetadata,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<opendal::Metadata> {
-        let prepared = self
+        let prepared = match self
             .prepare_write(entry_path, file_metadata, executor)
-            .await?;
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // Nothing has been published yet: discard the staged bytes and
+                // report the rejection, not a failed cleanup.
+                if let Err(abort_error) = backend_writer.abort().await {
+                    tracing::warn!(
+                        path = %entry_path,
+                        error = %abort_error,
+                        "Failed to abort rejected upload"
+                    );
+                }
+                return Err(error);
+            }
+        };
         let backend_metadata = backend_writer.close().await?;
         self.apply_write_effects(prepared, entry_path, file_metadata, executor)
             .await?;

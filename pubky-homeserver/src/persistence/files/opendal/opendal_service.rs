@@ -37,16 +37,22 @@ pub fn build_storage_operators(
 ) -> Result<(Operator, Operator), FileIoError> {
     let backend_operator = match &storage_config.backend {
         StorageConfigToml::FileSystem => {
-            let files_dir = match data_directory.join("data/files").to_str() {
-                Some(path) => path.to_string(),
-                None => {
-                    return Err(FileIoError::OpenDAL(opendal::Error::new(
-                        opendal::ErrorKind::Unexpected,
-                        "Invalid path",
-                    )))
-                }
+            let files_dir = data_directory.join("data/files");
+            // Uploads are staged here and renamed into place on close, so a
+            // rejected or aborted write never touches the existing file. Must
+            // be on the same filesystem as the root, and outside it so staged
+            // files never show up in listings.
+            let staging_dir = data_directory.join("data/files-tmp");
+            let (Some(files_dir), Some(staging_dir)) = (files_dir.to_str(), staging_dir.to_str())
+            else {
+                return Err(FileIoError::OpenDAL(opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    "Invalid path",
+                )));
             };
-            let builder = opendal::services::Fs::default().root(files_dir.as_str());
+            let builder = opendal::services::Fs::default()
+                .root(files_dir)
+                .atomic_write_dir(staging_dir);
             opendal::Operator::new(builder)?.finish()
         }
         #[cfg(feature = "storage-gcs")]
@@ -85,6 +91,32 @@ pub fn build_storage_operators(
         ))
         .layer(WritePathLayer::new(user_service));
     Ok((operator, admin_operator))
+}
+
+/// Aborts a backend write if the owning future is dropped before it completes,
+/// e.g. when the client disconnects mid-upload and the request handler is
+/// cancelled. Without this the staged bytes would never be cleaned up.
+struct AbortOnDrop(Option<opendal::Writer>);
+
+impl AbortOnDrop {
+    fn take(&mut self) -> opendal::Writer {
+        self.0.take().expect("writer is taken at most once")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        let Some(mut writer) = self.0.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = writer.abort().await {
+                    tracing::debug!(%error, "Could not abort dropped upload");
+                }
+            });
+        }
+    }
 }
 
 /// Build the storage operators from an `AppContext` (test-only convenience).
@@ -156,11 +188,12 @@ impl OpendalService {
         path: &EntryPath,
         mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
     ) -> Result<FileMetadata, FileIoError> {
-        let mut writer = self.operator.writer(path.as_str()).await?;
+        let mut guard = AbortOnDrop(Some(self.operator.writer(path.as_str()).await?));
         let mut metadata_builder = FileMetadataBuilder::default();
         metadata_builder.guess_mime_type_from_path(path.path().as_str());
 
         let write_result: Result<(), FileIoError> = async {
+            let writer = guard.0.as_mut().expect("writer is present while streaming");
             while let Some(chunk_result) = stream.next().await {
                 let chunk = chunk_result?;
                 metadata_builder.update(&chunk);
@@ -170,14 +203,20 @@ impl OpendalService {
         }
         .await;
 
+        // Past this point the write either completes or is aborted explicitly;
+        // the guard must not abort a second time.
+        let mut writer = guard.take();
         match write_result {
             Ok(()) => {
                 writer.close().await?;
                 Ok(metadata_builder.finalize())
             }
-            Err(e) => {
-                writer.abort().await?;
-                Err(e)
+            Err(stream_error) => {
+                // The caller needs the stream error, not a failed cleanup.
+                if let Err(abort_error) = writer.abort().await {
+                    tracing::warn!(%path, error = %abort_error, "Failed to abort broken upload");
+                }
+                Err(stream_error)
             }
         }
     }
@@ -259,9 +298,128 @@ impl OpendalService {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use super::*;
     use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
     use crate::shared::webdav::StoragePath;
+
+    /// A service on the production filesystem backend, a user with `quota_mb`,
+    /// a file path of theirs holding `old`, and the staging directory.
+    async fn fs_service_with_old_file(
+        quota_mb: u64,
+    ) -> (
+        Arc<AppContext>,
+        OpendalService,
+        EntryPath,
+        std::path::PathBuf,
+    ) {
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
+        let service = OpendalService::new(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context
+            .user_service
+            .create_with_quota_mb(&pubkey, quota_mb)
+            .await;
+        let path = EntryPath::new(pubkey, StoragePath::new("/pub/test.txt").unwrap());
+        service.write(&path, b"old".to_vec()).await.unwrap();
+        let staging_dir = context.data_dir.path().join("data/files-tmp");
+        assert_eq!(staged_count(&staging_dir), 0);
+        (context, service, path, staging_dir)
+    }
+
+    fn staged_count(staging_dir: &Path) -> usize {
+        std::fs::read_dir(staging_dir).map_or(0, Iterator::count)
+    }
+
+    async fn wait_for_staged_count(staging_dir: &Path, expected: usize, message: &str) {
+        wait_until(|| async { staged_count(staging_dir) == expected }, message).await;
+    }
+
+    /// Poll until `condition` holds, for a few seconds at most.
+    async fn wait_until<F, Fut>(condition: F, message: &str)
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        for _ in 0..500 {
+            if condition().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{message}");
+    }
+
+    /// A client that disconnects mid-upload drops the request future. The
+    /// staged bytes must be cleaned up and the existing file left alone.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn dropped_upload_leaves_no_staged_file_and_the_old_bytes() {
+        let (_context, service, path, staging_dir) = fs_service_with_old_file(1).await;
+
+        // One chunk, then the body never completes.
+        let stream = futures_util::stream::iter([Ok(Bytes::from_static(b"partial"))])
+            .chain(futures_util::stream::pending());
+        let upload = {
+            let (service, path) = (service.clone(), path.clone());
+            tokio::spawn(async move { service.write_stream(&path, Box::pin(stream)).await })
+        };
+        wait_for_staged_count(&staging_dir, 1, "upload should be staged while in flight").await;
+
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+
+        // The abort runs on a spawned task.
+        wait_for_staged_count(&staging_dir, 0, "dropped upload left its staged file").await;
+        assert_eq!(
+            service.get(&path).await.unwrap(),
+            Bytes::from_static(b"old")
+        );
+    }
+
+    /// A body that breaks mid-stream is aborted, and the caller gets the
+    /// stream error rather than a cleanup error.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn broken_stream_leaves_no_staged_file_and_the_old_bytes() {
+        let (_context, service, path, staging_dir) = fs_service_with_old_file(1).await;
+
+        let stream = futures_util::stream::iter([
+            Ok(Bytes::from_static(b"partial")),
+            Err(WriteStreamError::Other(anyhow::anyhow!("connection reset"))),
+        ]);
+        let result = service.write_stream(&path, Box::pin(stream)).await;
+
+        assert!(matches!(result, Err(FileIoError::StreamBroken(_))));
+        assert_eq!(staged_count(&staging_dir), 0);
+        assert_eq!(
+            service.get(&path).await.unwrap(),
+            Bytes::from_static(b"old")
+        );
+    }
+
+    /// Quota is only known once the whole body has streamed. Rejecting it then
+    /// must not have touched the existing file.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn quota_rejected_overwrite_leaves_the_old_bytes_and_no_staged_file() {
+        let (_context, service, path, staging_dir) = fs_service_with_old_file(1).await;
+
+        let result = service.write(&path, vec![42u8; 1024 * 1024]).await;
+
+        assert!(matches!(result, Err(FileIoError::DiskSpaceQuotaExceeded)));
+        assert_eq!(staged_count(&staging_dir), 0);
+        assert_eq!(
+            service.get(&path).await.unwrap(),
+            Bytes::from_static(b"old")
+        );
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]

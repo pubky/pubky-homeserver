@@ -8,6 +8,11 @@
 //!    entry metadata, events, and quota accounting around backend writes.
 //! 3. **OpenDAL base** — physical storage I/O.
 //!
+//! A write never touches the existing blob before it is finalized: every
+//! backend publishes on close, and the filesystem backend does so by staging
+//! the upload in `data/files-tmp` and renaming it into place. An upload that is
+//! rejected, breaks mid-stream, or loses its client is aborted instead.
+//!
 //! [`file`] provides the high-level [`FileService`](file::file_service::FileService)
 //! used by route handlers.
 
