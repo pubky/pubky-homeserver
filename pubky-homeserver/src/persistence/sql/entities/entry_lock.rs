@@ -4,6 +4,10 @@
 //! ignored by every read and overwritten by the next acquisition. Nothing
 //! removes dead rows eagerly; [`EntryLockRepository::delete_expired`] sweeps
 //! them on each `LOCK` request.
+//!
+//! Every lifetime is measured on the database clock, inside the statement that
+//! sets or checks it, so all instances behind one database agree on which locks
+//! are live whatever their own clocks say.
 
 use sea_query::{Expr, ExprTrait, Func, Iden, OnConflict, PostgresQueryBuilder, Query, SimpleExpr};
 use sea_query_sqlx::SqlxBinder;
@@ -40,24 +44,29 @@ impl FromRow<'_, PgRow> for EntryLockEntity {
     }
 }
 
-/// Unix seconds; the clock every lock lifetime is measured against.
-pub fn unix_now() -> i64 {
-    chrono::Utc::now().timestamp()
+/// Unix seconds on the database clock. `now()` is fixed for the statement, so
+/// one statement sees one instant.
+fn db_now() -> SimpleExpr {
+    Expr::cust("EXTRACT(EPOCH FROM NOW())::BIGINT")
+}
+
+/// The database clock `seconds` from now.
+fn db_now_plus(seconds: i64) -> SimpleExpr {
+    db_now().add(seconds)
 }
 
 pub struct EntryLockRepository;
 
 impl EntryLockRepository {
-    /// Take the lock on `path` with `token`, replacing an expired lock if one is
-    /// there. Returns `None` when a live lock exists.
+    /// Take the lock on `path` with `token` for `lifetime_secs`, replacing an
+    /// expired lock if one is there. Returns `None` when a live lock exists.
     ///
     /// A single `INSERT ... ON CONFLICT DO UPDATE ... WHERE expired` statement,
     /// so two racing acquisitions cannot both succeed.
     pub async fn acquire<'a>(
         path: &EntryPath,
         token: &str,
-        expires_at: i64,
-        now: i64,
+        lifetime_secs: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
         let statement = Query::insert()
@@ -70,14 +79,14 @@ impl EntryLockRepository {
             .values(vec![
                 SimpleExpr::Value(path.as_str().into()),
                 SimpleExpr::Value(token.into()),
-                SimpleExpr::Value(expires_at.into()),
+                db_now_plus(lifetime_secs),
             ])
             .expect("invariant: values count matches columns count")
             .on_conflict(
                 OnConflict::column(EntryLockIden::Path)
                     .update_columns([EntryLockIden::Token, EntryLockIden::ExpiresAt])
                     .action_and_where(
-                        Expr::col((ENTRY_LOCK_TABLE, EntryLockIden::ExpiresAt)).lte(now),
+                        Expr::col((ENTRY_LOCK_TABLE, EntryLockIden::ExpiresAt)).lte(db_now()),
                     )
                     .to_owned(),
             )
@@ -94,7 +103,6 @@ impl EntryLockRepository {
     #[cfg(test)]
     pub async fn get_active<'a>(
         path: &EntryPath,
-        now: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
         let statement = Query::select()
@@ -105,7 +113,7 @@ impl EntryLockRepository {
                 EntryLockIden::ExpiresAt,
             ])
             .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
-            .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(now))
+            .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(db_now()))
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
@@ -114,30 +122,48 @@ impl EntryLockRepository {
             .await
     }
 
+    /// Backdate the lock on `path` so it counts as expired.
+    #[cfg(test)]
+    pub async fn expire<'a>(
+        path: &EntryPath,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<(), sqlx::Error> {
+        let statement = Query::update()
+            .table(ENTRY_LOCK_TABLE)
+            .value(EntryLockIden::ExpiresAt, db_now().sub(1))
+            .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        sqlx::query_with(&query, values).execute(con).await?;
+        Ok(())
+    }
+
     /// Restart the lifetime of the live lock on `path` held with one of
-    /// `tokens`. Returns `None` when no such lock exists.
+    /// `tokens` to `lifetime_secs`. Returns `None` when no such lock exists.
     pub async fn refresh<'a>(
         path: &EntryPath,
         tokens: &[String],
-        expires_at: i64,
-        now: i64,
+        lifetime_secs: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
-        Self::set_expiry_of_live_lock(path, tokens, Expr::val(expires_at), now, executor).await
+        Self::set_expiry_of_live_lock(path, tokens, db_now_plus(lifetime_secs), executor).await
     }
 
-    /// Make the live lock on `path` held with one of `tokens` last until at
-    /// least `until`, never shortening it. Returns `None` when no such lock
-    /// exists.
+    /// Make the live lock on `path` held with one of `tokens` last at least
+    /// `horizon_secs` more, never shortening it. Returns `None` when no such
+    /// lock exists.
     pub async fn keep_alive<'a>(
         path: &EntryPath,
         tokens: &[String],
-        until: i64,
-        now: i64,
+        horizon_secs: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
-        let expires_at = Func::greatest([Expr::col(EntryLockIden::ExpiresAt), Expr::val(until)]);
-        Self::set_expiry_of_live_lock(path, tokens, expires_at.into(), now, executor).await
+        let expires_at = Func::greatest([
+            Expr::col(EntryLockIden::ExpiresAt),
+            db_now_plus(horizon_secs),
+        ]);
+        Self::set_expiry_of_live_lock(path, tokens, expires_at.into(), executor).await
     }
 
     /// One statement that both finds the live lock by token and updates it, so
@@ -146,7 +172,6 @@ impl EntryLockRepository {
         path: &EntryPath,
         tokens: &[String],
         expires_at: SimpleExpr,
-        now: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
         let statement = Query::update()
@@ -154,7 +179,7 @@ impl EntryLockRepository {
             .value(EntryLockIden::ExpiresAt, expires_at)
             .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
             .and_where(Expr::col(EntryLockIden::Token).is_in(tokens))
-            .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(now))
+            .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(db_now()))
             .returning_all()
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
@@ -184,12 +209,11 @@ impl EntryLockRepository {
 
     /// Sweep every expired lock.
     pub async fn delete_expired<'a>(
-        now: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<u64, sqlx::Error> {
         let statement = Query::delete()
             .from_table(ENTRY_LOCK_TABLE)
-            .and_where(Expr::col(EntryLockIden::ExpiresAt).lte(now))
+            .and_where(Expr::col(EntryLockIden::ExpiresAt).lte(db_now()))
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
@@ -220,38 +244,44 @@ mod tests {
         names.iter().map(|name| String::from(*name)).collect()
     }
 
+    async fn live(db: &SqlDb, path: &EntryPath) -> Option<EntryLockEntity> {
+        EntryLockRepository::get_active(path, &mut db.pool().into())
+            .await
+            .unwrap()
+    }
+
+    async fn expire(db: &SqlDb, path: &EntryPath) {
+        EntryLockRepository::expire(path, &mut db.pool().into())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn acquire_refuses_live_lock_and_replaces_expired_lock() {
         let db = SqlDb::test().await;
         let path = path("/pub/a.txt");
-        let now = 1_000;
 
-        let first = EntryLockRepository::acquire(&path, "t1", now + 60, now, &mut db.pool().into())
+        let first = EntryLockRepository::acquire(&path, "t1", 60, &mut db.pool().into())
             .await
             .unwrap()
             .expect("first lock should be granted");
         assert_eq!(first.token, "t1");
+        assert_eq!(live(&db, &path).await.as_ref(), Some(&first));
 
-        let second =
-            EntryLockRepository::acquire(&path, "t2", now + 60, now, &mut db.pool().into())
-                .await
-                .unwrap();
+        let second = EntryLockRepository::acquire(&path, "t2", 60, &mut db.pool().into())
+            .await
+            .unwrap();
         assert!(second.is_none(), "a live lock must not be replaced");
 
-        let later = now + 61;
-        let third =
-            EntryLockRepository::acquire(&path, "t3", later + 60, later, &mut db.pool().into())
-                .await
-                .unwrap()
-                .expect("an expired lock is replaced");
+        expire(&db, &path).await;
+        assert!(live(&db, &path).await.is_none());
+        let third = EntryLockRepository::acquire(&path, "t3", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("an expired lock is replaced");
         assert_eq!(third.token, "t3");
-        assert_eq!(
-            EntryLockRepository::get_active(&path, later, &mut db.pool().into())
-                .await
-                .unwrap(),
-            Some(third)
-        );
+        assert_eq!(live(&db, &path).await, Some(third));
     }
 
     /// Acquisition is one atomic statement: of many acquirers racing for a
@@ -261,8 +291,7 @@ mod tests {
     async fn racing_acquisitions_grant_exactly_one_lock() {
         let db = SqlDb::test().await;
         let path = path("/pub/a.txt");
-        let now = 1_000;
-        let race = |at: i64| {
+        let race = || {
             let (db, path) = (db.clone(), path.clone());
             async move {
                 let racers = 8;
@@ -272,15 +301,9 @@ mod tests {
                     tokio::spawn(async move {
                         barrier.wait().await;
                         let token = format!("t{i}");
-                        EntryLockRepository::acquire(
-                            &path,
-                            &token,
-                            at + 60,
-                            at,
-                            &mut db.pool().into(),
-                        )
-                        .await
-                        .unwrap()
+                        EntryLockRepository::acquire(&path, &token, 60, &mut db.pool().into())
+                            .await
+                            .unwrap()
                     })
                 });
                 let granted: Vec<EntryLockEntity> = join_all(acquisitions)
@@ -292,24 +315,18 @@ mod tests {
             }
         };
 
-        let granted = race(now).await;
+        let granted = race().await;
         assert_eq!(granted.len(), 1, "exactly one racer takes a free path");
 
         // With the lock expired, exactly one racer replaces it.
-        let later = now + 61;
-        let granted = race(later).await;
+        expire(&db, &path).await;
+        let granted = race().await;
         assert_eq!(
             granted.len(),
             1,
             "exactly one racer replaces an expired lock"
         );
-        assert_eq!(
-            EntryLockRepository::get_active(&path, later, &mut db.pool().into())
-                .await
-                .unwrap()
-                .as_ref(),
-            granted.first()
-        );
+        assert_eq!(live(&db, &path).await.as_ref(), granted.first());
     }
 
     #[tokio::test]
@@ -317,44 +334,37 @@ mod tests {
     async fn keep_alive_only_extends_the_live_lock_of_its_token() {
         let db = SqlDb::test().await;
         let path = path("/pub/a.txt");
-        let now = 1_000;
-        let expires_at = |at: i64| {
-            let (db, path) = (db.clone(), path.clone());
-            async move {
-                EntryLockRepository::get_active(&path, at, &mut db.pool().into())
-                    .await
-                    .unwrap()
-                    .map(|lock| lock.expires_at)
-            }
-        };
-        EntryLockRepository::acquire(&path, "t1", now + 60, now, &mut db.pool().into())
+        let expires_at = || async { live(&db, &path).await.map(|lock| lock.expires_at) };
+        let first = EntryLockRepository::acquire(&path, "t1", 60, &mut db.pool().into())
             .await
             .unwrap()
             .unwrap();
 
         // Extends a lock that ends sooner, leaves one that ends later alone.
-        let keep = |held: &[&str], until: i64, at: i64| {
+        let keep = |held: &[&str], horizon: i64| {
             let (db, path, held) = (db.clone(), path.clone(), tokens(held));
             async move {
-                EntryLockRepository::keep_alive(&path, &held, until, at, &mut db.pool().into())
+                EntryLockRepository::keep_alive(&path, &held, horizon, &mut db.pool().into())
                     .await
                     .unwrap()
                     .is_some()
             }
         };
-        assert!(keep(&["t1"], now + 90, now).await);
-        assert_eq!(expires_at(now).await, Some(now + 90));
-        assert!(keep(&["t1"], now + 30, now).await);
-        assert_eq!(expires_at(now).await, Some(now + 90));
+        assert!(keep(&["t1"], 90).await);
+        let extended = expires_at().await.unwrap();
+        assert!(extended > first.expires_at);
+        assert!(keep(&["t1"], 30).await);
+        assert_eq!(expires_at().await, Some(extended));
 
         // One of several presented tokens is enough.
-        assert!(keep(&["other", "t1"], now + 120, now).await);
-        assert_eq!(expires_at(now).await, Some(now + 120));
+        assert!(keep(&["other", "t1"], 120).await);
+        assert!(expires_at().await > Some(extended));
 
         // Another token, or an expired lock, is not kept alive.
-        assert!(!keep(&["other"], now + 600, now).await);
-        assert!(!keep(&["t1"], now + 600, now + 120).await);
-        assert_eq!(expires_at(now).await, Some(now + 120));
+        assert!(!keep(&["other"], 600).await);
+        expire(&db, &path).await;
+        assert!(!keep(&["t1"], 600).await);
+        assert_eq!(expires_at().await, None);
     }
 
     #[tokio::test]
@@ -362,53 +372,34 @@ mod tests {
     async fn refresh_release_and_sweep() {
         let db = SqlDb::test().await;
         let path = path("/pub/a.txt");
-        let now = 1_000;
-        EntryLockRepository::acquire(&path, "t1", now + 60, now, &mut db.pool().into())
+        let first = EntryLockRepository::acquire(&path, "t1", 60, &mut db.pool().into())
             .await
             .unwrap()
             .unwrap();
 
-        let wrong = EntryLockRepository::refresh(
-            &path,
-            &tokens(&["other"]),
-            now + 600,
-            now,
-            &mut db.pool().into(),
-        )
-        .await
-        .unwrap();
+        let wrong =
+            EntryLockRepository::refresh(&path, &tokens(&["other"]), 600, &mut db.pool().into())
+                .await
+                .unwrap();
         assert!(wrong.is_none());
-        let refreshed = EntryLockRepository::refresh(
-            &path,
-            &tokens(&["t1"]),
-            now + 600,
-            now,
-            &mut db.pool().into(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(refreshed.expires_at, now + 600);
+        let refreshed =
+            EntryLockRepository::refresh(&path, &tokens(&["t1"]), 600, &mut db.pool().into())
+                .await
+                .unwrap()
+                .unwrap();
+        // From 60 to 600 seconds, give or take a clock tick.
+        assert!((539..=541).contains(&(refreshed.expires_at - first.expires_at)));
 
-        // Expired locks are invisible to get_active but still refuse a refresh.
-        let expired = now + 601;
+        // Expired locks are invisible to get_active and refuse a refresh, but
+        // can still be released with their token.
+        expire(&db, &path).await;
+        assert!(live(&db, &path).await.is_none());
         assert!(
-            EntryLockRepository::get_active(&path, expired, &mut db.pool().into())
+            EntryLockRepository::refresh(&path, &tokens(&["t1"]), 60, &mut db.pool().into())
                 .await
                 .unwrap()
                 .is_none()
         );
-        assert!(EntryLockRepository::refresh(
-            &path,
-            &tokens(&["t1"]),
-            expired + 60,
-            expired,
-            &mut db.pool().into()
-        )
-        .await
-        .unwrap()
-        .is_none());
-
         assert!(
             !EntryLockRepository::release(&path, "other", &mut db.pool().into())
                 .await
@@ -420,12 +411,20 @@ mod tests {
                 .unwrap()
         );
 
-        EntryLockRepository::acquire(&path, "t2", now + 1, now, &mut db.pool().into())
+        // The sweep removes expired locks only.
+        EntryLockRepository::acquire(&path, "t2", 60, &mut db.pool().into())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            EntryLockRepository::delete_expired(now + 1, &mut db.pool().into())
+            EntryLockRepository::delete_expired(&mut db.pool().into())
+                .await
+                .unwrap(),
+            0
+        );
+        expire(&db, &path).await;
+        assert_eq!(
+            EntryLockRepository::delete_expired(&mut db.pool().into())
                 .await
                 .unwrap(),
             1

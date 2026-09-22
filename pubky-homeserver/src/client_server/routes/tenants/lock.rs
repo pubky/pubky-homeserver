@@ -12,6 +12,8 @@
 //! releases it once the write has committed, so a `LOCK` cannot land in the
 //! middle of an upload. The guard keeps whichever lock the write runs under
 //! alive until the write ends, so a slow upload cannot outlive its lock.
+//! Lifetimes are measured on the database clock, so every instance agrees on
+//! which locks are live.
 //!
 //! `LOCK` and `UNLOCK` exist on the path-addressed `/storage` route only. The
 //! deprecated owner-relative routes cannot take a lock, but their writes go
@@ -35,7 +37,7 @@ use super::authorize::authorize_write;
 use crate::{
     client_server::{auth::AuthSession, AppState},
     persistence::sql::{
-        entry_lock::{unix_now, EntryLockEntity, EntryLockRepository},
+        entry_lock::{EntryLockEntity, EntryLockRepository},
         SqlDb, UnifiedExecutor,
     },
     shared::{webdav::EntryPath, HttpError, HttpResult},
@@ -112,8 +114,6 @@ async fn guard_write(
     headers: &HeaderMap,
 ) -> HttpResult<WriteGuard> {
     let mut executor: UnifiedExecutor = sql_db.pool().into();
-    let now = unix_now();
-    let keep_until = now + WRITE_LOCK_HORIZON_SECS;
     let lock_ref = |token: String| LockRef {
         sql_db: sql_db.clone(),
         entry_path: entry_path.clone(),
@@ -123,9 +123,13 @@ async fn guard_write(
     let held = if_header_tokens(headers);
     if held.is_empty() {
         let token = uuid::Uuid::new_v4().to_string();
-        let granted =
-            EntryLockRepository::acquire(entry_path, &token, keep_until, now, &mut executor)
-                .await?;
+        let granted = EntryLockRepository::acquire(
+            entry_path,
+            &token,
+            WRITE_LOCK_HORIZON_SECS,
+            &mut executor,
+        )
+        .await?;
         return match granted {
             Some(_) => Ok(WriteGuard::implicit(lock_ref(token))),
             None => Err(HttpError::locked()),
@@ -133,9 +137,10 @@ async fn guard_write(
     }
 
     // Also carries a client's lock that is about to run out over the write.
-    let live = EntryLockRepository::keep_alive(entry_path, &held, keep_until, now, &mut executor)
-        .await?
-        .ok_or_else(HttpError::lock_token_mismatch)?;
+    let live =
+        EntryLockRepository::keep_alive(entry_path, &held, WRITE_LOCK_HORIZON_SECS, &mut executor)
+            .await?
+            .ok_or_else(HttpError::lock_token_mismatch)?;
     Ok(WriteGuard::held(lock_ref(live.token)))
 }
 
@@ -158,22 +163,25 @@ struct LockRef {
 }
 
 impl LockRef {
+    /// Make the lock last at least [`WRITE_LOCK_HORIZON_SECS`] more. `None`
+    /// when it is gone.
+    async fn extend(&self) -> Result<Option<EntryLockEntity>, sqlx::Error> {
+        EntryLockRepository::keep_alive(
+            &self.entry_path,
+            std::slice::from_ref(&self.token),
+            WRITE_LOCK_HORIZON_SECS,
+            &mut self.sql_db.pool().into(),
+        )
+        .await
+    }
+
     /// Push the lock's expiry out every `interval` until aborted or the lock
     /// is gone.
     fn spawn_keepalive(self, interval: Duration) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
-                let now = unix_now();
-                let kept = EntryLockRepository::keep_alive(
-                    &self.entry_path,
-                    std::slice::from_ref(&self.token),
-                    now + WRITE_LOCK_HORIZON_SECS,
-                    now,
-                    &mut self.sql_db.pool().into(),
-                )
-                .await;
-                match kept {
+                match self.extend().await {
                     Ok(Some(_)) => {}
                     // Expired through failed keep-alives, or the token's holder
                     // unlocked it or refreshed it to a shorter lifetime. The
@@ -260,28 +268,21 @@ async fn lock(
     let presented = if_header_tokens(headers);
     let is_new = presented.is_empty();
     if is_new {
-        // Before the clock is read, so a slow body does not eat into the
+        // Before the lock is taken, so a slow body does not eat into the
         // lifetime that is granted and reported.
         check_lockinfo(body).await?;
     }
 
     let sql_db = &state.context.sql_db;
-    let now = unix_now();
-    let expires_at = now + requested_timeout(headers);
+    let lifetime = requested_timeout(headers);
     let lock = if is_new {
-        create_lock(sql_db, entry_path, expires_at, now).await?
+        create_lock(sql_db, entry_path, lifetime).await?
     } else {
-        EntryLockRepository::refresh(
-            entry_path,
-            &presented,
-            expires_at,
-            now,
-            &mut sql_db.pool().into(),
-        )
-        .await?
-        .ok_or_else(HttpError::lock_token_mismatch)?
+        EntryLockRepository::refresh(entry_path, &presented, lifetime, &mut sql_db.pool().into())
+            .await?
+            .ok_or_else(HttpError::lock_token_mismatch)?
     };
-    lock_response(&lock, lock_root, now, is_new)
+    lock_response(&lock, lock_root, lifetime, is_new)
 }
 
 /// Refuse a `lockinfo` body that asks for a kind of lock that is not granted.
@@ -305,13 +306,12 @@ async fn check_lockinfo(lockinfo: Body) -> HttpResult<()> {
 async fn create_lock(
     sql_db: &SqlDb,
     entry_path: &EntryPath,
-    expires_at: i64,
-    now: i64,
+    lifetime_secs: i64,
 ) -> HttpResult<EntryLockEntity> {
     let token = uuid::Uuid::new_v4().to_string();
     let mut executor: UnifiedExecutor = sql_db.pool().into();
-    EntryLockRepository::delete_expired(now, &mut executor).await?;
-    EntryLockRepository::acquire(entry_path, &token, expires_at, now, &mut executor)
+    EntryLockRepository::delete_expired(&mut executor).await?;
+    EntryLockRepository::acquire(entry_path, &token, lifetime_secs, &mut executor)
         .await?
         .ok_or_else(HttpError::locked)
 }
@@ -336,15 +336,14 @@ async fn unlock(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// The `lockdiscovery` body of a granted lock. `Lock-Token` is set on creation
-/// only, as the RFC asks.
+/// The `lockdiscovery` body of a lock just granted or refreshed for `remaining`
+/// seconds. `Lock-Token` is set on creation only, as the RFC asks.
 fn lock_response(
     lock: &EntryLockEntity,
     lock_root: &str,
-    now: i64,
+    remaining: i64,
     created: bool,
 ) -> HttpResult<Response<Body>> {
-    let remaining = lock.expires_at - now;
     let token_url = format!("{LOCK_TOKEN_SCHEME}{}", lock.token);
     let body = format!(
         concat!(
@@ -640,14 +639,13 @@ mod tests {
         // that lock alive over the write's horizon, and leaves it in place
         // afterwards; a stale token is refused.
         let expires_at = || async {
-            EntryLockRepository::get_active(&path, unix_now(), &mut context.sql_db.pool().into())
+            EntryLockRepository::get_active(&path, &mut context.sql_db.pool().into())
                 .await
                 .unwrap()
                 .expect("the client's lock should be live")
                 .expires_at
         };
-        let now = unix_now();
-        assert!(expires_at().await <= now + 5);
+        let granted = expires_at().await;
         let held = guard_write(
             &context.sql_db,
             &path,
@@ -655,8 +653,9 @@ mod tests {
         )
         .await
         .unwrap();
+        // Granted 5 seconds, now at least the full horizon.
         assert!(
-            expires_at().await >= now + WRITE_LOCK_HORIZON_SECS,
+            expires_at().await >= granted + WRITE_LOCK_HORIZON_SECS - 5,
             "a write must keep its client's lock alive over its own horizon"
         );
         held.release().await;
@@ -683,16 +682,16 @@ mod tests {
             StoragePath::new("/pub/state.bin").unwrap(),
         );
         let expires_at = || async {
-            EntryLockRepository::get_active(&path, unix_now(), &mut context.sql_db.pool().into())
+            EntryLockRepository::get_active(&path, &mut context.sql_db.pool().into())
                 .await
                 .unwrap()
                 .map(|lock| lock.expires_at)
         };
-        let now = unix_now();
-        EntryLockRepository::acquire(&path, "t", now + 5, now, &mut context.sql_db.pool().into())
-            .await
-            .unwrap()
-            .unwrap();
+        let granted =
+            EntryLockRepository::acquire(&path, "t", 5, &mut context.sql_db.pool().into())
+                .await
+                .unwrap()
+                .unwrap();
 
         let lock = LockRef {
             sql_db: context.sql_db.clone(),
@@ -702,9 +701,10 @@ mod tests {
         let keepalive = lock.spawn_keepalive(Duration::from_millis(20));
         let mut extended = None;
         for _ in 0..100 {
+            // Granted 5 seconds, extended to the full horizon.
             extended = expires_at()
                 .await
-                .filter(|at| *at >= now + WRITE_LOCK_HORIZON_SECS);
+                .filter(|at| *at >= granted.expires_at + WRITE_LOCK_HORIZON_SECS - 5);
             if extended.is_some() {
                 break;
             }
@@ -732,13 +732,9 @@ mod tests {
         );
 
         for _ in 0..100 {
-            let live = EntryLockRepository::get_active(
-                &path,
-                unix_now(),
-                &mut context.sql_db.pool().into(),
-            )
-            .await
-            .unwrap();
+            let live = EntryLockRepository::get_active(&path, &mut context.sql_db.pool().into())
+                .await
+                .unwrap();
             if live.is_none() {
                 return;
             }
