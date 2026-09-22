@@ -11,6 +11,13 @@ use crate::shared::HttpError;
 impl From<AuthServiceError> for HttpError {
     fn from(error: AuthServiceError) -> Self {
         match error {
+            AuthServiceError::SessionLimitReached => {
+                tracing::info!("Grant session capacity reached");
+                HttpError::new_with_message(StatusCode::CONFLICT, error.to_string())
+            }
+            AuthServiceError::SessionRateLimited => {
+                HttpError::new_with_message(StatusCode::TOO_MANY_REQUESTS, error.to_string())
+            }
             AuthServiceError::InvalidGrant(ref inner) => match inner {
                 grant_verifier::Error::InvalidSignature | grant_verifier::Error::Expired => {
                     HttpError::unauthorized_with_message(error.to_string())
@@ -143,6 +150,11 @@ mod tests {
         );
         assert_status(AuthServiceError::SessionNotFound, StatusCode::UNAUTHORIZED);
         assert_status(AuthServiceError::SessionExpired, StatusCode::UNAUTHORIZED);
+        assert_status(AuthServiceError::SessionLimitReached, StatusCode::CONFLICT);
+        assert_status(
+            AuthServiceError::SessionRateLimited,
+            StatusCode::TOO_MANY_REQUESTS,
+        );
         assert_status(
             AuthServiceError::GrantOwnershipMismatch,
             StatusCode::FORBIDDEN,

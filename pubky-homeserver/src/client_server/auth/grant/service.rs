@@ -3,13 +3,14 @@
 //! Route handlers call `AuthService` methods instead of orchestrating
 //! verification, persistence, and minting steps directly.
 
+use crate::data_directory::GrantAuthToml;
 use crate::persistence::sql::{signup_code::SignupCode, uexecutor, SqlDb, UnifiedExecutor};
 use crate::services::user_service::{UserEntity, UserService};
 use chrono::Utc;
 use pubky_common::{
     auth::grant::GrantClaims,
     auth::grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
-    auth::jws::GrantId,
+    auth::jws::{GrantId, RandomId},
     crypto::PublicKey,
 };
 
@@ -49,6 +50,7 @@ pub struct GrantAuthService {
     homeserver_public_key: PublicKey,
     signup_service: SignupService,
     user_service: UserService,
+    session_limits: GrantAuthToml,
 }
 
 impl GrantAuthService {
@@ -59,6 +61,7 @@ impl GrantAuthService {
             homeserver_public_key: context.keypair.public_key(),
             signup_service: SignupService::from_context(context),
             user_service: context.user_service.clone(),
+            session_limits: context.config_toml.grant_auth.clone(),
         }
     }
 
@@ -75,6 +78,7 @@ impl GrantAuthService {
             homeserver_public_key,
             signup_service,
             user_service,
+            session_limits: Default::default(),
         }
     }
 
@@ -84,15 +88,17 @@ impl GrantAuthService {
         self.homeserver_public_key.clone()
     }
 
-    /// Full grant-based session creation: verify → find user → store → mint.
+    /// Issue a bearer in the requested slot, or the legacy slot if no ID is given.
     pub async fn create_grant_session(
         &self,
         grant_jws: &JwsCompact,
         pop_jws: &JwsCompact,
+        session_id: Option<RandomId>,
     ) -> Result<GrantSessionResponse, AuthServiceError> {
         let grant = self.verify_grant_and_pop(grant_jws, pop_jws).await?;
         let user = self.find_user(&grant).await?;
-        self.store_and_mint(&grant, &user).await
+        Self::store_grant(&grant, &user, &mut self.sql_db.pool().into()).await?;
+        self.mint_session(&grant, session_id).await
     }
 
     /// Grant-based signup: verify → create user (all-or-nothing).
@@ -111,6 +117,23 @@ impl GrantAuthService {
         tx.commit().await?;
         self.signup_service.cache_user_quota(&user);
         Ok(())
+    }
+
+    /// Revoke with grant + PoP, even if the bearer expired or issuance is limited.
+    /// Fresh proofs allow retries after revocation.
+    pub async fn signout_with_proof(
+        &self,
+        grant_jws: &JwsCompact,
+        pop_jws: &JwsCompact,
+    ) -> Result<(), AuthServiceError> {
+        let grant = self.verify_grant(grant_jws)?;
+        let pop = self.verify_pop_proof(pop_jws, &grant)?;
+        self.check_nonce_replay(&pop).await?;
+        let stored = self.get_grant(&grant.jti).await?;
+        if stored.user_pubkey != grant.iss || stored.client_cnf_key != grant.cnf.z32() {
+            return Err(AuthServiceError::GrantOwnershipMismatch);
+        }
+        self.revoke_grant(&grant.jti).await
     }
 
     /// Revoke a grant after verifying it belongs to the authenticated user.
@@ -153,6 +176,7 @@ impl GrantAuthService {
         let grant = self.get_grant(&session.grant_id).await?;
 
         Ok(GrantSessionInfo {
+            session_id: session.session_id.clone(),
             homeserver: self.homeserver_public_key.clone(),
             pubky: session.user_key.clone(),
             client_id: grant.client_id.clone(),
@@ -190,6 +214,7 @@ impl GrantAuthService {
         let grant = self.validate_active_grant_session_entity(&session).await?;
 
         Ok(GrantSession {
+            session_id: session.session_id,
             user_key: grant.user_pubkey.clone(),
             capabilities: grant.capabilities,
             grant_id: session.grant_id,
@@ -315,18 +340,6 @@ impl GrantAuthService {
         Ok(())
     }
 
-    /// Shared tail: persist grant → mint grant session.
-    /// No tx needed because store_grant is idempotent and mint_session only creates a session row.
-    async fn store_and_mint(
-        &self,
-        grant: &GrantClaims,
-        user: &UserEntity,
-    ) -> Result<GrantSessionResponse, AuthServiceError> {
-        Self::store_grant(grant, user, &mut self.sql_db.pool().into()).await?;
-        self.mint_session(grant, &mut self.sql_db.pool().into())
-            .await
-    }
-
     /// Look up a grant by ID. Returns `GrantNotFound` if missing.
     async fn get_grant(&self, grant_id: &GrantId) -> Result<GrantEntity, AuthServiceError> {
         map_not_found(
@@ -416,31 +429,38 @@ impl GrantAuthService {
     }
 
     /// Generate a fresh opaque bearer, persist its hash, and return the wire response.
-    async fn mint_session<'a>(
+    async fn mint_session(
         &self,
         grant: &GrantClaims,
-        executor: &mut UnifiedExecutor<'a>,
+        session_id: Option<RandomId>,
     ) -> Result<GrantSessionResponse, AuthServiceError> {
         let now = Utc::now().timestamp() as u64;
-        let expires_at = now + DEFAULT_SESSION_TOKEN_LIFETIME_SECS;
+        let expires_at = (now + DEFAULT_SESSION_TOKEN_LIFETIME_SECS).min(grant.exp);
         let bearer = SessionBearer::generate();
         let token_hash = bearer.hash();
 
         let new_session = NewGrantSession {
+            session_id: session_id.clone(),
             token_hash,
             grant_id: grant.jti.clone(),
             expires_at,
         };
-        // Enforces MAX_SESSIONS_PER_GRANT: atomically replaces any prior session row for this grant.
-        GrantSessionRepository::replace_for_grant(&new_session, executor).await?;
+        GrantSessionRepository::issue(&new_session, &self.sql_db, &self.session_limits).await?;
 
-        Ok(build_session_response(
-            bearer.into_string(),
-            grant,
-            self.homeserver_public_key.clone(),
-            expires_at,
-            now,
-        ))
+        Ok(GrantSessionResponse {
+            token: bearer.into_string(),
+            session: GrantSessionInfo {
+                session_id,
+                homeserver: self.homeserver_public_key.clone(),
+                pubky: grant.iss.clone(),
+                client_id: grant.client_id.clone(),
+                capabilities: grant.caps.clone(),
+                grant_id: grant.jti.clone(),
+                token_expires_at: expires_at,
+                grant_expires_at: grant.exp,
+                created_at: now,
+            },
+        })
     }
 }
 
@@ -453,28 +473,6 @@ fn map_not_found<T>(
         sqlx::Error::RowNotFound => not_found_err,
         other => AuthServiceError::Internal(other),
     })
-}
-
-fn build_session_response(
-    token: String,
-    grant: &GrantClaims,
-    homeserver: PublicKey,
-    token_expires_at: u64,
-    now: u64,
-) -> GrantSessionResponse {
-    GrantSessionResponse {
-        token,
-        session: GrantSessionInfo {
-            homeserver,
-            pubky: grant.iss.clone(),
-            client_id: grant.client_id.clone(),
-            capabilities: grant.caps.clone(),
-            grant_id: grant.jti.clone(),
-            token_expires_at,
-            grant_expires_at: grant.exp,
-            created_at: now,
-        },
-    }
 }
 
 #[cfg(test)]
@@ -587,7 +585,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
         assert!(!response.token.is_empty());
@@ -604,7 +602,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let err = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap_err();
         assert!(matches!(err, AuthServiceError::UserNotFound));
@@ -633,7 +631,7 @@ mod tests {
         let bad_grant_jws = sign_jws(&wrong_signer, GRANT_JWS_TYP, &raw_grant);
 
         let err = service
-            .create_grant_session(&bad_grant_jws, &pop_jws)
+            .create_grant_session(&bad_grant_jws, &pop_jws, None)
             .await
             .unwrap_err();
         assert!(matches!(err, AuthServiceError::InvalidGrant(_)));
@@ -673,13 +671,13 @@ mod tests {
 
         // First call succeeds
         service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
 
         // Second call with same nonce fails
         let err = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap_err();
         assert!(matches!(err, AuthServiceError::NonceReplay));
@@ -875,7 +873,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
 
@@ -898,7 +896,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
         let session = service
@@ -911,10 +909,7 @@ mod tests {
             .await
             .unwrap();
 
-        service
-            .mint_session(&raw_grant, &mut service.sql_db.pool().into())
-            .await
-            .unwrap();
+        service.mint_session(&raw_grant, None).await.unwrap();
 
         let err = service
             .validate_active_grant_session(&session)
@@ -933,7 +928,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
         service.revoke_grant(&raw_grant.jti).await.unwrap();
@@ -973,7 +968,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
         let bearer = SessionBearer::parse(&response.token).unwrap();
@@ -1004,7 +999,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
         let session = service
@@ -1031,7 +1026,7 @@ mod tests {
         let (grant_jws, pop_jws, raw_grant) =
             sign_grant(&user_a_kp, &client_kp, &service.homeserver_public_key());
         service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
 
@@ -1040,7 +1035,7 @@ mod tests {
         let (grant_b_jws, pop_b_jws, _) =
             sign_grant(&user_b_kp, &client_b_kp, &service.homeserver_public_key());
         let response_b = service
-            .create_grant_session(&grant_b_jws, &pop_b_jws)
+            .create_grant_session(&grant_b_jws, &pop_b_jws, None)
             .await
             .unwrap();
         let session_b = service
@@ -1068,7 +1063,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
 
@@ -1088,7 +1083,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
         let session = service
@@ -1121,7 +1116,7 @@ mod tests {
             sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
         let response = service
-            .create_grant_session(&grant_jws, &pop_jws)
+            .create_grant_session(&grant_jws, &pop_jws, None)
             .await
             .unwrap();
         let session = service
@@ -1162,5 +1157,95 @@ mod tests {
         let err =
             GrantAuthService::require_root_capability(&AuthSession::Grant(session)).unwrap_err();
         assert!(matches!(err, AuthServiceError::RootCapabilityRequired));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn proof_logout_works_after_bearer_expiry_at_capacity_and_rate_limit() {
+        let mut service = test_service().await;
+        service.session_limits.max_sessions_per_grant = 1.try_into().unwrap();
+        service.session_limits.session_issuance_per_minute = 1.try_into().unwrap();
+        let (user, _) = create_test_user(&service).await;
+        let client = Keypair::random();
+        let (grant_jws, pop, grant) = sign_grant(&user, &client, &service.homeserver_public_key());
+        let a = service
+            .create_grant_session(&grant_jws, &pop, Some(RandomId::generate()))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE grant_sessions SET expires_at = 0 WHERE grant_id = $1")
+            .bind(grant.jti.to_string())
+            .execute(service.sql_db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE grants SET session_window_start = 0 WHERE id = $1")
+            .bind(grant.jti.to_string())
+            .execute(service.sql_db.pool())
+            .await
+            .unwrap();
+        let b = service
+            .mint_session(&grant, Some(RandomId::generate()))
+            .await
+            .unwrap();
+        assert!(service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&a.token).unwrap())
+            .await
+            .is_err());
+        for _ in 0..2 {
+            let proof = sign_jws(
+                &client,
+                POP_JWS_TYP,
+                &PopProofClaims {
+                    aud: service.homeserver_public_key(),
+                    gid: grant.jti.clone(),
+                    nonce: PopNonce::generate(),
+                    iat: Utc::now().timestamp() as u64,
+                },
+            );
+            service
+                .signout_with_proof(&grant_jws, &proof)
+                .await
+                .unwrap();
+        }
+        assert!(service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&b.token).unwrap())
+            .await
+            .is_err());
+        assert!(matches!(
+            service
+                .mint_session(&grant, Some(RandomId::generate()))
+                .await,
+            Err(AuthServiceError::GrantRevoked)
+        ));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn proof_logout_requires_the_grants_client_key() {
+        let service = test_service().await;
+        let (user, _) = create_test_user(&service).await;
+        let client = Keypair::random();
+        let (grant_jws, pop, grant) = sign_grant(&user, &client, &service.homeserver_public_key());
+        let a = service
+            .create_grant_session(&grant_jws, &pop, None)
+            .await
+            .unwrap();
+        let proof = sign_jws(
+            &Keypair::random(),
+            POP_JWS_TYP,
+            &PopProofClaims {
+                aud: service.homeserver_public_key(),
+                gid: grant.jti,
+                nonce: PopNonce::generate(),
+                iat: Utc::now().timestamp() as u64,
+            },
+        );
+        assert!(matches!(
+            service.signout_with_proof(&grant_jws, &proof).await,
+            Err(AuthServiceError::InvalidPopProof(_))
+        ));
+        service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&a.token).unwrap())
+            .await
+            .unwrap();
     }
 }

@@ -17,7 +17,8 @@
     "test-browser:ci": "npm run build:test && browserify dist/tests/setup.js dist/tests/*.js -p esmify | tape-run --browser electron --electron-arg=--no-sandbox --electron-arg=--disable-gpu",
     "build": "cargo run --bin bundle_npm",
     "docs": "typedoc",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test-browser:tabs": "npm run build:test && browserify dist/tests/browser/session-tabs.js -p esmify -o dist/session-tabs.bundle.js && electron scripts/session-tabs.cjs"
   },
   "files": [
     "index.cjs",

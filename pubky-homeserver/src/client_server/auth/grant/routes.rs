@@ -8,7 +8,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use pubky_common::auth::{grant_session_responses::GrantInfo, jws::GrantId};
+use pubky_common::auth::{
+    grant_session_responses::GrantInfo,
+    jws::{GrantId, RandomId},
+};
 use serde::Deserialize;
 
 use super::crypto::jws_crypto::JwsCompact;
@@ -24,6 +27,9 @@ use crate::shared::{HttpError, HttpResult};
 /// JSON request body for grant-based session creation.
 #[derive(Deserialize)]
 pub struct CreateGrantSessionRequest {
+    /// Independent slot; absent for clients using legacy rotation.
+    #[serde(default)]
+    pub session_id: Option<RandomId>,
     /// Grant JWS (user-signed).
     pub grant: JwsCompact,
     /// PoP proof JWS (client-signed).
@@ -62,7 +68,7 @@ pub async fn create_grant_session(
 ) -> HttpResult<impl IntoResponse> {
     let response = state
         .grant_auth_service
-        .create_grant_session(&request.grant, &request.pop)
+        .create_grant_session(&request.grant, &request.pop, request.session_id)
         .await?;
     Ok(Json(response))
 }
@@ -104,13 +110,20 @@ pub async fn get_session(
 
 /// `DELETE /auth/grant/session` — idempotently revokes the grant (if any).
 ///
+/// Slot-aware clients may send grant + PoP JSON to revoke without a live bearer.
 /// Takes `Option<AuthSession>` rather than `AuthSession` so a second signout with an
 /// already-revoked bearer is a 200 no-op rather than a 401.
 pub async fn signout(
     State(state): State<AuthState>,
     auth: Option<AuthSession>,
+    proof: Option<Json<CreateGrantSessionRequest>>,
 ) -> HttpResult<impl IntoResponse> {
-    if let Some(AuthSession::Grant(session)) = auth {
+    if let Some(Json(proof)) = proof {
+        state
+            .grant_auth_service
+            .signout_with_proof(&proof.grant, &proof.pop)
+            .await?;
+    } else if let Some(AuthSession::Grant(session)) = auth {
         state
             .grant_auth_service
             .signout_grant_session(&session)

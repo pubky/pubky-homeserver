@@ -10,7 +10,7 @@
 //! `grant_id`) live on [`super::view::GrantSessionView`].
 
 use pubky_common::{
-    auth::{grant::GrantClaims, grant_session_responses::GrantSessionResponse},
+    auth::{grant::GrantClaims, grant_session_responses::GrantSessionResponse, jws::RandomId},
     crypto::PublicKey,
 };
 use reqwest::Method;
@@ -19,8 +19,8 @@ use super::{
     credential::{GrantCredential, sign_pop_for_grant},
     pop_signer::GrantPopSigner,
 };
+use crate::PubkyHttpClient;
 use crate::errors::{RequestError, Result};
-use crate::{PubkyHttpClient, cross_log};
 
 /// Establish a grant-backed session by exchanging a user-signed grant for
 /// an opaque bearer at the user's homeserver.
@@ -38,19 +38,29 @@ pub(crate) async fn credential_from_grant_exchange(
     grant_claims: GrantClaims,
     client_signer: GrantPopSigner,
     homeserver_pubkey: PublicKey,
+    session_id: Option<RandomId>,
 ) -> Result<GrantCredential> {
-    cross_log!(
-        info,
-        "Exchanging grant for grant credential (user={}, hs={})",
-        grant_claims.iss.z32(),
-        homeserver_pubkey.z32()
-    );
+    let supports_slots = client
+        .features
+        .supports(
+            client,
+            &homeserver_pubkey,
+            pubky_common::constants::features::GRANT_SESSION_SLOTS,
+        )
+        .await;
+    if session_id.is_some() && !supports_slots {
+        return Err(RequestError::Validation {
+            message: "Homeserver does not advertise grant-session-slots; browser tab restore requires an upgraded homeserver".into(),
+        }.into());
+    }
+    let session_id = supports_slots.then(|| session_id.unwrap_or_else(RandomId::generate));
     let response = post_grant_session(
         client,
         &grant_jws,
         &grant_claims,
         &client_signer,
         &homeserver_pubkey,
+        session_id.as_ref(),
     )
     .await?;
     Ok(GrantCredential::from_response(
@@ -94,15 +104,19 @@ pub(crate) async fn signup_account_from_grant(
 }
 
 /// `POST` a grant + `PoP` proof to `/auth/grant/session`.
-async fn post_grant_session(
+pub(crate) async fn post_grant_session(
     client: &PubkyHttpClient,
     grant_jws: &str,
     grant_claims: &GrantClaims,
     client_signer: &GrantPopSigner,
     homeserver_pk: &PublicKey,
+    session_id: Option<&RandomId>,
 ) -> Result<GrantSessionResponse> {
     let pop_jws = sign_pop_for_grant(client_signer, homeserver_pk, &grant_claims.jti).await?;
-    let body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
+    let mut body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
+    if let Some(id) = session_id {
+        body["session_id"] = serde_json::json!(id);
+    }
 
     let resp = client
         .cross_request_via_homeserver(
@@ -116,10 +130,15 @@ async fn post_grant_session(
         .send()
         .await?;
     let resp = client.check_http_status(resp).await?;
-    resp.json().await.map_err(|e| {
-        RequestError::DecodeJson {
+    let response: GrantSessionResponse =
+        resp.json().await.map_err(|e| RequestError::DecodeJson {
             message: format!("decoding grant session response: {e}"),
+        })?;
+    if response.session.session_id.as_ref() != session_id {
+        return Err(RequestError::Validation {
+            message: "Homeserver returned a different grant session identity".into(),
         }
-        .into()
-    })
+        .into());
+    }
+    Ok(response)
 }

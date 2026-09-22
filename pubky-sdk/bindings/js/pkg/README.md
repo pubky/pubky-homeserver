@@ -219,6 +219,18 @@ like a bearer token. Delegated browser grant sessions should use
 > applications should use grant auth plus `browserSessionStore` or
 > `exportLocalSecret()`.
 
+**Multiple browser tabs**
+
+On homeservers advertising `grant-session-slots`, `browserSessionStore.restore(id)`
+uses a separate session per tab and reuses its slot across reloads. Concurrent
+restores in one tab share the credential. Browser restore requires Web Locks and
+sessionStorage in addition to IndexedDB.
+
+Signout revokes the grant for every tab. The default homeserver limit is 20 active
+sessions per grant; reaching it returns a capacity error without evicting other
+tabs. See [grant session lifecycle](../../../../docs/grant-session-lifecycle.md)
+for compatibility, configuration and expiry behavior.
+
 **Approve a pubkyauth request URL**
 
 ```js

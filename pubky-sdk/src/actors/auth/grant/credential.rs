@@ -15,7 +15,7 @@ use pubky_common::{
     auth::{
         grant::GrantClaims,
         grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
-        jws::{POP_JWS_TYP, PopNonce},
+        jws::{POP_JWS_TYP, PopNonce, RandomId},
         pop::PopProofClaims,
     },
     crypto::{Keypair, PublicKey},
@@ -25,7 +25,7 @@ use reqwest::{Method, RequestBuilder};
 use tokio::sync::Mutex;
 
 use super::{
-    grant_exchange::credential_from_grant_exchange,
+    grant_exchange::{credential_from_grant_exchange, post_grant_session},
     pop_signer::{DelegatedSignFn, GrantPopSigner},
 };
 use crate::actors::session::core::PubkySession;
@@ -272,6 +272,16 @@ impl GrantCredential {
     ///   mismatched `PoP` keys.
     /// - Propagates HTTP/server errors from `POST /auth/grant/session`.
     pub async fn import_secret(token: &str, client: &PubkyHttpClient) -> Result<Self> {
+        Self::import_secret_in_slot(token, client, None).await
+    }
+
+    /// Restore using a browser-owned session identity. IDs are not credentials.
+    #[doc(hidden)]
+    pub async fn import_secret_in_slot(
+        token: &str,
+        client: &PubkyHttpClient,
+        session_id: Option<RandomId>,
+    ) -> Result<Self> {
         let saved = StoredGrantCredential::decode(token)?;
         let (grant_jws, grant_claims, client_signer, homeserver_pk) = restore_material(saved)?;
         credential_from_grant_exchange(
@@ -280,6 +290,7 @@ impl GrantCredential {
             grant_claims,
             client_signer,
             homeserver_pk,
+            session_id,
         )
         .await
     }
@@ -296,6 +307,17 @@ impl GrantCredential {
         client: &PubkyHttpClient,
         sign: DelegatedSignFn,
     ) -> Result<Self> {
+        Self::import_delegated_state_in_slot(state, client, sign, None).await
+    }
+
+    /// Restore a browser-owned independent session slot.
+    #[doc(hidden)]
+    pub async fn import_delegated_state_in_slot(
+        state: DelegatedGrantCredentialState,
+        client: &PubkyHttpClient,
+        sign: DelegatedSignFn,
+        session_id: Option<RandomId>,
+    ) -> Result<Self> {
         let (grant_jws, grant_claims, client_signer, homeserver_pk) =
             restore_delegated_material(state, sign)?;
         credential_from_grant_exchange(
@@ -304,6 +326,7 @@ impl GrantCredential {
             grant_claims,
             client_signer,
             homeserver_pk,
+            session_id,
         )
         .await
     }
@@ -323,30 +346,15 @@ impl GrantCredential {
             return Ok(());
         }
 
-        let pop_jws = sign_pop_for_grant(
+        let parsed = post_grant_session(
+            client,
+            &state.grant_jws,
+            &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
-            &state.grant_claims.jti,
+            state.session.session_id.as_ref(),
         )
         .await?;
-        let body = serde_json::json!({ "grant": &state.grant_jws, "pop": pop_jws });
-
-        let resp = client
-            .cross_request_via_homeserver(
-                Method::POST,
-                &state.homeserver_pk,
-                &state.grant_claims.iss,
-                GRANT_SESSION_PATH,
-            )
-            .await?
-            .json(&body)
-            .send()
-            .await?;
-        let resp = client.check_http_status(resp).await?;
-        let parsed: GrantSessionResponse =
-            resp.json().await.map_err(|e| RequestError::DecodeJson {
-                message: format!("decoding /auth/grant/session response: {e}"),
-            })?;
 
         state.bearer = parsed.token;
         state.token_expires_at = parsed.session.token_expires_at;
@@ -381,14 +389,27 @@ impl SessionCredential for GrantCredential {
     }
 
     async fn signout(&self, client: &PubkyHttpClient) -> Result<()> {
-        let bearer = self.current_bearer().await;
-        let response = self
-            .grant_session_request(client, Method::DELETE)
-            .await?
-            .bearer_auth(&bearer)
-            .send()
-            .await
-            .map_err(crate::Error::from)?;
+        let request = self.grant_session_request(client, Method::DELETE).await?;
+        let proof = {
+            let state = self.state.lock().await;
+            if state.session.session_id.is_some() {
+                let pop = sign_pop_for_grant(
+                    &state.client_signer,
+                    &state.homeserver_pk,
+                    &state.grant_claims.jti,
+                )
+                .await?;
+                Some(serde_json::json!({ "grant": state.grant_jws, "pop": pop }))
+            } else {
+                None
+            }
+        };
+        // Grant proof avoids issuance limits; older servers require a bearer.
+        let request = match proof {
+            Some(proof) => request.json(&proof),
+            None => self.attach(request, client).await?,
+        };
+        let response = request.send().await?;
         client.check_http_status(response).await?;
         Ok(())
     }
@@ -570,6 +591,28 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn explicit_slot_restore_refuses_unadvertised_support_before_exchange() {
+        let (stored, _) = stored_credential(now_unix() + 3600);
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
+        client.features.insert(&stored.homeserver_pk, &[]);
+        let error = GrantCredential::import_secret_in_slot(
+            &stored.encode(),
+            &client,
+            Some(RandomId::generate()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not advertise grant-session-slots")
+        );
+    }
+
     #[test]
     fn stored_grant_credential_encode_decode_round_trips() {
         let (stored, _claims) = stored_credential(now_unix() + 3600);
@@ -692,6 +735,7 @@ mod tests {
             GrantSessionResponse {
                 token: "test-bearer".into(),
                 session: GrantSessionInfo {
+                    session_id: None,
                     homeserver: stored.homeserver_pk.clone(),
                     pubky: claims.iss.clone(),
                     client_id: claims.client_id.clone(),

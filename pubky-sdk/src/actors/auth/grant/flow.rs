@@ -382,7 +382,7 @@ impl PubkyGrantAuthFlow {
 
         let pkdns = Pkdns::with_client(client.clone());
         let hs_pk = pkdns.require_homeserver_of(&claims.iss).await?;
-        credential_from_grant_exchange(client, jws, claims, client_signer, hs_pk).await
+        credential_from_grant_exchange(client, jws, claims, client_signer, hs_pk, None).await
     }
 
     async fn await_decoded_approval(relay_listener: AuthRelayListener) -> Result<GrantApproval> {

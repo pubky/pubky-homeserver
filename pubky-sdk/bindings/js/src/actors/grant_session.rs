@@ -160,6 +160,12 @@ pub struct GrantSessionInfo(
 
 #[wasm_bindgen]
 impl GrantSessionInfo {
+    /// Independent session identity; absent for legacy homeservers.
+    #[wasm_bindgen(js_name = "sessionId", getter)]
+    pub fn session_id(&self) -> Option<String> {
+        self.0.session_id.as_ref().map(ToString::to_string)
+    }
+
     /// Homeserver that issued this session.
     #[wasm_bindgen(getter)]
     pub fn homeserver(&self) -> PublicKey {

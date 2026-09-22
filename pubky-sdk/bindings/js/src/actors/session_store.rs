@@ -1,3 +1,6 @@
+use futures_util::lock::Mutex;
+use std::{collections::HashMap, rc::Rc};
+
 use js_sys::Reflect;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -9,6 +12,12 @@ use super::{
     session::Session,
 };
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
+
+// Clones share bearer refreshes; concurrent restores must not rotate the same slot.
+// ponytail: one mutex serializes all accounts; use per-account locks if restores contend.
+thread_local! {
+    static LIVE_SESSIONS: Rc<Mutex<HashMap<String, pubky::PubkySession>>> = Rc::default();
+}
 
 const STORE_VERSION: &str = "pubky-session-v1";
 const MODE_DELEGATED: &str = "delegated";
@@ -109,6 +118,7 @@ async function withSessionStore(mode, operation) {
 export async function __pubkySessionStoreIsAvailable() {
   if (!globalThis.indexedDB) return false;
   try {
+    if (!globalThis.navigator?.locks || !globalThis.sessionStorage) return false;
     const db = await openSessionStoreDb();
     db.close();
     return true;
@@ -314,7 +324,8 @@ pub struct BrowserSessionStore(pub(crate) pubky::Pubky);
 
 #[wasm_bindgen]
 impl BrowserSessionStore {
-    /// Whether IndexedDB is available for durable session persistence.
+    /// Whether IndexedDB, sessionStorage and Web Locks are available.
+    /// A homeserver advertising `grant-session-slots` is also required for restore.
     #[wasm_bindgen(js_name = "isAvailable")]
     pub async fn is_available(&self) -> JsResult<bool> {
         let value = JsFuture::from(js_store_is_available())
@@ -326,6 +337,8 @@ impl BrowserSessionStore {
     /// Persist a completed grant session in IndexedDB.
     #[wasm_bindgen]
     pub async fn save(&self, session: &Session) -> JsResult<StoredSessionInfo> {
+        let live = LIVE_SESSIONS.with(Rc::clone);
+        let mut live = live.lock().await;
         let grant = session.0.as_grant().ok_or_else(|| {
             PubkyError::new(
                 PubkyErrorName::ClientStateError,
@@ -379,6 +392,13 @@ impl BrowserSessionStore {
         JsFuture::from(js_store_put(value))
             .await
             .map_err(store_error)?;
+        if let Some(id) = session_info.session_id {
+            let owned =
+                super::browser_session_slot::session_id(&record.id, Some(id.clone())).await?;
+            if owned == id {
+                live.insert(record.id.clone(), session.0.clone());
+            }
+        }
         Ok(StoredSessionInfo(record))
     }
 
@@ -391,10 +411,26 @@ impl BrowserSessionStore {
     }
 
     /// Restore a specific stored session by id.
+    ///
+    /// Reuses this tab's session slot across reloads. Concurrent calls share a
+    /// live credential; other tabs receive independent slots. Requires a secure
+    /// browser context and homeserver `grant-session-slots` support.
     #[wasm_bindgen]
     pub async fn restore(&self, id: String) -> JsResult<Session> {
-        let record = self.load_record(id).await?;
-        match record.storage_mode.as_str() {
+        let live = LIVE_SESSIONS.with(Rc::clone);
+        let mut live = live.lock().await;
+        let record = self.load_record(id.clone()).await?;
+        if let Some(session) = live.get(&id) {
+            if let Some(grant) = session.as_grant() {
+                grant.refresh_if_needed().await?;
+            }
+            if session.revalidate().await?.is_some() {
+                return Ok(Session(session.clone()));
+            }
+        }
+        live.remove(&id);
+        let slot = super::browser_session_slot::session_id(&id, None).await?;
+        let session = match record.storage_mode.as_str() {
             MODE_DELEGATED => {
                 let state = decode_delegated_grant_state(&record.credential)?;
                 let stored_public_key =
@@ -406,26 +442,37 @@ impl BrowserSessionStore {
                     ));
                 }
                 let sign = BrowserGrantKeyStore::signer(state.key_id.clone());
-                Ok(Session(
-                    self.0.restore_delegated_grant_session(state, sign).await?,
-                ))
+                self.0
+                    .restore_delegated_grant_session_in_slot(state, sign, slot)
+                    .await?
             }
-            MODE_LOCAL_SECRET => Ok(Session(self.0.restore_session(&record.credential).await?)),
-            _ => Err(PubkyError::new(
-                PubkyErrorName::ClientStateError,
-                "Unsupported stored session storage mode.",
-            )),
-        }
+            MODE_LOCAL_SECRET => {
+                self.0
+                    .restore_grant_session_in_slot(&record.credential, slot)
+                    .await?
+            }
+            _ => {
+                return Err(PubkyError::new(
+                    PubkyErrorName::ClientStateError,
+                    "Unsupported stored session storage mode.",
+                ));
+            }
+        };
+        live.insert(id, session.clone());
+        Ok(Session(session))
     }
 
     /// Remove local stored session metadata and any SDK-owned delegated key for that record.
     #[wasm_bindgen]
     pub async fn remove(&self, id: String) -> JsResult<()> {
+        let live = LIVE_SESSIONS.with(Rc::clone);
+        let mut live = live.lock().await;
         let record = self.load_record(id.clone()).await?;
-        JsFuture::from(js_store_delete(id))
+        JsFuture::from(js_store_delete(id.clone()))
             .await
             .map_err(store_error)?;
 
+        live.remove(&id);
         if record.storage_mode == MODE_DELEGATED {
             let state = decode_delegated_grant_state(&record.credential)?;
             BrowserGrantKeyStore::delete_key(state.key_id).await?;
@@ -440,6 +487,8 @@ impl BrowserSessionStore {
     /// Delegated keys that only belong to pending grant flows are preserved.
     #[wasm_bindgen]
     pub async fn clear(&self) -> JsResult<()> {
+        let live = LIVE_SESSIONS.with(Rc::clone);
+        let mut live = live.lock().await;
         let records = self.stored_records().await?;
         let delegated_key_ids = delegated_key_ids_for_records(&records)?;
         let delegated_key_ids = serde_wasm_bindgen::to_value(&delegated_key_ids).map_err(|e| {
@@ -451,6 +500,7 @@ impl BrowserSessionStore {
         JsFuture::from(js_store_clear(delegated_key_ids))
             .await
             .map_err(store_error)?;
+        live.clear();
         Ok(())
     }
 
@@ -462,9 +512,12 @@ impl BrowserSessionStore {
     /// grants or immediately invalidate already-live in-memory sessions.
     #[wasm_bindgen(js_name = "clearAll")]
     pub async fn clear_all(&self) -> JsResult<()> {
+        let live = LIVE_SESSIONS.with(Rc::clone);
+        let mut live = live.lock().await;
         JsFuture::from(js_store_clear_all())
             .await
             .map_err(store_error)?;
+        live.clear();
         Ok(())
     }
 }
@@ -530,7 +583,7 @@ fn validate_record(record: StoredSessionRecord) -> JsResult<StoredSessionInfo> {
     Ok(StoredSessionInfo(record))
 }
 
-fn store_error(value: JsValue) -> PubkyError {
+pub(crate) fn store_error(value: JsValue) -> PubkyError {
     PubkyError::new(PubkyErrorName::ClientStateError, js_error_message(value))
 }
 

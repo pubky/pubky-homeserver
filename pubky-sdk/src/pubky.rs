@@ -417,6 +417,48 @@ impl Pubky {
         import_session_secret(token, Some(self.client.clone())).await
     }
 
+    /// Restore a grant into a browser-owned slot. The ID is public metadata.
+    ///
+    /// # Errors
+    /// Returns restore errors or an error if the homeserver lacks slot support.
+    #[doc(hidden)]
+    pub async fn restore_grant_session_in_slot(
+        &self,
+        token: &str,
+        session_id: pubky_common::auth::jws::RandomId,
+    ) -> Result<PubkySession> {
+        let credential =
+            GrantCredential::import_secret_in_slot(token, &self.client, Some(session_id)).await?;
+        Ok(PubkySession::from_grant_credential(
+            self.client.clone(),
+            credential,
+        ))
+    }
+
+    /// Restore delegated browser credentials in an independent session slot.
+    ///
+    /// # Errors
+    /// Returns restore errors or an error if the homeserver lacks slot support.
+    #[doc(hidden)]
+    pub async fn restore_delegated_grant_session_in_slot(
+        &self,
+        state: DelegatedGrantCredentialState,
+        sign: crate::DelegatedSignFn,
+        session_id: pubky_common::auth::jws::RandomId,
+    ) -> Result<PubkySession> {
+        let credential = GrantCredential::import_delegated_state_in_slot(
+            state,
+            &self.client,
+            sign,
+            Some(session_id),
+        )
+        .await?;
+        Ok(PubkySession::from_grant_credential(
+            self.client.clone(),
+            credential,
+        ))
+    }
+
     /// Restore an origin-bound delegated browser grant session.
     ///
     /// This uses non-secret metadata plus a browser-held non-extractable key.
