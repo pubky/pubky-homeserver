@@ -8,15 +8,27 @@
 //!    entry metadata, events, and quota accounting around backend writes.
 //! 3. **OpenDAL base** — physical storage I/O.
 //!
+//! # Write lifecycle
+//!
 //! A write never touches the existing blob before it is finalized: every
 //! backend publishes on close, and the filesystem backend does so by staging
 //! the upload in `data/files-tmp` and renaming it into place. An upload that is
-//! rejected, breaks mid-stream, or loses its client is aborted instead. Once
-//! the body has streamed, finalization runs on its own task, so a client that
-//! disconnects at that moment cannot stop it halfway. Two limits of that task:
-//! a disconnect also drops the request's lock keep-alive, so a lock can expire
-//! while its finalization is still running; and a runtime shutdown that cancels
-//! the task leaves the staged upload neither published nor aborted.
+//! rejected by quota or a collision, breaks mid-stream, or loses its client is
+//! aborted instead, leaving the existing blob untouched.
+//!
+//! Finalizing a write publishes the blob and then commits the entry row;
+//! finalizing a delete commits the row removal and then removes the blob. Blob
+//! storage cannot join the database transaction, so the two can diverge if the
+//! database update fails after publication or the process dies between the
+//! steps: the blob then holds new content while the entry describes the old,
+//! or no entry exists, or an unreferenced blob remains after a delete. A client
+//! disconnect cannot cause this: once the body has streamed, finalization runs
+//! on its own task, so dropping the request cannot stop it halfway.
+//!
+//! Two limits of that task: a disconnect also drops the request's lock
+//! keep-alive, so a lock can expire while its finalization is still running;
+//! and a runtime shutdown that cancels the task leaves the staged upload
+//! neither published nor aborted.
 //!
 //! [`file`] provides the high-level [`FileService`](file::file_service::FileService)
 //! used by route handlers.

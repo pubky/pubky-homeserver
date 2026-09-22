@@ -279,7 +279,8 @@ mod tests {
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, create_user, test_finalizer, test_operator, user_usage,
+        all_events, create_user, install_events_insert_trigger, test_finalizer, test_operator,
+        user_usage,
     };
     use super::*;
 
@@ -303,59 +304,25 @@ mod tests {
     }
 
     async fn fail_all_delete_event_inserts(db: &SqlDb) {
-        sqlx::query(
-            r#"
-            CREATE FUNCTION fail_delete_event_insert() RETURNS trigger AS $$
-            BEGIN
-                IF NEW.type = 'DEL' THEN
-                    RAISE EXCEPTION 'forced delete event insert failure';
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-            "#,
+        install_events_insert_trigger(
+            db,
+            "fail_delete_event_insert",
+            "IF NEW.type = 'DEL' THEN \
+                RAISE EXCEPTION 'forced delete event insert failure'; \
+             END IF;",
         )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            CREATE TRIGGER fail_delete_event_insert_trigger
-            BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION fail_delete_event_insert()
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        .await;
     }
 
     async fn fail_delete_event_inserts_for_failing_path(db: &SqlDb) {
-        sqlx::query(
-            r#"
-            CREATE FUNCTION fail_selected_delete_event() RETURNS trigger AS $$
-            BEGIN
-                IF NEW.type = 'DEL' AND NEW.path = '/failing.txt' THEN
-                    RAISE EXCEPTION 'forced selected delete event failure';
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-            "#,
+        install_events_insert_trigger(
+            db,
+            "fail_selected_delete_event",
+            "IF NEW.type = 'DEL' AND NEW.path = '/failing.txt' THEN \
+                RAISE EXCEPTION 'forced selected delete event failure'; \
+             END IF;",
         )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            CREATE TRIGGER fail_selected_delete_event_trigger
-            BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION fail_selected_delete_event()
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        .await;
     }
 
     #[tokio::test]

@@ -86,6 +86,13 @@ impl<R: oio::Write> oio::Write for WriteFinalizationWriter<R> {
         self.inner.abort().await
     }
 
+    /// Publish the staged bytes and commit their entry together.
+    ///
+    /// An upload rejected before publication (quota, collision) is aborted
+    /// here, because only this layer knows the rejection happened before the
+    /// backend renamed anything. On any later failure the backend has already
+    /// published, or may have, so the caller must not abort: the staged bytes
+    /// are the live blob, or a leftover that aborting could not reach anyway.
     async fn close(&mut self) -> Result<opendal::Metadata> {
         self.metadata_builder
             .guess_mime_type_from_path(self.entry_path.path().as_str());
@@ -93,6 +100,18 @@ impl<R: oio::Write> oio::Write for WriteFinalizationWriter<R> {
         self.finalizer
             .finalize_write(&mut self.inner, &self.entry_path, &file_metadata)
             .await
+    }
+}
+
+/// Discard the staged bytes of an upload rejected before publication. The
+/// caller reports the rejection, so a failed cleanup is only logged.
+async fn abort_rejected_upload<R: oio::Write>(backend_writer: &mut R, entry_path: &EntryPath) {
+    if let Err(abort_error) = backend_writer.abort().await {
+        tracing::warn!(
+            path = %entry_path,
+            error = %abort_error,
+            "Failed to abort rejected upload"
+        );
     }
 }
 
@@ -149,17 +168,9 @@ impl Finalizer {
             .await
         {
             Ok(prepared) => prepared,
-            Err(error) => {
-                // Nothing has been published yet: discard the staged bytes and
-                // report the rejection, not a failed cleanup.
-                if let Err(abort_error) = backend_writer.abort().await {
-                    tracing::warn!(
-                        path = %entry_path,
-                        error = %abort_error,
-                        "Failed to abort rejected upload"
-                    );
-                }
-                return Err(error);
+            Err(rejection) => {
+                abort_rejected_upload(backend_writer, entry_path).await;
+                return Err(rejection);
             }
         };
         let backend_metadata = backend_writer.close().await?;
@@ -287,7 +298,9 @@ mod tests {
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
 
-    use super::super::layer::test_support::{all_events, create_user, test_operator, user_usage};
+    use super::super::layer::test_support::{
+        all_events, create_user, install_events_insert_trigger, test_operator, user_usage,
+    };
     use super::*;
 
     #[tokio::test]
@@ -298,28 +311,12 @@ mod tests {
         let pubkey = create_user(&db).await;
         let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
 
-        sqlx::query(
-            r#"
-            CREATE FUNCTION fail_event_insert() RETURNS trigger AS $$
-            BEGIN
-                RAISE EXCEPTION 'forced event insert failure';
-            END;
-            $$ LANGUAGE plpgsql
-            "#,
+        install_events_insert_trigger(
+            &db,
+            "fail_event_insert",
+            "RAISE EXCEPTION 'forced event insert failure';",
         )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            CREATE TRIGGER fail_event_insert_trigger
-            BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION fail_event_insert()
-            "#,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        .await;
 
         operator
             .write(entry_path.as_str(), vec![1; 10])

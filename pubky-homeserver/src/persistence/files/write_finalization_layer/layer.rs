@@ -15,14 +15,9 @@ use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
 /// App-facing operators also reject path collisions; admin operators allow them
 /// so they can repair legacy data.
 ///
-/// Blob storage cannot be part of the database transaction. A write that is
-/// rejected before publication, by quota or a collision, aborts its upload and
-/// leaves the existing blob untouched. After publication the two can still
-/// diverge, but only if the database update itself fails or the process dies:
-/// the blob then holds the new content while the entry describes the old, or
-/// no entry exists. If deleting a blob fails after its database update, an
-/// unreferenced blob may remain. A client disconnect cannot cause either,
-/// because callers run finalization on its own task.
+/// Blob storage cannot be part of the database transaction. The ways the two
+/// can still diverge are described in the [`files`](crate::persistence::files)
+/// module docs.
 #[derive(Clone)]
 pub struct WriteFinalizationLayer {
     finalizer: Arc<Finalizer>,
@@ -242,7 +237,10 @@ impl Finalizer {
 }
 
 #[cfg(test)]
-pub(super) mod test_support {
+pub(crate) mod test_support {
+    use std::future::Future;
+    use std::time::Duration;
+
     use pubky_common::crypto::Keypair;
 
     use crate::persistence::files::{
@@ -263,7 +261,7 @@ pub(super) mod test_support {
         )
     }
 
-    pub(in super::super) fn test_operator(db: &SqlDb) -> opendal::Operator {
+    pub(crate) fn test_operator(db: &SqlDb) -> opendal::Operator {
         get_memory_operator().layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
@@ -273,26 +271,54 @@ pub(super) mod test_support {
         ))
     }
 
-    pub(in super::super) fn test_user_service(db: &SqlDb) -> UserService {
+    pub(crate) fn test_user_service(db: &SqlDb) -> UserService {
         UserService::new(db.clone())
     }
 
-    pub(in super::super) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
+    pub(crate) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
         let pubkey = Keypair::random().public_key();
         let user_service = test_user_service(db);
         user_service.create(&pubkey).await.unwrap();
         pubkey
     }
 
-    pub(in super::super) async fn user_usage(
-        db: &SqlDb,
-        pubkey: &pubky_common::crypto::PublicKey,
-    ) -> u64 {
+    pub(crate) async fn user_usage(db: &SqlDb, pubkey: &pubky_common::crypto::PublicKey) -> u64 {
         let user_service = test_user_service(db);
         user_service.get(pubkey).await.unwrap().used_bytes
     }
 
-    pub(in super::super) async fn all_events(db: &SqlDb) -> Vec<EventEntity> {
+    /// Install a plpgsql trigger called `name` that runs `body` before every
+    /// insert into the events table. `body` may raise to fail the insert.
+    pub(crate) async fn install_events_insert_trigger(db: &SqlDb, name: &str, body: &str) {
+        let function = format!(
+            "CREATE FUNCTION {name}() RETURNS trigger AS $$ \
+             BEGIN {body} RETURN NEW; END; \
+             $$ LANGUAGE plpgsql"
+        );
+        sqlx::query(&function).execute(db.pool()).await.unwrap();
+        let trigger = format!(
+            "CREATE TRIGGER {name}_trigger BEFORE INSERT ON events \
+             FOR EACH ROW EXECUTE FUNCTION {name}()"
+        );
+        sqlx::query(&trigger).execute(db.pool()).await.unwrap();
+    }
+
+    /// Poll until `condition` holds, for a few seconds at most.
+    pub(crate) async fn wait_until<F, Fut>(condition: F, message: &str)
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        for _ in 0..500 {
+            if condition().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{message}");
+    }
+
+    pub(crate) async fn all_events(db: &SqlDb) -> Vec<EventEntity> {
         EventRepository::get_by_cursor(
             None,
             Some(9999),
