@@ -14,7 +14,7 @@ const LOCK_TOKEN_SCHEME: &str = "opaquelocktoken:";
 /// every other write, and every other `LOCK`, gets `423 Locked`. The lock ends
 /// when it is [unlocked](SessionStorage::unlock) or when its
 /// [`timeout`](Self::timeout) runs out without a
-/// [refresh](SessionStorage::refresh), so a client that disappears never blocks
+/// [refresh](SessionStorage::refresh_lock), so a client that disappears never blocks
 /// a path for long.
 ///
 /// The lock is a bearer token: whoever holds this value, and may write the
@@ -53,7 +53,7 @@ impl StorageLock {
         &self.token
     }
 
-    /// Lifetime the homeserver granted at the last `lock` or `refresh`. It may
+    /// Lifetime the homeserver granted at the last `lock` or `refresh_lock`. It may
     /// be shorter than what was asked for.
     #[must_use]
     pub const fn timeout(&self) -> Duration {
@@ -116,7 +116,7 @@ impl SessionStorage {
     /// # Errors
     /// A lock that has expired or was unlocked returns 412; take a new one and
     /// read the file again. See [`SessionStorage`] for shared errors.
-    pub async fn refresh(&self, lock: &mut StorageLock, timeout: Duration) -> Result<()> {
+    pub async fn refresh_lock(&self, lock: &mut StorageLock, timeout: Duration) -> Result<()> {
         let rb = self
             .request(lock_method(), &lock.path)
             .await?

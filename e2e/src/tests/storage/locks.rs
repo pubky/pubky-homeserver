@@ -135,7 +135,7 @@ async fn lock_refresh_unlock() {
     assert_eq!(lock.timeout(), Duration::from_secs(60));
 
     storage
-        .refresh(&mut lock, Duration::from_secs(10))
+        .refresh_lock(&mut lock, Duration::from_secs(10))
         .await
         .unwrap();
     assert_eq!(lock.timeout(), Duration::from_secs(10));
@@ -148,7 +148,9 @@ async fn lock_refresh_unlock() {
 
     // Unlocked: the old lock is refused everywhere.
     storage.unlock(&lock).await.unwrap();
-    let refresh = storage.refresh(&mut lock, Duration::from_secs(10)).await;
+    let refresh = storage
+        .refresh_lock(&mut lock, Duration::from_secs(10))
+        .await;
     assert_eq!(
         status_of(refresh.unwrap_err()),
         StatusCode::PRECONDITION_FAILED
