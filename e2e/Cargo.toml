@@ -17,6 +17,8 @@ eventsource-stream.workspace = true
 futures = "0.3"
 pubky-testnet.workspace = true
 rand = { workspace = true }
+# `stream` for a request body that is still being written while other requests run.
+reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

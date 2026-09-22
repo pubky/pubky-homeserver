@@ -66,6 +66,7 @@ pub use errors::{BuildError, Error, Result};
 #[doc(inline)]
 pub use crate::actors::storage::{
     list::ListBuilder,
+    lock::StorageLock,
     resource::{IntoPubkyResource, IntoResourcePath, resolve_pubky},
     resource::{PubkyResource, ResourcePath},
     stats::ResourceStats,
