@@ -22,6 +22,9 @@ pub mod features {
     pub const GRANT_SESSION_SLOTS: &str = "grant-session-slots";
     /// Homeserver supports storage URLs containing the resource owner in the path.
     pub const PATH_ADDRESSED_STORAGE: &str = "path-addressed-storage";
+    /// Homeserver supports WebDAV `LOCK`/`UNLOCK` on storage files and honours
+    /// lock tokens in the `If` header on `PUT` and `DELETE`.
+    pub const WEBDAV_LOCKS: &str = "webdav-locks";
 }
 
 /// Local test network's hardcoded port numbers for local development.

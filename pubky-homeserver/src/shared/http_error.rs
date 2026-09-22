@@ -66,6 +66,21 @@ impl HttpError {
     pub fn unauthorized_with_message(message: impl ToString) -> HttpError {
         Self::new_with_message(StatusCode::UNAUTHORIZED, message)
     }
+
+    pub fn conflict(message: impl ToString) -> HttpError {
+        Self::new_with_message(StatusCode::CONFLICT, message)
+    }
+
+    pub fn locked() -> HttpError {
+        Self::new_with_message(StatusCode::LOCKED, "Resource is locked")
+    }
+
+    pub fn lock_token_mismatch() -> HttpError {
+        Self::new_with_message(
+            StatusCode::PRECONDITION_FAILED,
+            "The If header does not name the live lock on this path",
+        )
+    }
 }
 
 impl IntoResponse for HttpError {

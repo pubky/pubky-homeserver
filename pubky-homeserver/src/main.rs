@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
         None => {
             init_tracing_logs_if_set(&args.data_dir)?;
 
+            tracing::info!("Pubky Homeserver version {}", env!("CARGO_PKG_VERSION"));
             tracing::info!("Use data directory: {}", args.data_dir.display());
             let server = HomeserverApp::start_with_persistent_data_dir_path(args.data_dir).await?;
 

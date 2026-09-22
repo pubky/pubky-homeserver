@@ -7,12 +7,9 @@ use axum::{
 };
 use futures_util::stream::StreamExt;
 
+use super::{authorize::authorize_write, lock};
 use crate::{
-    client_server::{
-        auth::{has_write_permission, AuthSession},
-        middleware::request_tenant::RequestTenant,
-        AppState,
-    },
+    client_server::{auth::AuthSession, middleware::request_tenant::RequestTenant, AppState},
     persistence::{
         files::{
             write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
@@ -32,28 +29,24 @@ pub async fn legacy_delete(
     session: AuthSession,
     tenant: RequestTenant,
     Path(path): Path<WebDavFilePathAxum>,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
     let entry_path = EntryPath::new(tenant.public_key().clone(), path.inner().to_owned());
-    delete(state, session, entry_path).await
+    delete(state, session, entry_path, headers).await
 }
 
 pub async fn delete(
     State(state): State<AppState>,
     session: AuthSession,
     entry_path: EntryPath,
+    headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
-    if !entry_path.path().is_file() {
-        return Err(HttpError::bad_request("Target path must be a file"));
-    }
-    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
+    authorize_write(&state, &session, &entry_path, false).await?;
 
-    state
-        .context
-        .user_service
-        .get_or_http_error(entry_path.pubkey(), false)
-        .await?;
-
-    state.context.file_service.delete(&entry_path).await?;
+    lock::with_write_lock(&state.context.sql_db, &entry_path, &headers, async {
+        Ok(state.context.file_service.delete(&entry_path).await?)
+    })
+    .await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -76,16 +69,7 @@ pub async fn put(
     headers: HeaderMap,
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
-    if !entry_path.path().is_file() {
-        return Err(HttpError::bad_request("Target path must be a file"));
-    }
-    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
-
-    let user = state
-        .context
-        .user_service
-        .get_or_http_error(entry_path.pubkey(), true)
-        .await?;
+    let user = authorize_write(&state, &session, &entry_path, true).await?;
 
     // Early fail: check Content-Length header against the user's storage quota
     // so we can reject before streaming the entire body.
@@ -107,11 +91,13 @@ pub async fn put(
     let converted_stream =
         body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
-    state
-        .context
-        .file_service
-        .write_stream(&entry_path, converted_stream)
-        .await?;
+    lock::with_write_lock(&state.context.sql_db, &entry_path, &headers, async {
+        let file_service = &state.context.file_service;
+        Ok(file_service
+            .write_stream(&entry_path, converted_stream)
+            .await?)
+    })
+    .await?;
     Ok((StatusCode::CREATED, ()))
 }
 

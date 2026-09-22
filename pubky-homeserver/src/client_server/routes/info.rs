@@ -5,10 +5,12 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use pubky_common::constants::features::{GRANT_SESSION_SLOTS, PATH_ADDRESSED_STORAGE};
+use pubky_common::constants::features::{
+    GRANT_SESSION_SLOTS, PATH_ADDRESSED_STORAGE, WEBDAV_LOCKS,
+};
 use serde::Serialize;
 
-const FEATURES: &[&str] = &[PATH_ADDRESSED_STORAGE, GRANT_SESSION_SLOTS];
+const FEATURES: &[&str] = &[PATH_ADDRESSED_STORAGE, GRANT_SESSION_SLOTS, WEBDAV_LOCKS];
 
 #[derive(Serialize)]
 struct InfoResponse {

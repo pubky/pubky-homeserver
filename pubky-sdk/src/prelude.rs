@@ -12,7 +12,9 @@ pub use crate::Pubky;
 // Helpers
 pub use crate::{Method, StatusCode};
 // Homeserver Resources Paths / URLs
-pub use crate::{IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath, ResourceStats};
+pub use crate::{
+    IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath, ResourceStats, StorageLock,
+};
 // Capabilities for auth flows
 pub use crate::{AuthFlowKind, Capabilities, Capability, StoragePath};
 // Secret recovery utilities
