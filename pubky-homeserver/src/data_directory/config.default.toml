@@ -1,7 +1,13 @@
 [general]
 signup_mode = "token_required"
 user_storage_quota_mb = 0
-database_url = "postgres://localhost:5432/pubky_homeserver"
+# `database_url` is deliberately absent, and the fallback lives in code instead
+# (`DatabaseMode::DEFAULT_DATABASE_URL`). This file is merged underneath every config read
+# from disk, so a value here would make `[general].database_url` come back `Some(...)` for
+# every server and destroy the one thing the `Option` is good for: telling "the operator
+# chose this" apart from "nobody chose". The database-resolution rule for tests reads
+# exactly that distinction. The setting is documented (commented out) in
+# config.sample.toml.
 
 [drive]
 pubky_listen_socket = "127.0.0.1:6287"

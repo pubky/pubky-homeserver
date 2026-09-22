@@ -169,25 +169,30 @@ mod tests {
     use futures_lite::StreamExt;
     use pkarr::{extra::endpoints::Endpoint, ResolvePolicy};
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::sync::Arc;
 
     use super::*;
     use crate::republishers::pkarr_republisher::test_client_builder;
 
-    async fn test_context() -> (AppContext, mainline::Testnet) {
+    async fn test_context(
+        keypair: pubky_common::crypto::Keypair,
+    ) -> (AppContext, mainline::Testnet) {
         let dht = mainline::Testnet::builder(1).build().unwrap();
-        let pkarr_builder = test_client_builder(&dht);
-        let context = Arc::try_unwrap(AppContext::test().await)
-            .ok()
-            .expect("unique Arc")
-            .with_pkarr(pkarr_builder.clone().build().unwrap(), pkarr_builder);
+        let context = AppContext::new_ephemeral_with_pkarr(
+            crate::ConfigToml::default_test_config(),
+            keypair,
+            None,
+            test_client_builder(&dht),
+        )
+        .await
+        .expect("failed to build test AppContext");
         (context, dht)
     }
 
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_resolve_https_endpoint_with_pkarr_client() {
-        let (context, _dht) = test_context().await;
+        let keypair = pubky_common::crypto::Keypair::from_secret(&[0; 32]);
+        let (context, _dht) = test_context(keypair).await;
         let _republisher = HomeserverKeyRepublisher::start(&context, 8080, 8080)
             .await
             .unwrap();
@@ -213,8 +218,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_endpoints() {
-        let (context, _dht) = test_context().await;
-        let context = context.with_keypair(pubky_common::crypto::Keypair::random());
+        let (context, _dht) = test_context(pubky_common::crypto::Keypair::random()).await;
         let _republisher = HomeserverKeyRepublisher::start(&context, 8080, 8080)
             .await
             .unwrap();

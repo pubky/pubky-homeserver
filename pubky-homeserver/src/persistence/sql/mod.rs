@@ -16,7 +16,9 @@ mod sql_db;
 mod unified_executor;
 
 pub use connection_string::ConnectionString;
-pub use database_mode::DatabaseMode;
+#[cfg(any(test, feature = "testing"))]
+pub use connection_string::TEST_CONNECTION_STRING_ENV;
+pub use database_mode::{DatabaseMode, DEFAULT_DATABASE_URL};
 pub use entities::entry;
 pub use entities::signup_code;
 pub(crate) use entities::user;
