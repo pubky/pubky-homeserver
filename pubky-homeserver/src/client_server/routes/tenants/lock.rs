@@ -93,29 +93,38 @@ pub async fn with_write_lock<T>(
     headers: &HeaderMap,
     write: impl Future<Output = HttpResult<T>>,
 ) -> HttpResult<T> {
+    let _keepalive = check_lock(sql_db, entry_path, headers).await?;
+    write.await
+}
+
+/// The check of [`with_write_lock`], returning the keep-alive of a write under
+/// a held lock. A separate function so its pool connection is returned before
+/// the write runs: an upload can take a long time, and holding a connection
+/// for its duration would starve the write itself of one.
+async fn check_lock(
+    sql_db: &SqlDb,
+    entry_path: &EntryPath,
+    headers: &HeaderMap,
+) -> HttpResult<Option<KeepAlive>> {
     let mut executor: UnifiedExecutor = sql_db.pool().into();
     let held = if_header_tokens(headers);
     if held.is_empty() {
-        if EntryLockRepository::get_active(entry_path, &mut executor)
-            .await?
-            .is_some()
-        {
-            return Err(HttpError::locked());
-        }
-        return write.await;
+        return match EntryLockRepository::get_active(entry_path, &mut executor).await? {
+            None => Ok(None),
+            Some(_) => Err(HttpError::locked()),
+        };
     }
 
     let live =
         EntryLockRepository::keep_alive(entry_path, &held, WRITE_LOCK_HORIZON_SECS, &mut executor)
             .await?
             .ok_or_else(HttpError::lock_token_mismatch)?;
-    let _keepalive = KeepAlive::spawn(
+    Ok(Some(KeepAlive::spawn(
         sql_db.clone(),
         entry_path.clone(),
         live.token,
         KEEPALIVE_INTERVAL,
-    );
-    write.await
+    )))
 }
 
 /// Pushes a lock's expiry out every `interval` for as long as it is held.
@@ -502,8 +511,8 @@ mod tests {
         (context, path)
     }
 
-    async fn expires_at(context: &AppContext, path: &EntryPath) -> Option<i64> {
-        EntryLockRepository::get_active(path, &mut context.sql_db.pool().into())
+    async fn expires_at(db: &SqlDb, path: &EntryPath) -> Option<i64> {
+        EntryLockRepository::get_active(path, &mut db.pool().into())
             .await
             .unwrap()
             .map(|lock| lock.expires_at)
@@ -515,27 +524,42 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn write_runs_only_when_the_lock_allows_it() {
-        let (context, path) = test_path().await;
+        // One connection: a write that needs the database while the lock
+        // check still holds its connection would time out. Uploads are long,
+        // so the check must give its connection back before the write runs.
+        let db = SqlDb::test_with_pool_options(1, Duration::from_secs(2)).await;
+        let path = EntryPath::new(
+            Keypair::random().public_key(),
+            StoragePath::new("/pub/state.bin").unwrap(),
+        );
         let status_of = |result: HttpResult<()>| result.err().map(|e| e.into_response().status());
         let write = |headers: HeaderMap, body: HttpResult<()>| {
-            let (context, path) = (context.clone(), path.clone());
-            async move { with_write_lock(&context.sql_db, &path, &headers, async { body }).await }
+            let (db, path) = (db.clone(), path.clone());
+            async move {
+                with_write_lock(&db, &path, &headers, async {
+                    db.pool()
+                        .acquire()
+                        .await
+                        .expect("the lock check must not hold a connection over the write");
+                    body
+                })
+                .await
+            }
         };
 
         // Free path: the write runs, and a failure changes nothing.
         write(HeaderMap::new(), Ok(())).await.unwrap();
         let failed = write(HeaderMap::new(), Err(HttpError::not_found())).await;
         assert_eq!(status_of(failed), Some(StatusCode::NOT_FOUND));
-        assert_eq!(expires_at(&context, &path).await, None);
+        assert_eq!(expires_at(&db, &path).await, None);
         let stale = write(headers_with("if", "(<opaquelocktoken:stale>)"), Ok(())).await;
         assert_eq!(status_of(stale), Some(StatusCode::PRECONDITION_FAILED));
 
         // Locked path.
-        let granted =
-            EntryLockRepository::acquire(&path, "t", 5, &mut context.sql_db.pool().into())
-                .await
-                .unwrap()
-                .unwrap();
+        let granted = EntryLockRepository::acquire(&path, "t", 5, &mut db.pool().into())
+            .await
+            .unwrap()
+            .unwrap();
         let unlocked = write(HeaderMap::new(), Ok(())).await;
         assert_eq!(status_of(unlocked), Some(StatusCode::LOCKED));
         let wrong = write(headers_with("if", "(<opaquelocktoken:other>)"), Ok(())).await;
@@ -544,7 +568,7 @@ mod tests {
             .await
             .unwrap();
         // Granted 5 seconds, now at least the full horizon, and still held.
-        let extended = expires_at(&context, &path).await.unwrap();
+        let extended = expires_at(&db, &path).await.unwrap();
         assert!(extended >= granted.expires_at + WRITE_LOCK_HORIZON_SECS - 5);
         let unlocked = write(HeaderMap::new(), Ok(())).await;
         assert_eq!(status_of(unlocked), Some(StatusCode::LOCKED));
@@ -577,9 +601,12 @@ mod tests {
                 Some(StatusCode::PRECONDITION_FAILED),
                 "token for {path} must be refused on {other}"
             );
-            assert_eq!(expires_at(&context, other).await, None);
+            assert_eq!(expires_at(&context.sql_db, other).await, None);
         }
-        assert_eq!(expires_at(&context, &path).await, Some(granted.expires_at));
+        assert_eq!(
+            expires_at(&context.sql_db, &path).await,
+            Some(granted.expires_at)
+        );
     }
 
     /// A write in flight pushes its lock's expiry out, and stops doing so once
@@ -603,7 +630,7 @@ mod tests {
         let mut extended = None;
         for _ in 0..100 {
             // Granted 5 seconds, extended to the full horizon.
-            extended = expires_at(&context, &path)
+            extended = expires_at(&context.sql_db, &path)
                 .await
                 .filter(|at| *at >= granted.expires_at + WRITE_LOCK_HORIZON_SECS - 5);
             if extended.is_some() {
@@ -618,7 +645,7 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(expires_at(&context, &path).await, None);
+        assert_eq!(expires_at(&context.sql_db, &path).await, None);
     }
 
     #[tokio::test]
