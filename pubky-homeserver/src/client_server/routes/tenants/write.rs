@@ -9,13 +9,9 @@ use axum::{
 };
 use futures_util::stream::{self, Stream, StreamExt};
 
-use super::lock;
+use super::{authorize::authorize_write, lock};
 use crate::{
-    client_server::{
-        auth::{has_write_permission, AuthSession},
-        middleware::request_tenant::RequestTenant,
-        AppState,
-    },
+    client_server::{auth::AuthSession, middleware::request_tenant::RequestTenant, AppState},
     persistence::{
         files::{
             write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
@@ -54,16 +50,7 @@ pub async fn delete(
     entry_path: EntryPath,
     headers: HeaderMap,
 ) -> HttpResult<impl IntoResponse> {
-    if !entry_path.path().is_file() {
-        return Err(HttpError::bad_request("Target path must be a file"));
-    }
-    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
-
-    state
-        .context
-        .user_service
-        .get_or_http_error(entry_path.pubkey(), false)
-        .await?;
+    authorize_write(&state, &session, &entry_path, false).await?;
 
     lock::with_write_lock(&state.context.sql_db, &entry_path, &headers, async {
         Ok(state.context.file_service.delete(&entry_path).await?)
@@ -91,16 +78,7 @@ pub async fn put(
     headers: HeaderMap,
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
-    if !entry_path.path().is_file() {
-        return Err(HttpError::bad_request("Target path must be a file"));
-    }
-    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
-
-    let user = state
-        .context
-        .user_service
-        .get_or_http_error(entry_path.pubkey(), true)
-        .await?;
+    let user = authorize_write(&state, &session, &entry_path, true).await?;
 
     // Early fail: check Content-Length header against the user's storage quota
     // so we can reject before streaming the entire body.

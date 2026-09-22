@@ -200,7 +200,11 @@ impl EntryLockRepository {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use futures_util::future::join_all;
     use pubky_common::crypto::Keypair;
+    use tokio::sync::Barrier;
 
     use super::*;
     use crate::{persistence::sql::SqlDb, shared::webdav::StoragePath};
@@ -247,6 +251,64 @@ mod tests {
                 .await
                 .unwrap(),
             Some(third)
+        );
+    }
+
+    /// Acquisition is one atomic statement: of many acquirers racing for a
+    /// path, exactly one gets the lock, whether the row is absent or expired.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn racing_acquisitions_grant_exactly_one_lock() {
+        let db = SqlDb::test().await;
+        let path = path("/pub/a.txt");
+        let now = 1_000;
+        let race = |at: i64| {
+            let (db, path) = (db.clone(), path.clone());
+            async move {
+                let racers = 8;
+                let barrier = Arc::new(Barrier::new(racers));
+                let acquisitions = (0..racers).map(|i| {
+                    let (db, path, barrier) = (db.clone(), path.clone(), barrier.clone());
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        let token = format!("t{i}");
+                        EntryLockRepository::acquire(
+                            &path,
+                            &token,
+                            at + 60,
+                            at,
+                            &mut db.pool().into(),
+                        )
+                        .await
+                        .unwrap()
+                    })
+                });
+                let granted: Vec<EntryLockEntity> = join_all(acquisitions)
+                    .await
+                    .into_iter()
+                    .filter_map(|joined| joined.unwrap())
+                    .collect();
+                granted
+            }
+        };
+
+        let granted = race(now).await;
+        assert_eq!(granted.len(), 1, "exactly one racer takes a free path");
+
+        // With the lock expired, exactly one racer replaces it.
+        let later = now + 61;
+        let granted = race(later).await;
+        assert_eq!(
+            granted.len(),
+            1,
+            "exactly one racer replaces an expired lock"
+        );
+        assert_eq!(
+            EntryLockRepository::get_active(&path, later, &mut db.pool().into())
+                .await
+                .unwrap()
+                .as_ref(),
+            granted.first()
         );
     }
 

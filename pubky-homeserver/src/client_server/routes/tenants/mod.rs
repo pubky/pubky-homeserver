@@ -7,9 +7,9 @@
 //! [`crate::client_server::auth::tenant_router`].
 //! `LOCK`/`UNLOCK` (see [`lock`]) reach the `/storage` route through the
 //! method-router fallback; the deprecated routes do not offer them.
-//! Write handlers call [`crate::client_server::auth::has_write_permission`] and
-//! read handlers call [`crate::client_server::auth::has_read_permission`] to
-//! enforce capability-based access control.
+//! Write handlers call [`authorize::authorize_write`] and read handlers call
+//! [`crate::client_server::auth::has_read_permission`] to enforce
+//! capability-based access control.
 
 use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};
 
@@ -18,6 +18,7 @@ use crate::client_server::{
 };
 use crate::observability::Metrics;
 
+mod authorize;
 pub mod lock;
 pub mod read;
 pub mod write;

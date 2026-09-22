@@ -31,11 +31,9 @@ use axum::{
 };
 use tokio::task::JoinHandle;
 
+use super::authorize::authorize_write;
 use crate::{
-    client_server::{
-        auth::{has_write_permission, AuthSession},
-        AppState,
-    },
+    client_server::{auth::AuthSession, AppState},
     persistence::sql::{
         entry_lock::{unix_now, EntryLockEntity, EntryLockRepository},
         SqlDb, UnifiedExecutor,
@@ -245,27 +243,6 @@ impl Drop for WriteGuard {
     }
 }
 
-/// What `PUT` and `DELETE` demand of a request: a session with write
-/// capability on a file path of a known user.
-async fn authorize(
-    state: &AppState,
-    session: Option<AuthSession>,
-    entry_path: &EntryPath,
-    must_be_enabled: bool,
-) -> HttpResult<()> {
-    let session = session.ok_or_else(HttpError::unauthorized)?;
-    if !entry_path.path().is_file() {
-        return Err(HttpError::bad_request("Only files can be locked"));
-    }
-    has_write_permission(&session, entry_path.pubkey(), entry_path.path())?;
-    state
-        .context
-        .user_service
-        .get_or_http_error(entry_path.pubkey(), must_be_enabled)
-        .await?;
-    Ok(())
-}
-
 async fn lock(
     state: &AppState,
     session: Option<AuthSession>,
@@ -274,7 +251,10 @@ async fn lock(
     headers: &HeaderMap,
     body: Body,
 ) -> HttpResult<Response<Body>> {
-    authorize(state, session, entry_path, true).await?;
+    // The fallback route cannot demand a session up front without turning an
+    // unknown method's 405 into a 401, so it is required here.
+    let session = session.ok_or_else(HttpError::unauthorized)?;
+    authorize_write(state, &session, entry_path, true).await?;
 
     // A request naming a token is a refresh of the lock it holds.
     let presented = if_header_tokens(headers);
@@ -342,7 +322,8 @@ async fn unlock(
     entry_path: &EntryPath,
     headers: &HeaderMap,
 ) -> HttpResult<Response<Body>> {
-    authorize(state, session, entry_path, false).await?;
+    let session = session.ok_or_else(HttpError::unauthorized)?;
+    authorize_write(state, &session, entry_path, false).await?;
 
     let token = lock_token_header(headers)
         .ok_or_else(|| HttpError::bad_request("Missing or malformed Lock-Token header"))?;
@@ -650,12 +631,23 @@ mod tests {
         let response = server
             .method(method("LOCK"), &url)
             .add_header(header::COOKIE, cookie.clone())
+            .add_header("timeout", "Second-5")
             .await;
         response.assert_status(StatusCode::OK);
         let token = lock_token(&response);
 
-        // A write under the client's own lock takes no implicit lock and leaves
-        // the client's lock in place; a stale token is refused.
+        // A write under the client's own lock takes no implicit lock, keeps
+        // that lock alive over the write's horizon, and leaves it in place
+        // afterwards; a stale token is refused.
+        let expires_at = || async {
+            EntryLockRepository::get_active(&path, unix_now(), &mut context.sql_db.pool().into())
+                .await
+                .unwrap()
+                .expect("the client's lock should be live")
+                .expires_at
+        };
+        let now = unix_now();
+        assert!(expires_at().await <= now + 5);
         let held = guard_write(
             &context.sql_db,
             &path,
@@ -663,6 +655,10 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(
+            expires_at().await >= now + WRITE_LOCK_HORIZON_SECS,
+            "a write must keep its client's lock alive over its own horizon"
+        );
         held.release().await;
         assert_eq!(lock_status().await, StatusCode::LOCKED);
         let stale = guard_write(
@@ -820,6 +816,54 @@ mod tests {
             .add_header(header::COOKIE, cookie.clone())
             .await
             .assert_status(StatusCode::NO_CONTENT);
+    }
+
+    /// Lock lifetimes run on the real clock. Once the granted lifetime has
+    /// passed the path is writable and lockable again, and the old token is
+    /// stale.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn expired_lock_frees_the_path() {
+        let (server, keypair, cookie) = signed_up_server().await;
+        let url = storage_url(&keypair, "/pub/state.bin");
+        let response = server
+            .method(method("LOCK"), &url)
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header("timeout", "Second-1")
+            .await;
+        response.assert_status(StatusCode::OK);
+        response.assert_header("timeout", "Second-1");
+        let token = lock_token(&response);
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(vec![1].into())
+            .await
+            .assert_status(StatusCode::LOCKED);
+
+        // Lifetimes are whole seconds: the lock is dead once the next second
+        // has begun.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(vec![2].into())
+            .await
+            .assert_status(StatusCode::CREATED);
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header("if", holding(&token))
+            .bytes(vec![3].into())
+            .await
+            .assert_status(StatusCode::PRECONDITION_FAILED);
+        let response = server
+            .method(method("LOCK"), &url)
+            .add_header(header::COOKIE, cookie)
+            .await;
+        response.assert_status(StatusCode::OK);
+        assert_ne!(lock_token(&response), token);
     }
 
     #[tokio::test]
