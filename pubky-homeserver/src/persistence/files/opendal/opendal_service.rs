@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ use futures_util::{stream::StreamExt, Stream};
 #[cfg(test)]
 use opendal::Buffer;
 use opendal::Operator;
+use tracing::Instrument;
 
 use super::super::{FileIoError, FileMetadata, FileMetadataBuilder, FileStream, WriteStreamError};
 
@@ -119,6 +121,32 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Run a finalization step to completion on its own task.
+///
+/// Finalizing a write publishes the blob and then commits the entry row;
+/// finalizing a delete commits the row removal and then removes the blob.
+/// If the request future is dropped between those two steps, for example
+/// because the client disconnected, the entry row and the blob would end up
+/// disagreeing. A spawned task keeps running after the caller is dropped,
+/// so the step always completes. The client only loses the response.
+///
+/// The task runs in the caller's tracing span, so whatever the finalization
+/// logs still carries the request's context.
+async fn spawn_finalization<T: Send + 'static>(
+    finalization: impl Future<Output = Result<T, opendal::Error>> + Send + 'static,
+) -> Result<T, FileIoError> {
+    match tokio::spawn(finalization.in_current_span()).await {
+        Ok(result) => Ok(result?),
+        Err(error) => Err(FileIoError::OpenDAL(
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "Finalization task did not complete",
+            )
+            .set_source(error),
+        )),
+    }
+}
+
 /// Build the storage operators from an `AppContext` (test-only convenience).
 #[cfg(test)]
 pub fn build_storage_operators_from_context(
@@ -173,13 +201,17 @@ impl OpendalService {
     /// Delete a file.
     /// Deleting a non-existing file will NOT return an error.
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        Ok(self.operator.delete(path.as_str()).await?)
+        let operator = self.operator.clone();
+        let path = path.as_str().to_string();
+        spawn_finalization(async move { operator.delete(&path).await }).await
     }
 
     /// Delete a file bypassing write-path restrictions.
     /// Used by `FileService::admin_delete` for the admin `/webdav` REST route.
     pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        Ok(self.admin_operator.delete(path.as_str()).await?)
+        let operator = self.admin_operator.clone();
+        let path = path.as_str().to_string();
+        spawn_finalization(async move { operator.delete(&path).await }).await
     }
 
     /// Write a stream to the storage.
@@ -208,7 +240,7 @@ impl OpendalService {
         let mut writer = guard.take();
         match write_result {
             Ok(()) => {
-                writer.close().await?;
+                spawn_finalization(async move { writer.close().await }).await?;
                 Ok(metadata_builder.finalize())
             }
             Err(stream_error) => {
@@ -298,12 +330,13 @@ impl OpendalService {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;
+    use crate::persistence::files::events::{EventRepository, EventVisibility};
     use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
+    use crate::persistence::sql::entry::{EntryEntity, EntryRepository};
     use crate::shared::webdav::StoragePath;
 
     /// A service on the production filesystem backend, a user with `quota_mb`,
@@ -354,6 +387,146 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("{message}");
+    }
+
+    /// A client that disconnects while the write is being finalized drops the
+    /// request future. The finalization must still run to completion, or the
+    /// published blob and the entry row would disagree.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn write_finalization_completes_after_the_request_is_dropped() {
+        let context = AppContext::test().await;
+        let db = context.sql_db.clone();
+        let service = OpendalService::new(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let path = EntryPath::new(pubkey, StoragePath::new("/pub/test.txt").unwrap());
+        install_slow_event_insert(&db).await;
+
+        let request = {
+            let (service, path) = (service.clone(), path.clone());
+            tokio::spawn(async move { service.write(&path, b"committed".to_vec()).await })
+        };
+        wait_for_active_query(&db, "%INSERT INTO \"events\"%").await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        let entry = wait_for_entry(&db, &path).await;
+        assert_eq!(entry.content_length, 9);
+        assert_eq!(
+            service.get(&path).await.unwrap(),
+            Bytes::from_static(b"committed")
+        );
+        assert_eq!(event_count(&db).await, 1);
+    }
+
+    /// The delete counterpart: the row removal must commit and the blob must
+    /// go even though the request was dropped mid-finalization.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn delete_finalization_completes_after_the_request_is_dropped() {
+        let context = AppContext::test().await;
+        let db = context.sql_db.clone();
+        let service = OpendalService::new(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let path = EntryPath::new(pubkey, StoragePath::new("/pub/test.txt").unwrap());
+        service.write(&path, b"doomed".to_vec()).await.unwrap();
+        install_slow_event_insert(&db).await;
+
+        let request = {
+            let (service, path) = (service.clone(), path.clone());
+            tokio::spawn(async move { service.delete(&path).await })
+        };
+        wait_for_active_query(&db, "%INSERT INTO \"events\"%").await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        wait_until(
+            || async {
+                let row_gone = EntryRepository::get_by_path(&path, &mut db.pool().into())
+                    .await
+                    .is_err();
+                row_gone && !service.exists(&path).await.unwrap()
+            },
+            "the dropped delete never completed",
+        )
+        .await;
+        assert_eq!(event_count(&db).await, 2);
+    }
+
+    /// Hold every event insert for a while so a request can be dropped while
+    /// its finalization transaction is open.
+    async fn install_slow_event_insert(db: &SqlDb) {
+        sqlx::query(
+            r#"
+            CREATE FUNCTION slow_event_insert() RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(1);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER slow_event_insert_trigger
+            BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION slow_event_insert()
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    /// Poll until a statement matching `pattern` is executing on this database.
+    async fn wait_for_active_query(db: &SqlDb, pattern: &str) {
+        wait_until(
+            || async {
+                let (active,): (i64,) = sqlx::query_as(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND state = 'active' AND query LIKE $1",
+                )
+                .bind(pattern)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+                active > 0
+            },
+            &format!("no active query matching {pattern:?}"),
+        )
+        .await;
+    }
+
+    async fn wait_for_entry(db: &SqlDb, path: &EntryPath) -> EntryEntity {
+        wait_until(
+            || async {
+                EntryRepository::get_by_path(path, &mut db.pool().into())
+                    .await
+                    .is_ok()
+            },
+            &format!("entry {path} was never committed"),
+        )
+        .await;
+        EntryRepository::get_by_path(path, &mut db.pool().into())
+            .await
+            .unwrap()
+    }
+
+    async fn event_count(db: &SqlDb) -> usize {
+        EventRepository::get_by_cursor(
+            None,
+            Some(9999),
+            EventVisibility::All,
+            &mut db.pool().into(),
+        )
+        .await
+        .unwrap()
+        .len()
     }
 
     /// A client that disconnects mid-upload drops the request future. The

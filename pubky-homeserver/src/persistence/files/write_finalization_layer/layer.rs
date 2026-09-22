@@ -18,10 +18,11 @@ use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
 /// Blob storage cannot be part of the database transaction. A write that is
 /// rejected before publication, by quota or a collision, aborts its upload and
 /// leaves the existing blob untouched. After publication the two can still
-/// diverge: if the database update fails, or the request is dropped before it
-/// commits, the blob holds the new content while the entry describes the old,
-/// or no entry exists. If deleting a blob fails after its database update, an
-/// unreferenced blob may remain.
+/// diverge, but only if the database update itself fails or the process dies:
+/// the blob then holds the new content while the entry describes the old, or
+/// no entry exists. If deleting a blob fails after its database update, an
+/// unreferenced blob may remain. A client disconnect cannot cause either,
+/// because callers run finalization on its own task.
 #[derive(Clone)]
 pub struct WriteFinalizationLayer {
     finalizer: Arc<Finalizer>,

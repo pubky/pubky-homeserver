@@ -11,7 +11,12 @@
 //! A write never touches the existing blob before it is finalized: every
 //! backend publishes on close, and the filesystem backend does so by staging
 //! the upload in `data/files-tmp` and renaming it into place. An upload that is
-//! rejected, breaks mid-stream, or loses its client is aborted instead.
+//! rejected, breaks mid-stream, or loses its client is aborted instead. Once
+//! the body has streamed, finalization runs on its own task, so a client that
+//! disconnects at that moment cannot stop it halfway. Two limits of that task:
+//! a disconnect also drops the request's lock keep-alive, so a lock can expire
+//! while its finalization is still running; and a runtime shutdown that cancels
+//! the task leaves the staged upload neither published nor aborted.
 //!
 //! [`file`] provides the high-level [`FileService`](file::file_service::FileService)
 //! used by route handlers.
