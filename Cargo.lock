@@ -3709,9 +3709,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkarr"
-version = "8.0.1"
+version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21c6fb505578fd0934d1ffe1cc8405634b10bd5c5340e7609f33d3089e34f57e"
+checksum = "26c043ed867b3152b7b0eb3e0121048c522bfe2e0e8368c7a5e91c042c78a2a5"
 dependencies = [
  "async-compat",
  "base32",
@@ -3746,9 +3746,9 @@ dependencies = [
 
 [[package]]
 name = "pkarr-relay"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa1a6eb6f5d9e28dc3273388a2392ca494c48d019706b012a59ec4a81bf570c3"
+checksum = "4b7a05bba92a7c0bfb0f6d2c60568711afc1630d81bad6a24d3a54a496f4fd19"
 dependencies = [
  "anyhow",
  "axum",
@@ -5801,7 +5801,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
