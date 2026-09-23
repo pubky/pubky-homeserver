@@ -10,13 +10,13 @@
 use chrono::{DateTime, Utc};
 use pubky_common::{
     auth::{
-        jws::{GrantId, PopNonce, POP_JWS_TYP},
+        jws::{verify_jws, GrantId, PopNonce, VerifyError, POP_JWS_TYP},
         pop::PopProofClaims,
     },
     crypto::PublicKey,
 };
 
-use super::jws_crypto::{self, JwsCompact};
+use super::jws_compact::JwsCompact;
 
 /// ±3 minutes — matches existing `AuthToken` `TIMESTAMP_WINDOW` in `pubky-common/src/auth.rs`.
 pub const POP_MAX_AGE_SECS: u64 = 180;
@@ -60,7 +60,6 @@ impl PopProof {
     /// Nonce replay checking is done separately via the database.
     pub fn verify(compact: &JwsCompact, context: &PopVerificationContext) -> Result<Self, Error> {
         let raw = verify_signature(compact.as_str(), context.cnf_key)?;
-        check_header_type(compact.as_str())?;
         check_audience(&raw, context.expected_audience)?;
         check_grant_binding(&raw, context.expected_grant_id)?;
         check_timestamp(&raw)?;
@@ -68,21 +67,15 @@ impl PopProof {
     }
 }
 
-/// Check that the JWS header has `typ: "pubky-pop"`.
-fn check_header_type(compact: &str) -> Result<(), Error> {
-    let header = jsonwebtoken::decode_header(compact).map_err(|_| Error::InvalidFormat)?;
-    match header.typ.as_deref() {
-        Some(POP_JWS_TYP) => Ok(()),
-        _ => Err(Error::InvalidHeaderType),
-    }
-}
-
 fn verify_signature(compact: &str, cnf_key: &PublicKey) -> Result<PopProofClaims, Error> {
-    let decoding_key = jws_crypto::decoding_key(cnf_key);
-    let validation = jws_crypto::eddsa_validation();
-    let token_data = jsonwebtoken::decode::<PopProofClaims>(compact, &decoding_key, &validation)
-        .map_err(|_| Error::InvalidSignature)?;
-    Ok(token_data.claims)
+    verify_jws(cnf_key, POP_JWS_TYP, compact).map_err(|error| match error {
+        VerifyError::InvalidHeaderType => Error::InvalidHeaderType,
+        VerifyError::InvalidFormat(_)
+        | VerifyError::JsonParse(_)
+        | VerifyError::InvalidAlgorithm
+        | VerifyError::InvalidSignature
+        | VerifyError::UnsupportedHeader => Error::InvalidSignature,
+    })
 }
 
 fn check_audience(raw: &PopProofClaims, expected: &str) -> Result<(), Error> {
@@ -119,10 +112,6 @@ fn parse_verified_pop(raw: PopProofClaims) -> Result<PopProof, Error> {
 /// Errors from PoP proof verification.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// The JWS format is invalid or unparseable.
-    #[error("invalid PoP format")]
-    InvalidFormat,
-
     /// The JWS header `typ` is not `"pubky-pop"`.
     #[error("invalid PoP header type, expected pubky-pop")]
     InvalidHeaderType,
@@ -150,15 +139,12 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use pubky_common::crypto::Keypair;
+    use pubky_common::{auth::jws::sign_jws, crypto::Keypair};
 
-    use super::jws_crypto;
     use super::*;
 
     fn sign_pop(client_kp: &Keypair, raw: &PopProofClaims) -> JwsCompact {
-        let header = jws_crypto::eddsa_header(POP_JWS_TYP);
-        let enc = jws_crypto::encoding_key(client_kp);
-        let token = jsonwebtoken::encode(&header, raw, &enc).unwrap();
+        let token = sign_jws(client_kp, POP_JWS_TYP, raw);
         JwsCompact::parse(&token).unwrap()
     }
 
@@ -172,29 +158,9 @@ mod tests {
     }
 
     #[test]
-    fn verify_accepts_pubky_common_sign_jws() {
-        // Interop check: SDKs sign PoP proofs via `pubky_common::auth::jws::sign_jws`.
-        // The homeserver must accept that wire format byte-for-byte.
-        let client_kp = Keypair::random();
-        let hs_kp = Keypair::random();
-        let raw = make_valid_pop(&hs_kp);
-
-        let compact_str = pubky_common::auth::jws::sign_jws(&client_kp, POP_JWS_TYP, &raw);
-        let compact = JwsCompact::parse(&compact_str).unwrap();
-
-        let cnf_key = client_kp.public_key();
-        let aud = hs_kp.public_key().z32();
-        let context = PopVerificationContext {
-            cnf_key: &cnf_key,
-            expected_audience: &aud,
-            expected_grant_id: &raw.gid,
-        };
-        let pop = PopProof::verify(&compact, &context).unwrap();
-        assert_eq!(pop.grant_id, raw.gid);
-    }
-
-    #[test]
     fn sign_and_verify_roundtrip() {
+        // Interop check: verify the shared signer used by SDKs through the
+        // homeserver's full PoP verification pipeline.
         let client_kp = Keypair::random();
         let hs_kp = Keypair::random();
         let raw = make_valid_pop(&hs_kp);
@@ -278,10 +244,8 @@ mod tests {
         let raw = make_valid_pop(&hs_kp);
 
         // Sign with wrong typ header
-        let header = jws_crypto::eddsa_header("wrong-typ");
-        let enc = jws_crypto::encoding_key(&client_kp);
-        let compact =
-            JwsCompact::parse(&jsonwebtoken::encode(&header, &raw, &enc).unwrap()).unwrap();
+        let token = sign_jws(&client_kp, "wrong-typ", &raw);
+        let compact = JwsCompact::parse(&token).unwrap();
 
         let cnf_key = client_kp.public_key();
         let aud = hs_kp.public_key().z32();
