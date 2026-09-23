@@ -79,7 +79,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build Docker image
-        uses: pubky/ci-workflows/.github/actions/docker/build_and_push@5faaf004d36bb93a204b58cf7190ffe7fbcce16f
+        uses: pubky/ci-workflows/.github/actions/docker/build_and_push@main
         with:
           registry: registry-1.docker.io/synonymsoft
           context: .
