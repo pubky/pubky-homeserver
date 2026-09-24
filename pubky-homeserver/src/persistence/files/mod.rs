@@ -22,8 +22,10 @@
 //! database update fails after publication or the process dies between the
 //! steps: the blob then holds new content while the entry describes the old,
 //! or no entry exists, or an unreferenced blob remains after a delete. A client
-//! disconnect cannot cause this: once the body has streamed, finalization runs
-//! on its own task, so dropping the request cannot stop it halfway.
+//! disconnect cannot cause this: the finalization layer runs every
+//! finalization on its own task, so dropping the request, or any other user of
+//! the operator, cannot stop it halfway. A writer dropped before it closes, as
+//! a disconnect mid-upload does, discards its staged bytes the same way.
 //!
 //! Two limits of that task: a disconnect also drops the request's lock
 //! keep-alive, so a lock can expire while its finalization is still running;

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use crate::persistence::files::{events::EventsService, layer_domain_error::LayerDomainError};
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
@@ -6,6 +6,7 @@ use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::*;
 use opendal::Result;
+use tracing::Instrument;
 
 use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
 
@@ -82,6 +83,34 @@ pub(super) fn unexpected(
     )
 }
 
+/// The error for using a writer or deleter after it was closed or aborted.
+pub(super) fn already_closed(subject: &str) -> opendal::Error {
+    opendal::Error::new(
+        opendal::ErrorKind::Unexpected,
+        format!("{subject} was already closed or aborted"),
+    )
+}
+
+/// Run a finalization step to completion on its own task, so a caller dropped
+/// mid-step (a client disconnect) cannot leave the entry row and the blob
+/// disagreeing. Why that matters is described in the
+/// [`files`](crate::persistence::files) module docs.
+///
+/// The task runs in the caller's tracing span, so whatever the finalization
+/// logs still carries the request's context.
+pub(super) async fn spawn_finalization<T: Send + 'static>(
+    finalization: impl Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    match tokio::spawn(finalization.in_current_span()).await {
+        Ok(result) => result,
+        Err(error) => Err(opendal::Error::new(
+            opendal::ErrorKind::Unexpected,
+            "Finalization task did not complete",
+        )
+        .set_source(error)),
+    }
+}
+
 fn path_collision_error(entry_path: &EntryPath) -> opendal::Error {
     opendal::Error::new(
         opendal::ErrorKind::AlreadyExists,
@@ -110,7 +139,13 @@ pub(super) async fn check_no_path_collision(
     Ok(())
 }
 
-impl<A: Access> Layer<A> for WriteFinalizationLayer {
+// Finalization runs on spawned tasks that own the backend writer or deleter,
+// hence the `'static` bounds.
+impl<A: Access> Layer<A> for WriteFinalizationLayer
+where
+    A::Writer: 'static,
+    A::Deleter: 'static,
+{
     type LayeredAccess = WriteFinalizationAccessor<A>;
 
     fn layer(&self, inner: A) -> Self::LayeredAccess {
@@ -127,7 +162,11 @@ pub struct WriteFinalizationAccessor<A: Access> {
     finalizer: Arc<Finalizer>,
 }
 
-impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A> {
+impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A>
+where
+    A::Writer: 'static,
+    A::Deleter: 'static,
+{
     type Inner = A;
     type Reader = A::Reader;
     type Writer = WriteFinalizationWriter<A::Writer>;
@@ -237,11 +276,12 @@ impl Finalizer {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
+pub(super) mod test_support {
     use std::future::Future;
     use std::time::Duration;
 
     use pubky_common::crypto::Keypair;
+    use tempfile::TempDir;
 
     use crate::persistence::files::{
         events::{EventEntity, EventRepository, EventVisibility},
@@ -261,13 +301,13 @@ pub(crate) mod test_support {
         )
     }
 
-    pub(crate) fn test_operator(db: &SqlDb) -> opendal::Operator {
+    pub(in super::super) fn test_operator(db: &SqlDb) -> opendal::Operator {
         test_operator_over(db, get_memory_operator())
     }
 
     /// Like [`test_operator`], on the filesystem backend so staged uploads
-    /// can be observed in `files-tmp` under the returned directory.
-    pub(crate) fn test_fs_operator(db: &SqlDb) -> (opendal::Operator, tempfile::TempDir) {
+    /// can be observed with [`staged_count`] on the returned directory.
+    pub(in super::super) fn test_fs_operator(db: &SqlDb) -> (opendal::Operator, TempDir) {
         let (backend, tmp_dir) = get_fs_operator();
         (test_operator_over(db, backend), tmp_dir)
     }
@@ -282,25 +322,32 @@ pub(crate) mod test_support {
         ))
     }
 
-    pub(crate) fn test_user_service(db: &SqlDb) -> UserService {
+    pub(in super::super) fn test_user_service(db: &SqlDb) -> UserService {
         UserService::new(db.clone())
     }
 
-    pub(crate) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
+    pub(in super::super) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
         let pubkey = Keypair::random().public_key();
         let user_service = test_user_service(db);
         user_service.create(&pubkey).await.unwrap();
         pubkey
     }
 
-    pub(crate) async fn user_usage(db: &SqlDb, pubkey: &pubky_common::crypto::PublicKey) -> u64 {
+    pub(in super::super) async fn user_usage(
+        db: &SqlDb,
+        pubkey: &pubky_common::crypto::PublicKey,
+    ) -> u64 {
         let user_service = test_user_service(db);
         user_service.get(pubkey).await.unwrap().used_bytes
     }
 
     /// Install a plpgsql trigger called `name` that runs `body` before every
     /// insert into the events table. `body` may raise to fail the insert.
-    pub(crate) async fn install_events_insert_trigger(db: &SqlDb, name: &str, body: &str) {
+    pub(in super::super) async fn install_events_insert_trigger(
+        db: &SqlDb,
+        name: &str,
+        body: &str,
+    ) {
         let function = format!(
             "CREATE FUNCTION {name}() RETURNS trigger AS $$ \
              BEGIN {body} RETURN NEW; END; \
@@ -315,7 +362,7 @@ pub(crate) mod test_support {
     }
 
     /// Poll until `condition` holds, for a few seconds at most.
-    pub(crate) async fn wait_until<F, Fut>(condition: F, message: &str)
+    pub(in super::super) async fn wait_until<F, Fut>(condition: F, message: &str)
     where
         F: Fn() -> Fut,
         Fut: Future<Output = bool>,
@@ -329,7 +376,50 @@ pub(crate) mod test_support {
         panic!("{message}");
     }
 
-    pub(crate) async fn all_events(db: &SqlDb) -> Vec<EventEntity> {
+    /// Hold every event insert for a second, so a caller can be dropped while
+    /// its finalization transaction is open.
+    pub(in super::super) async fn install_slow_event_insert(db: &SqlDb) {
+        install_events_insert_trigger(db, "slow_event_insert", "PERFORM pg_sleep(1);").await;
+    }
+
+    /// Poll until an insert held by [`install_slow_event_insert`] is running.
+    pub(in super::super) async fn wait_for_slow_event_insert(db: &SqlDb) {
+        wait_for_active_query(db, "%INSERT INTO \"events\"%").await;
+    }
+
+    /// Poll until a statement matching `pattern` is executing on this database.
+    async fn wait_for_active_query(db: &SqlDb, pattern: &str) {
+        wait_until(
+            || async {
+                let (active,): (i64,) = sqlx::query_as(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND state = 'active' AND query LIKE $1",
+                )
+                .bind(pattern)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+                active > 0
+            },
+            &format!("no active query matching {pattern:?}"),
+        )
+        .await;
+    }
+
+    /// Uploads currently staged by a [`test_fs_operator`] in `tmp_dir`.
+    pub(in super::super) fn staged_count(tmp_dir: &TempDir) -> usize {
+        std::fs::read_dir(tmp_dir.path().join("files-tmp")).map_or(0, Iterator::count)
+    }
+
+    pub(in super::super) async fn wait_for_staged_count(
+        tmp_dir: &TempDir,
+        expected: usize,
+        message: &str,
+    ) {
+        wait_until(|| async { staged_count(tmp_dir) == expected }, message).await;
+    }
+
+    pub(in super::super) async fn all_events(db: &SqlDb) -> Vec<EventEntity> {
         EventRepository::get_by_cursor(
             None,
             Some(9999),

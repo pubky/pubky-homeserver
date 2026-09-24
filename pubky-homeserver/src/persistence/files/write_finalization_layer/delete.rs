@@ -11,7 +11,7 @@ use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
 use opendal::{Error, Result};
 
-use super::layer::{unexpected, Finalizer};
+use super::layer::{already_closed, spawn_finalization, unexpected, Finalizer};
 
 struct StagedDelete {
     user: UserEntity,
@@ -36,23 +36,45 @@ enum DeleteOutcome {
 }
 
 /// Deleter that commits entry deletion, its event, and quota accounting together.
+///
+/// Closing finalizes on a task of its own, so a caller dropped mid-close (a
+/// client disconnect) cannot stop a finalization halfway.
 pub struct WriteFinalizationDeleter<R> {
-    inner: R,
-    finalizer: Arc<Finalizer>,
-    delete_queue: Vec<PendingDelete>,
+    /// `None` while a close runs on its finalization task, and for good if
+    /// that close was dropped.
+    queued: Option<QueuedDeletes<R>>,
 }
 
 impl<R> WriteFinalizationDeleter<R> {
     pub(super) fn new(inner: R, finalizer: Arc<Finalizer>) -> Self {
         Self {
-            inner,
-            finalizer,
-            delete_queue: Vec::new(),
+            queued: Some(QueuedDeletes {
+                inner,
+                finalizer,
+                delete_queue: Vec::new(),
+            }),
         }
     }
 }
 
-impl<R: oio::Delete> WriteFinalizationDeleter<R> {
+/// The deleter's working state, moved whole onto the finalization task.
+struct QueuedDeletes<R> {
+    inner: R,
+    finalizer: Arc<Finalizer>,
+    delete_queue: Vec<PendingDelete>,
+}
+
+impl<R: oio::Delete> QueuedDeletes<R> {
+    async fn close(&mut self) -> Result<()> {
+        let outcome = self.process_delete_queue().await;
+
+        if outcome.should_notify {
+            self.finalizer.notify_event();
+        }
+
+        self.close_blob_deletes(outcome.first_error).await
+    }
+
     async fn process_delete_queue(&mut self) -> DeleteQueueOutcome {
         let mut outcome = DeleteQueueOutcome::default();
         let mut failed_deletes = Vec::new();
@@ -120,21 +142,30 @@ impl<R: oio::Delete> WriteFinalizationDeleter<R> {
     }
 }
 
-impl<R: oio::Delete> oio::Delete for WriteFinalizationDeleter<R> {
+impl<R: oio::Delete + 'static> oio::Delete for WriteFinalizationDeleter<R> {
     async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+        let queued = self
+            .queued
+            .as_mut()
+            .ok_or_else(|| already_closed("Deleter"))?;
         let entry_path = EntryPath::parse_opendal(path)?;
-        self.delete_queue.push(PendingDelete { entry_path, args });
+        queued.delete_queue.push(PendingDelete { entry_path, args });
         Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
-        let outcome = self.process_delete_queue().await;
-
-        if outcome.should_notify {
-            self.finalizer.notify_event();
-        }
-
-        self.close_blob_deletes(outcome.first_error).await
+        let mut queued = self
+            .queued
+            .take()
+            .ok_or_else(|| already_closed("Deleter"))?;
+        let (queued, result) = spawn_finalization(async move {
+            let result = queued.close().await;
+            Ok((queued, result))
+        })
+        .await?;
+        // Deletes that failed to finalize stay queued for a later close.
+        self.queued = Some(queued);
+        result
     }
 }
 
@@ -279,10 +310,46 @@ mod tests {
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, create_user, install_events_insert_trigger, test_finalizer, test_operator,
-        user_usage,
+        all_events, create_user, install_events_insert_trigger, install_slow_event_insert,
+        test_finalizer, test_operator, user_usage, wait_for_slow_event_insert, wait_until,
     };
     use super::*;
+
+    /// A caller that disconnects while the delete is being finalized drops the
+    /// close future. The row removal must still commit and the blob must go.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn delete_finalization_completes_after_the_caller_is_dropped() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        operator
+            .write(entry_path.as_str(), b"doomed".to_vec())
+            .await
+            .unwrap();
+        install_slow_event_insert(&db).await;
+
+        let delete = {
+            let (operator, path) = (operator.clone(), entry_path.as_str().to_string());
+            tokio::spawn(async move { operator.delete(&path).await })
+        };
+        wait_for_slow_event_insert(&db).await;
+        delete.abort();
+        assert!(delete.await.unwrap_err().is_cancelled());
+
+        wait_until(
+            || async {
+                let row_gone = EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+                    .await
+                    .is_err();
+                row_gone && !operator.exists(entry_path.as_str()).await.unwrap()
+            },
+            "the dropped delete never completed",
+        )
+        .await;
+        assert_eq!(all_events(&db).await.len(), 2);
+    }
 
     #[derive(Default)]
     struct BatchDelete {
@@ -483,7 +550,7 @@ mod tests {
         assert_eq!(events.last().unwrap().event_type, EventType::Delete);
         assert_eq!(events.last().unwrap().path, succeeding_path);
         assert_eq!(
-            deleter.inner.closed_paths,
+            deleter.queued.as_ref().unwrap().inner.closed_paths,
             vec![succeeding_path.as_str().to_string()],
             "successfully finalized paths should still be deleted from the backend"
         );

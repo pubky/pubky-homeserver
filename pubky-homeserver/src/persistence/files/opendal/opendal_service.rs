@@ -15,16 +15,12 @@ use crate::{
     storage_config::{StorageConfigToml, StorageToml},
 };
 use bytes::Bytes;
-use futures_util::Stream;
-#[cfg(test)]
-use futures_util::StreamExt;
+use futures_util::{stream::StreamExt, Stream};
 #[cfg(test)]
 use opendal::Buffer;
 use opendal::Operator;
 
 use super::super::{FileIoError, FileStream, WriteStreamError};
-use super::finalization::spawn_finalization;
-use super::staged_upload::StagedUpload;
 
 /// Build storage operators with one transactional finalization layer and an
 /// app-facing operator that additionally enforces write paths and collisions.
@@ -151,32 +147,40 @@ impl OpendalService {
     /// Delete a file.
     /// Deleting a non-existing file will NOT return an error.
     pub async fn delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        Self::delete_with(&self.operator, path).await
+        Ok(self.operator.delete(path.as_str()).await?)
     }
 
     /// Delete a file bypassing write-path restrictions.
     /// Used by `FileService::admin_delete` for the admin `/webdav` REST route.
     pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
-        Self::delete_with(&self.admin_operator, path).await
+        Ok(self.admin_operator.delete(path.as_str()).await?)
     }
 
-    async fn delete_with(operator: &Operator, path: &EntryPath) -> Result<(), FileIoError> {
-        let operator = operator.clone();
-        let path = path.as_str().to_string();
-        spawn_finalization(async move { operator.delete(&path).await }).await
-    }
-
-    /// Write a stream to the storage.
+    /// Write a stream to the storage. A stream that breaks mid-way aborts the
+    /// upload, and the caller gets the stream error rather than a cleanup error.
     pub async fn write_stream(
         &self,
         path: &EntryPath,
-        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+        mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
     ) -> Result<(), FileIoError> {
-        let mut upload = StagedUpload::begin(&self.operator, path).await?;
-        match upload.write_all(stream).await {
-            Ok(()) => upload.publish().await,
+        let mut writer = self.operator.writer(path.as_str()).await?;
+        let write_result: Result<(), FileIoError> = async {
+            while let Some(chunk_result) = stream.next().await {
+                writer.write(chunk_result?).await?;
+            }
+            Ok(())
+        }
+        .await;
+
+        match write_result {
+            Ok(()) => {
+                writer.close().await?;
+                Ok(())
+            }
             Err(stream_error) => {
-                upload.discard().await;
+                if let Err(error) = writer.abort().await {
+                    tracing::warn!(path = %path, %error, "Failed to abort broken upload");
+                }
                 Err(stream_error)
             }
         }
@@ -296,6 +300,36 @@ mod tests {
             write_result,
             Err(FileIoError::DiskSpaceQuotaExceeded)
         ));
+    }
+
+    /// A body that breaks mid-stream is aborted, and the caller gets the
+    /// stream error rather than a cleanup error.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn broken_stream_leaves_no_staged_file_and_the_old_bytes() {
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
+        let service = OpendalService::new(&context).unwrap();
+        let pubky = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubky).await.unwrap();
+        let path = EntryPath::new(pubky, StoragePath::new("/pub/test.txt").unwrap());
+        service.write(&path, b"old".to_vec()).await.unwrap();
+        let staging_dir = context.data_dir.path().join("data/files-tmp");
+
+        let stream = futures_util::stream::iter([
+            Ok(Bytes::from_static(b"partial")),
+            Err(WriteStreamError::Other(anyhow::anyhow!("connection reset"))),
+        ]);
+        let result = service.write_stream(&path, Box::pin(stream)).await;
+
+        assert!(matches!(result, Err(FileIoError::StreamBroken(_))));
+        assert_eq!(std::fs::read_dir(&staging_dir).unwrap().count(), 0);
+        assert_eq!(
+            service.get(&path).await.unwrap(),
+            Bytes::from_static(b"old")
+        );
     }
 
     /// Test the chunked reading of a file.
