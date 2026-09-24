@@ -25,6 +25,17 @@ pubky_listen_socket = "127.0.0.1:6287"
 # May be put behind a reverse proxy with TLS enabled.
 icann_listen_socket = "127.0.0.1:6286"
 
+# Configure each listener independently. Direct uses the TCP peer address.
+# Proxy protocol requires a PROXY v1/v2 preface from an immediate peer in
+# trusted_proxies. Keep a proxy listener inaccessible to other clients: an
+# allowed peer can claim any source IP. The proxy must send the real client
+# address, not a value copied from an HTTP forwarding header.
+icann_client_identity = { mode = "direct" }
+pubky_client_identity = { mode = "direct" }
+# Example for ICANN HTTP behind a local PROXY-protocol proxy:
+# icann_client_identity = { mode = "proxy_protocol", trusted_proxies = ["127.0.0.1/32"] }
+# For Pubky TLS, the PROXY preface must precede the TLS handshake.
+
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE

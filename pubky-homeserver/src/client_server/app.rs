@@ -25,12 +25,14 @@ use axum_server::{
     Handle,
 };
 use std::{net::SocketAddr, sync::Arc};
+use tcp_client_addr::IdentityMode;
 use tower::ServiceBuilder;
 use tower_cookies::CookieManagerLayer;
 use tower_http::cors::CorsLayer;
 
 use super::auth::{self, AuthenticationLayer};
 use super::cache_policy;
+use super::client_identity::ClientIdentityAcceptor;
 use super::middleware::{
     rate_limiter::{BandwidthQuotaLimitLayer, RequestRateLimitLayer},
     request_tenant::RequestTenant,
@@ -53,6 +55,15 @@ pub enum ClientServerBuildError {
     /// Failed to build request-count rate limit layer.
     #[error("Request-count rate limit configuration error: {0}")]
     RequestRateLimits(String),
+    /// Invalid client identity configuration for a listener.
+    #[error("{listener} client identity configuration error: {source}")]
+    ClientIdentityConfig {
+        /// Listener with invalid client identity settings.
+        listener: &'static str,
+        /// Invalid PROXY protocol configuration.
+        #[source]
+        source: tcp_client_addr::ConfigError,
+    },
 }
 /// A Pubky homeserver with ICANN HTTP and Pubky TLS servers.
 pub struct ClientServer {
@@ -97,15 +108,32 @@ impl ClientServer {
     pub async fn start(
         context: Arc<AppContext>,
     ) -> std::result::Result<Self, ClientServerBuildError> {
+        // Validate both listeners before binding either socket.
+        let drive = &context.config_toml.drive;
+        let icann_identity = drive
+            .icann_client_identity
+            .to_identity_mode()
+            .map_err(|source| ClientServerBuildError::ClientIdentityConfig {
+                listener: "ICANN HTTP",
+                source,
+            })?;
+        let pubky_identity = drive
+            .pubky_client_identity
+            .to_identity_mode()
+            .map_err(|source| ClientServerBuildError::ClientIdentityConfig {
+                listener: "Pubky TLS",
+                source,
+            })?;
         let router = Self::create_router(Arc::clone(&context))?;
 
         let (icann_http_handle, icann_http_socket) =
-            Self::start_icann_http_server(&context, router.clone())
+            Self::start_icann_http_server(&context, router.clone(), icann_identity)
                 .await
                 .map_err(ClientServerBuildError::IcannWebServer)?;
-        let (pubky_tls_handle, pubky_tls_socket) = Self::start_pubky_tls_server(&context, router)
-            .await
-            .map_err(ClientServerBuildError::PubkyTlsServer)?;
+        let (pubky_tls_handle, pubky_tls_socket) =
+            Self::start_pubky_tls_server(&context, router, pubky_identity)
+                .await
+                .map_err(ClientServerBuildError::PubkyTlsServer)?;
 
         Ok(Self {
             context,
@@ -127,6 +155,7 @@ impl ClientServer {
     async fn start_icann_http_server(
         context: &AppContext,
         router: Router,
+        identity: IdentityMode,
     ) -> Result<(Handle<SocketAddr>, SocketAddr)> {
         // Icann http server
         let http_listener = TcpListener::bind(context.config_toml.drive.icann_listen_socket)?;
@@ -136,8 +165,9 @@ impl ClientServer {
         let server = axum_server::from_tcp(http_listener)?;
         tokio::spawn(
             server
+                .acceptor(ClientIdentityAcceptor::new(identity))
                 .handle(http_handle.clone())
-                .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                .serve(router.into_make_service())
                 .map_err(|error| {
                     tracing::error!(?error, "Homeserver icann http server error");
                     println!("Homeserver icann http server error: {:?}", error);
@@ -151,6 +181,7 @@ impl ClientServer {
     async fn start_pubky_tls_server(
         context: &AppContext,
         router: Router,
+        identity: IdentityMode,
     ) -> Result<(Handle<SocketAddr>, SocketAddr)> {
         // Pubky tls server
         let https_listener = TcpListener::bind(context.config_toml.drive.pubky_listen_socket)?;
@@ -158,13 +189,16 @@ impl ClientServer {
         let https_socket = https_listener.local_addr()?;
         let https_handle = Handle::new();
         let server = axum_server::from_tcp(https_listener)?;
+        let tls_config =
+            RustlsConfig::from_config(Arc::new(context.keypair.to_rpk_rustls_server_config()));
+        // Read the PROXY preface before starting the TLS handshake.
+        let acceptor =
+            RustlsAcceptor::new(tls_config).acceptor(ClientIdentityAcceptor::new(identity));
         tokio::spawn(
             server
-                .acceptor(RustlsAcceptor::new(RustlsConfig::from_config(Arc::new(
-                    context.keypair.to_rpk_rustls_server_config(),
-                ))))
+                .acceptor(acceptor)
                 .handle(https_handle.clone())
-                .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                .serve(router.into_make_service())
                 .map_err(|error| {
                     tracing::error!(?error, "Homeserver pubky tls server error");
                     println!("Homeserver pubky tls server error: {:?}", error);

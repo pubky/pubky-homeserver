@@ -31,8 +31,8 @@ pub use client_server::{ClientServer, ClientServerBuildError};
 #[cfg(any(test, feature = "testing"))]
 pub use data_directory::MockDataDir;
 pub use data_directory::{
-    storage_config, AdminToml, ConfigReadError, ConfigToml, DataDir, LoggingToml, MetricsToml,
-    PersistentDataDir,
+    storage_config, AdminToml, ClientIdentityToml, ConfigReadError, ConfigToml, DataDir,
+    LoggingToml, MetricsToml, PersistentDataDir,
 };
 pub use homeserver_app::{HomeserverApp, HomeserverAppBuildError};
 pub use metrics_server::{MetricsServer, MetricsServerBuildError};
