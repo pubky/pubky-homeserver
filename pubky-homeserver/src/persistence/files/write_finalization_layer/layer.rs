@@ -245,7 +245,7 @@ pub(crate) mod test_support {
 
     use crate::persistence::files::{
         events::{EventEntity, EventRepository, EventVisibility},
-        opendal::opendal_test_operators::get_memory_operator,
+        opendal::opendal_test_operators::{get_fs_operator, get_memory_operator},
     };
     use crate::persistence::sql::SqlDb;
 
@@ -262,7 +262,18 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn test_operator(db: &SqlDb) -> opendal::Operator {
-        get_memory_operator().layer(WriteFinalizationLayer::new(
+        test_operator_over(db, get_memory_operator())
+    }
+
+    /// Like [`test_operator`], on the filesystem backend so staged uploads
+    /// can be observed in `files-tmp` under the returned directory.
+    pub(crate) fn test_fs_operator(db: &SqlDb) -> (opendal::Operator, tempfile::TempDir) {
+        let (backend, tmp_dir) = get_fs_operator();
+        (test_operator_over(db, backend), tmp_dir)
+    }
+
+    fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {
+        backend.layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
             EventsService::new(db.clone(), 100),

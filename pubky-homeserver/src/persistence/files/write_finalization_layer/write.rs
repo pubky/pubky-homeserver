@@ -88,11 +88,13 @@ impl<R: oio::Write> oio::Write for WriteFinalizationWriter<R> {
 
     /// Publish the staged bytes and commit their entry together.
     ///
-    /// An upload rejected before publication (quota, collision) is aborted
-    /// here, because only this layer knows the rejection happened before the
-    /// backend renamed anything. On any later failure the backend has already
-    /// published, or may have, so the caller must not abort: the staged bytes
-    /// are the live blob, or a leftover that aborting could not reach anyway.
+    /// An upload that fails before publication, because the transaction
+    /// cannot begin or the write is rejected by quota or a collision, is
+    /// aborted here, because only this layer knows the failure happened before
+    /// the backend renamed anything. On any later failure the backend has
+    /// already published, or may have, so the caller must not abort: the
+    /// staged bytes are the live blob, or a leftover that aborting could not
+    /// reach anyway.
     async fn close(&mut self) -> Result<opendal::Metadata> {
         self.metadata_builder
             .guess_mime_type_from_path(self.entry_path.path().as_str());
@@ -103,14 +105,14 @@ impl<R: oio::Write> oio::Write for WriteFinalizationWriter<R> {
     }
 }
 
-/// Discard the staged bytes of an upload rejected before publication. The
-/// caller reports the rejection, so a failed cleanup is only logged.
-async fn abort_rejected_upload<R: oio::Write>(backend_writer: &mut R, entry_path: &EntryPath) {
+/// Discard the staged bytes of an upload that failed before publication. The
+/// caller reports the failure, so a failed cleanup is only logged.
+async fn abort_unpublished_upload<R: oio::Write>(backend_writer: &mut R, entry_path: &EntryPath) {
     if let Err(abort_error) = backend_writer.abort().await {
         tracing::warn!(
             path = %entry_path,
             error = %abort_error,
-            "Failed to abort rejected upload"
+            "Failed to abort unpublished upload"
         );
     }
 }
@@ -122,10 +124,16 @@ impl Finalizer {
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
     ) -> Result<opendal::Metadata> {
-        let mut tx =
-            self.sql_db.pool().begin().await.map_err(|error| {
-                unexpected("Failed to begin write finalization transaction", error)
-            })?;
+        let mut tx = match self.sql_db.pool().begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                abort_unpublished_upload(backend_writer, entry_path).await;
+                return Err(unexpected(
+                    "Failed to begin write finalization transaction",
+                    error,
+                ));
+            }
+        };
 
         let result = {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
@@ -169,7 +177,7 @@ impl Finalizer {
         {
             Ok(prepared) => prepared,
             Err(rejection) => {
-                abort_rejected_upload(backend_writer, entry_path).await;
+                abort_unpublished_upload(backend_writer, entry_path).await;
                 return Err(rejection);
             }
         };
@@ -299,9 +307,34 @@ mod tests {
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, create_user, install_events_insert_trigger, test_operator, user_usage,
+        all_events, create_user, install_events_insert_trigger, test_fs_operator, test_operator,
+        user_usage,
     };
     use super::*;
+
+    /// The transaction failing to begin happens before the backend publishes,
+    /// so the staged bytes must be aborted like a rejected write.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn upload_is_aborted_when_the_transaction_cannot_begin() {
+        let db = SqlDb::test().await;
+        let (operator, tmp_dir) = test_fs_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        let staging_dir = tmp_dir.path().join("files-tmp");
+
+        let mut writer = operator.writer(entry_path.as_str()).await.unwrap();
+        writer.write(vec![1; 10]).await.unwrap();
+        assert_eq!(std::fs::read_dir(&staging_dir).unwrap().count(), 1);
+
+        db.pool().close().await;
+
+        writer
+            .close()
+            .await
+            .expect_err("closing without a database should fail");
+        assert_eq!(std::fs::read_dir(&staging_dir).unwrap().count(), 0);
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]
