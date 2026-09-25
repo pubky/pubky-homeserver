@@ -1,36 +1,40 @@
-//! Confines an operator to a single user's subtree.
+//! Confines an operator to a single user's public folder.
 //!
-//! The WebDAV endpoint points one `DavHandler` at the whole storage root and
-//! relies on an HTTP-level guard to keep a session inside its own drive. That
-//! guard is tested and holds, but it is one function: a future change to path
-//! normalisation would turn a bug there into a cross-tenant data breach.
+//! The WebDAV endpoint points a `DavHandler` at the whole storage root and
+//! relies on an HTTP-level check to keep a request inside `/pub/`. That check
+//! is tested and holds, but it is one function: a future change to path
+//! normalisation would turn a bug there into a private-data leak.
 //!
-//! This layer is the second line. Applied per request with the caller's key, it
-//! refuses any object key outside `{user_z32}/` at the storage boundary, so the
-//! HTTP guard becomes a source of good error messages rather than the only
+//! This layer is the second line. Applied per request with the drive's key, it
+//! refuses any object key outside `{user_z32}/pub/` at the storage boundary, so
+//! the HTTP check becomes a source of good error messages rather than the only
 //! control. `opendal` has no `SubdirLayer` and `OpendalFs` takes no root, so
 //! this is written out by hand.
 //!
 //! Every operation is checked, reads included — unlike
 //! [`WritePathLayer`](super::write_path_layer::WritePathLayer), which guards
-//! mutations only. Cross-tenant reads are exactly what this exists to stop.
+//! mutations only. Reads outside the public folder are exactly what this exists
+//! to stop.
 use std::sync::Arc;
 
 use opendal::raw::*;
 use opendal::Result;
 use pubky_common::crypto::PublicKey;
 
-/// Restricts an operator to the keys belonging to one user.
+use crate::constants::PUBLIC_ROOT;
+
+/// Restricts an operator to the keys in one user's public folder.
 #[derive(Clone, Debug)]
 pub struct TenantScopeLayer {
-    /// The owner's key with a trailing slash, e.g. `8pinxx…ewo/`.
+    /// The owner's public folder with a trailing slash, e.g. `8pinxx…ewo/pub/`.
     prefix: Arc<str>,
 }
 
 impl TenantScopeLayer {
-    pub fn new(owner: &PublicKey) -> Self {
+    /// Scope to `owner`'s public folder.
+    pub fn public(owner: &PublicKey) -> Self {
         Self {
-            prefix: format!("{}/", owner.z32()).into(),
+            prefix: format!("{}{PUBLIC_ROOT}", owner.z32()).into(),
         }
     }
 }
@@ -52,9 +56,9 @@ pub struct TenantScopeAccessor<A: Access> {
     prefix: Arc<str>,
 }
 
-/// Whether `path` names an object inside the scoped drive.
+/// Whether `path` names an object inside the scoped folder.
 ///
-/// The drive's own root is in scope so a client can stat and list the thing it
+/// The folder itself is in scope so a client can stat and list the thing it
 /// mounted, with or without a trailing slash. Everything else must sit beneath
 /// it. Keys are compared with any leading slash removed, because a DAV path
 /// arrives absolute while an OpenDAL key is not.
@@ -69,7 +73,7 @@ fn check(prefix: &str, path: &str) -> Result<()> {
     }
     Err(opendal::Error::new(
         opendal::ErrorKind::PermissionDenied,
-        "path is outside the caller's drive",
+        "path is outside the public folder",
     ))
 }
 
@@ -79,6 +83,7 @@ impl<A: Access> LayeredAccess for TenantScopeAccessor<A> {
     type Writer = A::Writer;
     type Lister = A::Lister;
     type Deleter = TenantScopeDeleter<A::Deleter>;
+    type Copier = A::Copier;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -99,10 +104,16 @@ impl<A: Access> LayeredAccess for TenantScopeAccessor<A> {
         self.inner.write(path, args).await
     }
 
-    async fn copy(&self, from: &str, to: &str, args: OpCopy) -> Result<RpCopy> {
+    async fn copy(
+        &self,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<(RpCopy, Self::Copier)> {
         check(&self.prefix, from)?;
         check(&self.prefix, to)?;
-        self.inner.copy(from, to, args).await
+        self.inner.copy(from, to, args, opts).await
     }
 
     async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
@@ -140,22 +151,21 @@ impl<A: Access> LayeredAccess for TenantScopeAccessor<A> {
 
 /// Deleter wrapper that rejects out-of-scope keys as they are queued.
 ///
-/// The check is a string comparison rather than a database lookup, so unlike
-/// [`WritePathDeleter`](super::write_path_layer::WritePathDeleter) it can run in
-/// `delete()` itself and fail immediately instead of buffering until `flush()`.
+/// The check is a string comparison rather than a database lookup, so it fails
+/// as the key is queued rather than when the batch is closed.
 pub struct TenantScopeDeleter<D> {
     inner: D,
     prefix: Arc<str>,
 }
 
 impl<D: oio::Delete> oio::Delete for TenantScopeDeleter<D> {
-    fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         check(&self.prefix, path)?;
-        self.inner.delete(path, args)
+        self.inner.delete(path, args).await
     }
 
-    async fn flush(&mut self) -> Result<usize> {
-        self.inner.flush().await
+    async fn close(&mut self) -> Result<()> {
+        self.inner.close().await
     }
 }
 
@@ -164,17 +174,21 @@ mod tests {
     use super::*;
     use pubky_common::crypto::Keypair;
 
+    fn prefix_for(owner: &str) -> String {
+        format!("{owner}/pub/")
+    }
+
     #[test]
-    fn keys_inside_the_drive_are_in_scope() {
+    fn keys_inside_the_public_folder_are_in_scope() {
         let owner = Keypair::random().public_key().z32();
-        let prefix = format!("{owner}/");
+        let prefix = prefix_for(&owner);
 
         for path in [
-            format!("{owner}/"),
+            format!("{owner}/pub/"),
             format!("{owner}/pub/file.txt"),
-            format!("{owner}/priv/deep/nested/file.txt"),
-            // The drive root arrives both ways depending on the caller.
-            owner.clone(),
+            format!("{owner}/pub/deep/nested/file.txt"),
+            // The folder root arrives both ways depending on the caller.
+            format!("{owner}/pub"),
             format!("/{owner}/pub/file.txt"),
         ] {
             assert!(is_in_scope(&prefix, &path), "{path} should be in scope");
@@ -182,10 +196,27 @@ mod tests {
     }
 
     #[test]
-    fn another_drive_is_out_of_scope() {
+    fn the_rest_of_the_drive_is_out_of_scope() {
+        let owner = Keypair::random().public_key().z32();
+        let prefix = prefix_for(&owner);
+
+        for path in [
+            // The drive root would list `priv/` next to `pub/`.
+            format!("{owner}/"),
+            owner.clone(),
+            format!("{owner}/priv/"),
+            format!("{owner}/priv/secret.txt"),
+            format!("{owner}/.DS_Store"),
+        ] {
+            assert!(!is_in_scope(&prefix, &path), "{path} should be denied");
+        }
+    }
+
+    #[test]
+    fn other_drives_and_the_storage_root_are_out_of_scope() {
         let owner = Keypair::random().public_key().z32();
         let other = Keypair::random().public_key().z32();
-        let prefix = format!("{owner}/");
+        let prefix = prefix_for(&owner);
 
         for path in [
             format!("{other}/pub/file.txt"),
@@ -200,15 +231,16 @@ mod tests {
     }
 
     #[test]
-    fn a_key_that_merely_starts_with_the_owners_is_out_of_scope() {
-        // Without the separator this would match by prefix alone, which is how
-        // "confined to a subtree" checks usually go wrong.
+    fn a_key_that_merely_starts_with_the_prefix_is_out_of_scope() {
+        // Without the separator these would match by prefix alone, which is
+        // how "confined to a subtree" checks usually go wrong.
         let owner = Keypair::random().public_key().z32();
-        let prefix = format!("{owner}/");
+        let prefix = prefix_for(&owner);
 
         for path in [
+            format!("{owner}/public/file.txt"),
+            format!("{owner}/pubx"),
             format!("{owner}-evil/pub/file.txt"),
-            format!("{owner}x/pub/file.txt"),
         ] {
             assert!(!is_in_scope(&prefix, &path), "{path} should be denied");
         }
@@ -217,23 +249,22 @@ mod tests {
     #[test]
     fn traversal_inside_a_key_does_not_escape() {
         // OpenDAL keys are opaque strings, so `..` is a literal segment here
-        // rather than a traversal — but it must still not read as in-scope when
-        // it climbs out of the drive.
+        // rather than a traversal. The HTTP layer collapses it before a key is
+        // built; this check only has to refuse a key that starts outside.
         let owner = Keypair::random().public_key().z32();
         let other = Keypair::random().public_key().z32();
-        let prefix = format!("{owner}/");
+        let prefix = prefix_for(&owner);
 
         assert!(!is_in_scope(&prefix, &format!("../{other}/pub/x")));
-        assert!(is_in_scope(&prefix, &format!("{owner}/pub/../priv/x")));
+        assert!(!is_in_scope(&prefix, &format!("{owner}/../{other}/pub/x")));
     }
 
     #[test]
     fn check_reports_permission_denied() {
         let owner = Keypair::random().public_key().z32();
-        let other = Keypair::random().public_key().z32();
 
-        let error = check(&format!("{owner}/"), &format!("{other}/pub/x"))
-            .expect_err("another drive must be refused");
+        let error = check(&prefix_for(&owner), &format!("{owner}/priv/secret.txt"))
+            .expect_err("a private path must be refused");
         assert_eq!(error.kind(), opendal::ErrorKind::PermissionDenied);
     }
 }

@@ -1,6 +1,5 @@
 //! Finalizes storage mutations and their corresponding database effects.
 
-mod copy_move;
 mod delete;
 mod layer;
 mod quota;

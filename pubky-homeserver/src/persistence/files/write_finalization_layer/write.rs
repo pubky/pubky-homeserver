@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::persistence::files::{events::EventType, FileMetadata, FileMetadataBuilder};
+use crate::persistence::files::{
+    events::EventType, layer_domain_error::LayerDomainError, FileMetadata, FileMetadataBuilder,
+};
 use crate::persistence::sql::{
     entry::{EntryEntity, EntryRepository},
     user::UserEntity,
@@ -40,7 +42,11 @@ impl PreparedWrite {
         let bytes_delta = file_metadata.length as i64 - existing_bytes as i64 + metadata_bytes;
         let max_bytes = resolve_storage_max_bytes(&user, default_storage_mb);
         if would_exceed_limit(user.used_bytes, bytes_delta, max_bytes) {
-            return Err(quota_exceeded_error());
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::RateLimited,
+                "User quota exceeded",
+            )
+            .set_source(LayerDomainError::DiskSpaceQuotaExceeded));
         }
 
         Ok(Self {

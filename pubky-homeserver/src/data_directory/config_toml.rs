@@ -48,9 +48,9 @@ pub enum ConfigReadError {
 
 /// `serde` default for a flag that is on unless an operator turns it off.
 ///
-/// These flags were added after homeservers were already deployed, so every one
-/// of them defaults rather than being required: an existing `config.toml` that
-/// predates the field must keep parsing.
+/// The flag was added after homeservers were already deployed, so it defaults
+/// rather than being required: an existing `config.toml` that predates the
+/// field must keep parsing.
 fn enabled() -> bool {
     true
 }
@@ -75,13 +75,7 @@ pub struct DriveToml {
     pub icann_listen_socket: SocketAddr,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
-    /// Serve the browser file explorer at `/drive`.
-    ///
-    /// Off by default: a storage daemon should not also be a web application
-    /// unless the operator asked for one.
-    #[serde(default)]
-    pub web_explorer: bool,
-    /// Serve the WebDAV endpoint at `/dav`.
+    /// Serve the read-only WebDAV endpoint at `/dav`.
     #[serde(default = "enabled")]
     pub webdav: bool,
 }
@@ -91,12 +85,6 @@ pub struct DriveToml {
 pub struct AdminToml {
     /// Enable or disable the admin server
     pub enabled: bool,
-    /// Allow `POST /generate_demo_user` to provision throwaway accounts.
-    ///
-    /// Off by default. It creates users without a signup token and hands out
-    /// long-lived credentials, so it belongs on a test homeserver only.
-    #[serde(default)]
-    pub demo_users: bool,
     /// Socket address for the admin HTTP server
     pub listen_socket: SocketAddr,
     /// Password for admin authentication
@@ -349,7 +337,7 @@ mod tests {
         assert_eq!(c.drive.rate_limits[1].path.0, "/dav/*");
         assert_eq!(
             c.drive.rate_limits[1].key,
-            crate::shared::quota::LimitKeyType::User
+            crate::shared::quota::LimitKeyType::Ip
         );
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());
         assert_eq!(c.storage.default_quota_mb, None);
@@ -367,10 +355,9 @@ mod tests {
     }
 
     #[test]
-    fn config_files_written_before_the_new_flags_still_parse() {
-        // These three landed after homeservers were deployed. A config.toml
-        // that predates them must keep working, with WebDAV on and the two
-        // demo surfaces off.
+    fn config_files_written_before_the_webdav_flag_still_parse() {
+        // `drive.webdav` landed after homeservers were deployed. A config.toml
+        // that predates it must keep working, with WebDAV on.
         let legacy = r#"
             [general]
             signup_mode = "token_required"
@@ -402,8 +389,6 @@ mod tests {
             config.drive.webdav,
             "WebDAV should stay on for existing servers"
         );
-        assert!(!config.drive.web_explorer, "the explorer must be opt-in");
-        assert!(!config.admin.demo_users, "demo provisioning must be opt-in");
     }
 
     #[test]
