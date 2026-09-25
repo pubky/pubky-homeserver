@@ -175,3 +175,9 @@ level = "info"
 # Per-module log levels overrides the global log level for specific modules.
 # Useful for suppressing logs from external dependencies or increasing verbosity for debugging.
 module_levels = ["pubky_homeserver=debug", "tower_http=debug"]
+
+[grant_auth]
+# Limits shared across server processes.
+max_sessions_per_grant = 20
+# Successful exchanges per grant per 60-second window, including rotations.
+session_issuance_per_minute = 60

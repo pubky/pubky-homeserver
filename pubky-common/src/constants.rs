@@ -18,6 +18,8 @@ pub mod storage {
 
 /// Features advertised by the homeserver client API.
 pub mod features {
+    /// Independent session identities, per-slot rotation and grant-proof logout.
+    pub const GRANT_SESSION_SLOTS: &str = "grant-session-slots";
     /// Homeserver supports storage URLs containing the resource owner in the path.
     pub const PATH_ADDRESSED_STORAGE: &str = "path-addressed-storage";
     /// Homeserver supports WebDAV `LOCK`/`UNLOCK` on storage files and honours
