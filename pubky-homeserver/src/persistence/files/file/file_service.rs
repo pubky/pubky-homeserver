@@ -67,24 +67,27 @@ impl FileService {
         }
     }
 
-    /// Get the content of a file as a stream of bytes.
-    /// The stream is chunked.
-    /// Errors if the file does not exist.
-    pub async fn get_stream(&self, path: &EntryPath) -> Result<FileStream, FileIoError> {
-        let stream: FileStream = self.opendal.get_stream(path).await?;
-        Ok(stream)
-    }
-
     /// The size of the stored blob, for the `Content-Length` of a response
     /// that serves it.
     ///
-    /// The entry row also records a length, but a crash between publishing a
-    /// blob and committing its row leaves the row describing the previous
-    /// content. A response sized from the row would then cut the body short,
-    /// so `GET` and `HEAD` report the blob's size instead. Errors if the file
-    /// does not exist.
+    /// The entry row also records a length, but a database failure after
+    /// publication leaves the row describing the previous content (see the
+    /// [`files`](crate::persistence::files) module docs). A response sized
+    /// from the row would then cut the body short, so `GET` and `HEAD` report
+    /// the blob's size instead. Errors if the file does not exist.
     pub async fn blob_length(&self, path: &EntryPath) -> Result<u64, FileIoError> {
         self.opendal.blob_length(path).await
+    }
+
+    /// The size of the stored blob and a stream of its bytes, sized by one
+    /// `stat` so a response's `Content-Length` and body agree. See
+    /// [`Self::blob_length`] for why the size is not the entry row's.
+    /// Errors if the file does not exist.
+    pub async fn get_sized_stream(
+        &self,
+        path: &EntryPath,
+    ) -> Result<(u64, FileStream), FileIoError> {
+        self.opendal.get_sized_stream(path).await
     }
 
     /// Write a file to the database and storage depending on the selected target location.
@@ -127,6 +130,13 @@ impl FileService {
     pub fn new_from_context(context: &AppContext) -> Result<Self, FileIoError> {
         let opendal_service = OpendalService::new(context)?;
         Ok(Self::new(opendal_service, context.sql_db.clone()))
+    }
+
+    /// Get the content of a file as a stream of bytes.
+    /// The stream is chunked.
+    /// Errors if the file does not exist.
+    pub async fn get_stream(&self, path: &EntryPath) -> Result<FileStream, FileIoError> {
+        self.opendal.get_stream(path).await
     }
 
     /// Get the content of a file as bytes.

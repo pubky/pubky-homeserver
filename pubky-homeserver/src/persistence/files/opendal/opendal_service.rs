@@ -186,23 +186,23 @@ impl OpendalService {
         }
     }
 
-    /// Get the stream of a file.
-    /// Helper method because the NOT_FOUND error can happen in two different places.
-    async fn get_stream_inner(&self, path: &EntryPath) -> Result<FileStream, opendal::Error> {
+    /// The size of the stored blob and a stream of its bytes.
+    ///
+    /// One `stat` sizes both: opendal would otherwise `stat` on its own to
+    /// bound an open-ended chunked read, and a second observation could see a
+    /// blob that an overwrite published in between.
+    pub async fn get_sized_stream(
+        &self,
+        path: &EntryPath,
+    ) -> Result<(u64, FileStream), FileIoError> {
+        let length = self.blob_length(path).await?;
         let reader = self
             .operator
             .reader_with(path.as_str())
             .chunk(CHUNK_SIZE)
             .await?;
-
-        let stream = reader.into_bytes_stream(0..).await?;
-        Ok(Box::new(stream))
-    }
-
-    /// Get the content of a file as a stream of bytes.
-    /// The stream is chunked by the CHUNK_SIZE.
-    pub async fn get_stream(&self, path: &EntryPath) -> Result<FileStream, FileIoError> {
-        Ok(self.get_stream_inner(path).await?)
+        let stream = reader.into_bytes_stream(0..length).await?;
+        Ok((length, Box::new(stream)))
     }
 
     /// The size of the stored blob.
@@ -233,6 +233,12 @@ impl OpendalService {
             admin_operator: operator.clone(),
             operator,
         }
+    }
+
+    /// Get the content of a file as a stream of bytes.
+    /// The stream is chunked by the CHUNK_SIZE.
+    pub async fn get_stream(&self, path: &EntryPath) -> Result<FileStream, FileIoError> {
+        Ok(self.get_sized_stream(path).await?.1)
     }
 
     /// Get the content of a file as a single Bytes object.
@@ -397,6 +403,37 @@ mod tests {
                 !file_service.exists(&path).await.unwrap(),
                 "File should not exist after deletion"
             );
+        }
+    }
+
+    /// The length and the stream come from the same `stat`, and a missing
+    /// blob fails before a reader is opened.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_get_sized_stream() {
+        let operators = OpendalTestOperators::new();
+        for (_scheme, operator) in operators.operators() {
+            let file_service = OpendalService::new_from_operator(operator);
+            let pubkey = pubky_common::crypto::Keypair::random().public_key();
+            let path = EntryPath::new(pubkey, StoragePath::new("/sized.bin").unwrap());
+
+            assert!(matches!(
+                file_service.get_sized_stream(&path).await,
+                Err(FileIoError::NotFound)
+            ));
+
+            let test_data = vec![7u8; CHUNK_SIZE + 1];
+            file_service.write(&path, test_data.clone()).await.unwrap();
+
+            let (length, mut stream) = file_service.get_sized_stream(&path).await.unwrap();
+            let mut collected_data = Vec::new();
+            while let Some(chunk_result) = stream.next().await {
+                collected_data.extend_from_slice(&chunk_result.unwrap());
+            }
+            assert_eq!(length, test_data.len() as u64);
+            assert_eq!(collected_data, test_data);
+
+            file_service.delete(&path).await.unwrap();
         }
     }
 

@@ -133,8 +133,11 @@ pub async fn get(
         }
     }
 
-    let blob_length = state.context.file_service.blob_length(&entry_path).await?;
-    let stream = state.context.file_service.get_stream(&entry_path).await?;
+    let (blob_length, stream) = state
+        .context
+        .file_service
+        .get_sized_stream(&entry_path)
+        .await?;
     let mut response = entry.to_response_headers(blob_length).into_response();
     *response.body_mut() = Body::from_stream(stream);
     Ok(response)
