@@ -75,6 +75,18 @@ impl FileService {
         Ok(stream)
     }
 
+    /// The size of the stored blob, for the `Content-Length` of a response
+    /// that serves it.
+    ///
+    /// The entry row also records a length, but a crash between publishing a
+    /// blob and committing its row leaves the row describing the previous
+    /// content. A response sized from the row would then cut the body short,
+    /// so `GET` and `HEAD` report the blob's size instead. Errors if the file
+    /// does not exist.
+    pub async fn blob_length(&self, path: &EntryPath) -> Result<u64, FileIoError> {
+        self.opendal.blob_length(path).await
+    }
+
     /// Write a file to the database and storage depending on the selected target location.
     pub async fn write_stream(
         &self,

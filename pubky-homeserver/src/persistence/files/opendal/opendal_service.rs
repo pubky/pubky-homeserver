@@ -205,6 +205,11 @@ impl OpendalService {
         Ok(self.get_stream_inner(path).await?)
     }
 
+    /// The size of the stored blob.
+    pub async fn blob_length(&self, path: &EntryPath) -> Result<u64, FileIoError> {
+        Ok(self.operator.stat(path.as_str()).await?.content_length())
+    }
+
     /// Check if a file exists.
     pub async fn exists(&self, path: &EntryPath) -> Result<bool, opendal::Error> {
         self.operator.exists(path.as_str()).await
