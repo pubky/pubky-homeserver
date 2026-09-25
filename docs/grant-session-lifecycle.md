@@ -3,6 +3,7 @@
 Homeservers advertising `grant-session-slots` support multiple sessions under one
 grant. Each session has a slot ID and a short-lived bearer. Refresh replaces the
 bearer in that slot.
+The SDK reuses a valid bearer that already lasts until grant expiry.
 
 ## Browser applications
 
@@ -63,8 +64,8 @@ A retry after a lost response can rotate the same slot without consuming capacit
 
 Clients using slots send grant + PoP JSON to `DELETE /auth/grant/session`, so logout
 works without a live bearer and does not consume issuance capacity or rate budget.
-Legacy bearer-only logout remains supported. Repeating proof logout with a fresh
-nonce is idempotent, including after a lost response.
+Legacy bearer-only logout sends the cached bearer. Repeating
+proof logout with a fresh nonce is idempotent, including after a lost response.
 
 - New SDK + new homeserver: independent sessions with automatic per-slot refresh.
 - Old SDK + new homeserver: requests without `session_id` rotate one legacy slot.

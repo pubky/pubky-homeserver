@@ -75,8 +75,11 @@ pub(crate) struct GrantCredentialState {
 }
 
 impl GrantCredentialState {
-    fn is_near_expiry(&self, now: u64, slack: u64) -> bool {
-        self.token_expires_at.saturating_sub(slack) <= now
+    fn needs_refresh(&self, now: u64, slack: u64) -> bool {
+        // Refresh cannot extend a valid bearer that already reaches grant expiry.
+        self.token_expires_at <= now
+            || (self.token_expires_at < self.grant_claims.exp
+                && self.token_expires_at.saturating_sub(slack) <= now)
     }
 }
 
@@ -339,10 +342,8 @@ impl GrantCredential {
         cross_log!(info, "Refreshing grant credential");
         let mut state = self.state.lock().await;
 
-        // Double-check pattern: by the time we acquired the lock, another
-        // task may have already refreshed. Skip the network call if the
-        // bearer is comfortably fresh now.
-        if !state.is_near_expiry(now_unix(), REFRESH_SLACK_SECS / 2) {
+        // Another caller may have refreshed while we waited for the lock.
+        if !state.needs_refresh(now_unix(), REFRESH_SLACK_SECS / 2) {
             return Ok(());
         }
 
@@ -407,7 +408,7 @@ impl SessionCredential for GrantCredential {
         // Grant proof avoids issuance limits; older servers require a bearer.
         let request = match proof {
             Some(proof) => request.json(&proof),
-            None => self.attach(request, client).await?,
+            None => request.bearer_auth(self.current_bearer().await),
         };
         let response = request.send().await?;
         client.check_http_status(response).await?;
@@ -419,7 +420,7 @@ impl SessionCredential for GrantCredential {
         // network call when no refresh is needed.
         let needs_refresh = {
             let grant_state = self.state.lock().await;
-            grant_state.is_near_expiry(now_unix(), REFRESH_SLACK_SECS)
+            grant_state.needs_refresh(now_unix(), REFRESH_SLACK_SECS)
         };
         if needs_refresh {
             self.refresh(client).await?;
@@ -588,6 +589,7 @@ mod tests {
         auth::jws::{ClientId, GRANT_JWS_TYP, GrantId},
         capabilities::Capability,
     };
+    use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConfigToml};
 
     use super::*;
 
@@ -611,6 +613,107 @@ mod tests {
                 .to_string()
                 .contains("does not advertise grant-session-slots")
         );
+    }
+
+    #[tokio::test]
+    #[pubky_testnet::test]
+    async fn capped_bearer_requests_and_legacy_logout_do_not_refresh() {
+        let mut config = ConfigToml::default_test_config();
+        config.grant_auth.session_issuance_per_minute = 1.try_into().unwrap();
+        let testnet = EphemeralTestnet::builder()
+            .config(config)
+            .build()
+            .await
+            .unwrap();
+        let user = Keypair::random();
+        let homeserver = testnet.homeserver_app().public_key();
+        testnet
+            .sdk()
+            .unwrap()
+            .signer(user.clone())
+            .signup(&homeserver, None)
+            .await
+            .unwrap();
+        let mut builder = PubkyHttpClient::builder();
+        builder.pkarr(|b| {
+            *b = testnet.pkarr_client_builder();
+            b
+        });
+        let client = builder.build().unwrap();
+        let pop_key = Keypair::random();
+        let now = now_unix();
+        let grant = GrantClaims {
+            iss: user.public_key(),
+            client_id: ClientId::new("refresh.test").unwrap(),
+            caps: vec![Capability::root()],
+            cnf: pop_key.public_key(),
+            jti: GrantId::generate(),
+            iat: now,
+            exp: now + 120,
+        };
+        let jws = grant.sign(&user, GRANT_JWS_TYP);
+        let signer = GrantPopSigner::local(pop_key);
+        let response = post_grant_session(&client, &jws, &grant, &signer, &homeserver, None)
+            .await
+            .unwrap();
+        let bearer = response.token.clone();
+        assert_eq!(response.session.token_expires_at, grant.exp);
+        let credential = GrantCredential::from_response(response, jws, grant, signer, homeserver);
+        for _ in 0..3 {
+            credential.refresh(&client).await.unwrap();
+            let request = credential
+                .grant_session_request(&client, Method::GET)
+                .await
+                .unwrap();
+            let response = credential
+                .attach(request, &client)
+                .await
+                .unwrap()
+                .send()
+                .await
+                .unwrap();
+            client.check_http_status(response).await.unwrap();
+            assert_eq!(credential.current_bearer().await, bearer);
+        }
+
+        // Logout must also work when the cached bearer would normally need a refresh.
+        credential.state.lock().await.token_expires_at = now_unix() + 60;
+        credential.signout(&client).await.unwrap();
+        assert!(
+            credential
+                .revalidate(&client, &user.public_key())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn refresh_policy_preserves_capped_bearers_until_expiry() {
+        let (stored, claims) = stored_credential(5_000);
+        let signer = GrantPopSigner::local(Keypair::from_secret(&stored.client_key_secret));
+        let credential = test_credential(stored, claims, signer);
+        let mut state = credential.state.blocking_lock();
+        let now = 1_000;
+        for (bearer_exp, grant_exp, slack, expected) in [
+            (1_301, 5_000, 300, false),
+            (1_300, 5_000, 300, true),
+            (1_151, 5_000, 150, false),
+            (1_150, 5_000, 150, true),
+            (1_120, 1_120, 150, false),
+            (1_120, 1_100, 150, false),
+            (1_000, 1_000, 150, true),
+            (999, 999, 150, true),
+            (0, 1_120, 150, true),
+        ] {
+            state.token_expires_at = bearer_exp;
+            state.grant_claims.exp = grant_exp;
+            assert_eq!(
+                state.needs_refresh(now, slack),
+                expected,
+                "bearer_exp={bearer_exp}, grant_exp={grant_exp}, slack={slack}"
+            );
+        }
     }
 
     #[test]
