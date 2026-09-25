@@ -20,7 +20,7 @@ use futures_util::{stream::StreamExt, Stream};
 use opendal::Buffer;
 use opendal::Operator;
 
-use super::super::{FileIoError, FileMetadata, FileMetadataBuilder, FileStream, WriteStreamError};
+use super::super::{FileIoError, FileStream, WriteStreamError};
 
 /// Build storage operators with one transactional finalization layer and an
 /// app-facing operator that additionally enforces write paths and collisions.
@@ -37,16 +37,22 @@ pub fn build_storage_operators(
 ) -> Result<(Operator, Operator), FileIoError> {
     let backend_operator = match &storage_config.backend {
         StorageConfigToml::FileSystem => {
-            let files_dir = match data_directory.join("data/files").to_str() {
-                Some(path) => path.to_string(),
-                None => {
-                    return Err(FileIoError::OpenDAL(opendal::Error::new(
-                        opendal::ErrorKind::Unexpected,
-                        "Invalid path",
-                    )))
-                }
+            let files_dir = data_directory.join("data/files");
+            // Uploads are staged here and renamed into place on close, so a
+            // rejected or aborted write never touches the existing file. Must
+            // be on the same filesystem as the root, and outside it so staged
+            // files never show up in listings.
+            let staging_dir = data_directory.join("data/files-tmp");
+            let (Some(files_dir), Some(staging_dir)) = (files_dir.to_str(), staging_dir.to_str())
+            else {
+                return Err(FileIoError::OpenDAL(opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    "Invalid path",
+                )));
             };
-            let builder = opendal::services::Fs::default().root(files_dir.as_str());
+            let builder = opendal::services::Fs::default()
+                .root(files_dir)
+                .atomic_write_dir(staging_dir);
             opendal::Operator::new(builder)?.finish()
         }
         #[cfg(feature = "storage-gcs")]
@@ -150,21 +156,17 @@ impl OpendalService {
         Ok(self.admin_operator.delete(path.as_str()).await?)
     }
 
-    /// Write a stream to the storage.
+    /// Write a stream to the storage. A stream that breaks mid-way aborts the
+    /// upload, and the caller gets the stream error rather than a cleanup error.
     pub async fn write_stream(
         &self,
         path: &EntryPath,
         mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-    ) -> Result<FileMetadata, FileIoError> {
+    ) -> Result<(), FileIoError> {
         let mut writer = self.operator.writer(path.as_str()).await?;
-        let mut metadata_builder = FileMetadataBuilder::default();
-        metadata_builder.guess_mime_type_from_path(path.path().as_str());
-
         let write_result: Result<(), FileIoError> = async {
             while let Some(chunk_result) = stream.next().await {
-                let chunk = chunk_result?;
-                metadata_builder.update(&chunk);
-                writer.write(chunk).await?;
+                writer.write(chunk_result?).await?;
             }
             Ok(())
         }
@@ -173,11 +175,13 @@ impl OpendalService {
         match write_result {
             Ok(()) => {
                 writer.close().await?;
-                Ok(metadata_builder.finalize())
+                Ok(())
             }
-            Err(e) => {
-                writer.abort().await?;
-                Err(e)
+            Err(stream_error) => {
+                if let Err(error) = writer.abort().await {
+                    tracing::warn!(path = %path, %error, "Failed to abort broken upload");
+                }
+                Err(stream_error)
             }
         }
     }
@@ -247,7 +251,7 @@ impl OpendalService {
         &self,
         path: &EntryPath,
         buffer: impl Into<Buffer>,
-    ) -> Result<FileMetadata, FileIoError> {
+    ) -> Result<(), FileIoError> {
         let buffer: Buffer = buffer.into();
         let bytes = Bytes::from(buffer.to_vec());
         // Create a single-item stream from the buffer
@@ -296,6 +300,36 @@ mod tests {
             write_result,
             Err(FileIoError::DiskSpaceQuotaExceeded)
         ));
+    }
+
+    /// A body that breaks mid-stream is aborted, and the caller gets the
+    /// stream error rather than a cleanup error.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn broken_stream_leaves_no_staged_file_and_the_old_bytes() {
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
+        let service = OpendalService::new(&context).unwrap();
+        let pubky = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubky).await.unwrap();
+        let path = EntryPath::new(pubky, StoragePath::new("/pub/test.txt").unwrap());
+        service.write(&path, b"old".to_vec()).await.unwrap();
+        let staging_dir = context.data_dir.path().join("data/files-tmp");
+
+        let stream = futures_util::stream::iter([
+            Ok(Bytes::from_static(b"partial")),
+            Err(WriteStreamError::Other(anyhow::anyhow!("connection reset"))),
+        ]);
+        let result = service.write_stream(&path, Box::pin(stream)).await;
+
+        assert!(matches!(result, Err(FileIoError::StreamBroken(_))));
+        assert_eq!(std::fs::read_dir(&staging_dir).unwrap().count(), 0);
+        assert_eq!(
+            service.get(&path).await.unwrap(),
+            Bytes::from_static(b"old")
+        );
     }
 
     /// Test the chunked reading of a file.
