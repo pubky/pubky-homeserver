@@ -208,8 +208,8 @@ where
         let from = EntryPath::parse_opendal(from)?;
         let to = EntryPath::parse_opendal(to)?;
         self.finalizer.collision_preflight(&to).await?;
-        self.inner
-            .copy(from.as_str(), to.as_str(), args, opts)
+        self.finalizer
+            .finalize_copy(self.inner.as_ref(), &from, &to, args)
             .await
     }
 
@@ -217,7 +217,9 @@ where
         let from = EntryPath::parse_opendal(from)?;
         let to = EntryPath::parse_opendal(to)?;
         self.finalizer.collision_preflight(&to).await?;
-        self.inner.rename(from.as_str(), to.as_str(), args).await
+        self.finalizer
+            .finalize_rename(self.inner.as_ref(), &from, &to, args)
+            .await
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {

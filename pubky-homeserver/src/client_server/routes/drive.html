@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Pubky Drive</title>
+<style>
+  :root {
+    --ground: #f2f4f5;
+    --surface: #ffffff;
+    --sunk: #e9edee;
+    --ink: #141a1c;
+    --muted: #5e6b70;
+    --faint: #8a979c;
+    --line: #dbe2e4;
+    --line-strong: #c3cdd0;
+    --accent: #0e7c7b;
+    --accent-soft: #dceceb;
+    --danger: #a03530;
+    --radius: 7px;
+    --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #111517; --surface: #181d20; --sunk: #0d1113;
+      --ink: #e8edee; --muted: #96a4a9; --faint: #6d7d82;
+      --line: #262f33; --line-strong: #354045;
+      --accent: #45bdb7; --accent-soft: #12302f; --danger: #e08b85;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--font); font-size: 15px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  [hidden] { display: none !important; }
+
+  /* ---------- sign in ---------- */
+  #signin {
+    min-height: 100%; display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 430px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 30px 30px 26px; display: flex; flex-direction: column; gap: 18px;
+  }
+  .brand { display: flex; flex-direction: column; gap: 5px; }
+  .brand h1 { margin: 0; font-size: 23px; letter-spacing: -0.015em; }
+  .brand p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 12.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); }
+  .field input {
+    font-family: var(--mono); font-size: 13.5px; padding: 10px 12px;
+    background: var(--ground); color: var(--ink);
+    border: 1px solid var(--line-strong); border-radius: 5px; width: 100%;
+  }
+  .field .hint { font-size: 12.5px; color: var(--faint); }
+  .btn {
+    background: var(--accent); color: #fff; border: 0; border-radius: 5px;
+    padding: 11px 16px; font-weight: 600; font-size: 15px;
+  }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line-strong); font-weight: 500; padding: 7px 12px; font-size: 13.5px; }
+  .btn.ghost:hover:not(:disabled) { color: var(--ink); border-color: var(--faint); }
+  .error {
+    background: var(--accent-soft); border: 1px solid var(--line);
+    border-left: 3px solid var(--danger); color: var(--ink);
+    border-radius: 5px; padding: 10px 13px; font-size: 14px;
+  }
+
+  /* ---------- shell ---------- */
+  #app { min-height: 100%; display: flex; flex-direction: column; }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  header .who { display: flex; flex-direction: column; min-width: 0; margin-right: auto; }
+  header .who b { font-size: 15px; font-weight: 600; }
+  header .who span {
+    font-family: var(--mono); font-size: 11.5px; color: var(--faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch;
+  }
+  .bar { display: flex; gap: 8px; align-items: center; }
+
+  nav.crumbs {
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    padding: 12px 20px; font-size: 14px; border-bottom: 1px solid var(--line);
+  }
+  nav.crumbs button {
+    background: none; border: 0; color: var(--accent); padding: 2px 4px;
+    border-radius: 4px; font-size: 14px;
+  }
+  nav.crumbs button:hover { background: var(--accent-soft); }
+  nav.crumbs b { color: var(--ink); padding: 2px 4px; }
+  nav.crumbs .sep { color: var(--faint); }
+
+  main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr); }
+  main.with-preview { grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); }
+  @media (max-width: 780px) { main.with-preview { grid-template-columns: minmax(0, 1fr); } }
+
+  .listing { padding: 16px 20px 40px; display: flex; flex-direction: column; gap: 2px; }
+
+  /* A row is a container, not a control: the open action and the delete action
+     are two sibling buttons, so neither is nested inside the other. */
+  .row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    border-radius: 6px; border: 1px solid transparent;
+  }
+  .row:hover, .row:focus-within { background: var(--surface); border-color: var(--line); }
+  .row[aria-current="true"] { background: var(--accent-soft); border-color: var(--line); }
+  .row .open {
+    display: grid; grid-template-columns: 40px minmax(0, 1fr) 110px 150px;
+    align-items: center; gap: 12px; min-width: 0;
+    padding: 8px 10px; border: 0; border-radius: 6px;
+    text-align: left; background: none; width: 100%; color: inherit; font: inherit;
+  }
+  .row .thumb {
+    width: 32px; height: 32px; border-radius: 4px; overflow: hidden;
+    display: grid; place-items: center; background: var(--sunk); color: var(--faint);
+    font-size: 11px; font-weight: 700; letter-spacing: .02em;
+  }
+  .row .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta { font-size: 12.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  @media (max-width: 640px) {
+    .row .open { grid-template-columns: 40px minmax(0, 1fr); }
+    .row .meta { display: none; }
+  }
+  /* Dimmed rather than hidden: a hover-only control cannot be reached on a
+     touch screen at all. */
+  .row .kill {
+    background: none; border: 0; color: var(--faint); font-size: 18px;
+    line-height: 1; padding: 7px 11px; margin-right: 3px;
+    border-radius: 4px; opacity: .4;
+  }
+  .row:hover .kill, .row .kill:hover, .row .kill:focus-visible { opacity: 1; }
+  .row .kill:hover { color: var(--danger); background: var(--sunk); }
+
+  .empty, .loading { padding: 40px 10px; color: var(--faint); text-align: center; }
+
+  aside {
+    border-left: 1px solid var(--line); background: var(--surface);
+    padding: 18px 20px; display: flex; flex-direction: column; gap: 14px;
+    overflow: auto;
+  }
+  aside h2 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+  aside .kv { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+  aside .kv code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+  aside img.preview { max-width: 100%; border-radius: 5px; border: 1px solid var(--line); display: block; }
+  aside pre.preview {
+    margin: 0; background: var(--sunk); border: 1px solid var(--line); border-radius: 5px;
+    padding: 12px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    max-height: 46vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    background: var(--ink); color: var(--ground); padding: 9px 16px;
+    border-radius: 999px; font-size: 14px; box-shadow: 0 4px 18px rgba(0,0,0,.22);
+    z-index: 20;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .toast { animation: rise .18s ease-out; }
+    @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } }
+  }
+</style>
+</head>
+<body>
+
+<section id="signin">
+  <form class="card" id="signin-form">
+    <div class="brand">
+      <h1>Pubky Drive</h1>
+      <p>Sign in with the public key and token you were given.</p>
+    </div>
+    <div class="error" id="signin-error" hidden></div>
+    <div class="field">
+      <label for="key">Public key</label>
+      <input id="key" name="key" autocomplete="username" spellcheck="false"
+             autocapitalize="off" placeholder="xizq71oidk6os1ryb…" required>
+    </div>
+    <div class="field">
+      <label for="token">Token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password"
+             spellcheck="false" placeholder="hDdAyy-EKZ_RBkH54fOB…" required>
+      <span class="hint">The token is your password. It stays in this tab only.</span>
+    </div>
+    <button class="btn" type="submit" id="signin-btn">Open drive</button>
+  </form>
+</section>
+
+<section id="app" hidden>
+  <header>
+    <div class="who">
+      <b>Pubky Drive</b>
+      <span id="who-key"></span>
+    </div>
+    <div class="bar">
+      <button class="btn ghost" id="btn-newfolder">New folder</button>
+      <button class="btn ghost" id="btn-upload">Upload</button>
+      <button class="btn ghost" id="btn-signout">Sign out</button>
+    </div>
+    <input type="file" id="file-input" multiple hidden>
+  </header>
+
+  <nav class="crumbs" id="crumbs"></nav>
+
+  <main id="main">
+    <div class="listing" id="listing"></div>
+    <aside id="preview" hidden></aside>
+  </main>
+</section>
+
+<script>
+(function () {
+  "use strict";
+
+  var DAV = "/dav/";
+  var state = { key: "", auth: "", path: "/", selected: null };
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---------- helpers ----------
+
+  function root() { return DAV + state.key; }
+
+  function url(path) {
+    // Encode each segment; keep the slashes.
+    return root() + path.split("/").map(encodeURIComponent).join("/");
+  }
+
+  function dav(method, path, opts) {
+    opts = opts || {};
+    var headers = { Authorization: state.auth };
+    if (opts.headers) {
+      for (var k in opts.headers) { headers[k] = opts.headers[k]; }
+    }
+    return fetch(url(path), { method: method, headers: headers, body: opts.body });
+  }
+
+  function bytes(n) {
+    if (n === null || n === undefined || isNaN(n)) { return ""; }
+    n = Number(n);
+    if (n < 1024) { return n + " B"; }
+    var units = ["KB", "MB", "GB"], i = -1;
+    do { n = n / 1024; i++; } while (n >= 1024 && i < units.length - 1);
+    return (n < 10 ? n.toFixed(1) : Math.round(n)) + " " + units[i];
+  }
+
+  function when(str) {
+    if (!str) { return ""; }
+    var d = new Date(str);
+    if (isNaN(d.getTime())) { return ""; }
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  function ext(name) {
+    var i = name.lastIndexOf(".");
+    return i > 0 ? name.slice(i + 1).toLowerCase() : "";
+  }
+
+  var IMAGES = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico"];
+  var TEXTS = ["txt", "md", "csv", "json", "html", "htm", "xml", "css", "js", "toml",
+               "yml", "yaml", "log", "rs", "py", "sh", "ts"];
+
+  function isImage(name) { return IMAGES.indexOf(ext(name)) !== -1; }
+  function isText(name) { return TEXTS.indexOf(ext(name)) !== -1; }
+
+  var toastTimer = null;
+  function toast(msg) {
+    var el = document.querySelector(".toast");
+    if (el) { el.remove(); }
+    el = document.createElement("div");
+    el.className = "toast";
+    el.setAttribute("role", "status");
+    el.textContent = msg;
+    document.body.appendChild(el);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.remove(); }, 2600);
+  }
+
+  // ---------- PROPFIND ----------
+
+  function listing(path) {
+    return dav("PROPFIND", path, { headers: { Depth: "1" } }).then(function (res) {
+      if (res.status === 401) { throw new Error("unauthorized"); }
+      if (!res.ok && res.status !== 207) {
+        throw new Error("Could not open this folder (" + res.status + ")");
+      }
+      return res.text();
+    }).then(function (xml) {
+      var doc = new DOMParser().parseFromString(xml, "application/xml");
+      var responses = doc.getElementsByTagNameNS("DAV:", "response");
+      var here = decodeURIComponent(url(path)).replace(/\/+$/, "");
+      var out = [];
+
+      for (var i = 0; i < responses.length; i++) {
+        var node = responses[i];
+        var hrefNode = node.getElementsByTagNameNS("DAV:", "href")[0];
+        if (!hrefNode) { continue; }
+
+        var href = decodeURIComponent(hrefNode.textContent.trim());
+        if (href.replace(/\/+$/, "") === here) { continue; }  // the folder itself
+
+        var isDir = node.getElementsByTagNameNS("DAV:", "collection").length > 0;
+        var sizeNode = node.getElementsByTagNameNS("DAV:", "getcontentlength")[0];
+        var modNode = node.getElementsByTagNameNS("DAV:", "getlastmodified")[0];
+        var trimmed = href.replace(/\/+$/, "");
+        var name = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+        if (!name) { continue; }
+
+        out.push({
+          name: name,
+          dir: isDir,
+          size: sizeNode ? parseInt(sizeNode.textContent, 10) : null,
+          modified: modNode ? modNode.textContent : "",
+          path: path + name + (isDir ? "/" : "")
+        });
+      }
+
+      out.sort(function (a, b) {
+        if (a.dir !== b.dir) { return a.dir ? -1 : 1; }
+        return a.name.localeCompare(b.name);
+      });
+      return out;
+    });
+  }
+
+  // ---------- rendering ----------
+
+  function crumbs() {
+    var el = $("crumbs");
+    el.textContent = "";
+    var parts = state.path.split("/").filter(Boolean);
+
+    function crumb(label, path, last) {
+      if (last) {
+        var b = document.createElement("b");
+        b.textContent = label;
+        el.appendChild(b);
+        return;
+      }
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = label;
+      btn.addEventListener("click", function () { go(path); });
+      el.appendChild(btn);
+      var sep = document.createElement("span");
+      sep.className = "sep";
+      sep.textContent = "/";
+      el.appendChild(sep);
+    }
+
+    crumb("Drive", "/", parts.length === 0);
+    var acc = "/";
+    parts.forEach(function (p, i) {
+      acc += p + "/";
+      crumb(p, acc, i === parts.length - 1);
+    });
+  }
+
+  function thumbnail(entry, holder) {
+    // <img src> cannot carry the Authorization header, so fetch and use a blob.
+    if (!isImage(entry.name) || (entry.size !== null && entry.size > 2 * 1024 * 1024)) {
+      return;
+    }
+    dav("GET", entry.path).then(function (res) {
+      return res.ok ? res.blob() : null;
+    }).then(function (blob) {
+      if (!blob) { return; }
+      var img = document.createElement("img");
+      img.alt = "";
+      img.src = URL.createObjectURL(blob);
+      img.addEventListener("load", function () { URL.revokeObjectURL(img.src); });
+      holder.textContent = "";
+      holder.appendChild(img);
+    }).catch(function () { /* leave the placeholder */ });
+  }
+
+  function render(entries) {
+    var list = $("listing");
+    list.textContent = "";
+
+    if (entries.length === 0) {
+      var empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "This folder is empty.";
+      list.appendChild(empty);
+      return;
+    }
+
+    entries.forEach(function (entry) {
+      var row = document.createElement("div");
+      row.className = "row";
+      row.dataset.path = entry.path;
+      if (state.selected && state.selected.path === entry.path) {
+        row.setAttribute("aria-current", "true");
+      }
+
+      var open = document.createElement("button");
+      open.type = "button";
+      open.className = "open";
+      open.setAttribute("aria-label", (entry.dir ? "Open folder " : "Preview ") + entry.name);
+
+      var thumb = document.createElement("span");
+      thumb.className = "thumb";
+      thumb.textContent = entry.dir ? "▶" : (ext(entry.name) || "·").slice(0, 3).toUpperCase();
+      open.appendChild(thumb);
+
+      var name = document.createElement("span");
+      name.className = "name";
+      name.textContent = entry.name;
+      open.appendChild(name);
+
+      var size = document.createElement("span");
+      size.className = "meta";
+      size.textContent = entry.dir ? "" : bytes(entry.size);
+      open.appendChild(size);
+
+      var mod = document.createElement("span");
+      mod.className = "meta";
+      mod.textContent = when(entry.modified);
+      open.appendChild(mod);
+
+      open.addEventListener("click", function () {
+        if (entry.dir) { go(entry.path); } else { select(entry); }
+      });
+      row.appendChild(open);
+
+      var kill = document.createElement("button");
+      kill.type = "button";
+      kill.className = "kill";
+      kill.setAttribute("aria-label", "Delete " + entry.name);
+      kill.textContent = "×";
+      kill.addEventListener("click", function () {
+        if (!confirm("Delete " + entry.name + "?")) { return; }
+        dav("DELETE", entry.path).then(function (res) {
+          if (!res.ok) { throw new Error("delete failed (" + res.status + ")"); }
+          toast("Deleted " + entry.name);
+          if (state.selected && state.selected.path === entry.path) { closePreview(); }
+          refresh();
+        }).catch(function (e) { toast(e.message); });
+      });
+      row.appendChild(kill);
+
+      list.appendChild(row);
+      thumbnail(entry, thumb);
+    });
+  }
+
+  // ---------- preview ----------
+
+  function closePreview() {
+    state.selected = null;
+    $("preview").hidden = true;
+    $("main").classList.remove("with-preview");
+  }
+
+  function select(entry) {
+    state.selected = entry;
+    var aside = $("preview");
+    aside.textContent = "";
+    aside.hidden = false;
+    $("main").classList.add("with-preview");
+
+    var h = document.createElement("h2");
+    h.textContent = entry.name;
+    aside.appendChild(h);
+
+    var kv = document.createElement("div");
+    kv.className = "kv";
+    var line = document.createElement("span");
+    line.textContent = bytes(entry.size) + (entry.modified ? " · " + when(entry.modified) : "");
+    kv.appendChild(line);
+    var code = document.createElement("code");
+    code.textContent = entry.path;
+    kv.appendChild(code);
+    aside.appendChild(kv);
+
+    var bar = document.createElement("div");
+    bar.className = "bar";
+    var dl = document.createElement("button");
+    dl.type = "button";
+    dl.className = "btn ghost";
+    dl.textContent = "Download";
+    dl.addEventListener("click", function () { download(entry); });
+    bar.appendChild(dl);
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "btn ghost";
+    close.textContent = "Close";
+    close.addEventListener("click", function () { closePreview(); refreshSelection(); });
+    bar.appendChild(close);
+    aside.appendChild(bar);
+
+    if (isImage(entry.name)) {
+      dav("GET", entry.path).then(function (r) { return r.ok ? r.blob() : null; })
+        .then(function (blob) {
+          if (!blob || state.selected !== entry) { return; }
+          var img = document.createElement("img");
+          img.className = "preview";
+          img.alt = entry.name;
+          img.src = URL.createObjectURL(blob);
+          aside.appendChild(img);
+        });
+    } else if (isText(entry.name) && (entry.size === null || entry.size < 512 * 1024)) {
+      dav("GET", entry.path).then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (text) {
+          if (text === null || state.selected !== entry) { return; }
+          var pre = document.createElement("pre");
+          pre.className = "preview";
+          pre.textContent = text;
+          aside.appendChild(pre);
+        });
+    }
+
+    refreshSelection();
+  }
+
+  function refreshSelection() {
+    var rows = document.querySelectorAll(".row");
+    for (var i = 0; i < rows.length; i++) {
+      var chosen = state.selected && rows[i].dataset.path === state.selected.path;
+      if (chosen) {
+        rows[i].setAttribute("aria-current", "true");
+      } else {
+        rows[i].removeAttribute("aria-current");
+      }
+    }
+  }
+
+  function download(entry) {
+    dav("GET", entry.path).then(function (res) {
+      if (!res.ok) { throw new Error("download failed (" + res.status + ")"); }
+      return res.blob();
+    }).then(function (blob) {
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = entry.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  // ---------- navigation and mutations ----------
+
+  function go(path) {
+    state.path = path;
+    closePreview();
+    crumbs();
+    $("listing").textContent = "";
+    var wait = document.createElement("p");
+    wait.className = "loading";
+    wait.textContent = "Loading…";
+    $("listing").appendChild(wait);
+
+    listing(path).then(render).catch(function (e) {
+      if (e.message === "unauthorized") { return signOut("Your token was rejected. Sign in again."); }
+      $("listing").textContent = "";
+      var p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = e.message;
+      $("listing").appendChild(p);
+    });
+  }
+
+  function refresh() { go(state.path); }
+
+  function newFolder() {
+    var name = prompt("Folder name");
+    if (!name) { return; }
+    if (name.indexOf("/") !== -1) { return toast("Folder names cannot contain /"); }
+    dav("MKCOL", state.path + name + "/").then(function (res) {
+      if (!res.ok) { throw new Error("could not create folder (" + res.status + ")"); }
+      toast("Created " + name);
+      refresh();
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  function upload(files) {
+    if (!files || files.length === 0) { return; }
+    var queue = Array.prototype.slice.call(files);
+    var done = 0;
+
+    function next() {
+      if (queue.length === 0) {
+        toast(done === 1 ? "Uploaded 1 file" : "Uploaded " + done + " files");
+        return refresh();
+      }
+      var file = queue.shift();
+      dav("PUT", state.path + file.name, { body: file }).then(function (res) {
+        if (!res.ok) { throw new Error("upload failed for " + file.name); }
+        done++;
+        next();
+      }).catch(function (e) { toast(e.message); next(); });
+    }
+    toast(files.length === 1 ? "Uploading…" : "Uploading " + files.length + " files…");
+    next();
+  }
+
+  // ---------- session ----------
+
+  function signOut(message) {
+    try { sessionStorage.removeItem("pubky-drive"); } catch (e) { /* private mode */ }
+    state = { key: "", auth: "", path: "/", selected: null };
+    $("app").hidden = true;
+    $("signin").hidden = false;
+    $("token").value = "";
+    if (message) {
+      $("signin-error").textContent = message;
+      $("signin-error").hidden = false;
+    }
+  }
+
+  function signIn(key, token) {
+    state.key = key;
+    state.auth = "Basic " + btoa(key + ":" + token);
+    state.path = "/";
+
+    return listing("/").then(function (entries) {
+      try {
+        sessionStorage.setItem("pubky-drive", JSON.stringify({ key: key, auth: state.auth }));
+      } catch (e) { /* private mode: session lives in memory only */ }
+      $("signin").hidden = true;
+      $("app").hidden = false;
+      $("signin-error").hidden = true;
+      $("who-key").textContent = key;
+      crumbs();
+      render(entries);
+    });
+  }
+
+  // ---------- wiring ----------
+
+  $("signin-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var key = $("key").value.trim();
+    var token = $("token").value.trim();
+    if (!key || !token) { return; }
+
+    var btn = $("signin-btn");
+    btn.disabled = true;
+    btn.textContent = "Opening…";
+    $("signin-error").hidden = true;
+
+    signIn(key, token).catch(function (e) {
+      $("signin-error").textContent = e.message === "unauthorized"
+        ? "That public key and token were not accepted."
+        : "Could not reach the drive. " + e.message;
+      $("signin-error").hidden = false;
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = "Open drive";
+    });
+  });
+
+  $("btn-signout").addEventListener("click", function () { signOut(""); });
+  $("btn-newfolder").addEventListener("click", newFolder);
+  $("btn-upload").addEventListener("click", function () { $("file-input").click(); });
+  $("file-input").addEventListener("change", function (ev) {
+    upload(ev.target.files);
+    ev.target.value = "";
+  });
+
+  // Drag and drop onto the listing.
+  ["dragover", "drop"].forEach(function (name) {
+    document.addEventListener(name, function (ev) {
+      if ($("app").hidden) { return; }
+      ev.preventDefault();
+      if (name === "drop" && ev.dataTransfer) { upload(ev.dataTransfer.files); }
+    });
+  });
+
+  // Prefill the key from ?user=<z32> so a shared link only needs the token typed.
+  var params = new URLSearchParams(location.search);
+  var hinted = params.get("user");
+  if (hinted) { $("key").value = hinted; }
+
+  // Restore a session within this tab.
+  var saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem("pubky-drive") || "null"); } catch (e) { saved = null; }
+  if (saved && saved.key && saved.auth) {
+    state.key = saved.key;
+    state.auth = saved.auth;
+    $("signin").hidden = true;
+    $("app").hidden = false;
+    $("who-key").textContent = saved.key;
+    go("/");
+  } else if (hinted) {
+    $("token").focus();
+  }
+})();
+</script>
+</body>
+</html>

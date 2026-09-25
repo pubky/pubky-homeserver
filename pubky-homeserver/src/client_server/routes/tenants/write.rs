@@ -102,7 +102,7 @@ pub async fn put(
 }
 
 /// Parse the `Content-Length` header into a `u64`, returning `None` if absent or unparseable.
-fn content_length_from_headers(headers: &HeaderMap) -> Option<u64> {
+pub(crate) fn content_length_from_headers(headers: &HeaderMap) -> Option<u64> {
     headers
         .get(axum::http::header::CONTENT_LENGTH)?
         .to_str()
@@ -113,7 +113,7 @@ fn content_length_from_headers(headers: &HeaderMap) -> Option<u64> {
 
 /// Check whether the Content-Length size hint would exceed the user's storage quota.
 /// Returns Ok if there is no size hint, no quota, or the hint fits within the quota.
-async fn fail_if_size_hint_exceeds_quota<'a>(
+pub(crate) async fn fail_if_size_hint_exceeds_quota<'a>(
     content_size_hint: Option<u64>,
     user: &UserEntity,
     default_storage_mb: Option<u64>,

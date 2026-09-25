@@ -22,6 +22,35 @@ use opendal::Operator;
 
 use super::super::{FileIoError, FileStream, WriteStreamError};
 
+/// Where in-flight filesystem writes are staged, relative to the data directory.
+const ATOMIC_WRITE_DIR: &str = "data/tmp";
+
+fn utf8_path(path: &Path) -> Result<String, FileIoError> {
+    path.to_str().map(str::to_string).ok_or_else(|| {
+        FileIoError::OpenDAL(opendal::Error::new(
+            opendal::ErrorKind::Unexpected,
+            "Invalid path",
+        ))
+    })
+}
+
+/// Remove temp files left by writes that never finished.
+///
+/// A write stages its bytes in the atomic write directory until `close` renames
+/// them into place, so anything still there at startup belonged to a process
+/// that crashed mid-upload. Nothing can be in flight before the operator exists,
+/// and without this the directory grows by one abandoned upload per crash.
+fn clear_interrupted_writes(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if let Err(error) = std::fs::remove_file(entry.path()) {
+            tracing::warn!(path = %entry.path().display(), %error, "Could not remove interrupted write");
+        }
+    }
+}
+
 /// Build storage operators with one transactional finalization layer and an
 /// app-facing operator that additionally enforces write paths and collisions.
 ///

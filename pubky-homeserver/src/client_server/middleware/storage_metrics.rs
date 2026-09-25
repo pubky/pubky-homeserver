@@ -13,6 +13,34 @@ use crate::{
     observability::{Metrics, PubkyHostHeaderUsage, StorageAddressingMode, StorageAuthMethod},
 };
 
+/// Records a `/dav` request against the same counter as the REST routes.
+///
+/// WebDAV resolves its own tenant from the URL rather than through
+/// [`RequestTenant`], so it needs its own recorder — without one, a growing share
+/// of storage traffic would appear on no dashboard at all once people mount
+/// drives. The `webdav` addressing label keeps the split visible.
+pub(crate) async fn record_webdav_request(
+    State(metrics): State<Metrics>,
+    request: Request,
+    next: Next,
+) -> Response {
+    metrics.record_storage_request(
+        StorageAddressingMode::WebDav,
+        PubkyHostHeaderUsage::Absent,
+        false,
+        auth_method(&request),
+    );
+    next.run(request).await
+}
+
+fn auth_method(request: &Request) -> StorageAuthMethod {
+    match request.extensions().get::<AuthSession>() {
+        Some(AuthSession::Cookie(_)) => StorageAuthMethod::Cookie,
+        Some(AuthSession::Grant(_)) => StorageAuthMethod::Grant,
+        None => StorageAuthMethod::None,
+    }
+}
+
 pub(crate) async fn record_request(
     State(metrics): State<Metrics>,
     request: Request,
@@ -42,11 +70,7 @@ pub(crate) async fn record_request(
     let pubky_host_query = request.uri().query().is_some_and(|query| {
         form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == "pubky-host")
     });
-    let auth_method = match request.extensions().get::<AuthSession>() {
-        Some(AuthSession::Cookie(_)) => StorageAuthMethod::Cookie,
-        Some(AuthSession::Grant(_)) => StorageAuthMethod::Grant,
-        None => StorageAuthMethod::None,
-    };
+    let auth_method = auth_method(&request);
 
     metrics.record_storage_request(
         addressing_mode,

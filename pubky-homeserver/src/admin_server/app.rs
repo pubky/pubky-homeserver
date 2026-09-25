@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::routes::{
-    admin_events, dav_handler, delete_entry,
+    admin_events, dav_handler, delete_entry, demo_user,
     disable_users::{disable_user, enable_user},
     generate_signup_token, info, root, signup_tokens, user_quota,
 };
@@ -21,8 +21,18 @@ use tokio::task::JoinHandle;
 use tower_http::cors::CorsLayer;
 
 /// Admin password protected router.
-fn create_protected_router(password: &str) -> Router<AppState> {
+fn create_protected_router(password: &str, demo_users: bool) -> Router<AppState> {
+    // Demo provisioning creates users without a signup token and hands out
+    // long-lived credentials, so the route only exists where an operator asked
+    // for it.
+    let demo = if demo_users {
+        Router::new().route("/generate_demo_user", post(demo_user::generate_demo_user))
+    } else {
+        Router::new()
+    };
+
     Router::new()
+        .merge(demo)
         .route(
             "/generate_signup_token",
             get(generate_signup_token::generate_signup_token)
@@ -49,7 +59,10 @@ fn create_public_router() -> Router<AppState> {
 
 /// Create the app
 pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Router> {
-    let admin_router = create_protected_router(state.admin_password());
+    let admin_router = create_protected_router(
+        state.admin_password(),
+        state.context.config_toml.admin.demo_users,
+    );
     let public_router = create_public_router();
     let app = Router::new()
         .merge(admin_router)

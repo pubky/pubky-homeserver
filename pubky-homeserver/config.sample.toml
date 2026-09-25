@@ -25,6 +25,17 @@ pubky_listen_socket = "127.0.0.1:6287"
 # May be put behind a reverse proxy with TLS enabled.
 icann_listen_socket = "127.0.0.1:6286"
 
+# Serve the WebDAV endpoint at /dav, so users can mount their drive in a file
+# manager. See docs/WEBDAV.md.
+# Default: true
+# webdav = true
+
+# Serve the browser file explorer at /drive.
+# This makes the homeserver a web application as well as a storage daemon, so
+# it is opt-in. Requires `webdav` to be enabled; it talks to /dav.
+# Default: false
+# web_explorer = false
+
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE
