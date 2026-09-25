@@ -56,7 +56,8 @@ pub async fn head(
         .file_service
         .get_info(&entry_path, &mut state.context.sql_db.pool().into())
         .await?;
-    let response = entry.to_response_headers().into_response();
+    let blob_length = state.context.file_service.blob_length(&entry_path).await?;
+    let response = entry.to_response_headers(blob_length).into_response();
     Ok(response)
 }
 
@@ -132,10 +133,13 @@ pub async fn get(
         }
     }
 
-    let stream = state.context.file_service.get_stream(&entry_path).await?;
-    let body_stream = Body::from_stream(stream);
-    let mut response = entry.to_response_headers().into_response();
-    *response.body_mut() = body_stream;
+    let (blob_length, stream) = state
+        .context
+        .file_service
+        .get_sized_stream(&entry_path)
+        .await?;
+    let mut response = entry.to_response_headers(blob_length).into_response();
+    *response.body_mut() = Body::from_stream(stream);
     Ok(response)
 }
 
@@ -237,9 +241,10 @@ fn to_http_date(date: &sqlx::types::chrono::NaiveDateTime) -> HttpDate {
 }
 
 impl EntryEntity {
-    pub fn to_response_headers(&self) -> HeaderMap {
+    /// `content_length` is the blob's size, see `FileService::blob_length`.
+    pub fn to_response_headers(&self, content_length: u64) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_LENGTH, self.content_length.into());
+        headers.insert(header::CONTENT_LENGTH, content_length.into());
         headers.insert(
             header::LAST_MODIFIED,
             HeaderValue::from_str(to_http_date(&self.modified_at).to_string().as_str())
@@ -1096,5 +1101,36 @@ mod tests {
             .put(&format!("/storage/{}/pub/file.txt", public_key.z32()))
             .await
             .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    /// A crash between publishing a blob and committing its row leaves the row
+    /// describing older content. The body must still arrive whole.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn get_reports_the_blob_length_when_the_row_is_stale() {
+        let (context, _, server, public_key, cookie) = create_environment().await.unwrap();
+        let url = format!("/storage/{}/pub/state.bin", public_key.z32());
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(Vec::from("the whole body").into())
+            .expect_success()
+            .await;
+
+        // Fake the crash: the row falls behind the blob.
+        sqlx::query("UPDATE entries SET content_length = 3 WHERE path = '/pub/state.bin'")
+            .execute(context.sql_db.pool())
+            .await
+            .unwrap();
+
+        let response = server.get(&url).expect_success().await;
+        response.assert_header(header::CONTENT_LENGTH, "14");
+        assert_eq!(response.text(), "the whole body");
+
+        // HEAD reports what GET would send.
+        server
+            .method(Method::HEAD, &url)
+            .await
+            .assert_header(header::CONTENT_LENGTH, "14");
     }
 }
