@@ -2733,6 +2733,9 @@ name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -3885,6 +3888,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
+name = "ppp"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a7a2049cd2570bd67bf0228e86bf850f8ceb5190a345c471d03a909da6049e0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4078,6 +4090,7 @@ dependencies = [
  "hostname-validator",
  "httpdate",
  "infer",
+ "ipnet",
  "jsonwebtoken",
  "mainline",
  "mime_guess",
@@ -4099,6 +4112,7 @@ dependencies = [
  "serde_valid",
  "sha2 0.11.0",
  "sqlx",
+ "tcp-client-addr",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -5792,6 +5806,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fce91f2f0ec87dff7e6bcbbeb267439aa1188703003c6055193c821487400432"
 dependencies = [
  "unicode-width",
+]
+
+[[package]]
+name = "tcp-client-addr"
+version = "0.1.0"
+source = "git+https://github.com/pubky/pkarr?branch=feat%2Ftcp-client-addr-crate#4b017d25e84a8c0512b34107f7ec21194b9e12e4"
+dependencies = [
+ "ipnet",
+ "ppp",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

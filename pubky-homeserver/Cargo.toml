@@ -33,11 +33,13 @@ dirs.workspace = true
 futures-lite = { workspace = true, features = ["default"] }
 futures-util.workspace = true
 httpdate.workspace = true
+ipnet.workspace = true
 pkarr = { workspace = true, features = ["default", "dht", "tls"] }
 pubky-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tcp-client-addr.workspace = true
 toml.workspace = true
 tower-cookies = "0.11"
 tower-http = { workspace = true, features = ["cors", "trace"] }

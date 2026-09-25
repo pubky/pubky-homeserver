@@ -15,6 +15,7 @@ use crate::{
     persistence::sql::ConnectionString,
     shared::toml_merge,
 };
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
@@ -24,6 +25,7 @@ use std::{
     path::Path,
     str::FromStr,
 };
+use tcp_client_addr::{ConfigError, IdentityMode, ProxyProtocol};
 use url::Url;
 
 /// Embedded copy of the default configuration (single source of truth for defaults)
@@ -64,8 +66,40 @@ pub struct PkdnsToml {
 pub struct DriveToml {
     pub pubky_listen_socket: SocketAddr,
     pub icann_listen_socket: SocketAddr,
+    /// How the ICANN HTTP listener determines the client address.
+    #[serde(default)]
+    pub icann_client_identity: ClientIdentityToml,
+    /// How the Pubky TLS listener determines the client address.
+    #[serde(default)]
+    pub pubky_client_identity: ClientIdentityToml,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
+}
+
+/// Client address source for one TCP listener.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ClientIdentityToml {
+    /// Use the direct TCP peer address.
+    #[default]
+    Direct,
+    /// Require a PROXY preface from a trusted immediate peer.
+    ProxyProtocol {
+        /// Networks permitted to supply a client address.
+        trusted_proxies: Vec<IpNet>,
+    },
+}
+
+impl ClientIdentityToml {
+    pub(crate) fn to_identity_mode(&self) -> Result<IdentityMode, ConfigError> {
+        match self {
+            Self::Direct => Ok(IdentityMode::Direct),
+            Self::ProxyProtocol { trusted_proxies } => {
+                let proxy = ProxyProtocol::new(trusted_proxies.iter().copied())?;
+                Ok(IdentityMode::ProxyProtocol(proxy))
+            }
+        }
+    }
 }
 
 /// Admin server configuration
@@ -307,6 +341,8 @@ mod tests {
             c.drive.pubky_listen_socket,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6287))
         );
+        assert_eq!(c.drive.icann_client_identity, ClientIdentityToml::Direct);
+        assert_eq!(c.drive.pubky_client_identity, ClientIdentityToml::Direct);
         assert_eq!(
             c.admin.listen_socket,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6288))
@@ -361,6 +397,50 @@ mod tests {
         // Other fields that were not set (left empty) should still match the default.
         assert_eq!(parsed.admin, ConfigToml::default().admin);
         assert_eq!(parsed.logging, ConfigToml::default().logging);
+    }
+
+    #[test]
+    fn client_identity_modes_are_independent() {
+        let config = ConfigToml::from_str_with_defaults(
+            r#"
+            [drive]
+            icann_client_identity = { mode = "proxy_protocol", trusted_proxies = ["127.0.0.1/32"] }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.drive.icann_client_identity,
+            ClientIdentityToml::ProxyProtocol {
+                trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
+            }
+        );
+        assert_eq!(
+            config.drive.pubky_client_identity,
+            ClientIdentityToml::Direct
+        );
+        assert!(config
+            .drive
+            .icann_client_identity
+            .to_identity_mode()
+            .is_ok());
+    }
+
+    #[test]
+    fn proxy_identity_requires_trusted_peers() {
+        let config = ConfigToml::from_str_with_defaults(
+            r#"
+            [drive]
+            pubky_client_identity = { mode = "proxy_protocol", trusted_proxies = [] }
+            "#,
+        )
+        .unwrap();
+
+        assert!(config
+            .drive
+            .pubky_client_identity
+            .to_identity_mode()
+            .is_err());
     }
 
     #[test]

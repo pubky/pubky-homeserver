@@ -125,13 +125,12 @@ impl BandwidthState {
     ///
     /// Returns at most one throttler: either a per-user limiter (authenticated)
     /// or an IP-keyed limiter (unauthenticated / unknown user).
-    #[allow(clippy::result_large_err)]
     async fn resolve_bandwidth_throttler(
         &self,
         info: &RequestInfo,
-    ) -> Result<Option<(LimitKey, Arc<KeyedRateLimiter>)>, Response> {
+    ) -> Result<Option<(LimitKey, Arc<KeyedRateLimiter>)>, HttpError> {
         let Some(pubkey) = info.user_pubkey.as_ref() else {
-            return Ok(self.ip_throttler(&info.client_ip));
+            return self.ip_throttler(&info.client_ip);
         };
 
         // Resolve per-user quota from cache/DB.
@@ -141,12 +140,11 @@ impl BandwidthState {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to resolve user limits",
             )
-            .into_response()
         })?;
 
         // Unknown user (e.g. spoofed cookie) → fall back to IP throttle.
         let Some(quota) = quota else {
-            return Ok(self.ip_throttler(&info.client_ip));
+            return self.ip_throttler(&info.client_ip);
         };
 
         // Pick read vs write fields based on HTTP method.
@@ -179,19 +177,22 @@ impl BandwidthState {
         Ok(Some((LimitKey::User(pubkey.clone()), limiter)))
     }
 
-    /// Try to resolve the unauthenticated IP throttler for the client IP.
+    /// Resolve the unauthenticated IP throttler, failing closed if identity is missing.
     fn ip_throttler(
         &self,
         client_ip: &Result<std::net::IpAddr, anyhow::Error>,
-    ) -> Option<(LimitKey, Arc<KeyedRateLimiter>)> {
-        let limiter = self.unauthenticated_read_limiter.as_ref()?;
-        match client_ip {
-            Ok(ip) => Some((LimitKey::Ip(*ip), limiter.clone())),
-            Err(e) => {
-                tracing::warn!("Failed to extract IP for unauthenticated rate limiting: {e}");
-                None
-            }
-        }
+    ) -> Result<Option<(LimitKey, Arc<KeyedRateLimiter>)>, HttpError> {
+        let Some(limiter) = self.unauthenticated_read_limiter.as_ref() else {
+            return Ok(None);
+        };
+        let ip = client_ip.as_ref().map_err(|error| {
+            tracing::error!(%error, "Missing client address for unauthenticated rate limiting");
+            HttpError::new_with_message(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Missing client address for rate limiting",
+            )
+        })?;
+        Ok(Some((LimitKey::Ip(*ip), limiter.clone())))
     }
 }
 
@@ -228,7 +229,7 @@ where
             let info = RequestInfo::from_request(&req);
             let throttler = match state.resolve_bandwidth_throttler(&info).await {
                 Ok(t) => t,
-                Err(resp) => return Ok(resp),
+                Err(error) => return Ok(error.into_response()),
             };
 
             if let Some((ref key, ref limiter)) = throttler {

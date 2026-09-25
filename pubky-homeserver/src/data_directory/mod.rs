@@ -14,7 +14,9 @@ mod persistent_data_dir;
 pub mod storage_config;
 
 mod log_level;
-pub use config_toml::{AdminToml, ConfigReadError, ConfigToml, LoggingToml, MetricsToml};
+pub use config_toml::{
+    AdminToml, ClientIdentityToml, ConfigReadError, ConfigToml, LoggingToml, MetricsToml,
+};
 pub use data_dir::DataDir;
 #[cfg(any(test, feature = "testing"))]
 pub use mock_data_dir::MockDataDir;

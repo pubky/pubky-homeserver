@@ -53,6 +53,7 @@ futures-lite = { version = "2", default-features = false }
 futures-util = "0.3"
 http-relay = "0.7"
 httpdate = "1"
+ipnet = { version = "2", features = ["serde"] }
 js-sys = "0.3"
 log = "0.4"
 mainline = "8"
@@ -69,6 +70,7 @@ reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+tcp-client-addr = { git = "https://github.com/pubky/pkarr", branch = "feat/tcp-client-addr-crate" }
 thiserror = "2"
 toml = "1"
 # pubky-testnet's docker-postgres feature uses tokio::sync::OnceCell::const_new,
