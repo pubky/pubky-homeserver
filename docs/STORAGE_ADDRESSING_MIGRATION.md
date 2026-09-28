@@ -71,10 +71,8 @@ homeserver-only release does not start the clock.
 
 | Milestone | SDK version | UTC date |
 | --- | --- | --- |
-| First stable path-addressing SDK release | Not released ([#527](https://github.com/pubky/pubky-homeserver/issues/527)) | Not started |
-| Earliest legacy-removal review | Stable release version | Stable release date + one year |
-
-Update this table as part of publishing that stable SDK release.
+| First stable path-addressing SDK release | [v0.12.0](https://github.com/pubky/pubky-homeserver/releases/tag/v0.12.0) | 2026-09-14 |
+| Earliest legacy-removal review | v0.12.0 | 2027-09-14 |
 
 ## Breaking-release review
 
