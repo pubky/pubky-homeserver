@@ -2,100 +2,82 @@
 //!
 //! Mounted at `/dav/{user_z32}/pub/...`, this serves the same files as
 //! `/storage/{user_z32}/pub/...` to standard WebDAV clients (GNOME Files,
-//! Finder, rclone, browsers) through the `dav-server` crate, mirroring the
-//! admin server's `/dav` endpoint.
+//! Finder, rclone, browsers). The endpoint itself — `dav-server`, the verb
+//! policy and CORS — is [`DavEndpoint`], shared with the admin server; what
+//! this module adds is the policy for *who sees what*.
 //!
 //! Nothing here is authenticated. `/pub/` is world-readable over REST, and this
 //! endpoint exposes exactly that and no more:
 //!
-//! - Only the read verbs are served. Anything that would write gets `405`,
-//!   which is what tells a file manager to mount the share read-only.
+//! - The share is [`DavAccess::ReadOnly`]: anything that would write gets
+//!   `405`, which is what tells a file manager to mount it read-only.
 //! - Only paths under `/pub/` exist. Everything else — the drive root
 //!   included — is `404`, so the endpoint never confirms that `/priv/` is there.
 //!
 //! Storage keys are `{user_z32}/{path}`, so stripping only the `/dav` prefix
 //! leaves the tenant segment in place and `/dav/{user_z32}/pub/x` maps straight
 //! onto the storage key `{user_z32}/pub/x`. The confinement to `/pub/` is
-//! enforced twice: [`DavTarget`] canonicalizes each path (collapsing `..`
-//! before it can escape) and refuses anything outside the public folder, and
-//! the per-request handler's storage is wrapped in [`TenantScopeLayer`] so a
-//! mistake in the first cannot reach a private folder or the storage root.
+//! enforced twice: [`DavTarget`] canonicalizes each path within its drive
+//! (collapsing `..` before it can escape) and refuses anything outside the
+//! public folder, and the per-request endpoint's storage is wrapped in
+//! [`TenantScopeLayer`] so a mistake in the first cannot reach a private folder
+//! or the storage root.
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderValue, Method, StatusCode},
-    middleware::Next,
-    response::{IntoResponse, Response},
+    http::Method,
+    middleware as axum_middleware,
+    response::Response,
+    routing::any,
+    Router,
 };
-use dav_server::DavHandler;
-use dav_server_opendalfs::OpendalFs;
 use percent_encoding::percent_decode_str;
 use pubky_common::crypto::PublicKey;
 
-use crate::client_server::AppState;
+use crate::client_server::{middleware::storage_metrics, AppState};
 use crate::constants::PUBLIC_ROOT;
 use crate::persistence::files::tenant_scope_layer::TenantScopeLayer;
-use crate::shared::{webdav::StoragePath, HttpError, HttpResult};
+use crate::shared::{
+    webdav::{
+        endpoint::{DavAccess, DavEndpoint, DAV_PREFIX, DAV_ROOT_ROUTE, DAV_ROUTE},
+        StoragePath,
+    },
+    HttpError, HttpResult,
+};
 
-/// URL prefix the [`DavHandler`] strips before resolving storage keys.
-///
-/// [`DavHandler`]: dav_server::DavHandler
-pub(crate) const DAV_PREFIX: &str = "/dav";
+/// The `/dav` routes.
+pub(crate) fn router(state: AppState) -> Router {
+    Router::new()
+        .route(DAV_ROOT_ROUTE, any(dav_handler))
+        .route(DAV_ROUTE, any(dav_handler))
+        .layer(axum_middleware::from_fn_with_state(
+            state.context.metrics.clone(),
+            storage_metrics::record_webdav_request,
+        ))
+        .with_state(state)
+}
 
-/// The verbs a read-only share answers. Everything else is refused with this
-/// list in `Allow`, before dav-server sees the request.
-const ALLOWED_METHODS: &str = "OPTIONS, GET, HEAD, PROPFIND";
-
-/// Request headers WebDAV clients send on reads. `Depth` is what makes listing
-/// work; `Content-Type` describes the XML body of a `PROPFIND`.
-const ALLOW_HEADERS: &str = "content-type, depth";
-
-/// Response headers a browser client has to be able to read. Without `dav`
-/// here a client cannot detect compliance.
-const EXPOSE_HEADERS: &str = "dav, allow, etag, last-modified, content-length, content-type";
-
-/// How long a browser may cache the preflight result.
-const PREFLIGHT_MAX_AGE: &str = "600";
-
-pub(crate) async fn dav_handler(
-    State(state): State<AppState>,
-    req: Request<Body>,
-) -> HttpResult<Response> {
-    if !is_read_method(req.method()) {
-        return Ok(method_not_allowed());
-    }
-
+async fn dav_handler(State(state): State<AppState>, req: Request<Body>) -> HttpResult<Response> {
     let target = DavTarget::parse(req.uri().path())?;
     // `OPTIONS` is a capability probe that touches nothing, so it is answered
     // anywhere a drive is named: a client may well send it above the folder it
     // is about to mount.
     if req.method() != Method::OPTIONS && !target.is_public() {
-        return Ok(not_found());
+        // Not 403: a refusal would confirm there is something there to refuse.
+        return Err(HttpError::not_found());
     }
 
-    Ok(scoped_handler(&state, &target.tenant)
-        .handle(req)
-        .await
-        .into_response())
+    Ok(scoped_endpoint(&state, &target.tenant).handle(req).await)
 }
 
-/// Whether `method` only reads. An unknown verb is not a read.
-fn is_read_method(method: &Method) -> bool {
-    matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS" | "PROPFIND")
-}
-
-/// A `DavHandler` whose view of storage is confined to one user's public
-/// folder.
+/// The endpoint for one user's public folder.
 ///
 /// Built per request rather than shared, because the confinement is the point:
 /// [`TenantScopeLayer`] refuses keys outside `{user_z32}/pub/` at the storage
 /// boundary, so a mistake in [`DavTarget::is_public`] cannot reach a private
 /// folder or another drive. The cost is a handful of allocations against a
 /// network round trip.
-///
-/// Only `/dav` is stripped from the URL, so the tenant segment survives into
-/// the object key and lands on the same key the REST routes use.
-fn scoped_handler(state: &AppState, tenant: &PublicKey) -> DavHandler {
+fn scoped_endpoint(state: &AppState, tenant: &PublicKey) -> DavEndpoint {
     let operator = state
         .context
         .file_service
@@ -104,31 +86,7 @@ fn scoped_handler(state: &AppState, tenant: &PublicKey) -> DavHandler {
         .clone()
         .layer(TenantScopeLayer::public(tenant));
 
-    // No lock system: a share that cannot be written has nothing to lock, and
-    // advertising compliance class 1 alone is what tells Finder to mount it
-    // read-only rather than complain.
-    DavHandler::builder()
-        .filesystem(OpendalFs::new(operator))
-        .strip_prefix(DAV_PREFIX)
-        .autoindex(true)
-        .build_handler()
-}
-
-/// `405` naming the verbs that are served. `Allow` is what a file manager reads
-/// to decide the share is read-only rather than broken.
-fn method_not_allowed() -> Response {
-    (
-        StatusCode::METHOD_NOT_ALLOWED,
-        [(header::ALLOW, ALLOWED_METHODS)],
-        "Method Not Allowed",
-    )
-        .into_response()
-}
-
-/// `404` for anything outside a public folder. Not `403`: a refusal would
-/// confirm there is something there to refuse.
-fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, "Not Found").into_response()
+    DavEndpoint::new(operator, DavAccess::ReadOnly)
 }
 
 /// A parsed `/dav` request path: which drive, and where inside it.
@@ -138,38 +96,26 @@ struct DavTarget {
 }
 
 impl DavTarget {
-    /// Parse and canonicalize a `/dav/...` URL path.
+    /// Parse `/dav/{user_z32}/...` into its drive and the path within it.
     ///
-    /// Canonicalization happens before anything is compared, so a path like
-    /// `/dav/{key}/pub/../priv/` is judged by where it lands rather than how
-    /// it is spelled.
+    /// The drive segment is taken before the path is canonicalized, so `..`
+    /// is judged by where it lands *inside* the drive and can never climb into
+    /// another one: a path that tries is malformed, not a different drive.
     fn parse(uri_path: &str) -> Result<Self, HttpError> {
         let decoded = percent_decode_str(uri_path)
             .decode_utf8()
             .map_err(|_| HttpError::bad_request("WebDAV path is not valid UTF-8"))?;
 
-        let relative = decoded
+        let (tenant, path) = decoded
             .strip_prefix(DAV_PREFIX)
-            .ok_or_else(|| HttpError::bad_request("WebDAV paths must start with `/dav/`"))?;
-
-        let canonical = StoragePath::normalize(relative)
-            .map_err(|e| HttpError::bad_request(format!("Invalid WebDAV path: {e}")))?;
-
-        // The canonical path is `/{user_z32}/...`, so the first segment names
-        // the drive and the remainder is the storage path within it.
-        let (tenant, path) = canonical
-            .as_str()
-            .strip_prefix('/')
-            .and_then(|rest| match rest.split_once('/') {
-                Some((tenant, path)) => Some((tenant, format!("/{path}"))),
-                None if !rest.is_empty() => Some((rest, "/".to_string())),
-                None => None,
-            })
-            .ok_or_else(|| HttpError::bad_request("WebDAV paths must name a user"))?;
+            .and_then(|rest| rest.strip_prefix('/'))
+            .map(|rest| rest.split_once('/').unwrap_or((rest, "")))
+            .filter(|(tenant, _)| !tenant.is_empty())
+            .ok_or_else(|| HttpError::bad_request("WebDAV paths are `/dav/{user}/...`"))?;
 
         let tenant = PublicKey::try_from_z32(tenant)
             .map_err(|e| HttpError::bad_request(format!("Invalid user in WebDAV path: {e}")))?;
-        let path = StoragePath::normalize(&path)
+        let path = StoragePath::normalize(&format!("/{path}"))
             .map_err(|e| HttpError::bad_request(format!("Invalid WebDAV path: {e}")))?;
 
         Ok(Self { tenant, path })
@@ -185,64 +131,10 @@ impl DavTarget {
     }
 }
 
-/// Cross-origin support for `/dav`, hand-rolled because the two kinds of
-/// `OPTIONS` request must be told apart.
-///
-/// A blanket CORS layer answers *every* `OPTIONS` itself. That breaks native
-/// clients: a bare `OPTIONS` is a WebDAV capability probe, and only the
-/// `DavHandler` can answer it with the `DAV:` header that Finder and GNOME
-/// Files read before they will mount a share. So only a real preflight — one
-/// carrying `Access-Control-Request-Method` — is short-circuited here; a bare
-/// `OPTIONS` falls through to the handler.
-///
-/// Nothing on this endpoint is authenticated, so the origin is simply `*` and
-/// no credentials are ever allowed. That keeps the server's session cookie —
-/// which is `SameSite=None` — unusable from another origin should `/dav` ever
-/// start reading it.
-pub(crate) async fn cors(req: Request<Body>, next: Next) -> Response {
-    if req.method() == Method::OPTIONS
-        && req
-            .headers()
-            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD)
-    {
-        return preflight();
-    }
-
-    let cross_origin = req.headers().contains_key(header::ORIGIN);
-    let mut response = next.run(req).await;
-
-    if cross_origin {
-        let headers = response.headers_mut();
-        headers.insert(
-            header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            HeaderValue::from_static("*"),
-        );
-        headers.insert(
-            header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static(EXPOSE_HEADERS),
-        );
-    }
-
-    response
-}
-
-/// The preflight answer.
-fn preflight() -> Response {
-    (
-        StatusCode::NO_CONTENT,
-        [
-            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-            (header::ACCESS_CONTROL_ALLOW_METHODS, ALLOWED_METHODS),
-            (header::ACCESS_CONTROL_ALLOW_HEADERS, ALLOW_HEADERS),
-            (header::ACCESS_CONTROL_MAX_AGE, PREFLIGHT_MAX_AGE),
-        ],
-    )
-        .into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{http::StatusCode, response::IntoResponse};
     use pubky_common::crypto::Keypair;
 
     fn status(result: Result<DavTarget, HttpError>) -> StatusCode {
@@ -296,36 +188,35 @@ mod tests {
     }
 
     #[test]
-    fn traversal_into_another_drive_lands_in_its_public_folder() {
-        // Every public folder is public, so climbing into another drive is not
-        // an escape: the path is judged like any other, by where it lands.
-        let mine = Keypair::random().public_key().z32();
-        let other = Keypair::random().public_key();
-        let other_z32 = other.z32();
-
-        let target =
-            DavTarget::parse(&format!("/dav/{mine}/../{other_z32}/pub/file.txt")).unwrap();
-        assert_eq!(target.tenant.z32(), other_z32);
-        assert!(target.is_public());
-
-        let target =
-            DavTarget::parse(&format!("/dav/{mine}/../{other_z32}/priv/file.txt")).unwrap();
-        assert!(!target.is_public());
-    }
-
-    #[test]
-    fn traversal_above_the_storage_root_is_rejected() {
+    fn a_path_that_climbs_out_of_its_drive_is_malformed() {
+        // The drive is fixed before the path is canonicalized, so `..` can
+        // never reach another drive or the storage root — it is simply a
+        // traversal above the root of this one.
         let z32 = Keypair::random().public_key().z32();
+        let other = Keypair::random().public_key().z32();
 
-        assert_eq!(
-            status(DavTarget::parse(&format!("/dav/{z32}/../../etc/passwd"))),
-            StatusCode::BAD_REQUEST
-        );
+        for path in [
+            format!("/dav/{z32}/../{other}/pub/file.txt"),
+            format!("/dav/{z32}/../../etc/passwd"),
+            format!("/dav/{z32}/pub/%2e%2e/%2e%2e/{other}/pub/x"),
+        ] {
+            assert_eq!(
+                status(DavTarget::parse(&path)),
+                StatusCode::BAD_REQUEST,
+                "{path} should be rejected"
+            );
+        }
     }
 
     #[test]
-    fn paths_outside_the_dav_prefix_are_rejected() {
-        for path in ["/storage/whatever", "/dav", "/dav/not-a-pubkey/pub/"] {
+    fn paths_that_do_not_name_a_drive_are_rejected() {
+        for path in [
+            "/storage/whatever",
+            "/dav",
+            "/dav/",
+            "/davos/x",
+            "/dav/not-a-pubkey/pub/",
+        ] {
             assert_eq!(
                 status(DavTarget::parse(path)),
                 StatusCode::BAD_REQUEST,
@@ -334,26 +225,400 @@ mod tests {
         }
     }
 
-    #[test]
-    fn only_read_verbs_are_served() {
-        let method = |name: &str| Method::from_bytes(name.as_bytes()).unwrap();
+    // ── Through the assembled router ────────────────────────────────────
+    //
+    // The unit tests above pin the path policy; these drive the whole client
+    // server the way a file manager would, so CORS, rate limits and metrics
+    // are exercised together with it.
 
-        for name in ["GET", "HEAD", "OPTIONS", "PROPFIND"] {
-            assert!(is_read_method(&method(name)), "{name} is a read");
+    use std::sync::Arc;
+
+    use axum::http::header;
+    use axum_test::TestServer;
+    use pubky_common::{auth::AuthToken, capabilities::Capability};
+
+    use crate::{app_context::AppContext, client_server::ClientServer};
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_serves_public_folders_anonymously_and_nothing_else() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router);
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+
+        put_public_file(&server, &user, &cookie, "dav.txt", b"hello").await;
+
+        // No credentials: the file is served exactly as `/storage` serves it.
+        server
+            .get(&format!("/dav/{public_key}/pub/dav.txt"))
+            .await
+            .assert_text("hello");
+
+        // Mounting starts with a PROPFIND of the folder.
+        propfind(&server, &format!("/dav/{public_key}/pub/"))
+            .await
+            .assert_status(StatusCode::MULTI_STATUS);
+
+        // The drive root and the private folder do not exist here, even to the
+        // owner: 404 rather than 401 or 403, so nothing is confirmed.
+        for path in [
+            format!("/dav/{public_key}/"),
+            format!("/dav/{public_key}/priv/"),
+            format!("/dav/{public_key}/pub/../priv/secret.txt"),
+        ] {
+            propfind(&server, &path)
+                .add_header("pubky-host", public_key.clone())
+                .add_header(header::COOKIE, cookie.clone())
+                .await
+                .assert_status(StatusCode::NOT_FOUND);
         }
-        for name in [
+
+        // A bare OPTIONS is what a file manager reads before mounting: no
+        // locking class, and an `Allow` with no write verb in it, on the
+        // folder and on a file alike.
+        for path in [
+            format!("/dav/{public_key}/pub/"),
+            format!("/dav/{public_key}/pub/dav.txt"),
+        ] {
+            let response = server.method(Method::OPTIONS, &path).await;
+            response.assert_status_ok();
+            response.assert_header("dav", "1");
+            let allow = allow_header(&response);
+            assert!(allow.contains("PROPFIND"), "{path}: {allow}");
+            assert_no_write_verbs(&allow, &path);
+        }
+
+        // A write is refused before dav-server sees it — dav-server's own 405
+        // carries no `Allow`, and a file manager needs one.
+        let response = server
+            .put(&format!("/dav/{public_key}/pub/dav.txt"))
+            .add_header("pubky-host", public_key.clone())
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(b"overwritten".to_vec().into())
+            .await;
+        response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
+        response.assert_header(header::ALLOW, "OPTIONS, GET, HEAD, PROPFIND");
+
+        // A verb dav-server has never heard of fails closed too, just with a
+        // different status: it is refused before any method set applies.
+        server
+            .method(
+                Method::from_bytes(b"FROBNICATE").unwrap(),
+                &format!("/dav/{public_key}/pub/dav.txt"),
+            )
+            .await
+            .assert_status(StatusCode::NOT_IMPLEMENTED);
+        server
+            .get(&format!("/storage/{public_key}/pub/dav.txt"))
+            .await
+            .assert_text("hello");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_options_advertises_dav_compliance_while_storage_keeps_cors() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router);
+        let public_key = Keypair::random().public_key().z32();
+
+        // `CorsLayer` answers every OPTIONS request itself, so a `/dav` route
+        // sitting under it returns a bare 200. Clients read the `DAV:` header
+        // off this response to decide whether the share is mountable at all —
+        // without it, nothing mounts.
+        //
+        // dav-server claims `1,2,3` whatever is attached, so the endpoint
+        // rewrites it: class 2 would tell Finder the share takes locks.
+        let response = server
+            .method(Method::OPTIONS, &format!("/dav/{public_key}/pub/"))
+            .await;
+        response.assert_status_ok();
+        response.assert_header("dav", "1");
+        // Nothing exists yet, and dav-server's answer for an unmapped path
+        // would offer MKCOL, PUT and LOCK unless told the share is read-only.
+        assert_no_write_verbs(&allow_header(&response), "an unmapped path");
+
+        // The REST routes still need their CORS preflight answered.
+        server
+            .method(Method::OPTIONS, &format!("/storage/{public_key}/pub/x"))
+            .add_header(header::ORIGIN, "https://app.example")
+            .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .await
+            .assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "https://app.example");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_preflight_is_answered_for_any_origin() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router);
+        let public_key = Keypair::random().public_key().z32();
+
+        let response = server
+            .method(Method::OPTIONS, &format!("/dav/{public_key}/pub/"))
+            .add_header(header::ORIGIN, "https://webdav.example")
+            .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "PROPFIND")
+            // A listing, a resumed download and a conditional fetch each need
+            // a header the browser must ask permission for.
+            .add_header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "depth, range, if-none-match",
+            )
+            .await;
+
+        response.assert_status(StatusCode::NO_CONTENT);
+        response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+
+        let allowed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|v| v.to_str().ok())
+            .expect("preflight must list allowed methods")
+            .to_string();
+        for method in ["PROPFIND", "GET", "HEAD"] {
+            assert!(allowed.contains(method), "{method} missing from {allowed}");
+        }
+        for method in ["PUT", "DELETE", "MKCOL", "MOVE", "LOCK"] {
+            assert!(
+                !allowed.contains(method),
+                "{method} offered on a read-only share"
+            );
+        }
+
+        let headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .expect("preflight must list allowed headers")
+            .to_string();
+        for name in ["depth", "range", "if-none-match"] {
+            assert!(headers.contains(name), "{name} missing from {headers}");
+        }
+
+        // Nothing here is authenticated, so nothing should ever invite the
+        // browser to attach the session cookie.
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            "credentials must never be allowed cross-origin on /dav"
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_cross_origin_response_exposes_headers_clients_need() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+        let server = TestServer::new(router);
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+
+        // PROPFIND on a folder with nothing in it is a 404, so give it a file.
+        put_public_file(&server, &user, &cookie, "cors.txt", b"hi").await;
+
+        let response = propfind(&server, &format!("/dav/{public_key}/pub/"))
+            .add_header(header::ORIGIN, "https://webdav.example")
+            .await;
+
+        response.assert_status(StatusCode::MULTI_STATUS);
+        response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+
+        let exposed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .expect("cross-origin responses must expose WebDAV headers")
+            .to_string();
+        for name in ["dav", "etag"] {
+            assert!(exposed.contains(name), "{name} missing from {exposed}");
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_propfind_depth_is_finite_by_default() {
+        // dav-server refuses `Depth: infinity` outright, and serves a request
+        // with no `Depth` as a one-level listing. Both are what the user guide
+        // promises.
+        let context = AppContext::test().await;
+        let server = TestServer::new(ClientServer::create_router(Arc::clone(&context)).unwrap());
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+        put_public_file(&server, &user, &cookie, "depth.txt", b"x").await;
+        let folder = format!("/dav/{public_key}/pub/");
+        let request = || {
+            server
+                .method(Method::from_bytes(b"PROPFIND").unwrap(), &folder)
+                .add_header("x-forwarded-for", CLIENT_IP)
+        };
+
+        let response = request().add_header("depth", "infinity").await;
+        response.assert_status(StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            response.text().contains("propfind-finite-depth"),
+            "{}",
+            response.text()
+        );
+
+        let response = request().await;
+        response.assert_status(StatusCode::MULTI_STATUS);
+        assert!(response.text().contains("depth.txt"), "{}", response.text());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_guesses_the_content_type_from_the_name() {
+        // REST serves the type a file was stored with; dav-server serves what
+        // the extension suggests. A file with no extension is octet-stream
+        // over WebDAV whatever it holds — a documented limitation.
+        let context = AppContext::test().await;
+        let server = TestServer::new(ClientServer::create_router(Arc::clone(&context)).unwrap());
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let public_key = user.public_key().z32();
+        for name in ["picture", "picture.png"] {
+            server
+                .put(&format!("/storage/{public_key}/pub/{name}"))
+                .add_header("pubky-host", public_key.clone())
+                .add_header(header::COOKIE, cookie.clone())
+                .content_type("image/png")
+                .bytes(b"\x89PNG".to_vec().into())
+                .expect_success()
+                .await;
+        }
+
+        server
+            .get(&format!("/storage/{public_key}/pub/picture"))
+            .await
+            .assert_header(header::CONTENT_TYPE, "image/png");
+        server
+            .get(&format!("/dav/{public_key}/pub/picture"))
+            .await
+            .assert_header(header::CONTENT_TYPE, "application/octet-stream");
+        server
+            .get(&format!("/dav/{public_key}/pub/picture.png"))
+            .await
+            .assert_header(header::CONTENT_TYPE, "image/png");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn webdav_propfind_is_rate_limited_per_client() {
+        // The shipped limit, tightened to one request so the test can reach
+        // it. Until the pattern was `/dav/**` it matched nothing at all:
+        // fast-glob's `*` stops at `/`, and every real request is at least
+        // `/dav/{key}/pub/`.
+        let context = AppContext::test_with_config(|c| {
+            let limit = c
+                .drive
+                .rate_limits
+                .iter_mut()
+                .find(|l| l.path.0 == "/dav/**")
+                .expect("the shipped PROPFIND limit is in the test config");
+            limit.quota = "1r/m".parse().unwrap();
+        })
+        .await;
+        let server = TestServer::new(ClientServer::create_router(Arc::clone(&context)).unwrap());
+        let public_key = Keypair::random().public_key().z32();
+        let path = format!("/dav/{public_key}/pub/");
+
+        // Nothing exists at the path, so a served request is a 404. What
+        // matters is that the second one from the same client is refused,
+        // and one from a different client is not.
+        propfind(&server, &path)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        propfind(&server, &path)
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
+        propfind_from(&server, &path, "203.0.113.10")
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// A stand-in client address. The shipped PROPFIND limit is keyed by IP
+    /// and `TestServer` carries no peer address, so requests say who they are
+    /// the way a reverse proxy would.
+    const CLIENT_IP: &str = "203.0.113.9";
+
+    fn propfind(server: &TestServer, path: &str) -> axum_test::TestRequest {
+        propfind_from(server, path, CLIENT_IP)
+    }
+
+    fn propfind_from(server: &TestServer, path: &str, client_ip: &str) -> axum_test::TestRequest {
+        server
+            .method(Method::from_bytes(b"PROPFIND").unwrap(), path)
+            .add_header("depth", "1")
+            .add_header("x-forwarded-for", client_ip)
+    }
+
+    fn allow_header(response: &axum_test::TestResponse) -> String {
+        response
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .expect("OPTIONS must carry Allow")
+            .to_string()
+    }
+
+    fn assert_no_write_verbs(allow: &str, what: &str) {
+        for verb in [
             "PUT",
             "DELETE",
             "MKCOL",
-            "PROPPATCH",
             "COPY",
             "MOVE",
             "LOCK",
             "UNLOCK",
-            // An unknown verb must fail closed.
-            "FROBNICATE",
+            "PROPPATCH",
         ] {
-            assert!(!is_read_method(&method(name)), "{name} is not a read");
+            assert!(
+                !allow.contains(verb),
+                "{what} offers {verb}: Allow: {allow}"
+            );
         }
+    }
+
+    /// Write a file into `user`'s public folder over REST, the way an app does.
+    async fn put_public_file(
+        server: &TestServer,
+        user: &Keypair,
+        cookie: &str,
+        name: &str,
+        body: &[u8],
+    ) {
+        let public_key = user.public_key().z32();
+        server
+            .put(&format!("/storage/{public_key}/pub/{name}"))
+            .add_header("pubky-host", public_key)
+            .add_header(header::COOKIE, cookie.to_string())
+            .bytes(body.to_vec().into())
+            .expect_success()
+            .await;
+    }
+
+    async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
+        let auth_token = AuthToken::sign(keypair, vec![Capability::root()]);
+        let body_bytes: axum::body::Bytes = auth_token.serialize().into();
+        let response = server
+            .post("/signup")
+            .add_header("host", keypair.public_key().z32())
+            .bytes(body_bytes)
+            .expect_success()
+            .await;
+
+        response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|h| h.to_str().ok())
+            .expect("signup should return a session cookie")
+            .to_string()
     }
 }

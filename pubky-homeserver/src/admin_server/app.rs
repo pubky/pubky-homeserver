@@ -20,6 +20,8 @@ use axum_server::Handle;
 use tokio::task::JoinHandle;
 use tower_http::cors::CorsLayer;
 
+use crate::shared::webdav::endpoint::{self as dav_endpoint, DavAccess};
+
 /// Admin password protected router.
 fn create_protected_router(password: &str) -> Router<AppState> {
     Router::new()
@@ -54,11 +56,23 @@ pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Rout
     let app = Router::new()
         .merge(admin_router)
         .merge(public_router)
-        .route("/dav{*path}", any(dav_handler::dav_handler))
-        .with_state(state)
+        .with_state(state.clone())
         .layer(CorsLayer::very_permissive());
 
-    with_trace_layer(app).into_make_service()
+    // WebDAV is kept out of the blanket CORS layer above: `CorsLayer` answers
+    // every OPTIONS request itself, which strips the `DAV:` compliance header
+    // a file manager reads before it will mount anything. The endpoint's own
+    // CORS answers only real preflights and lets a bare OPTIONS through.
+    let dav = Router::new()
+        .route(dav_endpoint::DAV_ROOT_ROUTE, any(dav_handler::dav_handler))
+        .route(dav_endpoint::DAV_ROUTE, any(dav_handler::dav_handler))
+        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            DavAccess::ReadWrite,
+            dav_endpoint::cors,
+        ));
+
+    with_trace_layer(app.merge(dav)).into_make_service()
 }
 
 /// Errors that can occur when building a `AdminServer`.
@@ -434,6 +448,44 @@ mod tests {
             .expect_success()
             .await;
         response.assert_status_ok();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_options_advertises_compliance_to_file_managers() {
+        // A file manager reads `DAV:` off a bare OPTIONS before it will mount
+        // anything. The server's blanket CORS layer answers every OPTIONS
+        // itself, so while `/dav` sat under it this header never appeared and
+        // Finder and GNOME Files could not mount the admin share at all.
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+
+        let response = server
+            .method(Method::OPTIONS, "/dav/")
+            .add_header("Authorization", auth_header().as_str())
+            .await;
+        response.assert_status_ok();
+        let dav = response
+            .headers()
+            .get("dav")
+            .expect("OPTIONS must advertise DAV compliance")
+            .to_str()
+            .unwrap();
+        // Class 1 is WebDAV itself; class 2 is locking, which macOS insists on
+        // before it will mount a share writable.
+        assert!(
+            dav.starts_with('1') && dav.contains('2'),
+            "unexpected DAV classes: {dav}"
+        );
+        let allow = response
+            .headers()
+            .get("allow")
+            .and_then(|v| v.to_str().ok())
+            .expect("OPTIONS must carry Allow");
+        assert!(
+            allow.contains("LOCK"),
+            "the operator's share takes locks: {allow}"
+        );
     }
 
     /// PUT a file via WebDAV, GET it back, then DELETE it.

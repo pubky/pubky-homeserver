@@ -25,11 +25,6 @@ pubky_listen_socket = "127.0.0.1:6287"
 # May be put behind a reverse proxy with TLS enabled.
 icann_listen_socket = "127.0.0.1:6286"
 
-# Serve the read-only WebDAV endpoint at /dav, so a user's public folder can be
-# mounted in a file manager. See docs/WEBDAV.md.
-# Default: true
-# webdav = true
-
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE
@@ -62,6 +57,15 @@ key = "ip"
 whitelist = [
     "127.0.0.1"
 ]
+
+# Limit WebDAV directory listings to 600 per minute per IP. Mounted folders
+# poll constantly, so this is generous: it stops a runaway client, not normal
+# use.
+[[drive.rate_limits]]
+path = "/dav/**"
+method = "PROPFIND"
+quota = "600r/m"
+key = "ip"
 
 [default_quotas]
 # Default bandwidth limits for the rate limiter.

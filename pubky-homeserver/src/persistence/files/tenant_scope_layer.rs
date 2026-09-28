@@ -62,9 +62,16 @@ pub struct TenantScopeAccessor<A: Access> {
 /// mounted, with or without a trailing slash. Everything else must sit beneath
 /// it. Keys are compared with any leading slash removed, because a DAV path
 /// arrives absolute while an OpenDAL key is not.
+///
+/// A `.` or `..` segment is refused wherever it sits. OpenDAL does not resolve
+/// them — it only collapses slashes — but the filesystem backend joins the key
+/// onto its root and the OS then does, so `{key}/pub/../priv/x` would read a
+/// private file while passing a prefix check. Nothing upstream should let one
+/// through; this layer exists for the day something does.
 fn is_in_scope(prefix: &str, path: &str) -> bool {
     let path = path.trim_start_matches('/');
-    path.starts_with(prefix) || path == prefix.trim_end_matches('/')
+    let has_dot_segment = path.split('/').any(|segment| matches!(segment, "." | ".."));
+    !has_dot_segment && (path.starts_with(prefix) || path == prefix.trim_end_matches('/'))
 }
 
 fn check(prefix: &str, path: &str) -> Result<()> {
@@ -247,16 +254,169 @@ mod tests {
     }
 
     #[test]
-    fn traversal_inside_a_key_does_not_escape() {
-        // OpenDAL keys are opaque strings, so `..` is a literal segment here
-        // rather than a traversal. The HTTP layer collapses it before a key is
-        // built; this check only has to refuse a key that starts outside.
+    fn dot_segments_are_refused_wherever_they_sit() {
+        // The filesystem backend hands the key to the OS, which resolves `..`.
+        // A prefix check alone would pass the first of these.
         let owner = Keypair::random().public_key().z32();
         let other = Keypair::random().public_key().z32();
         let prefix = prefix_for(&owner);
 
-        assert!(!is_in_scope(&prefix, &format!("../{other}/pub/x")));
-        assert!(!is_in_scope(&prefix, &format!("{owner}/../{other}/pub/x")));
+        for path in [
+            format!("{owner}/pub/../priv/secret.txt"),
+            format!("{owner}/pub/./x"),
+            format!("{owner}/pub/x/.."),
+            format!("{owner}/../{other}/pub/x"),
+            format!("../{other}/pub/x"),
+        ] {
+            assert!(!is_in_scope(&prefix, &path), "{path} should be denied");
+        }
+    }
+
+    // ── Through a real operator ─────────────────────────────────────────
+    //
+    // The string checks above pin the rule; these pin that every accessor
+    // override actually applies it. The unscoped operator plants files the
+    // scoped one must and must not be able to reach.
+
+    use crate::persistence::files::opendal::opendal_test_operators::get_fs_operator;
+    use opendal::{ErrorKind, Operator};
+
+    struct Drives {
+        owner: String,
+        other: String,
+        unscoped: Operator,
+        scoped: Operator,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn drives() -> Drives {
+        let owner_key = Keypair::random().public_key();
+        let owner = owner_key.z32();
+        let other = Keypair::random().public_key().z32();
+        let (unscoped, dir) = get_fs_operator();
+        for (path, body) in [
+            (format!("{owner}/pub/a.txt"), "public"),
+            (format!("{owner}/priv/s.txt"), "secret"),
+            (format!("{other}/pub/b.txt"), "someone else's"),
+        ] {
+            unscoped.write(&path, body).await.unwrap();
+        }
+        let scoped = unscoped.clone().layer(TenantScopeLayer::public(&owner_key));
+        Drives {
+            owner,
+            other,
+            unscoped,
+            scoped,
+            _dir: dir,
+        }
+    }
+
+    fn denied<T: std::fmt::Debug>(result: Result<T>, what: &str) {
+        let error = result.expect_err(&format!("{what} should be refused"));
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{what}: {error}");
+    }
+
+    #[tokio::test]
+    async fn the_public_folder_is_readable_through_the_scoped_operator() {
+        let d = drives().await;
+        let owner = &d.owner;
+
+        let body = d.scoped.read(&format!("{owner}/pub/a.txt")).await.unwrap();
+        assert_eq!(body.to_vec(), b"public");
+        assert!(d.scoped.stat(&format!("{owner}/pub/a.txt")).await.is_ok());
+
+        let listed: Vec<String> = d
+            .scoped
+            .list(&format!("{owner}/pub/"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name().to_string())
+            .collect();
+        assert!(listed.contains(&"a.txt".to_string()), "{listed:?}");
+    }
+
+    #[tokio::test]
+    async fn nothing_else_is_readable_through_the_scoped_operator() {
+        let d = drives().await;
+        let (owner, other) = (&d.owner, &d.other);
+
+        denied(
+            d.scoped.read(&format!("{owner}/priv/s.txt")).await,
+            "reading /priv/",
+        );
+        // The backend really does resolve `..` — the unscoped operator reads
+        // the private file through the public folder — which is exactly why
+        // the layer refuses the segment rather than trusting the prefix.
+        let sneaky = format!("{owner}/pub/../priv/s.txt");
+        assert_eq!(d.unscoped.read(&sneaky).await.unwrap().to_vec(), b"secret");
+        denied(d.scoped.read(&sneaky).await, "dot-dot after the prefix");
+        denied(
+            d.scoped.stat(&format!("{owner}/priv/s.txt")).await,
+            "stat of /priv/",
+        );
+        denied(
+            d.scoped.read(&format!("{other}/pub/b.txt")).await,
+            "another drive",
+        );
+        // Listing the drive root would reveal `priv/`; listing the storage
+        // root would reveal every drive.
+        denied(
+            d.scoped.list(&format!("{owner}/")).await,
+            "listing the drive root",
+        );
+        denied(d.scoped.list("/").await, "listing the storage root");
+        denied(d.scoped.list("").await, "listing the storage root");
+    }
+
+    #[tokio::test]
+    async fn writes_outside_the_public_folder_are_refused_and_change_nothing() {
+        let d = drives().await;
+        let (owner, other) = (&d.owner, &d.other);
+        let public = format!("{owner}/pub/a.txt");
+        let private = format!("{owner}/priv/s.txt");
+
+        denied(
+            d.scoped.write(&private, "clobbered").await,
+            "writing /priv/",
+        );
+        denied(
+            d.scoped.write(&format!("{other}/pub/b.txt"), "x").await,
+            "writing another drive",
+        );
+        denied(d.scoped.delete(&private).await, "deleting from /priv/");
+        denied(
+            d.scoped.copy(&public, &format!("{owner}/priv/c.txt")).await,
+            "copying into /priv/",
+        );
+        denied(
+            d.scoped.copy(&private, &format!("{owner}/pub/c.txt")).await,
+            "copying out of /priv/",
+        );
+        denied(
+            d.scoped
+                .rename(&public, &format!("{owner}/priv/m.txt"))
+                .await,
+            "moving into /priv/",
+        );
+        denied(
+            d.scoped.create_dir(&format!("{owner}/priv/d/")).await,
+            "mkdir in /priv/",
+        );
+
+        // The layer only confines; inside the folder the operator still works.
+        d.scoped
+            .write(&format!("{owner}/pub/w.txt"), "w")
+            .await
+            .unwrap();
+
+        let untouched = d.unscoped.read(&private).await.unwrap();
+        assert_eq!(untouched.to_vec(), b"secret");
+        assert!(d
+            .unscoped
+            .stat(&format!("{owner}/priv/c.txt"))
+            .await
+            .is_err());
     }
 
     #[test]

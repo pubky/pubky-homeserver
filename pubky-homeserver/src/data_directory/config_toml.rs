@@ -46,15 +46,6 @@ pub enum ConfigReadError {
     ConfigMergeError(String),
 }
 
-/// `serde` default for a flag that is on unless an operator turns it off.
-///
-/// The flag was added after homeservers were already deployed, so it defaults
-/// rather than being required: an existing `config.toml` that predates the
-/// field must keep parsing.
-fn enabled() -> bool {
-    true
-}
-
 /// Config structs
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -75,9 +66,6 @@ pub struct DriveToml {
     pub icann_listen_socket: SocketAddr,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
-    /// Serve the read-only WebDAV endpoint at `/dav`.
-    #[serde(default = "enabled")]
-    pub webdav: bool,
 }
 
 /// Admin server configuration
@@ -334,7 +322,7 @@ mod tests {
         // runaway-client guard on mounted drives.
         assert_eq!(c.drive.rate_limits.len(), 2);
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
-        assert_eq!(c.drive.rate_limits[1].path.0, "/dav/*");
+        assert_eq!(c.drive.rate_limits[1].path.0, "/dav/**");
         assert_eq!(
             c.drive.rate_limits[1].key,
             crate::shared::quota::LimitKeyType::Ip
@@ -355,39 +343,24 @@ mod tests {
     }
 
     #[test]
-    fn config_files_written_before_the_webdav_flag_still_parse() {
-        // `drive.webdav` landed after homeservers were deployed. A config.toml
-        // that predates it must keep working, with WebDAV on.
-        let legacy = r#"
-            [general]
-            signup_mode = "token_required"
-            database_url = "postgres://localhost:5432/pubky_homeserver"
-            [drive]
-            pubky_listen_socket = "127.0.0.1:6287"
-            icann_listen_socket = "127.0.0.1:6286"
-            rate_limits = []
-            [default_quotas]
-            [storage]
-            type = "file_system"
-            [admin]
-            enabled = true
-            listen_socket = "127.0.0.1:6288"
-            admin_password = "admin"
-            [metrics]
-            enabled = false
-            listen_socket = "127.0.0.1:6289"
-            [pkdns]
-            public_ip = "127.0.0.1"
-            user_keys_republisher_interval = 14400
-            [logging]
-            level = "info"
-            module_levels = []
-        "#;
+    fn the_shipped_webdav_limit_matches_real_requests() {
+        // `*` in fast-glob stops at `/`, so `/dav/*` would never have matched
+        // a real request — every one is at least `/dav/{key}/pub/`.
+        let config = ConfigToml::default();
+        let limit = &config.drive.rate_limits[1];
+        assert_eq!(limit.path.0, "/dav/**");
 
-        let config = ConfigToml::from_str(legacy).expect("a pre-flag config must still parse");
+        let key = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+        for path in [
+            format!("/dav/{key}/pub/"),
+            format!("/dav/{key}/pub/pubky.app/posts/abc"),
+            format!("/dav/{key}/"),
+        ] {
+            assert!(limit.path.is_match(&path), "{path} should be rate limited");
+        }
         assert!(
-            config.drive.webdav,
-            "WebDAV should stay on for existing servers"
+            !limit.path.is_match("/storage/x/pub/"),
+            "REST is not this limit's business"
         );
     }
 
@@ -427,7 +400,7 @@ mod tests {
         // Default rate limits should be preserved from defaults
         assert_eq!(merged.drive.rate_limits.len(), 2);
         assert_eq!(merged.drive.rate_limits[0].path.0, "/signup_tokens/*");
-        assert_eq!(merged.drive.rate_limits[1].path.0, "/dav/*");
+        assert_eq!(merged.drive.rate_limits[1].path.0, "/dav/**");
         let expected_logging = Some(LoggingToml {
             level: LogLevel::from_str("trace").unwrap(),
             module_levels: vec![],

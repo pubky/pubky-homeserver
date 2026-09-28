@@ -14,6 +14,7 @@
 /// This needs more research especially in consideration with Cryptrees. I see a future where "permissions" are set on an individual folder level and not forced on top level folders. TBD though.
 /// via: <https://github.com/pubky/pubky-homeserver/pull/145#discussion_r2149297326>
 ///
+pub(crate) mod endpoint;
 mod entry_path;
 mod entry_path_pub;
 mod webdav_path_axum;

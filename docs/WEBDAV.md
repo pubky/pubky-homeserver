@@ -26,19 +26,14 @@ API already, and the endpoint serves exactly that and nothing more:
 - **Only `/pub/` exists.** The drive root, `/priv/` and everything else are
   `404` — not `401` or `403`, which would confirm there is something there.
 
-The endpoint reports `DAV: 1`: compliance class 1, no locking, which is what
-makes Finder mount it read-only instead of complaining.
+`OPTIONS` reports `DAV: 1` — compliance class 1, no locking — with an `Allow`
+that lists only the read verbs, and a write attempt gets `405`. Between them
+that is what a file manager needs to mount the share read-only rather than
+report it broken.
 
 Bandwidth quotas and request rate limits apply as they do to the REST routes.
 The shipped config also rate-limits `PROPFIND` per IP, generously enough for a
 real sync client.
-
-To switch it off:
-
-```toml
-[drive]
-webdav = false   # default: true
-```
 
 ## Connect from Ubuntu (GNOME Files)
 
@@ -110,15 +105,26 @@ port 6286 — see [DEPLOY.md](./DEPLOY.md). The Pubky TLS port (6287) is not an
 alternative: it authenticates with a raw public key, which no file manager will
 accept.
 
+## For Operators
+
+Confinement is by storage key, not by what the key resolves to on disk. On the
+filesystem backend a symlink placed inside `data/files/<key>/pub/` is followed,
+so one pointing at `../priv` would serve private files. Only someone with
+access to the data directory can create one — no client can — and REST would
+not serve it, since it has no entry. Keep symlinks out of the data directory.
+
 ## Limitations
 
 - **Read-only, public folders only.** You cannot yet mount your own drive to
   write to it, or reach `/priv/`.
 - **The URL must end in `/pub/`.** The drive root is `404` by design.
-- **`PROPFIND` needs `Depth: 0` or `1`.** `Depth: infinity`, and no `Depth`
-  header, are refused with `403`, so listing a subtree is one request per
-  directory. File managers already work this way; sync tools that fetch a tree
-  in one call will not.
+- **`PROPFIND` needs `Depth: 0` or `1`.** `Depth: infinity` is refused with
+  `501`, so listing a whole subtree is one request per directory; a request
+  with no `Depth` header is served as a one-level listing. File managers
+  already work this way; sync tools that fetch a tree in one call will not.
+- **Content types are guessed from the file name.** REST serves the type a
+  file was stored with; WebDAV serves what the extension suggests, so a file
+  with no extension is `application/octet-stream` whatever it holds.
 - **No free-space figure** for clients that show disk usage.
 
 ## Troubleshooting
