@@ -139,7 +139,6 @@ impl PubkySigner {
             grant_claims,
             client_signer,
             homeserver,
-            None,
         )
         .await?;
         let session = PubkySession::from_grant_credential(self.client.clone(), credential);

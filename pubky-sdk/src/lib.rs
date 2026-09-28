@@ -107,3 +107,8 @@ pub use reqwest::{Method, StatusCode};
 
 #[cfg(test)]
 use pubky_testnet as _; // Used in docstring tests.
+
+#[doc(hidden)]
+pub use actors::auth::grant::shared_session::{
+    GrantSessionCoordinator, GrantSessionLease, SharedGrantSession,
+};

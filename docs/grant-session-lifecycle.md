@@ -8,28 +8,55 @@ The SDK reuses a valid bearer that already lasts until grant expiry.
 ## Browser applications
 
 Use `browserSessionStore.save(session)` after authentication and
-`browserSessionStore.restore(id)` when restoring an account. The SDK manages the
-per-tab sessions.
+`browserSessionStore.restore(id)` when restoring an account. Save the session
+before using it for requests. The original handle and its clones then join the
+shared browser session.
 
-- Each tab gets its own slot, so restoring or refreshing one tab leaves the
-  others authenticated.
-- Reloading a tab reuses its slot. Concurrent restores in one SDK instance share
-  the same credential and bearer refreshes.
-- IndexedDB stores the grant restore material. `sessionStorage` stores the public
-  slot ID. A Web Lock prevents a duplicate tab from reusing the copied ID. The
-  browser releases the lock when the document closes or reloads.
-- Browser restore requires IndexedDB, sessionStorage, Web Locks and a secure
-  context. `isAvailable()` checks browser facilities, not homeserver support.
-- Closed or crashed tabs count toward the limit until their bearers expire. The
-  default lifetime is one hour, capped by the grant's expiry.
-- Signout revokes the grant, invalidating all its sessions and future restores.
-  Other tabs discover the revocation on their next authenticated request; the
-  app must update their UI. `remove`, `clear` and `clearAll` delete local data
-  without revoking the grant or immediately invalidating live sessions.
+- Tabs on the same origin share one slot and bearer for each stored grant.
+  Opening, closing, duplicating or reloading tabs does not allocate another slot.
+  Different origins and browser profiles have separate slots, even for the same grant.
+- IndexedDB stores the grant restore material, current bearer and slot ID.
+  Delegated WebCrypto private keys remain non-extractable. Treat the stored
+  bearer as a credential; do not log or export the browser record.
+- Authenticated requests hold shared Web Locks until response headers arrive.
+  Refresh takes an exclusive lock and saves its result before releasing it.
+  Requests can run concurrently; a slow request can delay refresh. Response
+  bodies and open event streams do not retain the lock.
+- A refresh marker survives a lost response or tab closure. The next operation
+  exchanges into the same slot before using the bearer. A replayable request
+  rejected with 401 gets at most one recovery attempt. Transport failures and
+  other HTTP errors do not replay writes.
+- Browser save and restore require IndexedDB, Web Locks, a secure context and
+  homeserver `grant-session-slots` support. `isAvailable()` checks browser
+  facilities, not homeserver support. `sessionStorage` is no longer required.
+- Signout revokes the grant and all its sessions, including on other origins.
+  A failed signout remains pending and blocks requests; retry signout, or restore
+  the saved record to finish revocation. Successful signout removes the saved
+  record and its delegated key.
+- `remove`, `clear` and `clearAll` only delete local data. Browser-managed handles
+  stop working after their record is removed. These operations do not revoke the
+  grant or delete its server-side sessions.
+
+The SDK dispatches `pubky-session-changed` on `window` after local removal or
+successful signout, and forwards the notification to other tabs with
+BroadcastChannel when available. `event.detail` contains `{ id, action }`:
+`action` is `removed` for one record or `cleared` for all records (`id: null`).
+Applications decide how to update their UI. Requests always check persisted
+state, so missed notifications cannot restore removed credentials.
 
 Generic Rust/JS `restore_session`/`restoreSession` creates a new independent
-session on supporting homeservers. Browser apps should use the browser store for
-reload and duplicate-tab handling. Cloned Rust sessions share refresh state.
+session on supporting homeservers. Browser applications should use the browser
+store to share sessions across tabs. Requests made with a manually copied bearer
+are outside this coordination.
+
+### Upgrading stored browser sessions
+
+Existing grant records remain readable. On the first restore, the SDK saves a
+shared slot and bearer in the existing record. Per-tab sessions from older SDKs
+still count toward the cap until expiry, so this transition needs a free slot.
+Reload older app tabs to move them onto the shared-session SDK; older tabs do not
+participate in its locks. A saved session from the new SDK keeps its slot even
+when every tab closes.
 
 ## Homeserver configuration
 
@@ -67,7 +94,8 @@ works without a live bearer and does not consume issuance capacity or rate budge
 Legacy bearer-only logout sends the cached bearer. Repeating
 proof logout with a fresh nonce is idempotent, including after a lost response.
 
-- New SDK + new homeserver: independent sessions with automatic per-slot refresh.
+- New SDK + new homeserver: shared sessions within an origin; independent slots
+  across origins and browser profiles.
 - Old SDK + new homeserver: requests without `session_id` rotate one legacy slot.
   They do not replace identified sessions, but old clients still compete with
   each other. The legacy slot counts toward the cap.
@@ -82,4 +110,5 @@ behind one endpoint: an old binary still deletes all sessions for a grant. The
 migration preserves existing bearers. Downgrading the binary restores the old
 replacement behavior and may invalidate other tabs.
 
-Sharing a grant with another vibe still gives that vibe the grant's permissions.
+Sharing a grant and its client credential with another application gives it the
+grant's permissions. Browser coordination does not implement that handoff.

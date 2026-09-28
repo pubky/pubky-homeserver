@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 use super::{
     grant_exchange::{credential_from_grant_exchange, post_grant_session},
     pop_signer::{DelegatedSignFn, GrantPopSigner},
+    shared_session::GrantSessionCoordinator,
 };
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::credential::{SessionCredential, credential_session_missing};
@@ -60,8 +61,6 @@ pub(crate) fn now_unix() -> u64 {
 pub(crate) struct GrantCredentialState {
     /// Current opaque bearer token (homeserver-issued).
     pub bearer: String,
-    /// Unix seconds at which `bearer` expires. Drives proactive refresh.
-    pub token_expires_at: u64,
     /// The grant JWS used to mint this and future bearers (refresh material).
     pub grant_jws: String,
     /// Decoded grant claims — exposes `iss`, `client_id`, `cnf`, `jti`, …
@@ -72,14 +71,15 @@ pub(crate) struct GrantCredentialState {
     pub homeserver_pk: PublicKey,
     /// Latest server-reported session metadata.
     pub session: GrantSessionInfo,
+    pub coordinator: Option<Arc<dyn GrantSessionCoordinator>>,
 }
 
 impl GrantCredentialState {
-    fn needs_refresh(&self, now: u64, slack: u64) -> bool {
+    pub(super) fn needs_refresh(&self, now: u64, slack: u64) -> bool {
         // Refresh cannot extend a valid bearer that already reaches grant expiry.
-        self.token_expires_at <= now
-            || (self.token_expires_at < self.grant_claims.exp
-                && self.token_expires_at.saturating_sub(slack) <= now)
+        self.session.token_expires_at <= now
+            || (self.session.token_expires_at < self.grant_claims.exp
+                && self.session.token_expires_at.saturating_sub(slack) <= now)
     }
 }
 
@@ -95,9 +95,9 @@ pub struct GrantCredential {
 
 /// Durable refresh material for restoring a grant-backed session.
 ///
-/// This is the part of [`GrantCredential`] that is worth persisting. It omits
-/// the short-lived bearer token and cached session metadata; restoring always
-/// exchanges the stored grant for a fresh bearer.
+/// Portable restore material without a bearer or cached session metadata.
+/// Generic restore exchanges it for a fresh bearer; browser restore can reuse
+/// the bearer saved separately in `IndexedDB`.
 ///
 /// Treat values of this type as bearer-equivalent secrets until the underlying
 /// grant expires or is revoked.
@@ -214,17 +214,56 @@ impl GrantCredential {
         let info = to_session_info(&response.session);
         let state = GrantCredentialState {
             bearer: response.token,
-            token_expires_at: response.session.token_expires_at,
             grant_jws,
             grant_claims,
             client_signer,
             homeserver_pk,
             session: response.session,
+            coordinator: None,
         };
         Self {
             state: Arc::new(Mutex::new(state)),
             info,
         }
+    }
+
+    /// Read browser restore material without issuing a bearer.
+    /// Expired grants remain usable for finishing a pending logout.
+    #[doc(hidden)]
+    pub fn from_shared_secret(token: &str) -> Result<Self> {
+        let material = restore_material(StoredGrantCredential::decode(token)?, true)?;
+        Ok(Self::from_shared_material(material))
+    }
+
+    /// Read browser-held restore material, including expired grants for logout.
+    #[doc(hidden)]
+    pub fn from_shared_delegated_state(
+        state: DelegatedGrantCredentialState,
+        sign: DelegatedSignFn,
+    ) -> Result<Self> {
+        Ok(Self::from_shared_material(restore_delegated_material(
+            state, sign, true,
+        )?))
+    }
+
+    fn from_shared_material(
+        (jws, claims, signer, homeserver): (String, GrantClaims, GrantPopSigner, PublicKey),
+    ) -> Self {
+        let response = GrantSessionResponse {
+            token: String::new(),
+            session: GrantSessionInfo {
+                session_id: Some(RandomId::generate()),
+                homeserver: homeserver.clone(),
+                pubky: claims.iss.clone(),
+                client_id: claims.client_id.clone(),
+                capabilities: claims.caps.clone(),
+                grant_id: claims.jti.clone(),
+                token_expires_at: 0,
+                grant_expires_at: claims.exp,
+                created_at: 0,
+            },
+        };
+        Self::from_response(response, jws, claims, signer, homeserver)
     }
 
     /// Snapshot of the current bearer token (released immediately).
@@ -275,25 +314,15 @@ impl GrantCredential {
     ///   mismatched `PoP` keys.
     /// - Propagates HTTP/server errors from `POST /auth/grant/session`.
     pub async fn import_secret(token: &str, client: &PubkyHttpClient) -> Result<Self> {
-        Self::import_secret_in_slot(token, client, None).await
-    }
-
-    /// Restore using a browser-owned session identity. IDs are not credentials.
-    #[doc(hidden)]
-    pub async fn import_secret_in_slot(
-        token: &str,
-        client: &PubkyHttpClient,
-        session_id: Option<RandomId>,
-    ) -> Result<Self> {
         let saved = StoredGrantCredential::decode(token)?;
-        let (grant_jws, grant_claims, client_signer, homeserver_pk) = restore_material(saved)?;
+        let (grant_jws, grant_claims, client_signer, homeserver_pk) =
+            restore_material(saved, false)?;
         credential_from_grant_exchange(
             client,
             grant_jws,
             grant_claims,
             client_signer,
             homeserver_pk,
-            session_id,
         )
         .await
     }
@@ -310,26 +339,14 @@ impl GrantCredential {
         client: &PubkyHttpClient,
         sign: DelegatedSignFn,
     ) -> Result<Self> {
-        Self::import_delegated_state_in_slot(state, client, sign, None).await
-    }
-
-    /// Restore a browser-owned independent session slot.
-    #[doc(hidden)]
-    pub async fn import_delegated_state_in_slot(
-        state: DelegatedGrantCredentialState,
-        client: &PubkyHttpClient,
-        sign: DelegatedSignFn,
-        session_id: Option<RandomId>,
-    ) -> Result<Self> {
         let (grant_jws, grant_claims, client_signer, homeserver_pk) =
-            restore_delegated_material(state, sign)?;
+            restore_delegated_material(state, sign, false)?;
         credential_from_grant_exchange(
             client,
             grant_jws,
             grant_claims,
             client_signer,
             homeserver_pk,
-            session_id,
         )
         .await
     }
@@ -339,6 +356,11 @@ impl GrantCredential {
     /// Holds the credential mutex for the entire refresh so concurrent
     /// refreshes serialize on the same `Arc<Mutex<…>>`.
     pub(crate) async fn refresh(&self, client: &PubkyHttpClient) -> Result<()> {
+        if let Some(coordinator) = self.coordinator().await {
+            return self
+                .refresh_shared(client, coordinator.as_ref(), None)
+                .await;
+        }
         cross_log!(info, "Refreshing grant credential");
         let mut state = self.state.lock().await;
 
@@ -358,7 +380,6 @@ impl GrantCredential {
         .await?;
 
         state.bearer = parsed.token;
-        state.token_expires_at = parsed.session.token_expires_at;
         state.session = parsed.session;
         Ok(())
     }
@@ -390,6 +411,16 @@ impl SessionCredential for GrantCredential {
     }
 
     async fn signout(&self, client: &PubkyHttpClient) -> Result<()> {
+        let lease = match self.coordinator().await {
+            Some(coordinator) => Some(coordinator.acquire(true).await?),
+            None => None,
+        };
+        if let Some(lease) = &lease
+            && let Some(mut shared) = lease.load().await?
+        {
+            shared.logout_pending = true;
+            lease.store(&shared).await?;
+        }
         let request = self.grant_session_request(client, Method::DELETE).await?;
         let proof = {
             let state = self.state.lock().await;
@@ -412,7 +443,21 @@ impl SessionCredential for GrantCredential {
         };
         let response = request.send().await?;
         client.check_http_status(response).await?;
+        if let Some(lease) = lease {
+            lease.remove().await?;
+        }
         Ok(())
+    }
+
+    async fn send(
+        &self,
+        rb: RequestBuilder,
+        client: &PubkyHttpClient,
+    ) -> Result<reqwest::Response> {
+        if let Some(coordinator) = self.coordinator().await {
+            return self.send_shared(rb, client, coordinator.as_ref()).await;
+        }
+        Ok(self.attach(rb, client).await?.send().await?)
     }
 
     async fn attach(&self, rb: RequestBuilder, client: &PubkyHttpClient) -> Result<RequestBuilder> {
@@ -438,14 +483,16 @@ impl SessionCredential for GrantCredential {
         client: &PubkyHttpClient,
         _user: &PublicKey,
     ) -> Result<Option<SessionInfo>> {
-        let bearer = self.current_bearer().await;
-        let response = self
-            .grant_session_request(client, Method::GET)
-            .await?
-            .bearer_auth(&bearer)
-            .send()
-            .await
-            .map_err(crate::Error::from)?;
+        let request = self.grant_session_request(client, Method::GET).await?;
+        let response = if let Some(coordinator) = self.coordinator().await {
+            self.send_shared(request, client, coordinator.as_ref())
+                .await?
+        } else {
+            request
+                .bearer_auth(self.current_bearer().await)
+                .send()
+                .await?
+        };
         if credential_session_missing(&response) {
             return Ok(None);
         }
@@ -503,11 +550,12 @@ fn to_session_info(session: &GrantSessionInfo) -> SessionInfo {
 
 fn restore_material(
     saved: StoredGrantCredential,
+    allow_expired: bool,
 ) -> Result<(String, GrantClaims, GrantPopSigner, PublicKey)> {
     let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
         AuthError::Validation(format!("invalid stored grant credential grant JWS: {err}"))
     })?;
-    if grant_claims.exp <= now_unix() {
+    if !allow_expired && grant_claims.exp <= now_unix() {
         return Err(AuthError::Validation("stored grant credential has expired".into()).into());
     }
 
@@ -530,13 +578,14 @@ fn restore_material(
 fn restore_delegated_material(
     saved: DelegatedGrantCredentialState,
     sign: DelegatedSignFn,
+    allow_expired: bool,
 ) -> Result<(String, GrantClaims, GrantPopSigner, PublicKey)> {
     let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
         AuthError::Validation(format!(
             "invalid delegated grant credential grant JWS: {err}"
         ))
     })?;
-    if grant_claims.exp <= now_unix() {
+    if !allow_expired && grant_claims.exp <= now_unix() {
         return Err(AuthError::Validation("delegated grant credential has expired".into()).into());
     }
 
@@ -592,28 +641,6 @@ mod tests {
     use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConfigToml};
 
     use super::*;
-
-    #[tokio::test]
-    async fn explicit_slot_restore_refuses_unadvertised_support_before_exchange() {
-        let (stored, _) = stored_credential(now_unix() + 3600);
-        let client = PubkyHttpClient::builder()
-            .isolated_pkarr_test()
-            .build()
-            .unwrap();
-        client.features.insert(&stored.homeserver_pk, &[]);
-        let error = GrantCredential::import_secret_in_slot(
-            &stored.encode(),
-            &client,
-            Some(RandomId::generate()),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not advertise grant-session-slots")
-        );
-    }
 
     #[tokio::test]
     #[pubky_testnet::test]
@@ -677,7 +704,7 @@ mod tests {
         }
 
         // Logout must also work when the cached bearer would normally need a refresh.
-        credential.state.lock().await.token_expires_at = now_unix() + 60;
+        credential.state.lock().await.session.token_expires_at = now_unix() + 60;
         credential.signout(&client).await.unwrap();
         assert!(
             credential
@@ -706,7 +733,7 @@ mod tests {
             (999, 999, 150, true),
             (0, 1_120, 150, true),
         ] {
-            state.token_expires_at = bearer_exp;
+            state.session.token_expires_at = bearer_exp;
             state.grant_claims.exp = grant_exp;
             assert_eq!(
                 state.needs_refresh(now, slack),
@@ -731,7 +758,7 @@ mod tests {
         let (mut stored, _claims) = stored_credential(now_unix() + 3600);
         stored.client_key_secret = Keypair::random().secret();
 
-        let error = restore_material(stored).unwrap_err().to_string();
+        let error = restore_material(stored, false).unwrap_err().to_string();
 
         assert!(error.contains("client key does not match"));
     }
@@ -746,7 +773,7 @@ mod tests {
             client_pk: Keypair::random().public_key(),
         };
 
-        let error = restore_delegated_material(saved, test_delegated_signer())
+        let error = restore_delegated_material(saved, test_delegated_signer(), false)
             .unwrap_err()
             .to_string();
 
@@ -763,7 +790,7 @@ mod tests {
             client_pk: claims.cnf,
         };
 
-        let error = restore_delegated_material(saved, test_delegated_signer())
+        let error = restore_delegated_material(saved, test_delegated_signer(), false)
             .unwrap_err()
             .to_string();
 
@@ -792,9 +819,22 @@ mod tests {
     fn restore_material_rejects_expired_grant() {
         let (stored, _claims) = stored_credential(now_unix().saturating_sub(1));
 
-        let error = restore_material(stored).unwrap_err().to_string();
+        let error = restore_material(stored, false).unwrap_err().to_string();
 
         assert!(error.contains("has expired"));
+    }
+
+    #[test]
+    fn shared_restore_keeps_expired_material_for_logout() {
+        let (stored, claims) = stored_credential(now_unix().saturating_sub(1));
+        GrantCredential::from_shared_secret(&stored.encode()).unwrap();
+        let delegated = DelegatedGrantCredentialState {
+            grant_jws: stored.grant_jws,
+            homeserver_pk: stored.homeserver_pk,
+            key_id: "delegated-test-key".into(),
+            client_pk: claims.cnf,
+        };
+        GrantCredential::from_shared_delegated_state(delegated, test_delegated_signer()).unwrap();
     }
 
     #[test]

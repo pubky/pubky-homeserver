@@ -38,7 +38,6 @@ pub(crate) async fn credential_from_grant_exchange(
     grant_claims: GrantClaims,
     client_signer: GrantPopSigner,
     homeserver_pubkey: PublicKey,
-    session_id: Option<RandomId>,
 ) -> Result<GrantCredential> {
     let supports_slots = client
         .features
@@ -48,12 +47,7 @@ pub(crate) async fn credential_from_grant_exchange(
             pubky_common::constants::features::GRANT_SESSION_SLOTS,
         )
         .await;
-    if session_id.is_some() && !supports_slots {
-        return Err(RequestError::Validation {
-            message: "Homeserver does not advertise grant-session-slots; browser tab restore requires an upgraded homeserver".into(),
-        }.into());
-    }
-    let session_id = supports_slots.then(|| session_id.unwrap_or_else(RandomId::generate));
+    let session_id = supports_slots.then(RandomId::generate);
     let response = post_grant_session(
         client,
         &grant_jws,

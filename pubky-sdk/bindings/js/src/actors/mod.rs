@@ -1,6 +1,6 @@
 pub mod auth_flow;
 pub(crate) mod browser_grant_key_store;
-mod browser_session_slot;
+mod browser_session;
 pub mod cookie_session;
 pub mod deep_links;
 pub mod event_stream;

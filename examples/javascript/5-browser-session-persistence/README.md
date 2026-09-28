@@ -38,6 +38,6 @@ The demo does not persist root keypairs. If a saved grant expires or is revoked,
 
 ## Multiple tabs
 
-Use a homeserver advertising `grant-session-slots`. The SDK restores a separate
-session in each tab and reuses its slot on reload. Opening another tab leaves
-existing tabs authenticated; signing out revokes all sessions using the same grant.
+Use a homeserver advertising `grant-session-slots`. Tabs on the same origin share
+one slot and bearer, including after reloads. The SDK coordinates requests and
+refreshes with Web Locks. Signing out revokes all sessions using the same grant.

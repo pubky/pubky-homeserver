@@ -182,6 +182,16 @@ test("BrowserSessionStore: saves and restores a completed grant session", async 
     "restored session can perform authenticated storage operations",
   );
 
+  // Older SDKs saved grant material without the shared bearer state.
+  const oldSlot = (await restored.grant!.sessionInfo()).sessionId;
+  await removeSharedSession(stored.id);
+  const migrated = await Promise.all([store.restore(stored.id), store.restore(stored.id)]);
+  const newSlot = (await migrated[0].grant!.sessionInfo()).sessionId;
+  t.notEqual(newSlot, oldSlot, "migration creates a shared slot");
+  t.equal((await migrated[1].grant!.sessionInfo()).sessionId, newSlot, "concurrent migration reuses it");
+  await Promise.all([restored, ...migrated].map(session => session.storage.putText(path, "migrated")));
+  t.pass("existing and migrated handles adopt the shared bearer");
+
   t.end();
 });
 
@@ -577,5 +587,24 @@ function pubkyAuthObjectStores(): Promise<string[]> {
       resolve(names);
     };
     request.onerror = () => reject(request.error);
+  });
+}
+
+function removeSharedSession(id: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("pubky-auth", 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("storedSessions", "readwrite");
+      const store = tx.objectStore("storedSessions");
+      const record = store.get(id);
+      record.onsuccess = () => {
+        delete record.result.sharedSession;
+        store.put(record.result);
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+    };
   });
 }

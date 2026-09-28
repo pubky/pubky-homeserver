@@ -12,6 +12,8 @@ pub(crate) mod flow;
 pub(crate) mod grant_exchange;
 pub mod manager;
 pub(crate) mod pop_signer;
+#[doc(hidden)]
+pub mod shared_session;
 pub mod view;
 
 pub use credential::{DelegatedGrantCredentialState, GrantCredential};

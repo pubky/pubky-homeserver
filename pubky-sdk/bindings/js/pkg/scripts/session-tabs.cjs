@@ -1,4 +1,4 @@
-// Real browser contexts share IndexedDB but have separate JS memory/sessionStorage.
+// Real browser contexts share IndexedDB but have separate JS memory.
 const { app, BrowserWindow } = require("electron");
 const { createServer } = require("node:http");
 const { readFileSync } = require("node:fs");
@@ -38,69 +38,126 @@ async function reload(window) {
   window.reload();
   await loaded;
 }
+async function until(check) {
+  for (let i = 0; i < 100; i++) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error("Browser condition did not settle");
+}
 async function scenario(delegated) {
-  const a = await windowAtOrigin();
+  let a = await windowAtOrigin();
   const { id, slot } = await call(a, "create", delegated);
-  assert.ok(slot);
   const b = await windowAtOrigin();
-  const bSlot = await call(b, "restore", id);
-  assert.notEqual(slot, bSlot);
-  await call(a, "write");
-  await call(b, "write");
-  const exchanges = await call(a, "exchangeCount");
+  assert.equal(await call(b, "restore", id), slot);
+  assert.equal(await call(b, "exchangeCount"), 0, "restore reuses a valid bearer");
+  await assert.rejects(call(b, "restoreWithoutSlots"), /does not advertise grant-session-slots/);
+  assert.equal(await call(b, "exchangeCount"), 0, "unsupported restore does not issue a bearer");
+  await Promise.all([call(a, "write"), call(b, "write")]);
   assert.equal(await call(a, "restoreTogether", id), slot);
-  assert.equal(await call(a, "exchangeCount"), exchanges);
 
-  // Opening through an opener copies its sessionStorage, just like tab duplication.
-  a.webContents.setWindowOpenHandler(() => ({ action: "allow", overrideBrowserWindowOptions: { show: false } }));
-  const opened = once(a.webContents, "did-create-window");
-  await a.webContents.executeJavaScript("window.open(location.href); undefined", true);
-  const [duplicate] = await opened;
-  windows.push(duplicate);
-  if (duplicate.webContents.isLoading()) await once(duplicate.webContents, "did-finish-load");
-  assert.equal(await duplicate.webContents.executeJavaScript(
-    `sessionStorage.getItem(${JSON.stringify(`pubky-session-slot:${id}`)})`
-  ), slot, "opener sessionStorage was copied before SDK restore");
-  const duplicateSlot = await call(duplicate, "restore", id);
-  assert.notEqual(duplicateSlot, slot);
-  assert.notEqual(duplicateSlot, bSlot);
-  await call(a, "write");
-
-  // More reloads than the default cap, while another tab keeps writing.
-  for (let i = 0; i < 21; i++) {
-    await reload(a);
-    assert.equal(await call(a, "restore", id), slot);
-    await call(a, "write");
-    await call(b, "write");
+  // With a one-slot cap, even one extra allocation fails.
+  for (let i = 0; i < 3; i++) {
+    const tab = await windowAtOrigin();
+    assert.equal(await call(tab, "restore", id), slot);
+    assert.equal(await call(tab, "exchangeCount"), 0);
+    await call(tab, "write");
+    tab.destroy();
   }
   await reload(a);
-  await call(a, "loseNext");
-  await assert.rejects(call(a, "restore", id));
   assert.equal(await call(a, "restore", id), slot);
-  await call(b, "write");
+  assert.equal(await call(a, "exchangeCount"), 0);
 
-  await reload(a);
-  await call(a, "expireNext");
-  await call(a, "restore", id);
-  const beforeRefresh = await call(a, "exchangeCount");
-  await call(a, "restoreTogether", id);
+  // Ordinary writes share the lock; a refresh waits for an in-flight write.
+  await call(a, "holdWrite");
+  const write = call(a, "write");
+  await until(() => call(a, "held"));
+  await call(b, "write");
+  await call(b, "expire");
+  const before = await call(b, "exchangeCount");
+  let finished = false;
+  const refresh = call(b, "write").then(() => { finished = true; });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(finished, false);
+  assert.equal(await call(b, "exchangeCount"), before);
+  await call(a, "release");
+  await Promise.all([write, refresh]);
+  assert.equal(await call(b, "exchangeCount"), before + 1);
   await call(a, "write");
-  assert.equal(await call(a, "exchangeCount"), beforeRefresh + 1);
-  await call(b, "write");
 
-  // Logout from a session with an expired cached bearer must revoke every slot.
-  await reload(a);
-  await call(a, "expireNext");
-  await call(a, "restore", id);
-  await call(a, "logout");
+  // Tabs competing to refresh send just one exchange.
+  await call(a, "expire");
+  const counts = await Promise.all([call(a, "exchangeCount"), call(b, "exchangeCount")]);
+  await Promise.all([call(a, "write"), call(b, "write")]);
+  assert.equal((await call(a, "exchangeCount")) + (await call(b, "exchangeCount")), counts[0] + counts[1] + 1);
+
+  for (const failure of ["loseNext", "failNextPersist"]) {
+    await call(a, "expire");
+    await call(a, failure);
+    await assert.rejects(call(a, "write"));
+    assert.equal((await call(b, "shared")).pending, true);
+    await call(b, "write");
+    assert.equal((await call(b, "shared")).pending, false);
+    assert.equal((await call(b, "shared")).slot, slot);
+    await call(a, "write");
+  }
+
+  await call(a, "staleBearer");
+  await call(b, "write");
+  await call(a, "write");
+
+  // The server accepted a refresh, but its tab disappears before persisting it.
+  await call(a, "expire");
+  await call(a, "holdExchange");
+  call(a, "write").catch(() => {});
+  await until(() => call(a, "held"));
+  a.destroy();
+  await call(b, "write");
+  assert.equal((await call(b, "shared")).pending, false);
+  a = await windowAtOrigin();
+  assert.equal(await call(a, "restore", id), slot);
+
+  // A different origin cannot borrow the first origin's bearer or slot.
+  if (!delegated) {
+    const other = await windowAtOrigin();
+    await other.loadURL(base.replace("127.0.0.1", "localhost"));
+    await assert.rejects(call(other, "importRecord", await call(a, "exportRecord")), /409/);
+    const otherGrant = await call(other, "create");
+    assert.notEqual(otherGrant.id, id);
+    await Promise.all([call(other, "write"), call(a, "write")]);
+    await call(other, "logout");
+    other.destroy();
+  }
+
+  // A lost logout response blocks restoration, then retries revocation on reload.
+  await call(a, "expire");
+  await call(a, "loseLogout");
+  await assert.rejects(call(a, "logout"));
+  assert.equal((await call(b, "shared")).logout, true);
   await assert.rejects(call(b, "write"));
-  await assert.rejects(call(duplicate, "write"));
-  await assert.rejects(call(b, "restore", id));
-  a.destroy(); b.destroy(); duplicate.destroy();
-  console.log(`PASS ${delegated ? "delegated" : "local secret"}: independent tabs, duplicate, 21 reloads, concurrent restore, lost response, refresh, expired-bearer logout`);
+  await reload(a);
+  await assert.rejects(call(a, "restore", id));
+  assert.equal(await call(b, "shared"), undefined);
+  await until(async () => (await call(b, "changes")).some(change => change.id === id && change.action === "removed"));
+  await assert.rejects(call(b, "write"));
+
+  // Forgetting persistence stops saved handles without revoking unrelated grants.
+  const second = await call(a, "create", delegated);
+  await call(b, "restore", second.id);
+  await call(a, "remove");
+  await assert.rejects(call(b, "write"));
+  await assert.rejects(call(b, "restore", second.id));
+  assert.equal(await call(b, "shared"), undefined);
+  const third = await call(a, "create", delegated);
+  await call(b, "restore", third.id);
+  await call(a, "forgetAll");
+  await assert.rejects(call(b, "write"));
+  await assert.rejects(call(b, "restore", third.id));
+  a.destroy(); b.destroy();
+  console.log(`PASS ${delegated ? "delegated" : "local secret"}: shared slot, tab reopen/reload, concurrent writes/refresh, interrupted exchanges, logout, removal`);
 }
 
-const timeout = setTimeout(() => { console.error("Browser session tests timed out"); app.exit(1); }, 180000);
+const timeout = setTimeout(() => { console.error("Browser session tests timed out"); app.exit(1); }, 300000);
 app.on("window-all-closed", () => {});
 app.whenReady().then(async () => {
   server.listen(0, "127.0.0.1");

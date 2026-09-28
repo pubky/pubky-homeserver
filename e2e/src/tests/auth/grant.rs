@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use pubky_testnet::pubky_common::{
     auth::{
         grant::GrantClaims,
-        jws::{GrantId, RandomId, GRANT_JWS_TYP},
+        jws::{GrantId, GRANT_JWS_TYP},
     },
     crypto::PublicKey,
 };
@@ -724,11 +724,8 @@ async fn independent_sessions_refresh_and_signout_together() {
         .await
         .unwrap();
     let secret = a.as_grant().unwrap().export_local_secret().await.unwrap();
-    let slot_b = RandomId::generate();
-    let b = pubky
-        .restore_grant_session_in_slot(&secret, slot_b.clone())
-        .await
-        .unwrap();
+    let b = pubky.restore_session(&secret).await.unwrap();
+    let slot_b = b.as_grant().unwrap().session_info().await.session_id;
     let original_a = a.as_grant().unwrap().current_bearer().await;
     let original_b = b.as_grant().unwrap().current_bearer().await;
     for _ in 0..3 {
@@ -745,13 +742,13 @@ async fn independent_sessions_refresh_and_signout_together() {
     }
     assert_ne!(a.as_grant().unwrap().current_bearer().await, original_a);
     assert_ne!(b.as_grant().unwrap().current_bearer().await, original_b);
-    let resumed_b = pubky
-        .restore_grant_session_in_slot(&secret, slot_b)
-        .await
-        .unwrap();
-    assert!(b.revalidate().await.unwrap().is_none());
+    assert_eq!(
+        b.as_grant().unwrap().session_info().await.session_id,
+        slot_b
+    );
     assert!(a.revalidate().await.unwrap().is_some());
-    resumed_b.signout().await.unwrap();
+    assert!(b.revalidate().await.unwrap().is_some());
+    b.signout().await.unwrap();
     assert!(a.revalidate().await.unwrap().is_none());
     assert!(pubky.restore_session(&secret).await.is_err());
 }
