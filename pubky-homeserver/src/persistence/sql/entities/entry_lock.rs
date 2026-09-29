@@ -44,10 +44,12 @@ impl FromRow<'_, PgRow> for EntryLockEntity {
     }
 }
 
-/// Unix seconds on the database clock. `now()` is fixed for the statement, so
-/// one statement sees one instant.
+/// Unix seconds on the database clock. Fixed for the statement, so one
+/// statement sees one instant. Not `now()`, which is fixed for the whole
+/// transaction: a statement late in a long transaction would see a lock that
+/// expired since the transaction began as still live.
 fn db_now() -> SimpleExpr {
-    Expr::cust("EXTRACT(EPOCH FROM NOW())::BIGINT")
+    Expr::cust("EXTRACT(EPOCH FROM STATEMENT_TIMESTAMP())::BIGINT")
 }
 
 /// The database clock `seconds` from now.
@@ -119,6 +121,29 @@ impl EntryLockRepository {
         sqlx::query_as_with(&query, values)
             .fetch_optional(con)
             .await
+    }
+
+    /// Whether `token` holds the live lock on `path`. If it does, the lock row
+    /// stays locked until the executor's transaction ends: nobody can take,
+    /// refresh or release the lock before then, even once it expires.
+    /// Must be called within a transaction to hold the lock.
+    pub async fn hold<'a>(
+        path: &EntryPath,
+        token: &str,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<bool, sqlx::Error> {
+        let statement = Query::select()
+            .from(ENTRY_LOCK_TABLE)
+            .column(EntryLockIden::Path)
+            .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
+            .and_where(Expr::col(EntryLockIden::Token).eq(token))
+            .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(db_now()))
+            .lock(sea_query::LockType::Update)
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        let held = sqlx::query_with(&query, values).fetch_optional(con).await?;
+        Ok(held.is_some())
     }
 
     /// Backdate the lock on `path` so it counts as expired.
@@ -223,7 +248,7 @@ impl EntryLockRepository {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use futures_util::future::join_all;
     use pubky_common::crypto::Keypair;
@@ -245,6 +270,16 @@ mod tests {
 
     async fn live(db: &SqlDb, path: &EntryPath) -> Option<EntryLockEntity> {
         EntryLockRepository::get_active(path, &mut db.pool().into())
+            .await
+            .unwrap()
+    }
+
+    async fn hold(
+        transaction: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        path: &EntryPath,
+        token: &str,
+    ) -> bool {
+        EntryLockRepository::hold(path, token, &mut UnifiedExecutor::from_tx(transaction))
             .await
             .unwrap()
     }
@@ -281,6 +316,50 @@ mod tests {
             .expect("an expired lock is replaced");
         assert_eq!(third.token, "t3");
         assert_eq!(live(&db, &path).await, Some(third));
+    }
+
+    /// A lock held by a transaction cannot change hands until that transaction
+    /// ends, even if it runs out meanwhile. Only the token of the live lock
+    /// can hold it, judged on the clock of each statement rather than of the
+    /// transaction.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn held_lock_cannot_be_taken_until_its_transaction_ends() {
+        let db = SqlDb::test().await;
+        let path = path("/pub/a.txt");
+        EntryLockRepository::acquire(&path, "t1", 1, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+
+        let mut holder = db.pool().begin().await.unwrap();
+        assert!(!hold(&mut holder, &path, "other").await);
+        assert!(hold(&mut holder, &path, "t1").await);
+
+        // The lock runs out while it is held.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(live(&db, &path).await.is_none());
+        let taker = {
+            let (db, path) = (db.clone(), path.clone());
+            tokio::spawn(async move {
+                EntryLockRepository::acquire(&path, "t2", 60, &mut db.pool().into())
+                    .await
+                    .unwrap()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!taker.is_finished(), "a held lock must not be replaced");
+        assert!(
+            !hold(&mut holder, &path, "t1").await,
+            "an expired lock cannot be held again"
+        );
+
+        holder.commit().await.unwrap();
+        let taken = taker
+            .await
+            .unwrap()
+            .expect("an expired lock is replaced once nothing holds it");
+        assert_eq!(taken.token, "t2");
     }
 
     /// Acquisition is one atomic statement: of many acquirers racing for a

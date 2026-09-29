@@ -1,7 +1,13 @@
 use std::{future::Future, sync::Arc};
 
-use crate::persistence::files::{events::EventsService, layer_domain_error::LayerDomainError};
-use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
+use crate::persistence::files::{
+    events::EventsService,
+    layer_domain_error::LayerDomainError,
+    write_lock_token::{current_write_lock_token, WRITE_LOCK_TOKEN},
+};
+use crate::persistence::sql::{
+    entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb, UnifiedExecutor,
+};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::*;
@@ -97,10 +103,13 @@ pub(super) fn already_closed(subject: &str) -> opendal::Error {
 /// [`files`](crate::persistence::files) module docs.
 ///
 /// The task runs in the caller's tracing span, so whatever the finalization
-/// logs still carries the request's context.
+/// logs still carries the request's context. The caller's lock token is
+/// carried over the same way, for [`hold_write_lock`]: a new task starts with
+/// no task-locals.
 pub(super) async fn spawn_finalization<T: Send + 'static>(
     finalization: impl Future<Output = Result<T>> + Send + 'static,
 ) -> Result<T> {
+    let finalization = WRITE_LOCK_TOKEN.scope(current_write_lock_token(), finalization);
     match tokio::spawn(finalization.in_current_span()).await {
         Ok(result) => result,
         Err(error) => Err(opendal::Error::new(
@@ -136,6 +145,41 @@ pub(super) async fn check_no_path_collision(
         return Err(path_collision_error(entry_path));
     }
 
+    Ok(())
+}
+
+fn lock_lost_error(entry_path: &EntryPath) -> opendal::Error {
+    opendal::Error::new(
+        opendal::ErrorKind::ConditionNotMatch,
+        format!("Lock lost before {entry_path} was changed"),
+    )
+    .set_source(LayerDomainError::LockLost)
+}
+
+/// Hold the lock this finalization runs under until its transaction ends, or
+/// refuse the finalization if the lock is gone.
+///
+/// A write or delete that runs under a lock must still hold it when it changes
+/// the file, or it could land on top of whoever took the lock since. Call it
+/// holding the user row, so no other change to the file can slip in between.
+/// Holding the lock from then on keeps it from changing hands before the
+/// change is committed.
+///
+/// A finalization that runs under no lock token holds nothing.
+pub(super) async fn hold_write_lock(
+    entry_path: &EntryPath,
+    executor: &mut UnifiedExecutor<'_>,
+) -> Result<()> {
+    let Some(token) = current_write_lock_token() else {
+        return Ok(());
+    };
+    let held = EntryLockRepository::hold(entry_path, &token, executor)
+        .await
+        .map_err(|error| unexpected(format!("Failed to hold lock on {entry_path}"), error))?;
+    if !held {
+        tracing::warn!(path = %entry_path, "Refusing a write whose lock was lost");
+        return Err(lock_lost_error(entry_path));
+    }
     Ok(())
 }
 

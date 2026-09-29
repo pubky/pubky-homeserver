@@ -6,12 +6,13 @@
 //! Locks expire after the granted `Timeout`, so a client that disappears blocks
 //! a path for at most [`MAX_LOCK_TIMEOUT_SECS`].
 //!
-//! A write checks the lock once, before it starts, see [`with_write_lock`]. An
+//! A write checks the lock before it starts, see [`with_write_lock`]. An
 //! unlocked write holds nothing: a lock taken while it is still streaming does
 //! not stop it from landing. A write that presents a token runs under that lock
 //! and keeps it alive until the write ends, so a slow upload cannot outlive its
-//! lock. Lifetimes are measured on the database clock, so every instance agrees
-//! on which locks are live.
+//! lock; should the lock be lost anyway, the write is refused before it is
+//! published. Lifetimes are measured on the database clock, so every instance
+//! agrees on which locks are live.
 //!
 //! `LOCK` and `UNLOCK` exist on the path-addressed `/storage` route only. The
 //! deprecated owner-relative routes cannot take a lock, but their writes make
@@ -34,6 +35,7 @@ use tokio::task::JoinHandle;
 use super::authorize::authorize_write;
 use crate::{
     client_server::{auth::AuthSession, AppState},
+    persistence::files::write_lock_token::WRITE_LOCK_TOKEN,
     persistence::sql::{
         entry_lock::{EntryLockEntity, EntryLockRepository},
         SqlDb, UnifiedExecutor,
@@ -84,7 +86,9 @@ pub async fn dispatch(
 /// - No token and a live lock: 423 Locked.
 /// - The `If` header names the live lock: the write runs under that lock, which
 ///   is kept alive until the write ends. Checking and extending the lock is one
-///   statement, so it cannot expire between the two.
+///   statement, so it cannot expire between the two. The token is also handed
+///   to the write itself, which is refused if the lock is gone by the time it
+///   comes to change the file.
 /// - Tokens that name no live lock on this path: 412 Precondition Failed. A
 ///   client whose lock expired learns that instead of silently writing unlocked.
 pub async fn with_write_lock<T>(
@@ -93,19 +97,28 @@ pub async fn with_write_lock<T>(
     headers: &HeaderMap,
     write: impl Future<Output = HttpResult<T>>,
 ) -> HttpResult<T> {
-    let _keepalive = check_lock(sql_db, entry_path, headers).await?;
-    write.await
+    let lock_token = check_lock(sql_db, entry_path, headers).await?;
+    let _keepalive = lock_token.as_ref().map(|token| {
+        KeepAlive::spawn(
+            sql_db.clone(),
+            entry_path.clone(),
+            token.clone(),
+            KEEPALIVE_INTERVAL,
+        )
+    });
+    WRITE_LOCK_TOKEN.scope(lock_token, write).await
 }
 
-/// The check of [`with_write_lock`], returning the keep-alive of a write under
-/// a held lock. A separate function so its pool connection is returned before
-/// the write runs: an upload can take a long time, and holding a connection
-/// for its duration would starve the write itself of one.
+/// The check of [`with_write_lock`], returning the token of the lock the write
+/// runs under, if it runs under one. A separate function so its pool
+/// connection is returned before the write runs: an upload can take a long
+/// time, and holding a connection for its duration would starve the write
+/// itself of one.
 async fn check_lock(
     sql_db: &SqlDb,
     entry_path: &EntryPath,
     headers: &HeaderMap,
-) -> HttpResult<Option<KeepAlive>> {
+) -> HttpResult<Option<String>> {
     let mut executor: UnifiedExecutor = sql_db.pool().into();
     let held = if_header_tokens(headers);
     if held.is_empty() {
@@ -119,12 +132,7 @@ async fn check_lock(
         EntryLockRepository::keep_alive(entry_path, &held, WRITE_LOCK_HORIZON_SECS, &mut executor)
             .await?
             .ok_or_else(HttpError::lock_token_mismatch)?;
-    Ok(Some(KeepAlive::spawn(
-        sql_db.clone(),
-        entry_path.clone(),
-        live.token,
-        KEEPALIVE_INTERVAL,
-    )))
+    Ok(Some(live.token))
 }
 
 /// Pushes a lock's expiry out every `interval` for as long as it is held.
@@ -146,8 +154,8 @@ impl KeepAlive {
                 match extended {
                     Ok(Some(_)) => {}
                     // Expired through failed keep-alives, or the holder unlocked
-                    // it. The write is not stopped: nothing checks the lock at
-                    // commit.
+                    // it. The write is not stopped here: its finalization
+                    // refuses it once it finds the lock gone.
                     Ok(None) => {
                         tracing::warn!(path = %entry_path, "Lock lost while its write is in flight");
                         return;
