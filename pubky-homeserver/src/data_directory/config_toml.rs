@@ -321,10 +321,9 @@ mod tests {
         // Two shipped limits: brute-force protection on signup tokens, and a
         // runaway-client guard on mounted drives.
         assert_eq!(c.drive.rate_limits.len(), 2);
-        assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
-        assert_eq!(c.drive.rate_limits[1].path.0, "/dav/**");
+        assert!(shipped_limit(&c, "/signup_tokens/*").is_some());
         assert_eq!(
-            c.drive.rate_limits[1].key,
+            shipped_limit(&c, "/dav/**").expect("WebDAV limit").key,
             crate::shared::quota::LimitKeyType::Ip
         );
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());
@@ -342,13 +341,20 @@ mod tests {
         );
     }
 
+    /// The shipped rate limit for `path`, wherever it sits in the list.
+    fn shipped_limit<'a>(
+        config: &'a ConfigToml,
+        path: &str,
+    ) -> Option<&'a crate::shared::quota::PathLimit> {
+        config.drive.rate_limits.iter().find(|l| l.path.0 == path)
+    }
+
     #[test]
     fn the_shipped_webdav_limit_matches_real_requests() {
         // `*` in fast-glob stops at `/`, so `/dav/*` would never have matched
         // a real request — every one is at least `/dav/{key}/pub/`.
         let config = ConfigToml::default();
-        let limit = &config.drive.rate_limits[1];
-        assert_eq!(limit.path.0, "/dav/**");
+        let limit = shipped_limit(&config, "/dav/**").expect("WebDAV limit");
 
         let key = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
         for path in [
@@ -399,8 +405,8 @@ mod tests {
         let merged: ConfigToml = ConfigToml::from_str_with_defaults(s).unwrap();
         // Default rate limits should be preserved from defaults
         assert_eq!(merged.drive.rate_limits.len(), 2);
-        assert_eq!(merged.drive.rate_limits[0].path.0, "/signup_tokens/*");
-        assert_eq!(merged.drive.rate_limits[1].path.0, "/dav/**");
+        assert!(shipped_limit(&merged, "/signup_tokens/*").is_some());
+        assert!(shipped_limit(&merged, "/dav/**").is_some());
         let expected_logging = Some(LoggingToml {
             level: LogLevel::from_str("trace").unwrap(),
             module_levels: vec![],

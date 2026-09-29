@@ -11,9 +11,12 @@
 use axum::{
     body::Body,
     extract::{Request, State},
+    handler::Handler,
     http::{header, HeaderValue, Method, StatusCode},
-    middleware::Next,
+    middleware::{self as axum_middleware, Next},
     response::{IntoResponse, Response},
+    routing::any,
+    Router,
 };
 use dav_server::{fakels::FakeLs, DavHandler, DavMethodSet};
 use dav_server_opendalfs::OpendalFs;
@@ -25,8 +28,8 @@ pub(crate) const DAV_PREFIX: &str = "/dav";
 /// The axum routes for a `/dav` endpoint: the root, and everything beneath
 /// it. Two because a catch-all must match at least one character, and `/dav/`
 /// itself is the storage root an operator lists.
-pub(crate) const DAV_ROOT_ROUTE: &str = "/dav/";
-pub(crate) const DAV_ROUTE: &str = "/dav/{*path}";
+const DAV_ROOT_ROUTE: &str = "/dav/";
+const DAV_ROUTE: &str = "/dav/{*path}";
 
 /// The header a client reads to learn what the share supports.
 const DAV_COMPLIANCE_HEADER: &str = "dav";
@@ -37,6 +40,10 @@ const DAV_COMPLIANCE_HEADER: &str = "dav";
 /// attached, so the header is rewritten. Class 2 would tell Finder the share
 /// takes locks, and it would then try to mount writable.
 const READ_ONLY_DAV_CLASSES: &str = "1";
+
+/// What a folder on a read-only share answers to: it can be probed and
+/// listed, but there is no index page to `GET`.
+const READ_ONLY_COLLECTION_ALLOW: &str = "OPTIONS, PROPFIND";
 
 /// How long a browser may cache a preflight result.
 const PREFLIGHT_MAX_AGE: &str = "600";
@@ -56,6 +63,10 @@ pub(crate) enum DavAccess {
     /// The share reports `DAV: 1`, and a bare `OPTIONS` lists only those
     /// verbs in `Allow`. Between them, that is what tells a file manager to
     /// mount it read-only rather than report it broken.
+    ///
+    /// Folders have no directory index: a `GET` on one is `405`. Listing is
+    /// `PROPFIND`'s job, and that is the verb the shipped rate limit covers.
+    /// An index page would do the same work through a verb it does not.
     ReadOnly,
     /// Every WebDAV verb, with the `LOCK` handshake macOS needs before it will
     /// mount writable. The locks are [`FakeLs`]: well-formed tokens that lock
@@ -87,6 +98,11 @@ impl DavAccess {
         }
     }
 
+    /// Whether the share serves `method` at all.
+    fn allows(self, method: &Method) -> bool {
+        self.methods().contains(&method.as_str())
+    }
+
     fn method_set(self) -> DavMethodSet {
         DavMethodSet::from_vec(self.methods().to_vec())
             .expect("every verb listed is one dav-server knows")
@@ -96,6 +112,26 @@ impl DavAccess {
         HeaderValue::from_str(&self.methods().join(", "))
             .expect("verb names are valid header characters")
     }
+}
+
+/// Mount `handler` at `/dav/` and everything beneath it, with the endpoint's
+/// own CORS.
+///
+/// A server merges this *beside* its other routes, not under its blanket
+/// `CorsLayer`: that layer answers every `OPTIONS` itself, which strips the
+/// `DAV:` header a file manager reads before it will mount anything. The CORS
+/// here answers only real preflights and lets a bare `OPTIONS` through to
+/// dav-server.
+pub(crate) fn router<H, T, S>(access: DavAccess, handler: H) -> Router<S>
+where
+    H: Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route(DAV_ROOT_ROUTE, any(handler.clone()))
+        .route(DAV_ROUTE, any(handler))
+        .layer(axum_middleware::from_fn_with_state(access, cors))
 }
 
 /// `dav-server` over an operator that has already been scoped to what the
@@ -114,13 +150,15 @@ impl DavEndpoint {
         let builder = DavHandler::builder()
             .filesystem(OpendalFs::new(operator))
             .strip_prefix(DAV_PREFIX)
-            .autoindex(true)
             // Refuses anything else with 405, and keeps a bare OPTIONS from
             // offering MKCOL, PUT and LOCK on an unmapped path.
             .methods(access.method_set());
         let builder = match access {
-            DavAccess::ReadOnly => builder,
-            DavAccess::ReadWrite => builder.locksystem(FakeLs::new()),
+            // No index page on the anonymous share: it lists a folder exactly
+            // as PROPFIND does, one stat per entry, but through a verb the
+            // PROPFIND rate limit never sees.
+            DavAccess::ReadOnly => builder.autoindex(false),
+            DavAccess::ReadWrite => builder.autoindex(true).locksystem(FakeLs::new()),
         };
         Self {
             handler: builder.build_handler(),
@@ -134,12 +172,24 @@ impl DavEndpoint {
     /// reads to decide the share is read-only rather than broken. And its
     /// `DAV:` claims locking whether or not a lock system is attached.
     pub(crate) async fn handle(&self, req: Request<Body>) -> Response {
+        let method = req.method().clone();
         let mut response = self.handler.handle(req).await.into_response();
 
         if response.status() == StatusCode::METHOD_NOT_ALLOWED {
-            response
-                .headers_mut()
-                .insert(header::ALLOW, self.access.allow_header());
+            if !self.access.allows(&method) {
+                // The share refused the verb: say what it does take.
+                response
+                    .headers_mut()
+                    .insert(header::ALLOW, self.access.allow_header());
+            } else if self.access == DavAccess::ReadOnly {
+                // The share takes the verb but this resource does not. On a
+                // read-only share that is a GET or HEAD of a folder, which
+                // has no index page to serve.
+                response.headers_mut().insert(
+                    header::ALLOW,
+                    HeaderValue::from_static(READ_ONLY_COLLECTION_ALLOW),
+                );
+            }
         }
         if self.access == DavAccess::ReadOnly
             && response.headers().contains_key(DAV_COMPLIANCE_HEADER)
@@ -173,11 +223,7 @@ impl DavEndpoint {
 /// all need naming or a ranged or conditional `GET` fails its preflight —
 /// and there is nothing to protect by refusing: with no credentials in play,
 /// any header a browser could send, `curl` already can.
-pub(crate) async fn cors(
-    State(access): State<DavAccess>,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
+async fn cors(State(access): State<DavAccess>, req: Request<Body>, next: Next) -> Response {
     if req.method() == Method::OPTIONS
         && req
             .headers()
@@ -228,6 +274,8 @@ fn preflight(access: DavAccess, requested_headers: Option<&HeaderValue>) -> Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum_test::TestServer;
+    use tempfile::TempDir;
 
     #[test]
     fn a_read_only_share_advertises_only_read_verbs() {
@@ -250,5 +298,227 @@ mod tests {
         // would otherwise only surface when a server starts.
         DavAccess::ReadOnly.method_set();
         DavAccess::ReadWrite.method_set();
+    }
+
+    // ── Through the router ──────────────────────────────────────────────
+    //
+    // The admin and client servers each wrap this endpoint in their own
+    // policy. These tests pin what the endpoint does on its own, with a
+    // handler that adds nothing, so a regression in shared behaviour fails
+    // here rather than in one server's tests.
+
+    /// The smallest possible caller: no auth, no scoping, straight through.
+    async fn serve(State(endpoint): State<DavEndpoint>, req: Request<Body>) -> Response {
+        endpoint.handle(req).await
+    }
+
+    /// A share over a fresh filesystem operator holding `pub/a.txt`.
+    async fn share(access: DavAccess) -> (TestServer, TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = opendal::services::Fs::default().root(dir.path().to_str().unwrap());
+        let operator = Operator::new(backend).unwrap().finish();
+        operator.write("pub/a.txt", "hello").await.unwrap();
+        let app = router(access, serve).with_state(DavEndpoint::new(operator, access));
+        (TestServer::new(app), dir)
+    }
+
+    /// The verbs in an `Allow` header, however dav-server spells the list.
+    fn allow_set(response: &axum_test::TestResponse) -> std::collections::BTreeSet<String> {
+        verbs(&header_str(response, "allow").split(',').collect::<Vec<_>>())
+    }
+
+    fn verbs(list: &[&str]) -> std::collections::BTreeSet<String> {
+        list.iter().map(|v| v.trim().to_string()).collect()
+    }
+
+    fn header_str(response: &axum_test::TestResponse, name: &str) -> String {
+        response
+            .maybe_header(name)
+            .unwrap_or_else(|| panic!("{name} header missing"))
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_bare_options_on_a_read_only_share_reports_class_one_and_read_verbs() {
+        let (server, _dir) = share(DavAccess::ReadOnly).await;
+
+        // dav-server tailors `Allow` to the resource; the method set keeps
+        // every write verb out of it, and the endpoint rewrites `DAV:` from
+        // the `1,2,3,…` dav-server claims regardless.
+        for (path, expected) in [
+            ("/dav/pub/", &["OPTIONS", "PROPFIND"][..]),
+            (
+                "/dav/pub/a.txt",
+                &["OPTIONS", "GET", "HEAD", "PROPFIND"][..],
+            ),
+            ("/dav/pub/missing", &["OPTIONS"][..]),
+        ] {
+            let response = server.method(Method::OPTIONS, path).await;
+            response.assert_status_ok();
+            response.assert_header("dav", "1");
+            assert_eq!(allow_set(&response), verbs(expected), "{path}");
+            // A bare OPTIONS is not a preflight: no CORS answer, no CORS headers.
+            assert!(response
+                .maybe_header(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bare_options_on_a_read_write_share_keeps_locking() {
+        let (server, _dir) = share(DavAccess::ReadWrite).await;
+
+        let response = server.method(Method::OPTIONS, "/dav/pub/").await;
+
+        response.assert_status_ok();
+        let dav = header_str(&response, "dav");
+        assert!(
+            dav.starts_with("1,2"),
+            "read-write share must offer locks: {dav}"
+        );
+        let allow = allow_set(&response);
+        for verb in ["COPY", "LOCK", "UNLOCK"] {
+            assert!(allow.contains(verb), "{verb} missing from {allow:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_preflight_is_answered_before_dav_server_sees_it() {
+        let (server, _dir) = share(DavAccess::ReadOnly).await;
+
+        let response = server
+            .method(Method::OPTIONS, "/dav/pub/")
+            .add_header(header::ORIGIN, "https://webdav.example")
+            .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "PROPFIND")
+            .add_header(header::ACCESS_CONTROL_REQUEST_HEADERS, "depth, range")
+            .await;
+
+        response.assert_status(StatusCode::NO_CONTENT);
+        response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+        response.assert_header(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            "OPTIONS, GET, HEAD, PROPFIND",
+        );
+        response.assert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, "depth, range");
+        response.assert_header(header::ACCESS_CONTROL_MAX_AGE, PREFLIGHT_MAX_AGE);
+        // Never credentials: `*` plus credentials is refused by browsers, and
+        // the anonymous share must not invite the session cookie anyway.
+        assert!(response
+            .maybe_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none());
+        // dav-server did not run.
+        assert!(response.maybe_header("dav").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_preflight_asking_for_no_headers_is_granted_none() {
+        let (server, _dir) = share(DavAccess::ReadOnly).await;
+
+        let response = server
+            .method(Method::OPTIONS, "/dav/pub/")
+            .add_header(header::ORIGIN, "https://webdav.example")
+            .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .await;
+
+        response.assert_status(StatusCode::NO_CONTENT);
+        assert!(response
+            .maybe_header(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn only_cross_origin_responses_carry_cors_headers() {
+        let (server, _dir) = share(DavAccess::ReadOnly).await;
+
+        let cross_origin = server
+            .get("/dav/pub/a.txt")
+            .add_header(header::ORIGIN, "https://webdav.example")
+            .await;
+        cross_origin.assert_status_ok();
+        cross_origin.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+        cross_origin.assert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, EXPOSE_HEADERS);
+
+        let same_origin = server.get("/dav/pub/a.txt").await;
+        same_origin.assert_status_ok();
+        assert!(same_origin
+            .maybe_header(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+        assert!(same_origin
+            .maybe_header(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_verb_the_share_refuses_gets_an_allow_listing_the_share() {
+        let (server, _dir) = share(DavAccess::ReadOnly).await;
+
+        for method in ["PUT", "DELETE", "MKCOL", "LOCK", "PROPPATCH"] {
+            let response = server
+                .method(
+                    Method::from_bytes(method.as_bytes()).unwrap(),
+                    "/dav/pub/a.txt",
+                )
+                .await;
+            response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
+            // dav-server's own 405 carries no Allow at all.
+            response.assert_header("allow", "OPTIONS, GET, HEAD, PROPFIND");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_folder_on_a_read_only_share_has_no_index_page() {
+        let (server, _dir) = share(DavAccess::ReadOnly).await;
+
+        for method in [Method::GET, Method::HEAD] {
+            let response = server.method(method.clone(), "/dav/pub/").await;
+            response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
+            // The share takes GET; this resource does not. Say what it does.
+            response.assert_header("allow", READ_ONLY_COLLECTION_ALLOW);
+        }
+
+        // Listing is PROPFIND's job, and the files themselves still serve.
+        server
+            .method(Method::from_bytes(b"PROPFIND").unwrap(), "/dav/pub/")
+            .add_header("depth", "1")
+            .await
+            .assert_status(StatusCode::MULTI_STATUS);
+        server.get("/dav/pub/a.txt").await.assert_text("hello");
+    }
+
+    #[tokio::test]
+    async fn a_folder_on_a_read_write_share_is_an_index_page() {
+        let (server, _dir) = share(DavAccess::ReadWrite).await;
+
+        let response = server.get("/dav/pub/").await;
+
+        response.assert_status_ok();
+        assert!(
+            header_str(&response, "content-type").starts_with("text/html"),
+            "an index page is HTML"
+        );
+        assert!(response.text().contains("a.txt"), "{}", response.text());
+    }
+
+    #[tokio::test]
+    async fn a_folder_named_without_its_slash_is_redirected_to_it() {
+        // Browsers follow this; file managers never ask.
+        let (server, _dir) = share(DavAccess::ReadOnly).await;
+
+        let response = server.get("/dav/pub").await;
+
+        response.assert_status(StatusCode::FOUND);
+        response.assert_header(header::LOCATION, "/dav/pub/");
+    }
+
+    #[tokio::test]
+    async fn a_verb_dav_server_has_never_heard_of_is_not_implemented() {
+        let (server, _dir) = share(DavAccess::ReadWrite).await;
+
+        server
+            .method(Method::from_bytes(b"FROBNICATE").unwrap(), "/dav/pub/a.txt")
+            .await
+            .assert_status(StatusCode::NOT_IMPLEMENTED);
     }
 }

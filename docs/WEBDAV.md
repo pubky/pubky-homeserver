@@ -83,10 +83,13 @@ rclone copy pubky:notes ./notes
 
 ## In a Browser
 
-A folder URL shows a plain directory listing; a file URL serves the file with
-its stored content type. `/dav` answers CORS preflights for any origin, so
-browser-based WebDAV clients work against it directly with no username or
-password.
+A file URL serves the file, so a `/dav/` link to a public file can be opened or
+downloaded directly. A folder URL is `405`: there is no directory index page.
+Listing is `PROPFIND`'s job, and a browser that wants a folder's contents can
+use the REST listing at `/storage/<public-key>/pub/…/` instead.
+
+`/dav` answers CORS preflights for any origin, so browser-based WebDAV clients
+work against it directly with no username or password.
 
 ## Clients
 
@@ -125,6 +128,8 @@ not serve it, since it has no entry. Keep symlinks out of the data directory.
 - **Content types are guessed from the file name.** REST serves the type a
   file was stored with; WebDAV serves what the extension suggests, so a file
   with no extension is `application/octet-stream` whatever it holds.
+- **No directory index.** A `GET` on a folder is `405`; list it with
+  `PROPFIND` or over REST.
 - **No free-space figure** for clients that show disk usage.
 
 ## Troubleshooting
@@ -136,6 +141,8 @@ homeserver — a reverse proxy or a CORS layer — is answering `OPTIONS` itself
 **404 on everything.** The URL does not end in `/pub/`, or the key is
 misspelled. The drive root and `/priv/` are `404` deliberately.
 
-**405 Method Not Allowed.** The client tried to write. The share is read-only.
+**405 Method Not Allowed.** The client tried to write, or opened a folder URL
+in a browser. The share is read-only and has no directory index; the `Allow`
+header on the response says what the resource does take.
 
 **GNOME says "Operation not supported".** `sudo apt install gvfs-backends`.

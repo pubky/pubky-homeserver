@@ -37,7 +37,6 @@ use super::middleware::{
     trace::with_trace_layer,
 };
 use super::routes::{dav, events, info, root, signup_tokens, tenants};
-use crate::shared::webdav::endpoint::{self as dav_endpoint, DavAccess};
 
 /// Errors that can occur when building a `HomeserverCore`.
 #[derive(Debug, thiserror::Error)]
@@ -246,11 +245,10 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         // Keep feature discovery independent of authentication and database-backed quotas.
         .route("/info", get(info::get));
 
-    // WebDAV is kept out of the blanket CORS layer below: `CorsLayer` answers
-    // every OPTIONS itself, which strips the `DAV:` header a client reads
-    // before it will mount anything, so the endpoint brings its own. It is
-    // anonymous, but it shares the REST routes' middleware so the same request
-    // and bandwidth limits apply to it.
+    // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
+    // not under them — see `dav_endpoint::router`. It is anonymous, but it
+    // shares the REST routes' middleware so the same request and bandwidth
+    // limits apply to it.
     let dav = dav::router(state).layer(middleware);
 
     // Resolve the target before tracing and authentication. Valid `/storage/...`
@@ -265,13 +263,8 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
             HeaderName::from_static("timeout"),
         ]));
     // No `RequestTenant` here: the endpoint resolves its own tenant from the
-    // URL and nothing on this router reads it. The endpoint's CORS sits
-    // outermost so it answers a browser preflight itself, while a bare OPTIONS
-    // still reaches dav-server.
-    let dav_app = with_trace_layer(dav).layer(axum_middleware::from_fn_with_state(
-        DavAccess::ReadOnly,
-        dav_endpoint::cors,
-    ));
+    // URL and nothing on this router reads it.
+    let dav_app = with_trace_layer(dav);
 
     Ok(cors_app.merge(dav_app))
 }

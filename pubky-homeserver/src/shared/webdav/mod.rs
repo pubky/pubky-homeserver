@@ -1,5 +1,9 @@
-/// Storage path types used by client and admin routes:
+/// WebDAV: the storage path types used by client and admin routes, and the
+/// `/dav` endpoint both servers build on.
 ///
+/// - `endpoint` = `dav-server` over a scoped operator, with the verb policy and
+///   CORS both servers must agree on.
+/// - `target` = What a `/dav/{user_z32}/...` URL names.
 /// - `StoragePath` = Basically a regular absolute filesystem path like `/home/shacollision/test.txt`. This is used in the internal `file_service` as this should not be tied to the `/pub` requirement.
 /// - `EntryPath` = A `StoragePath` that starts with a public key.
 /// - `WebDavPathAxum` = A webdav path without the leading `/` because axum delivers the path param without the slash. The storage-root (`/pub/`, `/priv/`) requirement is enforced separately as an authorization concern, not by this type.
@@ -17,6 +21,7 @@
 pub(crate) mod endpoint;
 mod entry_path;
 mod entry_path_pub;
+pub(crate) mod target;
 mod webdav_path_axum;
 
 pub use entry_path::EntryPath;

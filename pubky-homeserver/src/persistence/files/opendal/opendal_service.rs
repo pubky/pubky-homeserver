@@ -19,6 +19,9 @@ use futures_util::{stream::StreamExt, Stream};
 #[cfg(test)]
 use opendal::Buffer;
 use opendal::Operator;
+use pubky_common::crypto::PublicKey;
+
+use crate::persistence::files::tenant_scope_layer::TenantScopeLayer;
 
 use super::super::{FileIoError, FileStream, WriteStreamError};
 
@@ -124,6 +127,13 @@ pub struct OpendalService {
 }
 
 impl OpendalService {
+    /// The operator a public WebDAV share is served from: the app-facing
+    /// operator confined to `owner`'s public folder, so nothing outside it is
+    /// reachable at the storage boundary whatever the caller asks for.
+    pub(crate) fn public_folder_operator(&self, owner: &PublicKey) -> Operator {
+        self.operator.clone().layer(TenantScopeLayer::public(owner))
+    }
+
     pub fn new_from_config(
         storage_config: &StorageToml,
         data_directory: &Path,

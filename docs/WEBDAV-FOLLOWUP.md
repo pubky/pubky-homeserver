@@ -52,6 +52,9 @@ world-readable over REST already; this serves exactly that.
 
 - `GET`, `HEAD`, `OPTIONS`, `PROPFIND` only. The drive root and `/priv/` are
   `404`, never `401`/`403`, so nothing confirms they exist.
+- No directory index: a `GET` on a folder is `405`. dav-server's autoindex
+  lists a folder exactly as `PROPFIND` does, one stat per entry, but through
+  a verb the PROPFIND rate limit never sees. The admin share keeps it.
 - Confinement enforced twice: `DavTarget` canonicalizes the path and checks
   `/pub/`; `TenantScopeLayer::public` refuses anything else at the storage
   boundary, per request.
@@ -111,12 +114,15 @@ Not yet done:
 - [ ] **`MKCOL`**: decide whether an empty directory gets an entry. Today it
       exists in storage only, invisible to REST and the event feed.
 - [ ] Converge the admin endpoint onto the same auth → scope → endpoint path.
-
-## Found along the way — file separately
-
-- `CorsLayer::very_permissive()` on `/storage` allows credentials while the
-  session cookie is `SameSite=None` in production. Any origin may be able to
-  read a signed-in user's `/priv/`. From code, not exploited — verify.
-- `dht_bootstrap_nodes = []` disables relays instead of forcing relay-only
-  (`app_context.rs` calls `no_relays()` whenever the key is set), so the
-  homeserver will not boot without UDP to the DHT.
+- [ ] **One `PathGuardLayer` behind `WritePathLayer` and `TenantScopeLayer`.**
+      They are the same layer asking a different question of each path: ~80
+      lines of identical accessor-plus-deleter delegation apiece, differing
+      only in the predicate (a DB lookup of `allowed_write_paths` vs a string
+      prefix check), which operations are guarded (mutations vs everything)
+      and the error raised. A generic layer over a small `PathPolicy` trait —
+      `check_read` defaulting to allow, `check_write` required — turns each
+      into a ~15-line policy behind a type alias, with no call-site or test
+      changes. Two mechanical details from a first attempt: the policy needs
+      an `Unpin` bound (`Access` and `oio::Delete` require it), and the alias
+      must not define its own `new` alongside the generic's. Its own small PR,
+      since it touches `WritePathLayer` on main.
