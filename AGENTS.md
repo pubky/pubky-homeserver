@@ -4,8 +4,10 @@ See [README.md](README.md) for the repository layout and project overview.
 
 ## Principles
 
-- Users own their identity and data. Preserve their ability to choose and move
-  homeservers. See [Credible Exit](https://pubky.org/explore/concepts/credible-exit/).
+- A user's public key identifies them across homeservers. Preserve the ability to
+  copy their data to another homeserver and update their Pkarr record to point
+  there, without changing their identity. See
+  [Credible Exit](https://pubky.org/explore/concepts/credible-exit/).
 - Keep changes small and focused. Reuse existing code and libraries, and avoid
   abstractions for problems we don't have.
 
