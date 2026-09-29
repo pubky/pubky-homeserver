@@ -15,13 +15,15 @@ struct NativeHttpConfig {
     request_timeout: Option<Duration>,
     read_timeout: Option<Duration>,
     pool_max_idle_per_host: Option<usize>,
+    extra_trust_anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
 }
 
 #[derive(Debug, Clone)]
 #[must_use]
 /// Configures a [`PubkyHttpClient`] before construction.
 ///
-/// Customize timeouts, user-agent, pkarr relays, and (WASM) testnet behavior.
+/// Customize timeouts, user-agent, pkarr relays, native ICANN HTTPS roots,
+/// and (WASM) testnet behavior.
 /// Most code obtains this via [`PubkyHttpClient::builder()`], which simply returns
 /// `PubkyHttpClientBuilder::default()`.
 ///
@@ -35,6 +37,8 @@ struct NativeHttpConfig {
 /// - User-agent: `pubky.org@<crate-version>` plus any [`Self::user_agent_extra`]
 /// - Idle keep-alive connections per host (native only): reqwest default unless set via
 ///   [`Self::pool_max_idle_per_host`]
+/// - ICANN HTTPS trust (native only): Mozilla roots, plus any roots supplied with
+///   `add_root_certificates_pem`.
 /// # Example
 /// ```no_run
 /// # #[cfg(not(target_arch = "wasm32"))]
@@ -278,7 +282,9 @@ impl PubkyHttpClientBuilder {
         #[cfg(not(target_arch = "wasm32"))]
         let mut icann_http_builder = reqwest::Client::builder()
             .user_agent(user_agent.as_ref())
-            .tls_backend_preconfigured(icann_tls_config_without_revocation_check());
+            .tls_backend_preconfigured(icann_tls_config_without_revocation_check(
+                &self.native_http.extra_trust_anchors,
+            ));
 
         // TODO: change this after Reqwest publish a release with timeout in wasm
         #[cfg(not(target_arch = "wasm32"))]
@@ -326,6 +332,40 @@ impl PubkyHttpClientBuilder {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PubkyHttpClientBuilder {
+    /// Add trusted CA certificates from a PEM bundle for ICANN HTTPS requests.
+    ///
+    /// These augment the built-in Mozilla roots. They do not affect `PubkyTLS`
+    /// connections or the separate pkarr relay client. This can be used with
+    /// a bundle read from `SSL_CERT_FILE`.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use pubky::PubkyHttpClient;
+    /// let pem = std::fs::read(std::env::var("SSL_CERT_FILE")?)?;
+    /// let mut builder = PubkyHttpClient::builder();
+    /// builder.add_root_certificates_pem(&pem)?;
+    /// let client = builder.build()?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error if the bundle has no certificates, contains malformed
+    /// PEM, or contains a certificate that cannot be used as a trust anchor.
+    pub fn add_root_certificates_pem(&mut self, pem: &[u8]) -> Result<&mut Self, BuildError> {
+        use rustls::pki_types::pem::PemObject;
+
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(pem) {
+            roots.add(certificate?)?;
+        }
+        if roots.is_empty() {
+            return Err(BuildError::EmptyRootCertificates);
+        }
+
+        self.native_http.extra_trust_anchors.extend(roots.roots);
+        Ok(self)
+    }
+
     /// Set a total deadline for each HTTP request.
     ///
     /// The deadline starts when the request begins connecting and lasts until
@@ -377,17 +417,20 @@ impl PubkyHttpClientBuilder {
     }
 }
 
-/// TLS config for the ICANN HTTP client: webpki/Mozilla roots, certificate revocation
-/// checking disabled.
+/// TLS config for the ICANN HTTP client: Mozilla and caller-supplied roots,
+/// with certificate revocation checking disabled.
 ///
 /// Revocation is disabled because reqwest's default verifier (rustls-platform-verifier)
 /// hard-fails revocation on Android, where Let's Encrypt's sharded-CRL hierarchy makes it
 /// falsely reject valid certificates ("invalid peer certificate: Revoked"). Only the ICANN
 /// client uses this; the homeserver raw-public-key client keeps its pkarr-derived TLS.
 #[cfg(not(target_arch = "wasm32"))]
-fn icann_tls_config_without_revocation_check() -> rustls::ClientConfig {
+fn icann_tls_config_without_revocation_check(
+    extra_roots: &[rustls::pki_types::TrustAnchor<'static>],
+) -> rustls::ClientConfig {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    root_store.extend(extra_roots.iter().cloned());
     let mut tls_config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
@@ -608,6 +651,9 @@ mod test {
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
+    const TEST_CA: &[u8] = include_bytes!("test_certs/ca.pem");
+
+    #[cfg(not(target_arch = "wasm32"))]
     async fn stalling_http_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -680,6 +726,94 @@ mod test {
 
         assert_eq!(builder.native_http.request_timeout, Some(request_timeout));
         assert_eq!(builder.native_http.read_timeout, Some(read_timeout));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn invalid_root_certificate_bundle_does_not_change_builder() {
+        let mut builder = PubkyHttpClient::builder();
+        assert!(matches!(
+            builder.add_root_certificates_pem(b"no certificates"),
+            Err(BuildError::EmptyRootCertificates)
+        ));
+        assert!(builder.native_http.extra_trust_anchors.is_empty());
+        assert!(matches!(
+            builder.add_root_certificates_pem(
+                b"-----BEGIN CERTIFICATE-----\ninvalid!\n-----END CERTIFICATE-----\n"
+            ),
+            Err(BuildError::RootCertificatePem(_))
+        ));
+        assert!(builder.native_http.extra_trust_anchors.is_empty());
+        assert!(matches!(
+            builder.add_root_certificates_pem(
+                b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n"
+            ),
+            Err(BuildError::RootCertificate(_))
+        ));
+        assert!(builder.native_http.extra_trust_anchors.is_empty());
+        builder.add_root_certificates_pem(TEST_CA).unwrap();
+        assert_eq!(builder.native_http.extra_trust_anchors.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn https_server_with_test_certificate() -> url::Url {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+        use tokio_rustls::TlsAcceptor;
+
+        let server_cert =
+            CertificateDer::from_pem_slice(include_bytes!("test_certs/server.pem")).unwrap();
+        let server_key =
+            PrivateKeyDer::from_pem_slice(include_bytes!("test_certs/server.key")).unwrap();
+        let server_config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![server_cert], server_key)
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(std::sync::Arc::new(server_config))
+                .accept(stream)
+                .await
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        url::Url::parse(&format!("https://localhost:{}/", address.port())).unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn extra_root_certificate_trusts_icann_https_server() {
+        let url = https_server_with_test_certificate().await;
+        let mut builder = PubkyHttpClient::builder();
+        builder.add_root_certificates_pem(TEST_CA).unwrap();
+        let client = builder.build().unwrap();
+        let response = client
+            .request_async(Method::GET, url)
+            .await
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "ok");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

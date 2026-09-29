@@ -4020,6 +4020,7 @@ dependencies = [
  "sse-core",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
  "wasm-bindgen-futures",

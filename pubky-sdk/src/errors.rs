@@ -7,11 +7,26 @@
 
 use thiserror::Error;
 
-// --- Build-Time Error ---
+// --- Client Configuration and Build Errors ---
 
-/// Errors that can occur while building a [`crate::PubkyHttpClient`].
+/// Errors that can occur while configuring or building a [`crate::PubkyHttpClient`].
 #[derive(Debug, Error)]
 pub enum BuildError {
+    /// A supplied root certificate bundle contained no certificates.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("Root certificate bundle contained no certificates")]
+    EmptyRootCertificates,
+
+    /// A supplied root certificate bundle contains invalid PEM.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("Failed to parse root certificate PEM: {0}")]
+    RootCertificatePem(#[from] rustls::pki_types::pem::Error),
+
+    /// A supplied root certificate cannot be used as a trust anchor.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("Invalid root certificate: {0}")]
+    RootCertificate(#[from] rustls::Error),
+
     /// Failed to construct the underlying pkarr client (DHT/relay configuration).
     #[error("Failed to build the Pkarr client: {0}")]
     Pkarr(#[from] pkarr::errors::BuildError),
