@@ -4,10 +4,8 @@ See [README.md](README.md) for the repository layout and project overview.
 
 ## Principles
 
-- A user's public key identifies them across homeservers. Preserve the ability to
-  copy their data to another homeserver and update their Pkarr record to point
-  there, without changing their identity. See
-  [Credible Exit](https://pubky.org/explore/concepts/credible-exit/).
+- Code should never prevent the user from exercising the
+  [credible exit](https://pubky.org/explore/concepts/credible-exit/).
 - Keep changes small and focused. Reuse existing code and libraries, and avoid
   abstractions for problems we don't have.
 
