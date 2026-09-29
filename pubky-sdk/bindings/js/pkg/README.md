@@ -406,7 +406,20 @@ await s.list("/pub/example.com/", null, false, 100, false);
 
 // Delete
 await s.delete("/pub/example.com/data.json");
+
+// Locked writes (WebDAV LOCK/UNLOCK)
+const lock = await s.lock("/pub/example.com/state.json", 30); // seconds
+lock.path; // -> "/pub/example.com/state.json"
+lock.token; // -> "opaquelocktoken:<uuid>"
+lock.timeoutSeconds; // -> what the homeserver granted, capped at 60
+await s.putTextLocked(lock, "{}"); // only the holder can write
+await s.putBytesLocked(lock, new Uint8Array([1, 2, 3]));
+await s.deleteLocked(lock);
+await s.refreshLock(lock, 30); // restart the lifetime
+await s.unlock(lock);
 ```
+
+While a lock lives, a plain `putJson`/`putText`/`putBytes`/`delete` on that path rejects with `423 Locked`, and so does a second `lock()`. Once the lock is gone, the old value is refused with `412` (write, delete, refresh) and `409` on `unlock()`; take a new lock and read the file again. A homeserver without lock support answers `405`.
 
 `get()` exposes the underlying `Response`, which is handy for streaming bodies or inspecting headers before consuming content.
 
