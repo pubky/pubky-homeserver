@@ -3043,9 +3043,9 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "mainline"
-version = "8.0.0"
+version = "8.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d32eaee3dcba6e0bbbefe8bd896a8bd6039d5e74b199c0fe248e9feb547c2a26"
+checksum = "43e632c9dd114af78fdccb1169f01b89ccc10590df11e55f07cc56c857537de6"
 dependencies = [
  "crc",
  "document-features",
@@ -3054,7 +3054,7 @@ dependencies = [
  "flume 0.12.0",
  "futures-lite",
  "getrandom 0.4.3",
- "lru 0.16.4",
+ "lru 0.18.4",
  "serde",
  "serde_bencode",
  "serde_bytes",
