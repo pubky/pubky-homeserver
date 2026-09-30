@@ -35,6 +35,7 @@ type _StorageDelete = Assert<
 type _StorageLock = Assert<
   IsExact<Parameters<SessionStorageType["lock"]>, [Path, number]>
 >;
+type _StorageLockPath = Assert<IsExact<StorageLock["path"], Path>>;
 type _StorageRefreshLock = Assert<
   IsExact<Parameters<SessionStorageType["refreshLock"]>, [StorageLock, number]>
 >;
@@ -43,6 +44,12 @@ type _StorageUnlock = Assert<
 >;
 type _StoragePutTextLocked = Assert<
   IsExact<Parameters<SessionStorageType["putTextLocked"]>, [StorageLock, string]>
+>;
+type _StoragePutBytesLocked = Assert<
+  IsExact<
+    Parameters<SessionStorageType["putBytesLocked"]>,
+    [StorageLock, Uint8Array]
+  >
 >;
 type _StorageDeleteLocked = Assert<
   IsExact<Parameters<SessionStorageType["deleteLocked"]>, [StorageLock]>
@@ -811,10 +818,26 @@ test("session: lock/refreshLock/unlock and locked writes", async (t) => {
   // The holder writes under the lock.
   await storage.putTextLocked(lock, "locked");
   t.equal(await storage.getText(path), "locked", "locked write landed whole");
+  await storage.putBytesLocked(lock, new Uint8Array([1, 2, 3]));
+  t.deepEqual(
+    Array.from(await storage.getBytes(path)),
+    [1, 2, 3],
+    "locked bytes write landed whole",
+  );
 
   // Refresh reports the newly granted lifetime.
   await storage.refreshLock(lock, 10);
   t.equal(lock.timeoutSeconds, 10, "refreshLock updated the granted timeout");
+
+  // Calls on one lock may overlap: a refresh while a write is in flight, and
+  // reading the lock meanwhile, must not trip wasm-bindgen's borrow check.
+  await Promise.all([
+    storage.refreshLock(lock, 20),
+    storage.putTextLocked(lock, "overlapped"),
+    Promise.resolve(lock.token),
+  ]);
+  t.equal(lock.timeoutSeconds, 20, "overlapping refresh landed");
+  t.equal(await storage.getText(path), "overlapped", "overlapping write landed");
 
   // A locked delete works and leaves the lock in place.
   await storage.deleteLocked(lock);
@@ -843,6 +866,13 @@ test("session: lock/refreshLock/unlock and locked writes", async (t) => {
     400,
     "directory lock",
   );
+
+  // Locking a free path reserves it without creating anything.
+  const freePath: Path = "/pub/example.com/reserved.bin";
+  const reservation = await storage.lock(freePath, 5);
+  t.equal(await storage.exists(freePath), false, "lock creates no file");
+  await expectStatus(storage.putText(freePath, "x"), 423, "reserved path");
+  await storage.unlock(reservation);
 
   // A timeout the SDK cannot express is refused before any request is made.
   for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {

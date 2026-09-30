@@ -411,7 +411,7 @@ await s.delete("/pub/example.com/data.json");
 const lock = await s.lock("/pub/example.com/state.json", 30); // seconds
 lock.path; // -> "/pub/example.com/state.json"
 lock.token; // -> "opaquelocktoken:<uuid>"
-lock.timeoutSeconds; // -> what the homeserver granted, capped at 60
+lock.timeoutSeconds; // -> what the homeserver granted (it caps the lifetime, currently at 60)
 await s.putTextLocked(lock, "{}"); // only the holder can write
 await s.putBytesLocked(lock, new Uint8Array([1, 2, 3]));
 await s.deleteLocked(lock);
