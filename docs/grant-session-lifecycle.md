@@ -32,10 +32,12 @@ shared browser session.
 - Signout revokes the grant and all its sessions, including on other origins.
   A failed signout remains pending and blocks requests; retry signout, or restore
   the saved record to finish revocation. Successful signout removes the saved
-  record and its delegated key.
+  record and its delegated key. Repeated or concurrent signout from other tabs
+  succeeds without another proof once the shared record is gone.
 - `remove`, `clear` and `clearAll` only delete local data. Browser-managed handles
   stop working after their record is removed. These operations do not revoke the
-  grant or delete its server-side sessions.
+  grant or delete its server-side sessions. Signout on a removed handle is a local
+  no-op and does not revoke the grant.
 
 The SDK dispatches `pubky-session-changed` on `window` after local removal or
 successful signout, and forwards the notification to other tabs with

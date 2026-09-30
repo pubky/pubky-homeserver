@@ -415,9 +415,10 @@ impl SessionCredential for GrantCredential {
             Some(coordinator) => Some(coordinator.acquire(true).await?),
             None => None,
         };
-        if let Some(lease) = &lease
-            && let Some(mut shared) = lease.load().await?
-        {
+        if let Some(lease) = &lease {
+            let Some(mut shared) = lease.load().await? else {
+                return Ok(());
+            };
             shared.logout_pending = true;
             lease.store(&shared).await?;
         }

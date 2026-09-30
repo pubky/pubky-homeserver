@@ -162,11 +162,13 @@ async function scenario(delegated) {
   await assert.rejects(call(b, "write"));
   await assert.rejects(call(b, "restore", second.id));
   assert.equal(await call(b, "shared"), undefined);
+  await call(b, "logout");
   const third = await call(a, "create", delegated);
   await call(b, "restore", third.id);
   await call(a, "forgetAll");
   await assert.rejects(call(b, "write"));
   await assert.rejects(call(b, "restore", third.id));
+  await call(b, "logout");
 
   const revoked = await call(a, "create", delegated);
   await call(b, "restore", revoked.id);
@@ -175,6 +177,16 @@ async function scenario(delegated) {
   await call(a, "expire");
   await assert.rejects(call(b, "restore", revoked.id), /Browser session is no longer valid/);
   await call(a, "logout");
+  await call(b, "logout");
+  await call(a, "logout");
+
+  const concurrent = await call(a, "create", delegated);
+  await call(b, "restore", concurrent.id);
+  await Promise.all([call(a, "logout"), call(b, "logout")]);
+  assert.equal(await call(b, "shared"), undefined);
+  await Promise.all([call(a, "logout"), call(b, "logout")]);
+  await assert.rejects(call(a, "write"));
+  await assert.rejects(call(b, "write"));
   a.destroy(); b.destroy();
   console.log(`PASS ${delegated ? "delegated" : "local secret"}: shared slot, tab reopen/reload, concurrent writes/refresh, interrupted exchanges, logout, removal`);
 }
