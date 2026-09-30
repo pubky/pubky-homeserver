@@ -26,9 +26,11 @@ mod tests {
     use axum_server::Server;
     use futures_util::StreamExt;
     use reqwest::Client;
+    use tcp_client_addr::IdentityMode;
     use tokio::time::Instant;
     use tower_cookies::CookieManagerLayer;
 
+    use crate::client_server::client_identity::ClientIdentityAcceptor;
     use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
@@ -80,7 +82,8 @@ mod tests {
 
         tokio::spawn(async move {
             server
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .acceptor(ClientIdentityAcceptor::new(IdentityMode::Direct))
+                .serve(app.into_make_service())
                 .await
                 .unwrap();
         });

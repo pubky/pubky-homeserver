@@ -15,6 +15,7 @@ use crate::{
     persistence::sql::ConnectionString,
     shared::toml_merge,
 };
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
@@ -24,6 +25,7 @@ use std::{
     path::Path,
     str::FromStr,
 };
+use tcp_client_addr::{ConfigError, IdentityMode, ProxyProtocol};
 use url::Url;
 
 /// Embedded copy of the default configuration (single source of truth for defaults)
@@ -61,11 +63,64 @@ pub struct PkdnsToml {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct DriveToml {
     pub pubky_listen_socket: SocketAddr,
     pub icann_listen_socket: SocketAddr,
+    /// How the ICANN HTTP listener determines the client address.
+    #[serde(default)]
+    pub icann_client_identity: ClientIdentityToml,
+    /// How the Pubky TLS listener determines the client address.
+    #[serde(default)]
+    pub pubky_client_identity: ClientIdentityToml,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
+}
+
+/// Client address source for one TCP listener.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClientIdentityToml {
+    /// Use the direct TCP peer address.
+    // An empty struct variant makes Serde reject fields intended for proxy mode.
+    Direct {},
+    /// Require a PROXY preface from a trusted immediate peer.
+    ProxyProtocol {
+        /// Networks permitted to supply a client address.
+        #[serde(deserialize_with = "deserialize_trusted_proxies")]
+        trusted_proxies: Vec<IpNet>,
+    },
+}
+
+impl Default for ClientIdentityToml {
+    fn default() -> Self {
+        Self::Direct {}
+    }
+}
+
+fn deserialize_trusted_proxies<'de, D>(deserializer: D) -> Result<Vec<IpNet>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let trusted_proxies = Vec::<IpNet>::deserialize(deserializer)?;
+    if trusted_proxies.is_empty() {
+        return Err(serde::de::Error::custom(
+            "trusted_proxies must not be empty",
+        ));
+    }
+    Ok(trusted_proxies)
+}
+
+impl ClientIdentityToml {
+    pub(crate) fn to_identity_mode(&self) -> Result<IdentityMode, ConfigError> {
+        match self {
+            Self::Direct {} => Ok(IdentityMode::Direct),
+            Self::ProxyProtocol { trusted_proxies } => {
+                let proxy = ProxyProtocol::new(trusted_proxies.iter().copied())?;
+                Ok(IdentityMode::ProxyProtocol(proxy))
+            }
+        }
+    }
 }
 
 /// Admin server configuration
@@ -307,6 +362,8 @@ mod tests {
             c.drive.pubky_listen_socket,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6287))
         );
+        assert_eq!(c.drive.icann_client_identity, ClientIdentityToml::Direct {});
+        assert_eq!(c.drive.pubky_client_identity, ClientIdentityToml::Direct {});
         assert_eq!(
             c.admin.listen_socket,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6288))
@@ -361,6 +418,70 @@ mod tests {
         // Other fields that were not set (left empty) should still match the default.
         assert_eq!(parsed.admin, ConfigToml::default().admin);
         assert_eq!(parsed.logging, ConfigToml::default().logging);
+    }
+
+    #[test]
+    fn client_identity_modes_are_independent() {
+        let config = ConfigToml::from_str_with_defaults(
+            r#"
+            [drive]
+            icann_client_identity = { mode = "proxy_protocol", trusted_proxies = ["127.0.0.1/32"] }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.drive.icann_client_identity,
+            ClientIdentityToml::ProxyProtocol {
+                trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
+            }
+        );
+        assert_eq!(
+            config.drive.pubky_client_identity,
+            ClientIdentityToml::Direct {}
+        );
+        assert!(config
+            .drive
+            .icann_client_identity
+            .to_identity_mode()
+            .is_ok());
+    }
+
+    #[test]
+    fn misspelled_client_identity_setting_is_rejected() {
+        let config = r#"
+            [drive]
+            icann_client_identitiy = { mode = "proxy_protocol", trusted_proxies = ["127.0.0.1/32"] }
+            "#;
+
+        assert!(ConfigToml::from_str_with_defaults(config).is_err());
+    }
+
+    #[test]
+    fn direct_identity_rejects_proxy_settings() {
+        for identity in [
+            r#"{ trusted_proxies = ["127.0.0.1/32"] }"#,
+            r#"{ mode = "direct", trusted_proxies = ["127.0.0.1/32"] }"#,
+        ] {
+            let config = format!("[drive]\nicann_client_identity = {identity}");
+            assert!(
+                ConfigToml::from_str_with_defaults(&config).is_err(),
+                "accepted invalid identity: {identity}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_identity_requires_trusted_peers() {
+        let error = ConfigToml::from_str_with_defaults(
+            r#"
+            [drive]
+            pubky_client_identity = { mode = "proxy_protocol", trusted_proxies = [] }
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("trusted"), "{error}");
     }
 
     #[test]

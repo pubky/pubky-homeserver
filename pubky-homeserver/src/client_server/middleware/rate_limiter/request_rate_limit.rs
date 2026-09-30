@@ -17,15 +17,15 @@ use tower::{Layer, Service};
 use crate::shared::quota::PathLimit;
 use crate::shared::HttpError;
 
-use super::limiter_pool::LimitTuple;
+use super::limiter_pool::{LimitKeyExtractionError, LimitTuple};
 
 /// A Tower Layer for request-count rate limiting.
 ///
 /// Matches requests by path and method against configured limits and
 /// returns 429 TOO MANY REQUESTS when a limit is exceeded.
 ///
-/// Returns 400 BAD REQUEST if the rate-limit key (IP or request tenant)
-/// cannot be extracted.
+/// Returns 400 BAD REQUEST if a required request tenant is missing, or 500
+/// INTERNAL SERVER ERROR if the verified client address is missing.
 #[derive(Debug, Clone)]
 pub struct RequestRateLimitLayer {
     limits: Vec<LimitTuple>,
@@ -109,16 +109,28 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
         }
         let key = match limit.extract_key(req) {
             Ok(key) => key,
-            Err(e) => {
+            Err(LimitKeyExtractionError::MissingClientAddress(error)) => {
+                tracing::error!(
+                    %error,
+                    path = %limit.limit.path.0,
+                    method = %limit.limit.method.0,
+                    "Missing client address for rate limiting"
+                );
+                return Err(HttpError::new_with_message(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Missing client address for rate limiting",
+                )
+                .into_response());
+            }
+            Err(LimitKeyExtractionError::MissingRequestTenant) => {
                 tracing::warn!(
-                    "{} {} Failed to extract key for rate limiting: {}",
-                    limit.limit.path.0,
-                    limit.limit.method.0,
-                    e
+                    path = %limit.limit.path.0,
+                    method = %limit.limit.method.0,
+                    "Missing request tenant for rate limiting"
                 );
                 return Err(HttpError::new_with_message(
                     StatusCode::BAD_REQUEST,
-                    "Failed to extract key for rate limiting",
+                    "Failed to extract user for rate limiting",
                 )
                 .into_response());
             }
@@ -152,6 +164,7 @@ mod tests {
         time::Duration,
     };
 
+    use axum::extract::ConnectInfo;
     use axum::http::Method;
     use axum::response::IntoResponse;
     use axum::{
@@ -162,9 +175,12 @@ mod tests {
     use axum_server::Server;
     use pubky_common::crypto::{Keypair, PublicKey};
     use reqwest::{Client, Response};
+    use tcp_client_addr::{IdentityMode, ProxyProtocol};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinHandle;
     use tower_cookies::CookieManagerLayer;
 
+    use crate::client_server::client_identity::ClientIdentityAcceptor;
     use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::shared::quota::{GlobPattern, HttpMethod, LimitKeyType};
     use crate::shared::HttpResult;
@@ -180,6 +196,13 @@ mod tests {
     }
 
     async fn start_server(config: Vec<PathLimit>) -> SocketAddr {
+        start_server_with_identity(config, IdentityMode::Direct).await
+    }
+
+    async fn start_server_with_identity(
+        config: Vec<PathLimit>,
+        identity: IdentityMode,
+    ) -> SocketAddr {
         let app = Router::new()
             .route("/upload", post(upload_handler))
             .route("/download", get(download_handler))
@@ -202,12 +225,141 @@ mod tests {
 
         tokio::spawn(async move {
             server
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .acceptor(ClientIdentityAcceptor::new(identity))
+                .serve(app.into_make_service())
                 .await
                 .unwrap();
         });
 
         socket
+    }
+
+    fn ip_limit() -> PathLimit {
+        PathLimit {
+            path: GlobPattern::new("/upload"),
+            method: HttpMethod(Method::POST),
+            quota: "1r/m".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_connect_info_does_not_satisfy_ip_limit() {
+        let limit = LimitTuple::new(ip_limit()).unwrap();
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/upload")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        let response = check_request_count_limits(&[limit], &request).unwrap_err();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn missing_request_tenant_remains_bad_request() {
+        let mut path_limit = ip_limit();
+        path_limit.key = LimitKeyType::User;
+        let limit = LimitTuple::new(path_limit).unwrap();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/upload")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = check_request_count_limits(&[limit], &request).unwrap_err();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn proxy_request(socket: SocketAddr, source_ip: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(socket).await.unwrap();
+        let request = format!(
+            "PROXY TCP4 {source_ip} 127.0.0.1 12345 80\r\nPOST /upload HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn direct_client_cannot_change_rate_limit_key_with_forwarding_headers() {
+        let socket = start_server(vec![ip_limit()]).await;
+        let client = Client::new();
+        let url = format!("http://{socket}/upload");
+
+        for (header_ip, expected_status) in [
+            ("198.51.100.1", StatusCode::CREATED),
+            ("198.51.100.2", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let response = client
+                .post(&url)
+                .header("x-forwarded-for", header_ip)
+                .header("x-real-ip", header_ip)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_protocol_uses_claimed_client_ip_for_rate_limits() {
+        let mode = IdentityMode::ProxyProtocol(
+            ProxyProtocol::new(["127.0.0.1/32".parse().unwrap()]).unwrap(),
+        );
+        let socket = start_server_with_identity(vec![ip_limit()], mode).await;
+
+        let first = proxy_request(socket, "198.51.100.1").await;
+        let second = proxy_request(socket, "198.51.100.1").await;
+        let third = proxy_request(socket, "198.51.100.2").await;
+
+        assert!(first.starts_with("HTTP/1.0 201"), "{first}");
+        assert!(second.starts_with("HTTP/1.0 429"), "{second}");
+        assert!(third.starts_with("HTTP/1.0 201"), "{third}");
+    }
+
+    #[tokio::test]
+    async fn proxy_protocol_rejects_missing_preface_and_untrusted_peer() {
+        for (trusted_peer, preface) in [
+            ("127.0.0.1/32", ""), // Trusted peer, but no PROXY preface.
+            (
+                "192.0.2.0/24",
+                "PROXY TCP4 198.51.100.1 127.0.0.1 12345 80\r\n",
+            ),
+        ] {
+            let proxy = ProxyProtocol::new([trusted_peer.parse().unwrap()]).unwrap();
+            let socket =
+                start_server_with_identity(vec![ip_limit()], IdentityMode::ProxyProtocol(proxy))
+                    .await;
+            let mut stream = tokio::net::TcpStream::connect(socket).await.unwrap();
+            let request = format!("{preface}POST /upload HTTP/1.0\r\nHost: localhost\r\n\r\n");
+            if let Err(error) = stream.write_all(request.as_bytes()).await {
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ));
+            }
+
+            let mut response = Vec::new();
+            match stream.read_to_end(&mut response).await {
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) => {}
+                Err(error) => panic!("unexpected read error: {error}"),
+            }
+            assert!(response.is_empty(), "{trusted_peer}: {response:?}");
+        }
     }
 
     #[tokio::test]
