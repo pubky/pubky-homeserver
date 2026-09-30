@@ -21,7 +21,7 @@ use pubky_common::{
     crypto::{Keypair, PublicKey},
 };
 
-use reqwest::{Method, RequestBuilder};
+use reqwest::{Method, RequestBuilder, StatusCode};
 use tokio::sync::Mutex;
 
 use super::{
@@ -35,7 +35,7 @@ use crate::{
     PubkyHttpClient,
     actors::session::SessionInfo,
     cross_log,
-    errors::{AuthError, RequestError, Result},
+    errors::{AuthError, Error, RequestError, Result},
 };
 
 /// Refresh the bearer proactively when it has less than this many seconds left.
@@ -485,8 +485,16 @@ impl SessionCredential for GrantCredential {
     ) -> Result<Option<SessionInfo>> {
         let request = self.grant_session_request(client, Method::GET).await?;
         let response = if let Some(coordinator) = self.coordinator().await {
-            self.send_shared(request, client, coordinator.as_ref())
-                .await?
+            match self
+                .send_shared(request, client, coordinator.as_ref())
+                .await
+            {
+                Err(Error::Request(RequestError::Server {
+                    status: StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND,
+                    ..
+                })) => return Ok(None),
+                result => result?,
+            }
         } else {
             request
                 .bearer_auth(self.current_bearer().await)

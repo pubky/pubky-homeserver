@@ -56,6 +56,20 @@ async function scenario(delegated) {
   await Promise.all([call(a, "write"), call(b, "write")]);
   assert.equal(await call(a, "restoreTogether", id), slot);
 
+  // Revalidation distinguishes rejected credentials from transient refresh failures.
+  for (const [status, error] of [
+    [0, /HTTP transport error/],
+    [429, /429 Too Many Requests/],
+    [500, /500 Internal Server Error/],
+    [401, /Browser session is no longer valid/],
+    [404, /Browser session is no longer valid/],
+  ]) {
+    await call(a, "expire");
+    await call(a, "failExchange", status);
+    await assert.rejects(call(a, "restore", id), error);
+    assert.equal(await call(a, "restore", id), slot);
+  }
+
   // With a one-slot cap, even one extra allocation fails.
   for (let i = 0; i < 3; i++) {
     const tab = await windowAtOrigin();
@@ -153,6 +167,14 @@ async function scenario(delegated) {
   await call(a, "forgetAll");
   await assert.rejects(call(b, "write"));
   await assert.rejects(call(b, "restore", third.id));
+
+  const revoked = await call(a, "create", delegated);
+  await call(b, "restore", revoked.id);
+  await call(a, "revoke");
+  await assert.rejects(call(b, "restore", revoked.id), /Browser session is no longer valid/);
+  await call(a, "expire");
+  await assert.rejects(call(b, "restore", revoked.id), /Browser session is no longer valid/);
+  await call(a, "logout");
   a.destroy(); b.destroy();
   console.log(`PASS ${delegated ? "delegated" : "local secret"}: shared slot, tab reopen/reload, concurrent writes/refresh, interrupted exchanges, logout, removal`);
 }

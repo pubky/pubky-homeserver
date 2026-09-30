@@ -15,7 +15,7 @@ use pubky_common::{
 };
 
 use super::crypto::{
-    grant_verifier::verify_grant,
+    grant_verifier::{verify_grant, verify_grant_for_revocation},
     jws_crypto::JwsCompact,
     pop_verifier::{
         PopProof, PopVerificationContext, POP_MAX_AGE_SECS, POP_NONCE_GC_THRESHOLD_SECS,
@@ -119,14 +119,14 @@ impl GrantAuthService {
         Ok(())
     }
 
-    /// Revoke with grant + PoP, even if the bearer expired or issuance is limited.
+    /// Revoke with grant + PoP, even after grant expiry or when issuance is limited.
     /// Fresh proofs allow retries after revocation.
     pub async fn signout_with_proof(
         &self,
         grant_jws: &JwsCompact,
         pop_jws: &JwsCompact,
     ) -> Result<(), AuthServiceError> {
-        let grant = self.verify_grant(grant_jws)?;
+        let grant = verify_grant_for_revocation(grant_jws)?;
         let pop = self.verify_pop_proof(pop_jws, &grant)?;
         self.check_nonce_replay(&pop).await?;
         let stored = self.get_grant(&grant.jti).await?;
@@ -1216,6 +1216,58 @@ mod tests {
                 .await,
             Err(AuthServiceError::GrantRevoked)
         ));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn proof_logout_accepts_expired_grants_but_session_issuance_does_not() {
+        let service = test_service().await;
+        let (user, _) = create_test_user(&service).await;
+        let client = Keypair::random();
+        let (grant_jws, _, grant) = sign_grant_with_client_id(
+            &user,
+            &client,
+            &service.homeserver_public_key(),
+            "test.app",
+            0,
+        );
+        let stored_user = service.find_user(&grant).await.unwrap();
+        GrantAuthService::store_grant(&grant, &stored_user, &mut service.sql_db.pool().into())
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            let proof = sign_jws(
+                &client,
+                POP_JWS_TYP,
+                &PopProofClaims {
+                    aud: service.homeserver_public_key(),
+                    gid: grant.jti.clone(),
+                    nonce: PopNonce::generate(),
+                    iat: Utc::now().timestamp() as u64,
+                },
+            );
+            assert!(matches!(
+                service.create_grant_session(&grant_jws, &proof, None).await,
+                Err(AuthServiceError::InvalidGrant(
+                    super::super::crypto::grant_verifier::Error::Expired
+                ))
+            ));
+            service
+                .signout_with_proof(&grant_jws, &proof)
+                .await
+                .unwrap();
+            assert!(service
+                .get_grant(&grant.jti)
+                .await
+                .unwrap()
+                .revoked_at
+                .is_some());
+            assert!(matches!(
+                service.signout_with_proof(&grant_jws, &proof).await,
+                Err(AuthServiceError::NonceReplay)
+            ));
+        }
     }
 
     #[tokio::test]

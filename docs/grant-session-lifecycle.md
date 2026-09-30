@@ -91,6 +91,7 @@ A retry after a lost response can rotate the same slot without consuming capacit
 
 Clients using slots send grant + PoP JSON to `DELETE /auth/grant/session`, so logout
 works without a live bearer and does not consume issuance capacity or rate budget.
+Expired grants remain valid for logout only; signature and fresh PoP checks still apply.
 Legacy bearer-only logout sends the cached bearer. Repeating
 proof logout with a fresh nonce is idempotent, including after a lost response.
 

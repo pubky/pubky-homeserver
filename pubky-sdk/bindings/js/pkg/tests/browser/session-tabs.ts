@@ -1,13 +1,15 @@
 // Each Electron window loads its own SDK instance against shared browser storage.
-import { Pubky, Keypair, PublicKey, Session, AuthFlowKind } from "../../index.js";
+import { Pubky, Keypair, PublicKey, Session, Signer, GrantManager, AuthFlowKind } from "../../index.js";
 import { createSignupToken } from "../utils.js";
 
 const sdk = Pubky.testnet();
 const store = sdk.browserSessionStore;
 let current: Session;
+let signer: Signer;
 let savedId: string;
 let exchanges = 0;
 let hideSlots = false;
+let exchangeFailure: number | undefined;
 let loseExchange = false;
 let loseLogout = false;
 let failPersist = false;
@@ -30,6 +32,14 @@ globalThis.fetch = async (input, init) => {
   const request = input instanceof Request ? input : new Request(input, init);
   if (hideSlots && new URL(request.url).pathname === "/info") {
     const response = Response.json({ features: [] });
+    Object.defineProperty(response, "url", { value: request.url });
+    return response;
+  }
+  if (exchangeFailure !== undefined && request.method === "POST" && new URL(request.url).pathname === "/auth/grant/session") {
+    const status = exchangeFailure;
+    exchangeFailure = undefined;
+    if (status === 0) throw new TypeError("Simulated connection failure");
+    const response = new Response("Simulated exchange failure", { status });
     Object.defineProperty(response, "url", { value: request.url });
     return response;
   }
@@ -83,7 +93,7 @@ async function identity() { return (await current.grant!.sessionInfo()).sessionI
 
 const tabs = {
   async create(delegated = false) {
-    const signer = sdk.signer(Keypair.random());
+    signer = sdk.signer(Keypair.random());
     await signer.signup(PublicKey.from("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo"), await createSignupToken());
     if (delegated) {
       const flow = await sdk.startGrantAuthFlow("/pub/tabs.test/:rw", AuthFlowKind.signin(), {
@@ -118,6 +128,11 @@ const tabs = {
   },
   async write() { await current.storage.putText("/pub/tabs.test/value", "ok"); },
   async logout() { await current.signout(); },
+  async revoke() {
+    const other = await signer.signin("other-app.test");
+    await new GrantManager(other).revoke(await current.grant!.grantId());
+    await other.signout();
+  },
   async remove() { await store.remove(savedId); },
   async forgetAll() { await store.clearAll(); },
   async expire() {
@@ -152,6 +167,7 @@ const tabs = {
     return tabs.restore(savedId);
   },
   loseNext() { loseExchange = true; },
+  failExchange(status: number) { exchangeFailure = status; },
   loseLogout() { loseLogout = true; },
   failNextPersist() { failPersist = true; },
   holdWrite() { holdWrite = true; },
