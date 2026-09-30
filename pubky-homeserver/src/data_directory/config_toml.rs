@@ -64,6 +64,8 @@ pub struct PkdnsToml {
 pub struct DriveToml {
     pub pubky_listen_socket: SocketAddr,
     pub icann_listen_socket: SocketAddr,
+    /// Serve every user's public folder as a read-only WebDAV share under `/dav`.
+    pub webdav_enabled: bool,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
 }
@@ -318,14 +320,9 @@ mod tests {
         assert_eq!(c.pkdns.user_keys_republisher_interval, 14400);
         assert_eq!(c.pkdns.dht_bootstrap_nodes, None);
         assert_eq!(c.pkdns.dht_request_timeout_ms, None);
-        // Two shipped limits: brute-force protection on signup tokens, and a
-        // runaway-client guard on mounted drives.
-        assert_eq!(c.drive.rate_limits.len(), 2);
-        assert!(shipped_limit(&c, "/signup_tokens/*").is_some());
-        assert_eq!(
-            shipped_limit(&c, "/dav/**").expect("WebDAV limit").key,
-            crate::shared::quota::LimitKeyType::Ip
-        );
+        assert!(!c.drive.webdav_enabled);
+        assert_eq!(c.drive.rate_limits.len(), 1);
+        assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());
         assert_eq!(c.storage.default_quota_mb, None);
         assert_eq!(c.storage.backend, StorageConfigToml::FileSystem);
@@ -338,35 +335,6 @@ mod tests {
                     TargetLevel::from_str("tower_http=debug").unwrap()
                 ],
             })
-        );
-    }
-
-    /// The shipped rate limit for `path`, wherever it sits in the list.
-    fn shipped_limit<'a>(
-        config: &'a ConfigToml,
-        path: &str,
-    ) -> Option<&'a crate::shared::quota::PathLimit> {
-        config.drive.rate_limits.iter().find(|l| l.path.0 == path)
-    }
-
-    #[test]
-    fn the_shipped_webdav_limit_matches_real_requests() {
-        // `*` in fast-glob stops at `/`, so `/dav/*` would never have matched
-        // a real request — every one is at least `/dav/{key}/pub/`.
-        let config = ConfigToml::default();
-        let limit = shipped_limit(&config, "/dav/**").expect("WebDAV limit");
-
-        let key = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
-        for path in [
-            format!("/dav/{key}/pub/"),
-            format!("/dav/{key}/pub/pubky.app/posts/abc"),
-            format!("/dav/{key}/"),
-        ] {
-            assert!(limit.path.is_match(&path), "{path} should be rate limited");
-        }
-        assert!(
-            !limit.path.is_match("/storage/x/pub/"),
-            "REST is not this limit's business"
         );
     }
 
@@ -404,9 +372,8 @@ mod tests {
         let s = "[logging]\nlevel=\"trace\"\nmodule_levels = [ ]";
         let merged: ConfigToml = ConfigToml::from_str_with_defaults(s).unwrap();
         // Default rate limits should be preserved from defaults
-        assert_eq!(merged.drive.rate_limits.len(), 2);
-        assert!(shipped_limit(&merged, "/signup_tokens/*").is_some());
-        assert!(shipped_limit(&merged, "/dav/**").is_some());
+        assert_eq!(merged.drive.rate_limits.len(), 1);
+        assert_eq!(merged.drive.rate_limits[0].path.0, "/signup_tokens/*");
         let expected_logging = Some(LoggingToml {
             level: LogLevel::from_str("trace").unwrap(),
             module_levels: vec![],

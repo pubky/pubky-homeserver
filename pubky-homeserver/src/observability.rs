@@ -34,8 +34,6 @@ pub const STORAGE_REQUEST_COUNT: &str = "storage_request_count";
 pub(crate) enum StorageAddressingMode {
     Path,
     Legacy,
-    /// A mounted drive: `/dav/{user_z32}/...`.
-    WebDav,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -180,7 +178,6 @@ impl Metrics {
         let addressing_mode = match addressing_mode {
             StorageAddressingMode::Path => "path",
             StorageAddressingMode::Legacy => "legacy",
-            StorageAddressingMode::WebDav => "webdav",
         };
         let pubky_host_header = match pubky_host_header {
             PubkyHostHeaderUsage::Absent => "absent",

@@ -29,7 +29,6 @@ This repository contains the core infrastructure: a homeserver that stores and s
 
 - **Operators**: [Install and run a homeserver](./docs/INSTALL.md), then [deploy it publicly](./docs/DEPLOY.md).
 - **App developers**: See the [Developer Guide](https://pubky.org/explore/pubky-protocol/getting-started/) for a walk-through of the [SDK](https://pubky.org/explore/pubky-protocol/sdk/) usage. Learn to build apps that read and write user data on homeservers.
-- **End users**: [Mount any user's public folder over WebDAV](./docs/WEBDAV.md) in GNOME Files, macOS Finder or any WebDAV client.
 
 ## What Is a Homeserver?
 
@@ -37,7 +36,6 @@ A Pubky homeserver stores and serves user data. Users choose which homeserver ho
 
 - Public-key based sign-up, sign-in and third-party app authorization.
 - File storage via HTTP `PUT`, `GET`, `DELETE`, and listing APIs (WebDAV-like).
-- A read-only [WebDAV endpoint](./docs/WEBDAV.md) so any user's public folder can be mounted in a file manager.
 - PKARR/PKDNS publishing for homeserver discovery.
 - Admin and metrics endpoints for operators.
 

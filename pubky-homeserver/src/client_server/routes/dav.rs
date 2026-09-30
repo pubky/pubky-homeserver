@@ -2,9 +2,10 @@
 //!
 //! Mounted at `/dav/{user_z32}/pub/...`, this serves the same files as
 //! `/storage/{user_z32}/pub/...` to standard WebDAV clients (GNOME Files,
-//! Finder, rclone, browsers). The endpoint itself — `dav-server`, the verb
-//! policy and CORS — is [`DavEndpoint`], shared with the admin server; what
-//! this module adds is the policy for *who sees what*.
+//! Finder, rclone, browsers). It is off unless `[drive] webdav_enabled` is
+//! set; without it the client server has no `/dav` route. The endpoint itself
+//! — `dav-server`, the verb policy and CORS — is [`DavEndpoint`], shared with
+//! the admin server; what this module adds is the policy for *who sees what*.
 //!
 //! Nothing here is authenticated. `/pub/` is world-readable over REST, and this
 //! endpoint exposes exactly that and no more:
@@ -23,12 +24,11 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::Method,
-    middleware as axum_middleware,
     response::Response,
     Router,
 };
 
-use crate::client_server::{middleware::storage_metrics, AppState};
+use crate::client_server::AppState;
 use crate::shared::{
     webdav::{
         endpoint::{self as dav_endpoint, DavAccess, DavEndpoint},
@@ -39,12 +39,7 @@ use crate::shared::{
 
 /// The `/dav` routes.
 pub(crate) fn router(state: AppState) -> Router {
-    dav_endpoint::router(DavAccess::ReadOnly, dav_handler)
-        .layer(axum_middleware::from_fn_with_state(
-            state.context.metrics.clone(),
-            storage_metrics::record_webdav_request,
-        ))
-        .with_state(state)
+    dav_endpoint::router(DavAccess::ReadOnly, dav_handler).with_state(state)
 }
 
 async fn dav_handler(State(state): State<AppState>, req: Request<Body>) -> HttpResult<Response> {
@@ -73,10 +68,9 @@ async fn dav_handler(State(state): State<AppState>, req: Request<Body>) -> HttpR
 mod tests {
     //! These drive the whole client server the way a file manager would, so
     //! the path policy in this module is exercised together with the CORS,
-    //! rate limits, bandwidth limits and metrics it is merged beside. The
+    //! rate limits and bandwidth limits it is merged beside. The
     //! path policy itself is pinned in `target.rs`; the endpoint's own
     //! behaviour in `endpoint.rs`.
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use axum::http::{header, StatusCode};
@@ -97,6 +91,44 @@ mod tests {
             .get(&share.dav("/pub/dav.txt"))
             .await
             .assert_text("hello");
+        share
+            .server
+            .get(&share.storage("/pub/dav.txt"))
+            .await
+            .assert_text("hello");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn the_share_is_not_served_unless_the_config_enables_it() {
+        // Off is the default, so this is what a deployment that never heard
+        // of `webdav_enabled` serves: `/dav` is a path like any other the
+        // server has no route for, while REST carries on.
+        let share = Share::with_config(|c| {
+            c.drive.webdav_enabled = ConfigToml::default().drive.webdav_enabled;
+        })
+        .await;
+        share.put("dav.txt", b"hello").await;
+        let unrouted = format!("/no-such-route/{}/pub/dav.txt", share.public_key);
+
+        for method in [
+            Method::GET,
+            Method::OPTIONS,
+            Method::from_bytes(b"PROPFIND").unwrap(),
+        ] {
+            let request = |path: &str| share.server.method(method.clone(), path);
+            let response = request(&share.dav("/pub/dav.txt")).await;
+
+            assert_eq!(
+                response.status_code(),
+                request(&unrouted).await.status_code(),
+                "{method} is answered as a route of its own"
+            );
+            // `CorsLayer` still answers the OPTIONS, but without the header
+            // a file manager decides to mount from.
+            assert!(response.maybe_header("dav").is_none(), "{method}");
+        }
+
         share
             .server
             .get(&share.storage("/pub/dav.txt"))
@@ -263,7 +295,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn a_folder_has_no_index_page() {
         // A browser GET on a folder would list it exactly as PROPFIND does,
-        // one stat per entry, through a verb the PROPFIND rate limit never
+        // one stat per entry, through a verb a PROPFIND rate limit never
         // sees. So it is refused, with an `Allow` naming what a folder takes.
         let share = Share::new().await;
         share.put("dav.txt", b"hello").await;
@@ -444,19 +476,22 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn propfind_is_rate_limited_per_client() {
-        // The shipped limit, tightened to one request so the test can reach
-        // it. Until the pattern was `/dav/**` it matched nothing at all:
-        // fast-glob's `*` stops at `/`, and every real request is at least
-        // `/dav/{key}/pub/`.
+    async fn an_operator_can_rate_limit_propfind_per_client() {
+        // No limit on `/dav` ships; this is the one an operator would add,
+        // at one request so the test can reach it. The pattern has to be
+        // `/dav/**`: fast-glob's `*` stops at `/`, and every real request is
+        // at least `/dav/{key}/pub/`.
         let share = Share::with_config(|c| {
-            let limit = c
-                .drive
-                .rate_limits
-                .iter_mut()
-                .find(|l| l.path.0 == "/dav/**")
-                .expect("the shipped PROPFIND limit is in the test config");
-            limit.quota = "1r/m".parse().unwrap();
+            let limit = toml::from_str(
+                r#"
+                path = "/dav/**"
+                method = "PROPFIND"
+                quota = "1r/m"
+                key = "ip"
+                "#,
+            )
+            .unwrap();
+            c.drive.rate_limits.push(limit);
         })
         .await;
         let path = share.dav("/pub/");
@@ -503,51 +538,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn requests_are_counted_under_the_webdav_label() {
-        // `/dav` resolves its own tenant, so it bypasses the recorder the
-        // REST routes use. Without its own, mounted drives would be
-        // invisible on every dashboard.
-        let share = Share::new().await;
-        share.put("dav.txt", b"hello").await;
-
-        share
-            .server
-            .get(&share.dav("/pub/dav.txt"))
-            .expect_success()
-            .await;
-        propfind(&share.server, &share.dav("/pub/"))
-            .await
-            .assert_status(StatusCode::MULTI_STATUS);
-
-        let output = share.context.metrics.render().unwrap();
-        let webdav = output
-            .lines()
-            .filter(|line| line.starts_with("storage_request_count_total{"))
-            .filter(|line| line.contains("addressing_mode=\"webdav\""))
-            .collect::<Vec<_>>();
-        assert_eq!(webdav.len(), 1, "one webdav sample expected:\n{output}");
-        let sample = webdav[0];
-        assert!(sample.contains("auth_method=\"none\""), "{sample}");
-        assert!(sample.contains("pubky_host_header=\"absent\""), "{sample}");
-        assert!(sample.contains("pubky_host_query=\"false\""), "{sample}");
-        assert!(sample.ends_with(" 2"), "two requests expected: {sample}");
-        // Labels stay low-cardinality: no key, no path.
-        assert!(!output.contains(&share.public_key));
-        assert!(!output.contains("dav.txt"));
-    }
-
     // ── Fixtures ────────────────────────────────────────────────────────
 
-    /// A stand-in client address. The shipped PROPFIND limit is keyed by IP
+    /// A stand-in client address. Rate and bandwidth limits are keyed by IP
     /// and `TestServer` carries no peer address, so requests say who they are
     /// the way a reverse proxy would.
     const CLIENT_IP: &str = "203.0.113.9";
 
     /// One signed-up user's drive, seen through the whole client server.
     struct Share {
-        context: Arc<AppContext>,
         server: TestServer,
         cookie: String,
         public_key: String,
@@ -558,14 +557,19 @@ mod tests {
             Self::with_config(|_| {}).await
         }
 
+        /// A share is off unless the config turns it on, so every fixture
+        /// does, before `configure` has its say.
         async fn with_config(configure: impl FnOnce(&mut ConfigToml)) -> Self {
-            let context = AppContext::test_with_config(configure).await;
-            let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
+            let context = AppContext::test_with_config(|c| {
+                c.drive.webdav_enabled = true;
+                configure(c);
+            })
+            .await;
+            let router = ClientServer::create_router(context).unwrap();
             let server = TestServer::new(router);
             let user = Keypair::random();
             let cookie = signup_cookie(&server, &user).await;
             Self {
-                context,
                 server,
                 cookie,
                 public_key: user.public_key().z32(),

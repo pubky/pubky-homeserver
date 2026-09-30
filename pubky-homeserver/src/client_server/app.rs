@@ -245,12 +245,6 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         // Keep feature discovery independent of authentication and database-backed quotas.
         .route("/info", get(info::get));
 
-    // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
-    // not under them — see `dav_endpoint::router`. It is anonymous, but it
-    // shares the REST routes' middleware so the same request and bandwidth
-    // limits apply to it.
-    let dav = dav::router(state).layer(middleware);
-
     // Resolve the target before tracing and authentication. Valid `/storage/...`
     // requests are therefore logged using their Pubky URL.
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
@@ -262,6 +256,16 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
             HeaderName::from_static("lock-token"),
             HeaderName::from_static("timeout"),
         ]));
+
+    if !state.context.config_toml.drive.webdav_enabled {
+        return Ok(cors_app);
+    }
+
+    // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
+    // not under them — see `dav_endpoint::router`. It is anonymous, but it
+    // shares the REST routes' middleware so the same request and bandwidth
+    // limits apply to it.
+    let dav = dav::router(state).layer(middleware);
     // No `RequestTenant` here: the endpoint resolves its own tenant from the
     // URL and nothing on this router reads it.
     let dav_app = with_trace_layer(dav);

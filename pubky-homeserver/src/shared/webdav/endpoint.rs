@@ -8,6 +8,32 @@
 //! endpoints must agree on lives in this module, so they cannot drift: how the
 //! handler is built, which verbs a share answers, and how `OPTIONS` is told
 //! apart from a CORS preflight.
+//!
+//! | | admin | client |
+//! |---|---|---|
+//! | auth | Basic `admin:<password>`, in its handler | none |
+//! | operator | `admin_operator`, every drive | app operator scoped to `{key}/pub/` |
+//! | access | `ReadWrite`, `FakeLs` | `ReadOnly` |
+//!
+//! Neither endpoint has its own switch: the client one exposes nothing
+//! `/storage` does not already, and the admin one comes and goes with the
+//! whole admin server.
+//!
+//! # Why `dav-server` over the stock `OpendalFs`
+//!
+//! The alternative was a custom `DavFileSystem` over `FileService`. Writes were
+//! exercised under `OpendalFs` first, and every problem found belonged in the
+//! OpenDAL layer stack rather than in the filesystem behind `dav-server`:
+//! `COPY`/`MOVE` bypassing the database is `WriteFinalizationLayer`'s to fix,
+//! and fixing it there covers the admin operator too; directory `DELETE`
+//! recurses file by file through the finalization deleter, so nothing is
+//! orphaned; and lock keep-alive through a long upload has no token to work
+//! with in either design. What `OpendalFs` genuinely cannot express is small —
+//! `get_quota` for free-space display, a quota refusal as `507` rather than
+//! `500`, an ETag when the backend reports none, a cap on directory listings —
+//! and all of it fits a thin `DavFileSystem` wrapper that delegates everything
+//! else. That wrapper is the escape hatch if more control is ever needed; a
+//! rewrite of the filesystem methods and a streaming `DavFile` is not warranted.
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -65,8 +91,8 @@ pub(crate) enum DavAccess {
     /// mount it read-only rather than report it broken.
     ///
     /// Folders have no directory index: a `GET` on one is `405`. Listing is
-    /// `PROPFIND`'s job, and that is the verb the shipped rate limit covers.
-    /// An index page would do the same work through a verb it does not.
+    /// `PROPFIND`'s job, so that is the one verb an operator has to rate
+    /// limit. An index page would do the same work through another.
     ReadOnly,
     /// Every WebDAV verb, with the `LOCK` handshake macOS needs before it will
     /// mount writable. The locks are [`FakeLs`]: well-formed tokens that lock
@@ -155,7 +181,7 @@ impl DavEndpoint {
             .methods(access.method_set());
         let builder = match access {
             // No index page on the anonymous share: it lists a folder exactly
-            // as PROPFIND does, one stat per entry, but through a verb the
+            // as PROPFIND does, one stat per entry, but through a verb a
             // PROPFIND rate limit never sees.
             DavAccess::ReadOnly => builder.autoindex(false),
             DavAccess::ReadWrite => builder.autoindex(true).locksystem(FakeLs::new()),
