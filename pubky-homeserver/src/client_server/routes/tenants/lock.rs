@@ -35,7 +35,7 @@ use tokio::task::JoinHandle;
 use super::authorize::authorize_write;
 use crate::{
     client_server::{auth::AuthSession, AppState},
-    persistence::files::write_lock_token::WRITE_LOCK_TOKEN,
+    persistence::files::write_finalization_layer::write_lock,
     persistence::sql::{
         entry_lock::{EntryLockEntity, EntryLockRepository},
         SqlDb, UnifiedExecutor,
@@ -97,28 +97,19 @@ pub async fn with_write_lock<T>(
     headers: &HeaderMap,
     write: impl Future<Output = HttpResult<T>>,
 ) -> HttpResult<T> {
-    let lock_token = check_lock(sql_db, entry_path, headers).await?;
-    let _keepalive = lock_token.as_ref().map(|token| {
-        KeepAlive::spawn(
-            sql_db.clone(),
-            entry_path.clone(),
-            token.clone(),
-            KEEPALIVE_INTERVAL,
-        )
-    });
-    WRITE_LOCK_TOKEN.scope(lock_token, write).await
+    let (lock_token, _keepalive) = check_lock(sql_db, entry_path, headers).await?.unzip();
+    write_lock::run_under(lock_token, write).await
 }
 
-/// The check of [`with_write_lock`], returning the token of the lock the write
-/// runs under, if it runs under one. A separate function so its pool
-/// connection is returned before the write runs: an upload can take a long
-/// time, and holding a connection for its duration would starve the write
-/// itself of one.
+/// The check of [`with_write_lock`], returning the token and keep-alive of a
+/// write under a held lock. A separate function so its pool connection is
+/// returned before the write runs: an upload can take a long time, and holding
+/// a connection for its duration would starve the write itself of one.
 async fn check_lock(
     sql_db: &SqlDb,
     entry_path: &EntryPath,
     headers: &HeaderMap,
-) -> HttpResult<Option<String>> {
+) -> HttpResult<Option<(String, KeepAlive)>> {
     let mut executor: UnifiedExecutor = sql_db.pool().into();
     let held = if_header_tokens(headers);
     if held.is_empty() {
@@ -132,7 +123,13 @@ async fn check_lock(
         EntryLockRepository::keep_alive(entry_path, &held, WRITE_LOCK_HORIZON_SECS, &mut executor)
             .await?
             .ok_or_else(HttpError::lock_token_mismatch)?;
-    Ok(Some(live.token))
+    let keepalive = KeepAlive::spawn(
+        sql_db.clone(),
+        entry_path.clone(),
+        live.token.clone(),
+        KEEPALIVE_INTERVAL,
+    );
+    Ok(Some((live.token, keepalive)))
 }
 
 /// Pushes a lock's expiry out every `interval` for as long as it is held.

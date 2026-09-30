@@ -12,8 +12,6 @@ pub enum LayerDomainError {
     DiskSpaceQuotaExceeded,
     #[error("path_collision")]
     PathCollision,
-    /// The lock a write or delete ran under was gone when it came to change
-    /// the file.
     #[error("lock_lost")]
     LockLost,
 }

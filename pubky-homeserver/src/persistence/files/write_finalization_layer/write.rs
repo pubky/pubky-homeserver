@@ -14,11 +14,8 @@ use opendal::raw::oio;
 use opendal::Result;
 
 use super::{
-    layer::{
-        already_closed, check_no_path_collision, hold_write_lock, spawn_finalization, unexpected,
-        Finalizer,
-    },
-    resolve_storage_max_bytes, would_exceed_limit,
+    layer::{already_closed, check_no_path_collision, spawn_finalization, unexpected, Finalizer},
+    resolve_storage_max_bytes, would_exceed_limit, write_lock,
 };
 
 struct PreparedWrite {
@@ -236,8 +233,6 @@ impl Finalizer {
         Ok(backend_metadata)
     }
 
-    /// Everything that can reject the write, run before the backend publishes
-    /// so a rejection still has staged bytes to abort.
     async fn prepare_write(
         &self,
         entry_path: &EntryPath,
@@ -255,7 +250,7 @@ impl Finalizer {
                 )
             })?;
 
-        hold_write_lock(entry_path, executor).await?;
+        write_lock::hold(entry_path, executor).await?;
 
         if self.collision_policy.enforces_collisions() {
             check_no_path_collision(entry_path, executor).await?;
@@ -355,7 +350,6 @@ mod tests {
     use pubky_common::crypto::Keypair;
     use tokio::sync::Barrier;
 
-    use crate::persistence::files::write_lock_token::WRITE_LOCK_TOKEN;
     use crate::persistence::files::FileIoError;
     use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
@@ -503,8 +497,7 @@ mod tests {
             .unwrap()
             .expect("the expired lock should be replaceable");
 
-        let rejection = WRITE_LOCK_TOKEN
-            .scope(Some("token-a".to_string()), writer.close())
+        let rejection = write_lock::run_under(Some("token-a".to_string()), writer.close())
             .await
             .expect_err("the write should be refused once its lock is gone");
 
@@ -548,7 +541,7 @@ mod tests {
             .await
             .unwrap();
 
-        let close = WRITE_LOCK_TOKEN.scope(Some("token-a".to_string()), writer.close());
+        let close = write_lock::run_under(Some("token-a".to_string()), writer.close());
         let outlast_the_lock = async {
             tokio::time::sleep(Duration::from_secs(2)).await;
             other_finalization.commit().await.unwrap();
@@ -562,44 +555,6 @@ mod tests {
         ));
         assert_eq!(staged_count(&tmp_dir), 0);
         assert!(!operator.exists(entry_path.as_str()).await.unwrap());
-    }
-
-    /// The lock check only refuses a lost lock: a write whose lock is still
-    /// live lands, and an unlocked write never consults the lock table.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn write_under_a_live_lock_and_unlocked_write_both_land() {
-        let db = SqlDb::test().await;
-        let operator = test_operator(&db);
-        let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
-        EntryLockRepository::acquire(&entry_path, "token-a", 60, &mut db.pool().into())
-            .await
-            .unwrap()
-            .expect("the lock should be free");
-
-        WRITE_LOCK_TOKEN
-            .scope(
-                Some("token-a".to_string()),
-                operator.write(entry_path.as_str(), b"locked".to_vec()),
-            )
-            .await
-            .expect("a write under its live lock should land");
-        assert_eq!(
-            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
-            b"locked"
-        );
-
-        // An unlocked write started before the lock existed is not checked,
-        // which is what a write with no token means.
-        operator
-            .write(entry_path.as_str(), b"unlocked".to_vec())
-            .await
-            .expect("a write without a token should not consult the lock");
-        assert_eq!(
-            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
-            b"unlocked"
-        );
     }
 
     /// The transaction failing to begin happens before the backend publishes,

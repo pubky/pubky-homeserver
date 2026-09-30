@@ -30,7 +30,8 @@
 //!
 //! A disconnect also drops the request's lock keep-alive, so a lock can expire
 //! before its write is finalized. The finalization then refuses the write
-//! rather than let it land on top of the next holder.
+//! rather than let it land on top of the next holder, see
+//! [`write_finalization_layer::write_lock`].
 //!
 //! One limit of that task: a runtime shutdown that cancels it leaves the
 //! staged upload neither published nor aborted.
@@ -41,7 +42,6 @@
 mod file;
 mod layer_domain_error;
 mod opendal;
-pub(crate) mod write_lock_token;
 
 pub(crate) mod events;
 pub(crate) mod write_finalization_layer;

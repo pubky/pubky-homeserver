@@ -11,22 +11,8 @@ use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
 use opendal::{Error, Result};
 
-use super::layer::{already_closed, hold_write_lock, spawn_finalization, unexpected, Finalizer};
-
-/// The entry row of `entry_path`, if it has one.
-async fn find_entry(
-    entry_path: &EntryPath,
-    executor: &mut UnifiedExecutor<'_>,
-) -> Result<Option<EntryEntity>> {
-    match EntryRepository::get_by_path(entry_path, executor).await {
-        Ok(entry) => Ok(Some(entry)),
-        Err(sqlx::Error::RowNotFound) => Ok(None),
-        Err(error) => Err(unexpected(
-            format!("Failed to load entry {entry_path}"),
-            error,
-        )),
-    }
-}
+use super::layer::{already_closed, spawn_finalization, unexpected, Finalizer};
+use super::write_lock;
 
 struct StagedDelete {
     user: UserEntity,
@@ -247,10 +233,29 @@ impl Finalizer {
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<()> {
         let entry_path = &pending.entry_path;
-        // Without a user there is nobody whose write could put the file back.
-        self.lock_user_row(entry_path, executor).await?;
-        if find_entry(entry_path, executor).await?.is_some() {
-            return Ok(());
+        match self
+            .user_service
+            .get_for_no_key_update(entry_path.pubkey(), executor)
+            .await
+        {
+            // Without a user there is nobody whose write could put the file back.
+            Ok(_) | Err(sqlx::Error::RowNotFound) => {}
+            Err(error) => {
+                return Err(unexpected(
+                    format!("Failed to lock user {}", entry_path.pubkey()),
+                    error,
+                ));
+            }
+        }
+        match EntryRepository::get_by_path(entry_path, executor).await {
+            Ok(_) => return Ok(()),
+            Err(sqlx::Error::RowNotFound) => {}
+            Err(error) => {
+                return Err(unexpected(
+                    format!("Failed to load entry {entry_path}"),
+                    error,
+                ));
+            }
         }
 
         backend_deleter
@@ -259,27 +264,6 @@ impl Finalizer {
         // Flushed here: a backend that batches would otherwise remove the blob
         // after the user row is released.
         backend_deleter.close().await
-    }
-
-    /// Lock the row of the path's user, which serializes this step with every
-    /// other change to that user's files. `None` if there is no such user.
-    async fn lock_user_row(
-        &self,
-        entry_path: &EntryPath,
-        executor: &mut UnifiedExecutor<'_>,
-    ) -> Result<Option<UserEntity>> {
-        match self
-            .user_service
-            .get_for_no_key_update(entry_path.pubkey(), executor)
-            .await
-        {
-            Ok(user) => Ok(Some(user)),
-            Err(sqlx::Error::RowNotFound) => Ok(None),
-            Err(error) => Err(unexpected(
-                format!("Failed to lock user {}", entry_path.pubkey()),
-                error,
-            )),
-        }
     }
 
     async fn delete_in_transaction(
@@ -300,14 +284,32 @@ impl Finalizer {
         entry_path: &EntryPath,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<Option<StagedDelete>> {
-        let Some(user) = self.lock_user_row(entry_path, executor).await? else {
-            return Ok(None);
+        let user = match self
+            .user_service
+            .get_for_no_key_update(entry_path.pubkey(), executor)
+            .await
+        {
+            Ok(user) => user,
+            Err(sqlx::Error::RowNotFound) => return Ok(None),
+            Err(error) => {
+                return Err(unexpected(
+                    format!("Failed to lock user {}", entry_path.pubkey()),
+                    error,
+                ));
+            }
         };
 
-        hold_write_lock(entry_path, executor).await?;
+        write_lock::hold(entry_path, executor).await?;
 
-        let Some(deleted_entry) = find_entry(entry_path, executor).await? else {
-            return Ok(None);
+        let deleted_entry = match EntryRepository::get_by_path(entry_path, executor).await {
+            Ok(entry) => entry,
+            Err(sqlx::Error::RowNotFound) => return Ok(None),
+            Err(error) => {
+                return Err(unexpected(
+                    format!("Failed to delete entry {entry_path}"),
+                    error,
+                ));
+            }
         };
         EntryRepository::delete(deleted_entry.id, executor)
             .await
@@ -365,7 +367,6 @@ mod tests {
     use tokio::sync::Barrier;
 
     use crate::persistence::files::events::EventType;
-    use crate::persistence::files::write_lock_token::WRITE_LOCK_TOKEN;
     use crate::persistence::files::FileIoError;
     use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
@@ -431,13 +432,12 @@ mod tests {
             .unwrap()
             .expect("the lock should be free");
 
-        let rejection = WRITE_LOCK_TOKEN
-            .scope(
-                Some("token-a".to_string()),
-                operator.delete(entry_path.as_str()),
-            )
-            .await
-            .expect_err("the delete should be refused under a lock it does not hold");
+        let rejection = write_lock::run_under(
+            Some("token-a".to_string()),
+            operator.delete(entry_path.as_str()),
+        )
+        .await
+        .expect_err("the delete should be refused under a lock it does not hold");
 
         assert!(matches!(
             FileIoError::from(rejection),
@@ -452,13 +452,12 @@ mod tests {
             .expect("a refused delete must preserve the entry");
         assert_eq!(all_events(&db).await.len(), 1);
 
-        WRITE_LOCK_TOKEN
-            .scope(
-                Some("token-b".to_string()),
-                operator.delete(entry_path.as_str()),
-            )
-            .await
-            .expect("a delete under its live lock should land");
+        write_lock::run_under(
+            Some("token-b".to_string()),
+            operator.delete(entry_path.as_str()),
+        )
+        .await
+        .expect("a delete under its live lock should land");
         assert!(!operator.exists(entry_path.as_str()).await.unwrap());
     }
 
