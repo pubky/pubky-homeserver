@@ -26,17 +26,22 @@ mod shared;
 pub mod tracing;
 
 pub use admin_server::{AdminServer, AdminServerBuildError};
-pub use app_context::{AppContext, AppContextConversionError};
+pub use app_context::{AppContext, AppContextBuildError};
 pub use client_server::{ClientServer, ClientServerBuildError};
-#[cfg(any(test, feature = "testing"))]
-pub use data_directory::MockDataDir;
 pub use data_directory::{
-    storage_config, AdminToml, ConfigReadError, ConfigToml, DataDir, LoggingToml, MetricsToml,
+    storage_config, AdminToml, ConfigReadError, ConfigToml, LoggingToml, MetricsToml,
     PersistentDataDir,
 };
 pub use homeserver_app::{HomeserverApp, HomeserverAppBuildError};
 pub use metrics_server::{MetricsServer, MetricsServerBuildError};
-pub use persistence::sql::{ConnectionString, DatabaseMode};
+/// Name of the env var that overrides the database URL in test / testing builds,
+/// so callers and docs can refer to it instead of hardcoding the string.
+#[cfg(any(test, feature = "testing"))]
+pub use persistence::sql::TEST_CONNECTION_STRING_ENV;
+pub use persistence::sql::{ConnectionString, DatabaseMode, DEFAULT_DATABASE_URL};
+/// Re-exported so callers of [`AppContext::new`] and friends do not need a direct
+/// `pubky-common` dependency just to name the server identity type.
+pub use pubky_common::crypto::Keypair;
 pub use shared::quota::{
     BandwidthQuota, DefaultQuotasToml, GlobPattern, HttpMethod, LimitKey, LimitKeyType, PathLimit,
     RequestCountQuota, TimeUnit,

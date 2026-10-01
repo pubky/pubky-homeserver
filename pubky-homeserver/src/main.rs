@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pubky_homeserver::{
-    tracing::init_tracing_logs_if_set, DataDir, HomeserverApp, PersistentDataDir,
-};
+use pubky_homeserver::{tracing::init_tracing_logs_if_set, HomeserverApp, PersistentDataDir};
 
 fn default_config_dir_path() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".pubky")

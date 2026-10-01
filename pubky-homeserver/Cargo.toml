@@ -49,7 +49,6 @@ tower = "0.5"
 thiserror.workspace = true
 hostname-validator = "1"
 tempfile.workspace = true
-dyn-clone = "1"
 reqwest = { workspace = true, features = [
     "rustls",
 ] }
