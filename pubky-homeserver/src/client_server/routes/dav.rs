@@ -413,8 +413,8 @@ mod tests {
     #[pubky_test_utils::test]
     async fn propfind_depth_is_finite_by_default() {
         // dav-server refuses `Depth: infinity` outright, and serves a request
-        // with no `Depth` as a one-level listing. Both are what the user guide
-        // promises.
+        // with no `Depth` as a one-level listing, so no single PROPFIND walks
+        // a whole tree.
         let share = Share::new().await;
         share.put("depth.txt", b"x").await;
         let folder = share.dav("/pub/");
@@ -443,7 +443,7 @@ mod tests {
     async fn the_content_type_is_guessed_from_the_name() {
         // REST serves the type a file was stored with; dav-server serves what
         // the extension suggests. A file with no extension is octet-stream
-        // over WebDAV whatever it holds — a documented limitation.
+        // over WebDAV whatever it holds — a known limitation.
         let share = Share::new().await;
         for name in ["picture", "picture.png"] {
             share
@@ -513,8 +513,8 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn anonymous_reads_share_the_rest_routes_bandwidth_limit() {
-        // The user guide says bandwidth quotas apply as they do to REST. For
-        // an anonymous read that is the per-IP limit; a 3 kB file at 1 kB/s
+        // The bandwidth quotas configured for REST apply here too. For an
+        // anonymous read that is the per-IP limit; a 3 kB file at 1 kB/s
         // cannot finish in under a second if the limit is really in the path.
         let share = Share::with_config(|c| {
             c.default_quotas.unauthenticated_ip_rate_read = Some("1kb/s".parse().unwrap());

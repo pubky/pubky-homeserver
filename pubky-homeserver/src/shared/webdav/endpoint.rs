@@ -15,9 +15,8 @@
 //! | operator | `admin_operator`, every drive | app operator scoped to `{key}/pub/` |
 //! | access | `ReadWrite`, `FakeLs` | `ReadOnly` |
 //!
-//! Neither endpoint has its own switch: the client one exposes nothing
-//! `/storage` does not already, and the admin one comes and goes with the
-//! whole admin server.
+//! The client endpoint is off unless `[drive] webdav_enabled` is set. The admin
+//! one has no switch of its own: it comes and goes with the whole admin server.
 //!
 //! # Why `dav-server` over the stock `OpendalFs`
 //!

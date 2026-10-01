@@ -263,8 +263,10 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
 
     // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
     // not under them — see `dav_endpoint::router`. It is anonymous, but it
-    // shares the REST routes' middleware so the same request and bandwidth
-    // limits apply to it.
+    // runs behind the REST routes' middleware so the configured request and
+    // bandwidth limits apply to it. Request-count limiters are shared with
+    // REST; bandwidth buckets are per route, so a client's read allowance on
+    // `/dav` is counted separately from its allowance on `/storage`.
     let dav = dav::router(state).layer(middleware);
     // No `RequestTenant` here: the endpoint resolves its own tenant from the
     // URL and nothing on this router reads it.
