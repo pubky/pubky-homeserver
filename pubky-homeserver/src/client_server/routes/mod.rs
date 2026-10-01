@@ -1,5 +1,6 @@
 //! HTTP route handlers for the client server.
 //!
+//! - [`dav`]: Read-only WebDAV access to public folders.
 //! - [`events`]: Historical event feed and live SSE stream for file change notifications.
 //! - [`info`]: Homeserver feature discovery.
 //! - [`root`]: Server info endpoint.
@@ -8,6 +9,7 @@
 //!
 //! Auth routes (signup, signin, session management) live in [`crate::client_server::auth::routes`].
 
+pub(crate) mod dav;
 pub(crate) mod events;
 pub(crate) mod info;
 pub(crate) mod root;

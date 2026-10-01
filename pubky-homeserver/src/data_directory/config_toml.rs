@@ -64,6 +64,8 @@ pub struct PkdnsToml {
 pub struct DriveToml {
     pub pubky_listen_socket: SocketAddr,
     pub icann_listen_socket: SocketAddr,
+    /// Serve every user's public folder as a read-only WebDAV share under `/dav`.
+    pub webdav_enabled: bool,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
 }
@@ -318,6 +320,7 @@ mod tests {
         assert_eq!(c.pkdns.user_keys_republisher_interval, 14400);
         assert_eq!(c.pkdns.dht_bootstrap_nodes, None);
         assert_eq!(c.pkdns.dht_request_timeout_ms, None);
+        assert!(!c.drive.webdav_enabled);
         assert_eq!(c.drive.rate_limits.len(), 1);
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());

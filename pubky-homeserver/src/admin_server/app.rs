@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::routes::{
-    admin_events, dav_handler, delete_entry,
+    admin_events, dav, delete_entry,
     disable_users::{disable_user, enable_user},
     generate_signup_token, info, root, signup_tokens, user_quota,
 };
@@ -14,11 +14,13 @@ use crate::AppContext;
 #[cfg(any(test, feature = "testing"))]
 use crate::MockDataDir;
 use crate::{AppContextConversionError, PersistentDataDir};
-use axum::routing::{any, delete, post};
+use axum::routing::{delete, post};
 use axum::{routing::get, Router};
 use axum_server::Handle;
 use tokio::task::JoinHandle;
 use tower_http::cors::CorsLayer;
+
+use crate::shared::webdav::endpoint::{self as dav_endpoint, DavAccess};
 
 /// Admin password protected router.
 fn create_protected_router(password: &str) -> Router<AppState> {
@@ -54,11 +56,14 @@ pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Rout
     let app = Router::new()
         .merge(admin_router)
         .merge(public_router)
-        .route("/dav{*path}", any(dav_handler::dav_handler))
-        .with_state(state)
+        .with_state(state.clone())
         .layer(CorsLayer::very_permissive());
 
-    with_trace_layer(app).into_make_service()
+    // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
+    // not under them — see `dav_endpoint::router`.
+    let dav = dav_endpoint::router(DavAccess::ReadWrite, dav::dav_handler).with_state(state);
+
+    with_trace_layer(app.merge(dav)).into_make_service()
 }
 
 /// Errors that can occur when building a `AdminServer`.
@@ -434,6 +439,103 @@ mod tests {
             .expect_success()
             .await;
         response.assert_status_ok();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_options_advertises_compliance_to_file_managers() {
+        // A file manager reads `DAV:` off a bare OPTIONS before it will mount
+        // anything. The server's blanket CORS layer answers every OPTIONS
+        // itself, so while `/dav` sat under it this header never appeared and
+        // Finder and GNOME Files could not mount the admin share at all.
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+
+        let response = server
+            .method(Method::OPTIONS, "/dav/")
+            .add_header("Authorization", auth_header().as_str())
+            .await;
+        response.assert_status_ok();
+        let dav = response
+            .headers()
+            .get("dav")
+            .expect("OPTIONS must advertise DAV compliance")
+            .to_str()
+            .unwrap();
+        // Class 1 is WebDAV itself; class 2 is locking, which macOS insists on
+        // before it will mount a share writable.
+        assert!(
+            dav.starts_with('1') && dav.contains('2'),
+            "unexpected DAV classes: {dav}"
+        );
+        let allow = response
+            .headers()
+            .get("allow")
+            .and_then(|v| v.to_str().ok())
+            .expect("OPTIONS must carry Allow");
+        assert!(
+            allow.contains("LOCK"),
+            "the operator's share takes locks: {allow}"
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_without_credentials_is_challenged() {
+        // The operator's share is every drive, read-write. Nothing on it is
+        // served without the admin password, and the challenge is Basic so a
+        // file manager knows to ask for one.
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+
+        for (method, header) in [
+            (Method::from_bytes(b"PROPFIND").unwrap(), None),
+            (Method::GET, None),
+            (Method::GET, Some("Basic YWRtaW46d3Jvbmc=")), // admin:wrong
+            (Method::GET, Some("Bearer admin")),
+        ] {
+            let mut request = server.method(method.clone(), "/dav/");
+            if let Some(header) = header {
+                request = request.add_header("Authorization", header);
+            }
+            let response = request.await;
+            response.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+            response.assert_header("www-authenticate", "Basic");
+            assert!(
+                response.maybe_header("dav").is_none(),
+                "{method} {header:?}: nothing about the share is disclosed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_preflight_is_answered_without_credentials() {
+        // A browser preflight never carries credentials, so it must be
+        // answered before the password check — `CorsLayer` used to do this
+        // for the whole admin server; `/dav` now brings its own.
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+
+        let response = server
+            .method(Method::OPTIONS, "/dav/")
+            .add_header("origin", "https://admin.example")
+            .add_header("access-control-request-method", "PROPFIND")
+            .add_header("access-control-request-headers", "authorization, depth")
+            .await;
+
+        response.assert_status(axum::http::StatusCode::NO_CONTENT);
+        response.assert_header("access-control-allow-origin", "*");
+        response.assert_header("access-control-allow-headers", "authorization, depth");
+        let methods = response
+            .maybe_header("access-control-allow-methods")
+            .expect("preflight lists methods")
+            .to_str()
+            .unwrap()
+            .to_string();
+        for verb in ["PROPFIND", "PUT", "DELETE", "LOCK"] {
+            assert!(methods.contains(verb), "{verb} missing from {methods}");
+        }
     }
 
     /// PUT a file via WebDAV, GET it back, then DELETE it.
