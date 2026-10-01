@@ -11,7 +11,7 @@ use axum::{
 use pubky_common::auth::{grant_session_responses::GrantInfo, jws::GrantId};
 use serde::Deserialize;
 
-use super::crypto::jws_crypto::JwsCompact;
+use super::crypto::jws_compact::JwsCompact;
 use super::persistence::grant::GrantEntity;
 use super::service::GrantAuthService;
 use crate::client_server::auth::AuthSession;

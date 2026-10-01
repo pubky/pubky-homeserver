@@ -4079,7 +4079,6 @@ dependencies = [
  "hostname-validator",
  "httpdate",
  "infer",
- "jsonwebtoken",
  "mainline",
  "mime_guess",
  "opendal",
