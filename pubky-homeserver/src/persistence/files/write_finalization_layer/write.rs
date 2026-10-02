@@ -354,11 +354,62 @@ mod tests {
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, create_user, install_events_insert_trigger, install_slow_event_insert,
-        staged_count, test_fs_operator, test_operator, test_user_service, user_usage,
-        wait_for_slow_event_insert, wait_for_staged_count, wait_until,
+        all_events, backend_throttle, create_user, install_events_insert_trigger,
+        install_slow_event_insert, staged_count, test_finalizer, test_fs_operator, test_operator,
+        test_user_service, user_usage, wait_for_slow_event_insert, wait_for_staged_count,
+        wait_until,
     };
     use super::*;
+
+    /// A backend writer whose close is throttled.
+    struct ThrottledWriter;
+
+    impl oio::Write for ThrottledWriter {
+        async fn write(&mut self, _bs: opendal::Buffer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<opendal::Metadata> {
+            Err(backend_throttle())
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The finalization must hand a backend throttle on unchanged, or the
+    /// client is told the server broke instead of to retry. Nothing was
+    /// published, so no entry, event or usage may remain either.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn throttled_backend_close_stays_rate_limited_and_rolls_back() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        let mut writer = WriteFinalizationWriter::new(
+            ThrottledWriter,
+            Arc::new(test_finalizer(&db)),
+            entry_path.clone(),
+        );
+        oio::Write::write(&mut writer, vec![1u8; 10].into())
+            .await
+            .unwrap();
+
+        let throttled = oio::Write::close(&mut writer)
+            .await
+            .expect_err("the backend throttled the close");
+
+        assert!(matches!(
+            FileIoError::from(throttled),
+            FileIoError::BackendRateLimited(_)
+        ));
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect_err("entry insert should roll back");
+        assert_eq!(user_usage(&db, &pubkey).await, 0);
+        assert!(all_events(&db).await.is_empty());
+    }
 
     /// A caller that disconnects while the write is being finalized drops the
     /// close future. The finalization must still run to completion, or the
