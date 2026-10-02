@@ -305,13 +305,15 @@ mod tests {
     use tokio::sync::Barrier;
 
     use crate::persistence::files::events::EventType;
+    use crate::persistence::files::FileIoError;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, create_user, install_events_insert_trigger, install_slow_event_insert,
-        test_finalizer, test_operator, user_usage, wait_for_slow_event_insert, wait_until,
+        all_events, backend_throttle, create_user, install_events_insert_trigger,
+        install_slow_event_insert, test_finalizer, test_operator, user_usage,
+        wait_for_slow_event_insert, wait_until,
     };
     use super::*;
 
@@ -368,6 +370,55 @@ mod tests {
             self.closed_paths.extend(queued_paths);
             Ok(())
         }
+    }
+
+    /// A backend deleter whose blob deletion is throttled.
+    struct ThrottledDelete;
+
+    impl oio::Delete for ThrottledDelete {
+        async fn delete(&mut self, _path: &str, _args: OpDelete) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Err(backend_throttle())
+        }
+    }
+
+    /// The finalization must hand a backend throttle on unchanged, or the
+    /// client is told the server broke instead of to retry. The row removal
+    /// commits before the blob delete, so it has already happened by then.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn throttled_blob_delete_stays_rate_limited_after_the_row_is_removed() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        test_operator(&db)
+            .write(entry_path.as_str(), vec![1; 10])
+            .await
+            .unwrap();
+
+        let mut deleter =
+            WriteFinalizationDeleter::new(ThrottledDelete, Arc::new(test_finalizer(&db)));
+        deleter
+            .delete(entry_path.as_str(), OpDelete::default())
+            .await
+            .unwrap();
+        let throttled = deleter
+            .close()
+            .await
+            .expect_err("the backend throttled the blob delete");
+
+        assert!(matches!(
+            FileIoError::from(throttled),
+            FileIoError::BackendRateLimited(_)
+        ));
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect_err("the row removal commits before the blob delete");
+        assert_eq!(user_usage(&db, &pubkey).await, 0);
+        assert_eq!(all_events(&db).await.len(), 2);
     }
 
     async fn fail_all_delete_event_inserts(db: &SqlDb) {

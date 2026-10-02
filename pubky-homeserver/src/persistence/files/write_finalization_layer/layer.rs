@@ -322,6 +322,16 @@ pub(super) mod test_support {
         ))
     }
 
+    /// The error of a backend that throttled a mutation, as an object store
+    /// does for a second mutation of one object within a second.
+    pub(in super::super) fn backend_throttle() -> opendal::Error {
+        opendal::Error::new(
+            opendal::ErrorKind::RateLimited,
+            "object mutation rate limit exceeded",
+        )
+        .set_temporary()
+    }
+
     pub(in super::super) fn test_user_service(db: &SqlDb) -> UserService {
         UserService::new(db.clone())
     }
