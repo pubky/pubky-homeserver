@@ -56,7 +56,8 @@ httpdate = "1"
 js-sys = "0.3"
 log = "0.4"
 mainline = "8"
-pkarr = { version = "8", default-features = false }
+# Separate DHT and relay request timeout setters require Pkarr 8.1 or newer.
+pkarr = { version = "8.1", default-features = false }
 pkarr-relay = { version = "2", default-features = false }
 percent-encoding = "2"
 pubky = { path = "pubky-sdk", version = "0.14", default-features = false }

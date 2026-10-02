@@ -327,7 +327,8 @@ mod tests {
         combined_builder
             .relays(&["http://127.0.0.1:1"])
             .unwrap()
-            .request_timeout(Duration::from_millis(100));
+            .dht_request_timeout(Duration::from_millis(100))
+            .relay_request_timeout(Duration::from_millis(100));
         let combined_client = combined_builder.build().unwrap();
 
         assert_eq!(

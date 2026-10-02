@@ -164,8 +164,13 @@ dht_bootstrap_nodes = [
 # If not set and no bootstrap nodes are set, the default pkarr relay nodes will be used.
 dht_relay_nodes = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
 
-# Default UDP request timeout for the DHT
+# Timeout for individual DHT UDP requests in milliseconds (must be nonzero).
+# If omitted, Pkarr's default is used. Does not change relay HTTP timeouts.
 dht_request_timeout_ms = 2000
+
+# Timeout for relay HTTP requests in milliseconds (must be nonzero).
+# If omitted, Pkarr's default is used. Does not change DHT UDP timeouts.
+relay_request_timeout_ms = 5000
 
 [logging]
 # Global runtime log level sets the default minimum logging level for all messages across the executable.

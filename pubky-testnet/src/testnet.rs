@@ -187,9 +187,9 @@ impl Testnet {
                 .no_default_network()
                 .bootstrap(&self.dht.bootstrap)
                 .dht_report_policy(pkarr::dht::ReportPolicy::testnet())
-                // 100ms timeout for requests. This makes network-only resolution fast
-                // because it doesn't need to wait the default 2s which would slow down the tests.
-                .request_timeout(Duration::from_millis(100));
+                // Short DHT and relay request timeouts keep test resolution fast.
+                .dht_request_timeout(Duration::from_millis(100))
+                .relay_request_timeout(Duration::from_millis(100));
             if relays.is_empty() {
                 builder.no_relays()
             } else {
