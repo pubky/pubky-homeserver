@@ -79,13 +79,15 @@ async function record(update?: (value: any) => any) {
   });
   try {
     return await new Promise<any>((resolve, reject) => {
-      const tx = db.transaction("storedSessions", update ? "readwrite" : "readonly");
+      const tx = db.transaction(["storedSessions", "delegatedGrantKeys"], update ? "readwrite" : "readonly");
       const records = tx.objectStore("storedSessions");
-      const request = records.get(savedId);
+      const keys = tx.objectStore("delegatedGrantKeys");
+      const legacy = records.get(savedId);
+      const request = keys.get(`session:${savedId}`);
       let value: any;
       request.onsuccess = () => {
-        value = request.result;
-        if (update) records.put(update(value));
+        value = request.result ?? legacy.result;
+        if (update) (request.result ? keys : records).put(update(value));
       };
       tx.oncomplete = () => resolve(value);
       tx.onerror = tx.onabort = () => reject(tx.error);

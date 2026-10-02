@@ -571,6 +571,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1361,6 +1362,7 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -4026,6 +4028,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-time",
  "webpki-roots 1.0.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -4044,8 +4047,11 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "subtle",
  "thiserror 2.0.20",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -4196,6 +4202,7 @@ dependencies = [
  "wasm-bindgen-test",
  "wasm-streams 0.7.0",
  "web-sys",
+ "zeroize",
 ]
 
 [[package]]
@@ -7123,6 +7130,9 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "zerotrie"

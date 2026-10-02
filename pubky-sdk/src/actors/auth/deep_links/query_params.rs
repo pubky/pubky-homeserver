@@ -4,7 +4,33 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{auth::jws::ClientId, capabilities::Capabilities, crypto::PublicKey};
 use url::Url;
 
-use super::DeepLinkParseError;
+use super::{DeepLinkParseError, GrantApprovalFormat};
+
+pub(super) fn parse_grant_approval_format(
+    url: &Url,
+) -> Result<GrantApprovalFormat, DeepLinkParseError> {
+    let mut values = url
+        .query_pairs()
+        .filter(|(key, _)| key == "approval")
+        .map(|(_, value)| value);
+    match (values.next(), values.next()) {
+        (None, None) => Ok(GrantApprovalFormat::Grant),
+        (Some(value), None) if value == "v1" => Ok(GrantApprovalFormat::V1),
+        _ => Err(DeepLinkParseError::InvalidQueryParameter(
+            "approval",
+            Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected one approval=v1 parameter, or none for a bare grant",
+            )),
+        )),
+    }
+}
+
+pub(super) fn append_grant_approval_format(url: &mut Url, format: GrantApprovalFormat) {
+    if format == GrantApprovalFormat::V1 {
+        url.query_pairs_mut().append_pair("approval", "v1");
+    }
+}
 
 pub(super) fn parse_capabilities(url: &Url) -> Result<Capabilities, DeepLinkParseError> {
     required_query(url, "caps")?

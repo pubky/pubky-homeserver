@@ -43,8 +43,10 @@ url.workspace = true
 wasm-bindgen = "0.2"
 wasm-bindgen-futures.workspace = true
 wasm-streams.workspace = true
+zeroize = "1"
 # ReadableStream is not available in early 0.3.x web-sys releases.
 web-sys = { version = "0.3.77", default-features = false, features = [
+    "CryptoKey",
     "Request",
     "RequestInit",
     "RequestCredentials",

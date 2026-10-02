@@ -4,7 +4,7 @@ use crate::js_error::JsResult;
 use pubky_common::capabilities::Capabilities;
 
 #[wasm_bindgen(typescript_custom_section)]
-const TS_CAPABILITIES: &str = r#"export type CapabilityAction = "r" | "w" | "rw";
+const TS_CAPABILITIES: &str = r#"export type CapabilityAction = "r" | "w" | "e" | "rw" | "re" | "we" | "rwe";
 export type CapabilityScope = `/${string}`;
 export type CapabilityEntry = `${CapabilityScope}:${CapabilityAction}`;
 type CapabilitiesTail = `,${CapabilityEntry}${string}`;
@@ -16,7 +16,8 @@ pub(crate) fn parse_capabilities(input: &str) -> JsResult<Capabilities> {
 
 /// Validate and normalize a capabilities string.
 ///
-/// - Normalizes action order (`wr` -> `rw`)
+/// - Normalizes action order (`wr` -> `rw`, `ewr` -> `rwe`).
+/// - `e` requests scoped encryption/decryption keys in V1 grant approvals.
 /// - Throws `InvalidInput` identifying the first malformed entry.
 ///
 /// @param {string} input

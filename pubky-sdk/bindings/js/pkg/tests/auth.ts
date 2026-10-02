@@ -355,11 +355,11 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   const signupToken = await createSignupToken();
   await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
 
-  const capabilities = "/pub/pubky.app/:rw";
+  const capabilities = "/pub/pubky.app/:rwe";
   const originalFlow = await sdk.startGrantAuthFlow(
     capabilities,
     AuthFlowKind.signin(),
-    { clientId: "grant-resume-js.test", relay: TESTNET_HTTP_RELAY },
+    { clientId: "grant-resume-js.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "v1" },
   );
   const savedUrl = originalFlow.authorizationUrl;
   let savedState: string;
@@ -370,6 +370,8 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   } catch (_error) {
     savedState = originalFlow.saveLocal();
   }
+  t.notOk(new URL(savedUrl).searchParams.has("ek"), "link needs no recipient key");
+  t.ok(new URL(savedUrl).searchParams.has("secret"), "V1 keeps the existing relay secret");
   originalFlow.free();
 
   await signer.approveAuthRequest(savedUrl);
@@ -394,6 +396,7 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
     capabilities.split(","),
     "resumed grant session capabilities match",
   );
+  t.deepEqual(session.grant!.encryptionScopes, ["/pub/pubky.app/"], "resumed V1 flow decrypts scoped keys");
 
   t.end();
 });

@@ -3,6 +3,7 @@ import test from "tape";
 import {
   AuthFlowKind,
   CookieSession,
+  EncryptionKeys,
   GrantInfo,
   GrantManager,
   GrantSession,
@@ -60,6 +61,12 @@ type _CookieExportSecret = Assert<
 >;
 type _GrantExportLocalSecret = Assert<
   IsExact<ReturnType<GrantSession["exportLocalSecret"]>, Promise<string>>
+>;
+type _GrantEncryptionCryptoKey = Assert<
+  IsExact<ReturnType<GrantSession["deriveEncryptionCryptoKey"]>, Promise<CryptoKey>>
+>;
+type _OfflineEncryptionCryptoKey = Assert<
+  IsExact<ReturnType<EncryptionKeys["deriveEncryptionCryptoKey"]>, Promise<CryptoKey>>
 >;
 
 const PATH_AUTH_BASIC: Path = "/pub/example.com/auth-basic.txt";
@@ -822,5 +829,159 @@ test("Auth: signout removes persisted session cookies", async (t) => {
     t.comment(`after signout: ${inspection.reason}`);
   }
 
+  t.end();
+});
+
+
+test("Local signer sessions retain encryption keys through secret restore", async (t) => {
+  const sdk = Pubky.testnet();
+  const signer = sdk.signer(Keypair.random());
+  await signer.signup(HOMESERVER_PUBLICKEY, await createSignupToken());
+  const session = await signer.signin("local-keys.test");
+  const key = session.grant!.deriveEncryptionKey("/pub/chat/message");
+  t.equal(key.length, 32, "local signin attaches keys");
+  const cryptoKey = await session.grant!.deriveEncryptionCryptoKey("/pub/chat/message");
+  t.equal(cryptoKey.extractable, false, "content CryptoKey is non-extractable");
+  t.deepEqual(cryptoKey.usages, ["encrypt", "decrypt"], "content CryptoKey supports encryption and decryption");
+  const algorithm = { name: "AES-GCM", iv: crypto.getRandomValues(new Uint8Array(12)) };
+  const plaintext = new TextEncoder().encode("scoped content");
+  const ciphertext = await crypto.subtle.encrypt(algorithm, cryptoKey, plaintext);
+  for (const directory of ["/", "/pub/chat/", "/pub/chat/sub/"]) {
+    try {
+      session.grant!.deriveEncryptionKey(directory);
+      t.fail("directory seeds must not be exposed");
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "InvalidInput", "directory derivation is rejected");
+      t.match(error.message, /file path.*directory/, "error explains the file requirement");
+    }
+  }
+
+  t.deepEqual(session.grant!.encryptionScopes, ["/"], "local signer has root scope");
+  const token = await session.exportLocalSecret();
+  t.ok(token.startsWith("pubky-grant-credential-v2:"), "key-bearing export uses V2");
+  const restored = await sdk.restoreSession(token);
+  t.deepEqual(restored.grant!.deriveEncryptionKey("/pub/chat/message"), key, "secret restore preserves keys");
+  await restored.signout();
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("offline key recovery must not use the network"); };
+  try {
+    const offlineKeys = EncryptionKeys.fromLocalSecret(token)!;
+    t.deepEqual(offlineKeys.scopes, ["/"], "offline keys retain scopes");
+    t.deepEqual(offlineKeys.deriveForPath("/pub/chat/message"), key, "revoked keys recover offline");
+    const offlineCryptoKey = await offlineKeys.deriveEncryptionCryptoKey("/pub/chat/message");
+    const decrypted = await crypto.subtle.decrypt(algorithm, offlineCryptoKey, ciphertext);
+    t.deepEqual(new Uint8Array(decrypted), plaintext, "offline CryptoKey decrypts session ciphertext");
+    try {
+      offlineKeys.deriveForPath("/pub/chat/");
+      t.fail("offline recovery must not expose directory seeds");
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "InvalidInput", "offline directory derivation rejects");
+    }
+    offlineKeys.free();
+    const signatureStart = token.lastIndexOf(".") + 1;
+    const tampered = token.slice(0, signatureStart)
+      + (token[signatureStart] === "A" ? "B" : "A") + token.slice(signatureStart + 1);
+    try {
+      EncryptionKeys.fromLocalSecret(tampered);
+      t.fail("offline recovery must verify the signature");
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "AuthenticationError", "tampered approval rejects offline");
+    }
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+
+  key.fill(0);
+  t.end();
+});
+
+
+test("V1 grant flows separate backup access from encryption keys", async (t) => {
+  const sdk = Pubky.testnet();
+  const signer = sdk.signer(Keypair.random());
+  await signer.signup(HOMESERVER_PUBLICKEY, await createSignupToken());
+  for (const [caps, expectedScopes] of [
+    ["/:rw", []],
+    ["/:rw,/pub/chat/:e", ["/pub/chat/"]],
+  ] as const) {
+    const flow = await sdk.startGrantAuthFlow(
+      caps, AuthFlowKind.signin(),
+      { clientId: "backup-keys.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "v1" },
+    );
+    t.equal(new URL(flow.authorizationUrl).searchParams.get("approval"), "v1", "flow requires V1");
+    await signer.approveAuthRequest(flow.authorizationUrl);
+    const session = await flow.awaitApproval();
+    t.deepEqual(session.grant!.encryptionScopes, [...expectedScopes], "only e scopes receive keys");
+    await session.storage.putText("/pub/backup/ciphertext", "opaque ciphertext");
+    t.equal(await session.storage.getText("/pub/backup/ciphertext"), "opaque ciphertext", "storage access does not require keys");
+
+    let offlineKeys: EncryptionKeys;
+    if (typeof indexedDB !== "undefined") {
+      const stored = await sdk.browserSessionStore.save(session);
+      const restored = await sdk.browserSessionStore.restore(stored.id);
+      t.deepEqual(restored.grant!.encryptionScopes, [...expectedScopes], "browser restore preserves V1 key scopes");
+      offlineKeys = (await sdk.browserSessionStore.restoreEncryptionKeys(stored.id))!;
+    } else {
+      const token = await session.exportLocalSecret();
+      const restored = await sdk.restoreSession(token);
+      t.deepEqual(restored.grant!.encryptionScopes, [...expectedScopes], "secret restore preserves V1 key scopes");
+      offlineKeys = EncryptionKeys.fromLocalSecret(token)!;
+    }
+    t.deepEqual(offlineKeys.scopes, [...expectedScopes], "offline recovery preserves explicit key scopes");
+    if (expectedScopes.length > 0) {
+      const key = await session.grant!.deriveEncryptionCryptoKey("/pub/chat/message");
+      const algorithm = { name: "AES-GCM", iv: crypto.getRandomValues(new Uint8Array(12)) };
+      const plaintext = new TextEncoder().encode("scoped content");
+      const ciphertext = await crypto.subtle.encrypt(algorithm, key, plaintext);
+      const recoveredKey = await offlineKeys.deriveEncryptionCryptoKey("/pub/chat/message");
+      const decrypted = await crypto.subtle.decrypt(algorithm, recoveredKey, ciphertext);
+      t.deepEqual(new Uint8Array(decrypted), plaintext, "V1 CryptoKeys survive offline recovery");
+    }
+    try {
+      await session.grant!.deriveEncryptionCryptoKey("/pub/backup/ciphertext");
+      t.fail("backup storage permission must not deliver encryption keys");
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "InvalidInput", "storage scope alone cannot derive keys");
+    }
+    offlineKeys.free();
+    await session.signout();
+  }
+  t.end();
+});
+
+test("V1 grant flows expose scoped keys and retain them after restore", async (t) => {
+  const sdk = Pubky.testnet();
+  const signer = sdk.signer(Keypair.random());
+  await signer.signup(HOMESERVER_PUBLICKEY, await createSignupToken());
+  const flow = await sdk.startGrantAuthFlow(
+    "/pub/chat/:re", AuthFlowKind.signin(),
+    { clientId: "scoped-keys.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "v1" },
+  );
+  await signer.approveAuthRequest(flow.authorizationUrl);
+  const session = await flow.awaitApproval();
+  t.deepEqual(session.grant!.encryptionScopes, ["/pub/chat/"], "V1 delivers scoped keys");
+  const key = session.grant!.deriveEncryptionKey("/pub/chat/message");
+  // Browser facade flows use non-extractable WebCrypto keys. Persist them
+  // through the browser store; Node flows can export portable secret tokens.
+  let restored: Session;
+  if (typeof indexedDB !== "undefined") {
+    const stored = await sdk.browserSessionStore.save(session);
+    restored = await sdk.browserSessionStore.restore(stored.id);
+  } else {
+    restored = await sdk.restoreSession(await session.exportLocalSecret());
+  }
+  t.deepEqual(restored.grant!.deriveEncryptionKey("/pub/chat/message"), key, "scoped keys survive restore");
+  try {
+    restored.grant!.deriveEncryptionKey("/pub/other/message");
+    t.fail("undelegated path must fail");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(error.name, "InvalidInput", "undelegated paths are rejected");
+  }
+  key.fill(0);
   t.end();
 });

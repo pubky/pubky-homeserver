@@ -70,6 +70,63 @@ println!("Your current homeserver: {:?}", resolved);
 # Ok(()) }
 ```
 
+## Scoped encryption keys
+
+Select approval format V1 and request `e` for scopes that need keys. Storage
+permissions `r` and `w` deliver no keys; signers may narrow or decline `e`.
+
+```rust
+# use pubky::{Capabilities, PubkyGrantAuthFlow, AuthFlowKind, ClientId};
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+let caps = Capabilities::builder()
+    .read_write("/")?
+    .encryption_keys("/pub/chat/")?
+    .finish();
+let flow = PubkyGrantAuthFlow::builder(
+    &caps, AuthFlowKind::signin(), ClientId::new("backup.example").unwrap(),
+)
+.approval_format(pubky::deep_links::GrantApprovalFormat::V1)
+.start()?;
+# Ok(()) }
+```
+
+Use `ScopedEncryptionKeyBundle::derive_for_path()` with a canonical
+`StoragePath` to get a zeroizing 32-byte file key. Directory scopes cover
+descendants; exact-file scopes cover only that file. Directory paths and
+unapproved paths are rejected.
+
+Keys remain usable after expiry or revocation; renames require re-encryption.
+See the [key guide](../docs/scoped-encryption-keys.md) for compatibility,
+[approval delivery](../docs/scoped-encryption-keys.md#approval-delivery), and
+[relay limits](../docs/scoped-encryption-keys.md#relay-limits). Approvals above
+the relay's default 2 KiB limit fail with HTTP 413.
+
+## Offline encryption-key recovery
+
+Recover keys from saved V2 grant secrets without a client, network, or valid
+grant:
+
+```rust,no_run
+use pubky::{GrantCredential, StoragePath};
+
+# fn recover(saved_token: &str) -> pubky::Result<()> {
+if let Some(keys) = GrantCredential::restore_encryption_keys(saved_token)? {
+    let path = StoragePath::new("/pub/chat/message").unwrap();
+    let content_key = keys.derive_for_path(&path).unwrap();
+    // Use the key for locally downloaded ciphertext. It zeroizes on drop.
+}
+# Ok(()) }
+```
+
+For delegated credentials, call
+`GrantCredential::restore_delegated_encryption_keys(&state, signed_approval)`
+with the saved confidential approval as `Some(&str)`. No signing callback is
+needed. Both methods verify the signature, grant binding, and scopes; records
+without keys return `None`.
+
+Recovery creates no session. Authentication still requires an unexpired grant
+and a successful homeserver exchange.
+
 ## Error-body limits
 
 HTTP status checking leaves successful response bodies unread. For HTTP errors,

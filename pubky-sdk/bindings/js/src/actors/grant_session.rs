@@ -41,6 +41,41 @@ impl GrantSession {
         })
     }
 
+    /// Approved key scopes, or `undefined` for authentication-only sessions.
+    /// Directory scopes cover descendant files; exact files cover only themselves.
+    #[wasm_bindgen(js_name = "encryptionScopes", getter)]
+    pub fn encryption_scopes(&self) -> JsResult<Option<Vec<String>>> {
+        Ok(self
+            .as_grant()?
+            .encryption_keys()
+            .map(|keys| keys.scopes().map(ToString::to_string).collect()))
+    }
+
+    /// Derive a 32-byte content key for a canonical decoded file path.
+    /// Directory paths, including `/`, are rejected.
+    /// The caller owns the JS byte copy and must avoid logging or publishing it.
+    /// Rejects authentication-only sessions and paths outside approved scopes.
+    #[wasm_bindgen(js_name = "deriveEncryptionKey")]
+    pub fn derive_encryption_key(&self, path: &str) -> JsResult<js_sys::Uint8Array> {
+        let grant = self.as_grant()?;
+        let keys = grant.encryption_keys().ok_or_else(|| {
+            PubkyError::new(
+                PubkyErrorName::ClientStateError,
+                "Session has no encryption keys.",
+            )
+        })?;
+        super::encryption_keys::derive_file_key(keys, path)
+    }
+
+    /// Derive a non-extractable AES-GCM-256 key for WebCrypto encryption/decryption.
+    /// Rejects authentication-only sessions, directories, and unapproved paths.
+    /// Requires WebCrypto; temporary JS key bytes are cleared after import.
+    #[wasm_bindgen(js_name = "deriveEncryptionCryptoKey")]
+    pub async fn derive_encryption_crypto_key(&self, path: &str) -> JsResult<web_sys::CryptoKey> {
+        super::encryption_keys::import_encryption_crypto_key(self.derive_encryption_key(path)?)
+            .await
+    }
+
     /// Full grant session metadata.
     ///
     /// @returns {Promise<GrantSessionInfo>}
@@ -62,7 +97,8 @@ impl GrantSession {
     /// Export the portable local secret material needed to restore this grant session.
     ///
     /// Treat the returned string as bearer-equivalent secret material until the
-    /// grant expires or is revoked.
+    /// grant expires or is revoked. Included scoped keys remain sensitive after
+    /// expiry or revocation.
     ///
     /// @returns {Promise<string>}
     #[wasm_bindgen(js_name = "exportLocalSecret")]

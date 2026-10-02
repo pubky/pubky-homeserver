@@ -135,11 +135,13 @@ impl Pubky {
     ///
     /// Grant auth uses a user-signed grant JWS plus Proof-of-Possession and
     /// returns a self-refreshing session.
+    /// Select `approvalFormat: "v1"` and include `e` on scopes that need content
+    /// keys. Storage `r` and `w` alone do not deliver encryption keys.
     ///
     /// @param {string} capabilities Comma-separated caps, e.g. `"/pub/app/:rw,/pub/foo/file:r"`.
     /// @param {AuthFlowKind} kind The kind of authentication flow to perform.
     /// @param {GrantAuthFlowOptions} options Options for the grant flow:
-    /// `{ clientId, relay?, xCallback? }`.
+    /// `{ clientId, relay?, xCallback?, approvalFormat? }`.
     /// @returns {Promise<GrantAuthFlow>}
     /// A running grant auth flow. Show `authorizationUrl` as QR/deeplink,
     /// then `awaitApproval()` to obtain a grant-backed `Session`.

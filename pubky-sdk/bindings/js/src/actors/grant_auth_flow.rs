@@ -31,6 +31,28 @@ pub struct GrantAuthFlowOptions {
     /// Optional return destinations for success, error, and cancellation.
     #[tsify(optional, type = "XCallbackParams | null")]
     pub(crate) x_callback: Option<XCallbackParams>,
+    /// Relay approval format. `v1` delivers keys only for approved `e` scopes
+    /// and rejects bare-grant downgrades.
+    /// Omitted or `grant` preserves compatibility with older signers.
+    #[tsify(optional)]
+    pub(crate) approval_format: Option<GrantApprovalFormat>,
+}
+
+/// Relay payload format understood by the requesting app.
+#[derive(Tsify, Serialize, Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum GrantApprovalFormat {
+    Grant,
+    V1,
+}
+
+impl From<GrantApprovalFormat> for pubky::deep_links::GrantApprovalFormat {
+    fn from(format: GrantApprovalFormat) -> Self {
+        match format {
+            GrantApprovalFormat::Grant => Self::Grant,
+            GrantApprovalFormat::V1 => Self::V1,
+        }
+    }
 }
 
 /// Start and control a grant-backed pubkyauth authorization flow.
@@ -96,12 +118,16 @@ impl GrantAuthFlow {
             client_id,
             relay,
             x_callback,
+            approval_format,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;
 
         let mut builder = PubkyGrantAuthFlow::builder(&caps, kind.0, client_id);
+        if let Some(format) = approval_format {
+            builder = builder.approval_format(format.into());
+        }
         if let Some(c) = client {
             builder = builder.client(c);
         }
@@ -147,6 +173,7 @@ impl GrantAuthFlow {
             client_id,
             relay,
             x_callback,
+            approval_format,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
@@ -156,6 +183,9 @@ impl GrantAuthFlow {
 
         let mut builder = PubkyGrantAuthFlow::builder(&caps, kind.0, client_id)
             .delegated_client_signer(key_id, public_key, sign);
+        if let Some(format) = approval_format {
+            builder = builder.approval_format(format.into());
+        }
         if let Some(c) = client {
             builder = builder.client(c);
         }

@@ -16,6 +16,7 @@
 mod deep_link;
 mod direct_signup;
 mod error;
+mod grant_approval_format;
 mod query_params;
 mod schemes;
 mod seed_export;
@@ -32,6 +33,7 @@ pub const DEEP_LINK_SCHEMES: [&str; 2] = ["pubkyauth", "pubkyring"];
 pub use deep_link::DeepLink;
 pub use direct_signup::{DirectSignupDeepLink, DirectSignupIntent, DirectSignupParams};
 pub use error::DeepLinkParseError;
+pub use grant_approval_format::GrantApprovalFormat;
 pub use schemes::DeepLinkScheme;
 pub use seed_export::{SecretExportIntent, SeedExportDeepLink, SeedExportParams};
 pub use signin::{SigninDeepLink, SigninIntent, SigninParams};

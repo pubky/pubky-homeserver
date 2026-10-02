@@ -18,6 +18,9 @@ rand.workspace = true
 thiserror.workspace = true
 postcard = { version = "1", features = ["alloc"] }
 crypto_secretbox = { version = "0.1", features = ["std"] }
+sha2 = { version = "0.11", features = ["zeroize"] }
+subtle = "2"
+zeroize = { version = "1", features = ["serde"] }
 argon2 = { version = "0.6" }
 pubky-timestamp = { version = "0.4", features = ["full"] }
 serde.workspace = true

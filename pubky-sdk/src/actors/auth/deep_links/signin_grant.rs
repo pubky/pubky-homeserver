@@ -2,10 +2,11 @@ use pubky_common::{auth::jws::ClientId, capabilities::Capabilities, crypto::Publ
 use url::Url;
 
 use super::{
-    DeepLinkParseError,
+    DeepLinkParseError, GrantApprovalFormat,
     query_params::{
-        append_grant_params, append_signin_params, parse_capabilities, parse_client_id,
-        parse_client_pk, parse_relay, parse_secret,
+        append_grant_approval_format, append_grant_params, append_signin_params,
+        parse_capabilities, parse_client_id, parse_client_pk, parse_grant_approval_format,
+        parse_relay, parse_secret,
     },
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
 };
@@ -31,22 +32,31 @@ pub struct SigninGrantParams {
     pub client_id: ClientId,
     /// Client public key bound by the grant's `cnf` claim.
     pub client_pk: PublicKey,
+    /// Relay payload format understood by the requesting client.
+    pub approval_format: GrantApprovalFormat,
 }
 
 impl DeepLinkParams for SigninGrantParams {
     fn parse(url: &Url) -> Result<Self, DeepLinkParseError> {
+        let approval_format = parse_grant_approval_format(url)?;
+        let capabilities = parse_capabilities(url)?;
+        approval_format
+            .validate_capabilities(&capabilities)
+            .map_err(|error| DeepLinkParseError::InvalidQueryParameter("caps", Box::new(error)))?;
         Ok(Self {
-            capabilities: parse_capabilities(url)?,
+            capabilities,
             relay: parse_relay(url)?,
             secret: parse_secret(url)?,
             client_id: parse_client_id(url)?,
             client_pk: parse_client_pk(url)?,
+            approval_format,
         })
     }
 
     fn append_query_pairs(&self, url: &mut Url) {
         append_signin_params(url, &self.capabilities, &self.relay, &self.secret);
         append_grant_params(url, &self.client_id, &self.client_pk);
+        append_grant_approval_format(url, self.approval_format);
     }
 }
 
@@ -74,6 +84,10 @@ mod tests {
         assert_eq!(deep_link.intent(), "signin_grant");
         assert_eq!(deep_link.params().client_id.to_string(), "franky.pubky.app");
         assert_eq!(deep_link.params().client_pk.z32(), client_pk.z32());
+        assert_eq!(
+            deep_link.params().approval_format,
+            GrantApprovalFormat::Grant
+        );
     }
 
     #[test]
@@ -90,6 +104,7 @@ mod tests {
                 secret: [42; 32],
                 client_id,
                 client_pk,
+                approval_format: GrantApprovalFormat::Grant,
             },
         );
         let parsed_again = SigninGrantDeepLink::parse_url(&deep_link.to_url()).unwrap();
@@ -106,6 +121,40 @@ mod tests {
             err,
             DeepLinkParseError::MissingQueryParameter("cpk")
         ));
+    }
+
+    #[test]
+    fn versioned_approval_format_round_trips() {
+        let client_pk = Keypair::random().public_key();
+        let link: SigninGrantDeepLink = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}&approval=v1",
+            client_pk.z32()
+        ).parse().unwrap();
+        assert_eq!(link.params().approval_format, GrantApprovalFormat::V1);
+        assert_eq!(
+            SigninGrantDeepLink::parse_url(&link.to_url()).unwrap(),
+            link
+        );
+    }
+
+    #[test]
+    fn unsupported_or_duplicate_approval_formats_are_rejected() {
+        let client_pk = Keypair::random().public_key();
+        let base = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}",
+            client_pk.z32()
+        );
+        for query in [
+            "approval=v2",
+            "approval=",
+            "approval=v1&approval=v1",
+            "approval=v1&approval=v2",
+        ] {
+            assert!(matches!(
+                format!("{base}&{query}").parse::<SigninGrantDeepLink>(),
+                Err(DeepLinkParseError::InvalidQueryParameter("approval", _))
+            ));
+        }
     }
 
     #[test]

@@ -13,9 +13,10 @@ shared browser session.
 
 - Tabs share one bearer for each stored grant. Opening, closing, duplicating or
   reloading tabs reuses the saved bearer while it is valid.
-- IndexedDB stores the grant restore material and current bearer. Delegated
-  WebCrypto private keys remain non-extractable. Treat the stored bearer as a
-  credential; do not log or export the browser record.
+- IndexedDB stores restore material and the bearer. Delegated signing keys
+  remain non-extractable; scoped-key approvals use a separate AES-GCM wrapping
+  key. See [persistence][key-persistence] for recovery and protection limits.
+  Do not log or export browser records.
 - Authenticated requests hold shared Web Locks until response headers arrive.
   Refresh takes an exclusive lock and saves its result before releasing it.
   Requests can run concurrently; a slow request can delay refresh. Response
@@ -58,6 +59,24 @@ Existing grant records remain readable. On first restore, the SDK exchanges the
 grant once and saves a shared bearer in the existing record. Concurrent restores
 reuse that bearer. Reload older app tabs so they participate in the SDK's locks.
 The shared bearer remains saved when every tab closes.
+
+Bare grants use `pubky-session-v1`; V1 approvals use `pubky-session-v2`, even
+without `e` scopes. Approval and storage versions are separate.
+
+V2 records live under `session:<id>` in `delegatedGrantKeys`; the database
+version stays at 1. Older SDKs see only V1 records in `storedSessions`. The
+current SDK lists both formats, but older SDKs cannot read V1 approvals or V2
+secret tokens.
+
+Current `clear` and `clearAll` remove both formats. An older SDK's `clear`
+removes only V1 records; its `clearAll` deletes both formats and all keys.
+
+To add keys, request a fresh V1 approval with `e` and save the new record ID,
+even with the same `clientId`. The old grant keeps its original permissions.
+To replace it, sign it out after saving the new session; deleting its local
+record does not revoke it. A new bare grant does not inherit keys.
+
+[key-persistence]: scoped-encryption-keys.md#persistence-and-offline-recovery
 
 ## Protocol and compatibility
 

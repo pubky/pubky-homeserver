@@ -5,6 +5,8 @@ import {
   AuthFlowKind,
   BrowserSessionStore,
   GrantAuthFlow,
+  GrantManager,
+  Signer,
   Keypair,
   Pubky,
   PublicKey,
@@ -154,7 +156,7 @@ test("BrowserSessionStore: saves and restores a completed grant session", async 
   t.equal(stored.clientId, clientId, "stored record keeps client id");
   t.deepEqual(
     stored.capabilities,
-    "/:rw".split(","),
+    "/:rwe".split(","),
     "stored record keeps capabilities",
   );
   t.ok(stored.grantId.length > 0, "stored record includes grant id");
@@ -261,6 +263,68 @@ test("BrowserSessionStore: facade local fallback is stored with local secret mat
     setBrowserDelegationOverride(undefined);
   }
 
+  t.end();
+});
+
+test("BrowserSessionStore: V1 approvals preserve scoped keys after restore", async (t) => {
+  if (typeof indexedDB === "undefined") {
+    t.comment("browser persistence test skipped without IndexedDB");
+    t.end();
+    return;
+  }
+
+  const sdk = Pubky.testnet();
+  const store = sdk.browserSessionStore;
+  await store.clear();
+  await assertBrowserDelegationAvailable(t);
+  for (const delegated of [true, false]) {
+    setBrowserDelegationOverride(delegated);
+    try {
+      const { session, signer } = await grantSessionFor(
+        sdk, `keys-${delegated}.test`, "/pub/chat/:rwe", "v1",
+      );
+      const grant = session.grant!;
+      const key = grant.deriveEncryptionKey("/pub/chat/message");
+      t.equal(key.length, 32, "derivation returns 32 bytes");
+      t.deepEqual(grant.encryptionScopes, ["/pub/chat/"], "only approved scopes are exposed");
+      const stored = await store.save(session);
+      t.equal(stored.storageMode, delegated ? "delegated" : "localSecret", "expected persistence mode");
+      grant.free();
+      session.free();
+      const restored = await Pubky.testnet().browserSessionStore.restore(stored.id);
+      t.deepEqual(restored.grant!.deriveEncryptionKey("/pub/chat/message"), key, "restore retains keys");
+      t.deepEqual(restored.grant!.encryptionScopes, ["/pub/chat/"], "restore retains scopes");
+      try {
+        restored.grant!.deriveEncryptionKey("/pub/other/message");
+        t.fail("undelegated paths must be rejected");
+      } catch (error) {
+        assertPubkyError(t, error);
+        t.equal(error.name, "InvalidInput", "undelegated path is rejected");
+      }
+      // Revoke remotely: shared-session logout intentionally deletes the
+      // local record, so it cannot be used to test recovery of retained keys.
+      const ownerSession = await signer.signin("revoke-keys.test");
+      const manager = new GrantManager(ownerSession);
+      await manager.revoke(stored.grantId);
+      manager.free();
+      ownerSession.free();
+      if (delegated) await removeStoredSigningKey(stored.id);
+      const savedFetch = globalThis.fetch;
+      globalThis.fetch = async () => { throw new Error("offline recovery attempted a fetch"); };
+      try {
+        const offlineKeys = await store.restoreEncryptionKeys(stored.id);
+        t.ok(offlineKeys, "stored keys recover without authentication");
+        t.deepEqual(offlineKeys!.deriveForPath("/pub/chat/message"), key, "offline recovery retains keys after revocation");
+        offlineKeys!.free();
+      } finally {
+        globalThis.fetch = savedFetch;
+      }
+      key.fill(0);
+      await store.remove(stored.id);
+    } finally {
+      setBrowserDelegationOverride(undefined);
+    }
+  }
   t.end();
 });
 
@@ -548,11 +612,11 @@ test("BrowserSessionStore: delegated browser pending flow can be resumed", async
   const signupToken = await createSignupToken();
   await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
 
-  const capabilities = "/pub/pubky.app/:rw";
+  const capabilities = "/pub/pubky.app/:rwe";
   const flow = await sdk.startGrantAuthFlow(
     capabilities,
     AuthFlowKind.signin(),
-    { clientId: "session-store-delegated-resume.test", relay: TESTNET_HTTP_RELAY },
+    { clientId: "session-store-delegated-resume.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "v1" },
   );
   const savedUrl = flow.authorizationUrl;
   const delegatedState = flow.saveDelegated();
@@ -579,6 +643,7 @@ test("BrowserSessionStore: delegated browser pending flow can be resumed", async
     capabilities.split(","),
     "resumed pending session keeps capabilities",
   );
+  t.deepEqual(session.grant!.encryptionScopes, ["/pub/pubky.app/"], "resumed delegated V1 flow decrypts scoped keys");
   t.pass("delegated browser pending flow was resumed");
 
   t.end();
@@ -645,7 +710,8 @@ async function grantSessionFor(
   sdk: Pubky,
   clientId: string,
   capabilities: Capabilities,
-): Promise<{ publicKey: string; session: Session }> {
+  approvalFormat: "grant" | "v1" = "grant",
+): Promise<{ publicKey: string; session: Session; signer: Signer }> {
   const signer = sdk.signer(Keypair.random());
   const publicKey = signer.publicKey.z32();
   const signupToken = await createSignupToken();
@@ -654,11 +720,11 @@ async function grantSessionFor(
   const flow = await sdk.startGrantAuthFlow(
     capabilities,
     AuthFlowKind.signin(),
-    { clientId, relay: TESTNET_HTTP_RELAY },
+    { clientId, relay: TESTNET_HTTP_RELAY, approvalFormat },
   );
   await signer.approveAuthRequest(flow.authorizationUrl);
   const session = await flow.awaitApproval();
-  return { publicKey, session };
+  return { publicKey, session, signer };
 }
 
 /**
@@ -701,9 +767,9 @@ function removeSharedSession(id: string): Promise<void> {
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
-      const tx = db.transaction("storedSessions", "readwrite");
-      const store = tx.objectStore("storedSessions");
-      const record = store.get(id);
+      const tx = db.transaction("delegatedGrantKeys", "readwrite");
+      const store = tx.objectStore("delegatedGrantKeys");
+      const record = store.get(`session:${id}`);
       record.onsuccess = () => {
         delete record.result.sharedSession;
         store.put(record.result);
@@ -747,6 +813,25 @@ function removeDelegatedKey(id: string): Promise<void> {
       };
       tx.oncomplete = () => { db.close(); resolve(); };
       tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+/** Remove the delegated signing key while retaining the confidential approval. */
+function removeStoredSigningKey(id: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("pubky-auth", 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(["storedSessions", "delegatedGrantKeys"], "readwrite");
+      const record = transaction.objectStore("delegatedGrantKeys").get(`session:${id}`);
+      record.onsuccess = () => {
+        const state = JSON.parse(record.result.credential) as { keyId: string };
+        transaction.objectStore("delegatedGrantKeys").delete(state.keyId);
+      };
+      transaction.oncomplete = () => { db.close(); resolve(); };
+      transaction.onabort = () => { db.close(); reject(transaction.error); };
     };
   });
 }

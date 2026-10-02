@@ -5,7 +5,10 @@
 //! The view borrows the session, so it cannot outlive it; this is what makes
 //! the grant-only API impossible to misuse against a cookie session.
 
-use pubky_common::auth::{grant_session_responses::GrantSessionInfo, jws::GrantId};
+use pubky_common::{
+    auth::{grant_session_responses::GrantSessionInfo, jws::GrantId},
+    encryption_keys::ScopedEncryptionKeyBundle,
+};
 
 use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
@@ -57,6 +60,22 @@ impl<'a> GrantSessionView<'a> {
         }
     }
 
+    /// Verified scoped keys retained by this session's grant credential.
+    ///
+    /// V2 secret exports preserve this bundle; legacy V1 exports have no keys.
+    pub fn encryption_keys(&self) -> Option<&ScopedEncryptionKeyBundle> {
+        self.credential.encryption_keys()
+    }
+
+    /// Borrow the confidential signed approval for secure browser persistence.
+    ///
+    /// Contains scoped secret keys. Store separately from non-secret delegated
+    /// metadata. Use [`GrantCredential::restore_delegated_encryption_keys`] for
+    /// offline key recovery, or import the credential to authenticate again.
+    pub fn secret_approval(&self) -> Option<&str> {
+        self.credential.secret_approval()
+    }
+
     /// Returns the full grant session metadata from the homeserver.
     ///
     /// This gives access to grant-specific fields like `grant_id`,
@@ -71,7 +90,8 @@ impl<'a> GrantSessionView<'a> {
     /// Export the portable local secret material needed to restore this session.
     ///
     /// The returned token contains the grant JWS and `PoP` client secret. Treat
-    /// it as a bearer-equivalent secret until the grant expires or is revoked.
+    /// it as a bearer-equivalent secret. Key-bearing sessions include their
+    /// signed approval; those keys remain sensitive after expiry or revocation.
     /// Delegated/browser-held `PoP` keys return `None` because the private key
     /// is intentionally not extractable.
     pub async fn export_local_secret(&self) -> Option<String> {
@@ -80,6 +100,8 @@ impl<'a> GrantSessionView<'a> {
 
     /// Export non-secret delegated restore metadata, if this session uses a
     /// browser-held delegated `PoP` key.
+    /// Scoped keys are omitted; persist [`Self::secret_approval`] separately
+    /// to restore keys alongside authentication.
     pub async fn export_delegated_restore_state(&self) -> Option<DelegatedGrantCredentialState> {
         self.credential.export_delegated_restore_state().await
     }

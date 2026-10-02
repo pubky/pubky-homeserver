@@ -7,8 +7,8 @@ use pubky_common::{
 
 use crate::actors::DEFAULT_HTTP_RELAY_INBOX;
 use crate::actors::auth::deep_links::{
-    DeepLink, DeepLinkScheme, SigninGrantDeepLink, SigninGrantParams, SignupGrantDeepLink,
-    SignupGrantParams, XCallbackParams,
+    DeepLink, DeepLinkScheme, GrantApprovalFormat, SigninGrantDeepLink, SigninGrantParams,
+    SignupGrantDeepLink, SignupGrantParams, XCallbackParams,
 };
 use crate::actors::auth::grant::flow::PubkyGrantAuthFlow;
 use crate::actors::auth::grant::pop_signer::{DelegatedSignFn, GrantPopSigner};
@@ -33,6 +33,7 @@ pub struct GrantAuthFlowBuilder {
     client_id: ClientId,
     client_signer: GrantPopSigner,
     x_callback: XCallbackParams,
+    approval_format: GrantApprovalFormat,
 }
 
 impl GrantAuthFlowBuilder {
@@ -47,7 +48,20 @@ impl GrantAuthFlowBuilder {
             client_id,
             client_signer: GrantPopSigner::local(Keypair::random()),
             x_callback: XCallbackParams::default(),
+            approval_format: GrantApprovalFormat::Grant,
         }
+    }
+
+    /// Choose the relay approval format. Defaults to a bare grant for
+    /// compatibility with signers that predate scoped encryption keys.
+    ///
+    /// Select [`GrantApprovalFormat::V1`] and request `e` scopes for content keys.
+    /// This requests `approval=v1` and rejects bare-grant responses without
+    /// retrying in legacy mode. It requires a signer that supports V1.
+    #[must_use]
+    pub fn approval_format(mut self, format: GrantApprovalFormat) -> Self {
+        self.approval_format = format;
+        self
     }
 
     /// Set a custom relay base URL. Trailing slash optional.
@@ -115,7 +129,10 @@ impl GrantAuthFlowBuilder {
             client_id,
             client_signer,
             x_callback,
+            approval_format,
         } = self;
+
+        approval_format.validate_capabilities(&caps)?;
 
         let client = match client {
             Some(c) => c,
@@ -133,6 +150,7 @@ impl GrantAuthFlowBuilder {
                     secret: client_secret,
                     client_id,
                     client_pk,
+                    approval_format,
                 },
             )),
             AuthFlowKind::SignUp {
@@ -150,6 +168,7 @@ impl GrantAuthFlowBuilder {
                         signup_token: signup_token.clone(),
                         client_id,
                         client_pk,
+                        approval_format,
                     },
                 ))
             }

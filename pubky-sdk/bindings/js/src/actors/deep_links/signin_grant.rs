@@ -79,6 +79,16 @@ impl SigninGrantDeepLink {
         PublicKey(self.0.params().client_pk.clone())
     }
 
+    /// Negotiated approval format: `grant` or `v1`.
+    #[wasm_bindgen(js_name = "approvalFormat", getter)]
+    pub fn approval_format(&self) -> String {
+        match self.0.params().approval_format {
+            pubky::deep_links::GrantApprovalFormat::Grant => "grant",
+            pubky::deep_links::GrantApprovalFormat::V1 => "v1",
+        }
+        .to_owned()
+    }
+
     /// Optional x-callback-url metadata carried by this deep link.
     #[wasm_bindgen(js_name = "xCallback", getter)]
     pub fn x_callback(&self) -> JsResult<Ts<XCallbackParams>> {

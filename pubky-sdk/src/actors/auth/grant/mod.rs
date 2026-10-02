@@ -5,6 +5,7 @@
 //! mirror-friendly sessions.
 
 pub(crate) mod approval;
+pub(crate) mod approval_envelope;
 pub(crate) mod builder;
 pub(crate) mod constants;
 pub(crate) mod credential;

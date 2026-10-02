@@ -5,10 +5,11 @@
 //! - Lightweight JWS payload decoding (no signature verification)
 //! - Typed identifiers for grants, tokens, nonces, and client IDs
 
-use std::fmt;
+use std::{fmt, io};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::crypto::{random_bytes, Keypair};
 
@@ -40,6 +41,76 @@ pub fn sign_jws<T: Serialize>(keypair: &Keypair, typ: &str, claims: &T) -> Strin
     let signing_input = jws_signing_input(typ, claims);
     let signature = keypair.sign(signing_input.as_bytes());
     finish_jws(signing_input, signature.to_bytes())
+}
+
+/// Sign secret-bearing claims using zeroizing JSON and compact-JWS buffers.
+///
+/// Produces the same bytes as [`sign_jws`]. Counts the serialized JSON length
+/// first, then writes into fixed storage so growth cannot leave unwiped copies
+/// in freed allocations. The base64 payload is written directly into the
+/// preallocated output, which is also the signing input. The caller's claims
+/// remain the caller's responsibility.
+///
+/// # Panics
+/// Panics if claims cannot be JSON-serialized, their serialized length changes
+/// between the two passes, or the output length overflows `usize`.
+pub fn sign_secret_jws<T: Serialize>(
+    keypair: &Keypair,
+    typ: &str,
+    claims: &T,
+) -> Zeroizing<String> {
+    let mut length = JsonLengthCounter(0);
+    serde_json::to_writer(&mut length, claims)
+        .expect("invariant: claims must be serde_json-serializable");
+    let mut payload = Zeroizing::new(vec![0; length.0]);
+    let mut writer = payload.as_mut_slice();
+    serde_json::to_writer(&mut writer, claims)
+        .expect("invariant: claims must serialize to the counted JSON length");
+    assert!(
+        writer.is_empty(),
+        "invariant: claims must serialize to the counted JSON length"
+    );
+
+    // Only the header and signature are public; neither contains claim bytes.
+    let header = serde_json::json!({ "alg": "EdDSA", "typ": typ });
+    let header_b64 = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&header)
+            .expect("invariant: serde_json serialization of a static header object cannot fail"),
+    );
+    let payload_b64_len = base64::encoded_len(payload.len(), false)
+        .expect("invariant: base64 payload length must fit usize");
+    let signature_b64_len = base64::encoded_len(ed25519_dalek::SIGNATURE_LENGTH, false)
+        .expect("invariant: Ed25519 signature length must fit usize");
+    let compact_len = header_b64
+        .len()
+        .checked_add(payload_b64_len)
+        .and_then(|len| len.checked_add(signature_b64_len + 2))
+        .expect("invariant: compact JWS length must fit usize");
+    let mut compact = Zeroizing::new(String::with_capacity(compact_len));
+    compact.push_str(&header_b64);
+    compact.push('.');
+    URL_SAFE_NO_PAD.encode_string(payload.as_slice(), &mut compact);
+    let signature = keypair.sign(compact.as_bytes());
+    compact.push('.');
+    URL_SAFE_NO_PAD.encode_string(signature.to_bytes(), &mut compact);
+    compact
+}
+
+/// Measures JSON without retaining claim bytes or allocating a payload buffer.
+struct JsonLengthCounter(usize);
+
+impl io::Write for JsonLengthCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("JSON length overflows usize"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Build the canonical JWS signing input `base64url(header).base64url(payload)`.
@@ -387,6 +458,35 @@ mod tests {
         let header: serde_json::Value = serde_json::from_slice(&header_bytes).unwrap();
         assert_eq!(header["alg"], "EdDSA");
         assert_eq!(header["typ"], GRANT_JWS_TYP);
+    }
+
+    #[test]
+    fn secret_jws_matches_normal_signing_for_escaped_and_large_payloads() {
+        let keypair = Keypair::from_secret(&[7; 32]);
+        for length in [0, 1, 2, 3, 1024, 8192] {
+            let claims = serde_json::json!({
+                "text": "\"\\\n\u{0001}é".repeat(length),
+                "secret": [0, 1, 127, 255],
+            });
+            let expected = sign_jws(&keypair, "pubky-test", &claims);
+            let compact = sign_secret_jws(&keypair, "pubky-test", &claims);
+            assert_eq!(compact.as_str(), expected);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "claims must serialize to the counted JSON length")]
+    fn secret_jws_rejects_payload_growth_between_serialization_passes() {
+        struct GrowingClaims(std::cell::Cell<bool>);
+
+        impl Serialize for GrowingClaims {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(if self.0.replace(true) { "longer" } else { "x" })
+            }
+        }
+
+        let keypair = Keypair::from_secret(&[7; 32]);
+        sign_secret_jws(&keypair, "pubky-test", &GrowingClaims(false.into()));
     }
 
     #[test]
