@@ -57,7 +57,10 @@ pub struct PkdnsToml {
     pub user_keys_republisher_interval: u64,
     pub dht_bootstrap_nodes: Option<Vec<DomainPort>>,
     pub dht_relay_nodes: Option<Vec<Url>>,
+    /// Timeout for individual DHT peer requests; omitted uses Pkarr's default.
     pub dht_request_timeout_ms: Option<NonZeroU64>,
+    /// Timeout for relay HTTP requests; omitted uses Pkarr's default.
+    pub relay_request_timeout_ms: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -288,6 +291,14 @@ mod tests {
     };
 
     #[test]
+    fn pkarr_request_timeouts_reject_zero() {
+        for setting in ["dht_request_timeout_ms", "relay_request_timeout_ms"] {
+            let raw = format!("[pkdns]\n{setting} = 0");
+            assert!(ConfigToml::from_str_with_defaults(&raw).is_err());
+        }
+    }
+
+    #[test]
     fn test_default_config() {
         let c = ConfigToml::default();
         assert_eq!(c.general.signup_mode, SignupMode::TokenRequired);
@@ -318,6 +329,7 @@ mod tests {
         assert_eq!(c.pkdns.user_keys_republisher_interval, 14400);
         assert_eq!(c.pkdns.dht_bootstrap_nodes, None);
         assert_eq!(c.pkdns.dht_request_timeout_ms, None);
+        assert_eq!(c.pkdns.relay_request_timeout_ms, None);
         assert_eq!(c.drive.rate_limits.len(), 1);
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());

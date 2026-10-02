@@ -398,9 +398,9 @@ impl PubkyHttpClientBuilder {
     /// # Deprecated
     /// This setter has never had any effect on WASM: reqwest uses the browser
     /// `fetch` backend and `build()` does not apply a global HTTP timeout.
-    /// Use [`.pkarr()`](Self::pkarr) to configure pkarr/DHT request timeouts instead.
+    /// Use [`.pkarr()`](Self::pkarr) to configure Pkarr relay request timeouts instead.
     #[deprecated(
-        note = "HTTP request timeout is not supported on WASM and has never had any effect; use `.pkarr(|p| p.request_timeout(..))` for pkarr/DHT timeouts"
+        note = "HTTP request timeout is not supported on WASM and has never had any effect; use `.pkarr(|p| p.relay_request_timeout(..))` for Pkarr relay timeouts"
     )]
     pub fn request_timeout(&mut self, _timeout: Duration) -> &mut Self {
         self

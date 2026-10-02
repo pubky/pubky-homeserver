@@ -18,8 +18,8 @@ pub struct PkarrConfig {
     /// The list of relays to access the DHT with.
     #[tsify(optional)]
     pub(crate) relays: Option<Vec<String>>,
-    /// The timeout for DHT requests in milliseconds.
-    /// Default is 2000ms.
+    /// The timeout for relay HTTP requests in milliseconds.
+    /// Default is 5000ms.
     #[tsify(optional)]
     pub(crate) request_timeout: Option<u64>,
 }
@@ -103,7 +103,7 @@ impl Client {
                 // Timeout
                 if let Some(timeout_ms) = pkarr.request_timeout {
                     builder.pkarr(|p| {
-                        p.request_timeout(Duration::from_millis(timeout_ms));
+                        p.relay_request_timeout(Duration::from_millis(timeout_ms));
                         p
                     });
                 }
