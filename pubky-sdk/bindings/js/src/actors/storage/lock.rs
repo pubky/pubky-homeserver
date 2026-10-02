@@ -77,7 +77,8 @@ impl SessionStorage {
     /// the lock keeps it alive until the write ends, so it need not cover the upload itself.
     ///
     /// @param {Path} path File path; must not end with `/`.
-    /// @param {number} timeoutSeconds Lifetime to ask for, in whole seconds; a fraction is dropped.
+    /// @param {number} timeoutSeconds Lifetime to ask for, in seconds; rounded down to
+    /// whole seconds, and at least 1.
     /// @returns {Promise<StorageLock>} The granted lock.
     /// @throws {PubkyError} `InvalidInput` for a negative, NaN or out-of-range timeout;
     /// a path that is already locked rejects with `RequestError` and status `423`;
@@ -100,7 +101,8 @@ impl SessionStorage {
     /// {@link StorageLock.timeoutSeconds}.
     ///
     /// @param {StorageLock} lock A lock this client holds.
-    /// @param {number} timeoutSeconds Lifetime to ask for, in whole seconds; a fraction is dropped.
+    /// @param {number} timeoutSeconds Lifetime to ask for, in seconds; rounded down to
+    /// whole seconds, and at least 1.
     /// @returns {Promise<void>}
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
     /// `RequestError` and status `412`; take a new one and read the file again.
