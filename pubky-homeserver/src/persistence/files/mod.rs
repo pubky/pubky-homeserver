@@ -5,7 +5,8 @@
 //!
 //! 1. **[`write_path_layer`]** — enforces per-user allowed write paths (outermost, runs first).
 //! 2. **[`write_finalization_layer`]** — atomically finalizes collision checks,
-//!    entry metadata, events, and quota accounting around backend writes.
+//!    entry metadata, events, and quota accounting around backend writes,
+//!    deletes, copies and renames.
 //! 3. **OpenDAL base** — physical storage I/O.
 //!
 //! # Write lifecycle
@@ -31,6 +32,32 @@
 //! keep-alive, so a lock can expire while its finalization is still running;
 //! and a runtime shutdown that cancels the task leaves the staged upload
 //! neither published nor aborted.
+//!
+//! # Copy and rename
+//!
+//! Only WebDAV copies and renames, and only the filesystem backend can do
+//! both. They follow the write's ordering, on a task of their own like it:
+//! lock the users, check collisions and quota, run the backend operation, then
+//! commit the entries, events and usage. They can diverge the same way if the
+//! commit fails after the backend has acted. A copy is a `PUT` in the event
+//! feed and a rename a `PUT` of the new path followed by a `DEL` of the old. A
+//! rename may name a folder, and then moves every entry beneath it, but only
+//! to a path nothing occupies.
+//!
+//! The entries are what is transferred, so a file the database does not know
+//! is refused rather than copied into a second untracked file. Such a file
+//! inside a renamed folder moves with it and stays untracked, and a folder
+//! with no entries at all is renamed with nothing to record. A destination
+//! keeps the content type of its source rather than deriving a new one.
+//!
+//! A refusal can come too late for a WebDAV client. With `Overwrite: T`, the
+//! default, `dav-server` deletes an existing destination before it calls
+//! `copy` or `rename`, and that delete is finalized on its own. If the
+//! transfer is then refused, for an untracked source, the quota or a
+//! collision, the destination is gone and the source has not moved. Only the
+//! admin share can reach this. The delete and the transfer are separate calls
+//! into the filesystem behind `dav-server`, so refusing earlier would mean
+//! checking in the `/dav` endpoint, ahead of it.
 //!
 //! [`file`] provides the high-level [`FileService`](file::file_service::FileService)
 //! used by route handlers.

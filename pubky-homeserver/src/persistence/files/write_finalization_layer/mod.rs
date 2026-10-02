@@ -3,6 +3,7 @@
 mod delete;
 mod layer;
 mod quota;
+mod transfer;
 mod write;
 
 pub use delete::WriteFinalizationDeleter;

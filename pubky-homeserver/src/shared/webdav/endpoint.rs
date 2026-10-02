@@ -23,8 +23,8 @@
 //! The alternative was a custom `DavFileSystem` over `FileService`. Writes were
 //! exercised under `OpendalFs` first, and every problem found belonged in the
 //! OpenDAL layer stack rather than in the filesystem behind `dav-server`:
-//! `COPY`/`MOVE` bypassing the database is `WriteFinalizationLayer`'s to fix,
-//! and fixing it there covers the admin operator too; directory `DELETE`
+//! `COPY`/`MOVE` bypassing the database was `WriteFinalizationLayer`'s to fix,
+//! and fixing it there covered the admin operator too; directory `DELETE`
 //! recurses file by file through the finalization deleter, so nothing is
 //! orphaned; and lock keep-alive through a long upload has no token to work
 //! with in either design. What `OpendalFs` genuinely cannot express is small —
