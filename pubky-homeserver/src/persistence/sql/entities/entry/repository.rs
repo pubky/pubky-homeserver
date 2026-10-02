@@ -63,7 +63,41 @@ impl EntryRepository {
         path: &EntryPath,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<EntryEntity, sqlx::Error> {
-        let statement = Query::select()
+        let statement = Self::select_entries_of(path.pubkey())
+            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).eq(path.path().as_str()))
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        let entry: EntryEntity = sqlx::query_as_with(&query, values).fetch_one(con).await?;
+        Ok(entry)
+    }
+
+    /// Get every entry beneath a folder, at any depth, ordered by path.
+    /// `folder` may be given with or without its trailing slash.
+    pub async fn get_descendants<'a>(
+        folder: &EntryPath,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<EntryEntity>, sqlx::Error> {
+        let mut prefix = folder.path().to_string();
+        if !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        // Not `LIKE`: a path may contain `%` and `_`.
+        let statement = Self::select_entries_of(folder.pubkey())
+            .and_where(Expr::cust_with_values(
+                "substr(entries.path, 1, length($1)) = $1",
+                vec![sea_query::Value::from(prefix)],
+            ))
+            .order_by((ENTRY_TABLE, EntryIden::Path), Order::Asc)
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        sqlx::query_as_with(&query, values).fetch_all(con).await
+    }
+
+    /// Select the columns of an [`EntryEntity`] from the entries of one user.
+    fn select_entries_of(pubkey: &pubky_common::crypto::PublicKey) -> sea_query::SelectStatement {
+        Query::select()
             .from(ENTRY_TABLE)
             .columns([
                 (ENTRY_TABLE, EntryIden::Id),
@@ -80,13 +114,8 @@ impl EntryRepository {
                 USER_TABLE,
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).eq(path.path().as_str()))
-            .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
-            .to_owned();
-        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
-        let con = executor.get_con().await?;
-        let entry: EntryEntity = sqlx::query_as_with(&query, values).fetch_one(con).await?;
-        Ok(entry)
+            .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(pubkey.z32()))
+            .to_owned()
     }
 
     pub async fn update<'a>(

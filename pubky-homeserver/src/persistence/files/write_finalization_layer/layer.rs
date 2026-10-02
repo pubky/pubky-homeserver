@@ -4,13 +4,18 @@ use crate::persistence::files::{events::EventsService, layer_domain_error::Layer
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
+use opendal::raw::oio::Copy as _;
 use opendal::raw::*;
 use opendal::Result;
 use tracing::Instrument;
 
-use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
+use super::{
+    transfer::{Transfer, TransferKind},
+    WriteFinalizationDeleter, WriteFinalizationWriter,
+};
 
-/// Keeps file entries, events, and user quotas in sync with blob writes and deletes.
+/// Keeps file entries, events, and user quotas in sync with blob writes,
+/// deletes, copies and renames.
 ///
 /// The related database changes are committed together in one transaction.
 /// App-facing operators also reject path collisions; admin operators allow them
@@ -111,12 +116,17 @@ pub(super) async fn spawn_finalization<T: Send + 'static>(
     }
 }
 
-fn path_collision_error(entry_path: &EntryPath) -> opendal::Error {
+pub(super) fn path_collision_error(entry_path: &EntryPath) -> opendal::Error {
     opendal::Error::new(
         opendal::ErrorKind::AlreadyExists,
         format!("File/folder path collision for {entry_path}"),
     )
     .set_source(LayerDomainError::PathCollision)
+}
+
+pub(super) fn quota_exceeded_error() -> opendal::Error {
+    opendal::Error::new(opendal::ErrorKind::RateLimited, "User quota exceeded")
+        .set_source(LayerDomainError::DiskSpaceQuotaExceeded)
 }
 
 pub(super) async fn check_no_path_collision(
@@ -137,6 +147,26 @@ pub(super) async fn check_no_path_collision(
     }
 
     Ok(())
+}
+
+/// Run a backend copy to completion, aborting it if it fails part-way.
+async fn copy_in_backend<A: Access>(
+    backend: &A,
+    transfer: &Transfer,
+    args: OpCopy,
+    opts: OpCopier,
+) -> Result<opendal::Metadata> {
+    let Transfer { from, to, .. } = transfer;
+    let (_, mut copier) = backend.copy(from.as_str(), to.as_str(), args, opts).await?;
+    match copier.close().await {
+        Ok(metadata) => Ok(metadata),
+        Err(error) => {
+            if let Err(abort_error) = copier.abort().await {
+                tracing::warn!(path = %to, error = %abort_error, "Failed to abort copy");
+            }
+            Err(error)
+        }
+    }
 }
 
 // Finalization runs on spawned tasks that own the backend writer or deleter,
@@ -172,7 +202,7 @@ where
     type Writer = WriteFinalizationWriter<A::Writer>;
     type Lister = A::Lister;
     type Deleter = WriteFinalizationDeleter<A::Deleter>;
-    type Copier = A::Copier;
+    type Copier = oio::OneShotCopier;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -198,6 +228,9 @@ where
         ))
     }
 
+    /// The copy is carried out and finalized here, on a task of its own,
+    /// rather than by the returned copier: a caller that drops the copier
+    /// cannot then leave a copied blob without its entry.
     async fn copy(
         &self,
         from: &str,
@@ -205,19 +238,44 @@ where
         args: OpCopy,
         opts: OpCopier,
     ) -> Result<(RpCopy, Self::Copier)> {
-        let from = EntryPath::parse_opendal(from)?;
-        let to = EntryPath::parse_opendal(to)?;
-        self.finalizer.collision_preflight(&to).await?;
-        self.inner
-            .copy(from.as_str(), to.as_str(), args, opts)
-            .await
+        let transfer = Transfer {
+            kind: TransferKind::CopyFile,
+            from: EntryPath::parse_opendal(from)?,
+            to: EntryPath::parse_opendal(to)?,
+        };
+        let inner = self.inner.clone();
+        let finalizer = self.finalizer.clone();
+        let metadata = spawn_finalization(async move {
+            let backend_copy = copy_in_backend(inner.as_ref(), &transfer, args, opts);
+            finalizer.finalize_transfer(&transfer, backend_copy).await
+        })
+        .await?;
+        Ok((
+            RpCopy::default(),
+            oio::OneShotCopier::new(async move { Ok(metadata) }),
+        ))
     }
 
+    /// `from` may name a folder, without a trailing slash: every entry beneath
+    /// it then moves with it.
     async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
         let from = EntryPath::parse_opendal(from)?;
         let to = EntryPath::parse_opendal(to)?;
-        self.finalizer.collision_preflight(&to).await?;
-        self.inner.rename(from.as_str(), to.as_str(), args).await
+        // The path does not say whether it is a folder; only the backend knows.
+        let source = self.inner.stat(from.as_str(), OpStat::new()).await?;
+        let kind = if source.into_metadata().is_dir() {
+            TransferKind::RenameFolder
+        } else {
+            TransferKind::RenameFile
+        };
+        let transfer = Transfer { kind, from, to };
+        let inner = self.inner.clone();
+        let finalizer = self.finalizer.clone();
+        spawn_finalization(async move {
+            let backend_rename = inner.rename(transfer.from.as_str(), transfer.to.as_str(), args);
+            finalizer.finalize_transfer(&transfer, backend_rename).await
+        })
+        .await
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
@@ -302,23 +360,34 @@ pub(super) mod test_support {
     }
 
     pub(in super::super) fn test_operator(db: &SqlDb) -> opendal::Operator {
-        test_operator_over(db, get_memory_operator())
+        test_operator_over(db, get_memory_operator(), true)
     }
 
     /// Like [`test_operator`], on the filesystem backend so staged uploads
     /// can be observed with [`staged_count`] on the returned directory.
     pub(in super::super) fn test_fs_operator(db: &SqlDb) -> (opendal::Operator, TempDir) {
         let (backend, tmp_dir) = get_fs_operator();
-        (test_operator_over(db, backend), tmp_dir)
+        (test_operator_over(db, backend, true), tmp_dir)
     }
 
-    fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {
+    /// Like [`test_fs_operator`], with the admin operator's policy of not
+    /// enforcing path collisions. The admin share is what copies and renames.
+    pub(in super::super) fn test_admin_fs_operator(db: &SqlDb) -> (opendal::Operator, TempDir) {
+        let (backend, tmp_dir) = get_fs_operator();
+        (test_operator_over(db, backend, false), tmp_dir)
+    }
+
+    fn test_operator_over(
+        db: &SqlDb,
+        backend: opendal::Operator,
+        enforce_path_collisions: bool,
+    ) -> opendal::Operator {
         backend.layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
             EventsService::new(db.clone(), 100),
             None,
-            true,
+            enforce_path_collisions,
         ))
     }
 

@@ -640,6 +640,71 @@ mod tests {
         response.assert_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// A file manager renames a folder with one MOVE and duplicates a file
+    /// with one COPY. Both must leave the entries, and so REST and the quota,
+    /// agreeing with where the bytes now are.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_dav_move_and_copy_keep_entries_in_step() {
+        use crate::persistence::sql::entry::EntryRepository;
+        use crate::services::user_service::FILE_METADATA_SIZE;
+        use crate::shared::webdav::{EntryPath, StoragePath};
+        use crate::storage_config::StorageConfigToml;
+
+        // The in-memory backend can neither copy nor rename.
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
+        let server = create_test_server(&context);
+        let auth_value = auth_header();
+        let pubkey = Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+        let z32 = pubkey.z32();
+        context
+            .file_service
+            .opendal
+            .admin_operator
+            .write(&format!("{z32}/pub/docs/a.txt"), "hello")
+            .await
+            .unwrap();
+
+        let response = server
+            .method(
+                Method::from_bytes(b"MOVE").unwrap(),
+                &format!("/dav/{z32}/pub/docs/"),
+            )
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", format!("/dav/{z32}/pub/notes/"))
+            .await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let response = server
+            .method(
+                Method::from_bytes(b"COPY").unwrap(),
+                &format!("/dav/{z32}/pub/notes/a.txt"),
+            )
+            .add_header("Authorization", auth_value.as_str())
+            .add_header("Destination", format!("/dav/{z32}/pub/notes/b.txt"))
+            .await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+
+        let entry_length = |path: &str| {
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
+            let sql_db = context.sql_db.clone();
+            async move {
+                EntryRepository::get_by_path(&path, &mut sql_db.pool().into())
+                    .await
+                    .map(|entry| entry.content_length)
+                    .ok()
+            }
+        };
+        assert_eq!(entry_length("/pub/docs/a.txt").await, None);
+        assert_eq!(entry_length("/pub/notes/a.txt").await, Some(5));
+        assert_eq!(entry_length("/pub/notes/b.txt").await, Some(5));
+        let user = context.user_service.get(&pubkey).await.unwrap();
+        assert_eq!(user.used_bytes, 2 * (5 + FILE_METADATA_SIZE));
+    }
+
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_generate_signup_token_with_limits() {
