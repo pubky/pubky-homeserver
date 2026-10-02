@@ -10,7 +10,7 @@ pub enum FileIoError {
     #[error("OpenDAL error: {0}")]
     OpenDAL(opendal::Error),
     #[error("Storage backend rate limited: {0}")]
-    BackendRateLimited(opendal::Error),
+    BackendRateLimited(#[source] opendal::Error),
     #[error("Temp file error: {0}")]
     TempFile(#[from] std::io::Error),
     #[error(transparent)]
