@@ -40,5 +40,5 @@ storage requirements and upgrades from older stored records.
 To run the multi-window regression, start a fresh testnet with
 `cargo run -p pubky-testnet -- --homeserver-config pubky-sdk/bindings/js/pkg/scripts/session-tabs.toml`
 from the repository root. Then run `npm run build && npm run test-browser:tabs`
-from `pubky-sdk/bindings/js/pkg`. The testnet uses the existing single-session protocol and
+from `pubky-sdk/bindings/js/pkg`. The testnet supports both shared browser sessions and independent session slots, with
 Postgres on port 5432 with the repository's `test_user` / `test_pass` credentials.

@@ -38,10 +38,11 @@
 //! The client sends a **Grant JWS** + **PoP JWS**. The homeserver verifies both
 //! (signature, expiry, PoP audience/nonce/timestamp), stores the Grant idempotently,
 //! generates a fresh opaque bearer, and inserts a session row holding only
-//! `SHA-256(bearer)`. Each exchange replaces the previous bearer for that grant.
-//! Browser tabs share that bearer and coordinate refresh through the SDK.
+//! `SHA-256(bearer)`. An optional `session_id` selects an independent slot; without
+//! it, exchanges rotate only the legacy slot. Active slots are bounded by config,
+//! and capacity rejection never evicts another session.
 //!
-//! `DELETE /auth/grant/session` revokes the grant and its session. It accepts
+//! `DELETE /auth/grant/session` revokes the grant and all its slots. It accepts
 //! either a live bearer or Grant + PoP JSON, allowing logout after bearer expiry.
 //!
 //! ## 2. Authenticating requests

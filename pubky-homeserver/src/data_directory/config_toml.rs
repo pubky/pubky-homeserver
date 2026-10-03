@@ -68,6 +68,19 @@ pub struct DriveToml {
     pub rate_limits: Vec<PathLimit>,
 }
 
+/// Limits for grant-backed session issuance. Defaults come from config.default.toml.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct GrantAuthToml {
+    pub max_sessions_per_grant: NonZeroU64,
+    pub session_issuance_per_minute: NonZeroU64,
+}
+
+impl Default for GrantAuthToml {
+    fn default() -> Self {
+        ConfigToml::default().grant_auth
+    }
+}
+
 /// Admin server configuration
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AdminToml {
@@ -118,6 +131,8 @@ pub struct MetricsToml {
 pub struct ConfigToml {
     /// General application settings (signup mode, quotas, backups).
     pub general: GeneralToml,
+    /// Concurrent session and issuance limits.
+    pub grant_auth: GrantAuthToml,
     /// File‐drive API settings (listen sockets for Pubky TLS and HTTP).
     pub drive: DriveToml,
     /// Storage configuration: backend selection and default storage quota.
@@ -384,5 +399,22 @@ mod tests {
         let s = "[general]\nuser_storage_quota_mb = 500\n";
         let parsed = ConfigToml::from_str_with_defaults(s).unwrap();
         assert_eq!(parsed.storage.default_quota_mb, Some(500));
+    }
+
+    #[test]
+    fn grant_session_limits_merge_defaults_and_reject_zero() {
+        let defaults = ConfigToml::default();
+        assert_eq!(defaults.grant_auth.max_sessions_per_grant.get(), 20);
+        assert_eq!(defaults.grant_auth.session_issuance_per_minute.get(), 60);
+        let config =
+            ConfigToml::from_str_with_defaults("[grant_auth]\nmax_sessions_per_grant = 40")
+                .unwrap();
+        assert_eq!(config.grant_auth.max_sessions_per_grant.get(), 40);
+        assert_eq!(config.grant_auth.session_issuance_per_minute.get(), 60);
+        for key in ["max_sessions_per_grant", "session_issuance_per_minute"] {
+            assert!(
+                ConfigToml::from_str_with_defaults(&format!("[grant_auth]\n{key} = 0")).is_err()
+            );
+        }
     }
 }

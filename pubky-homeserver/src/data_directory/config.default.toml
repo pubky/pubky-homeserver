@@ -36,3 +36,9 @@ dht_relay_nodes = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
 [logging]
 level = "info"
 module_levels = ["pubky_homeserver=debug", "tower_http=debug"]
+
+[grant_auth]
+# Positive limits shared across server processes. The legacy slot counts too.
+max_sessions_per_grant = 20
+# Successful exchanges per grant per 60-second window, including rotations.
+session_issuance_per_minute = 60

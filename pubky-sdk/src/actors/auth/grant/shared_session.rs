@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
-use pubky_common::auth::grant_session_responses::GrantSessionResponse;
+use pubky_common::auth::{grant_session_responses::GrantSessionResponse, jws::RandomId};
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +120,21 @@ impl GrantCredential {
         {
             return Ok(());
         }
+        if state.bearer.is_empty()
+            && state.session.session_id.is_none()
+            && client
+                .features
+                .supports(
+                    client,
+                    &state.homeserver_pk,
+                    pubky_common::constants::features::GRANT_SESSION_SLOTS,
+                )
+                .await
+        {
+            state.session.session_id = Some(RandomId::generate());
+        }
+        // Persist the slot before exchanging so an interrupted first restore reuses it.
+        shared.response = state.response();
         shared.refresh_pending = true;
         lease.store(&shared).await?;
         let response = post_grant_session(
@@ -128,6 +143,7 @@ impl GrantCredential {
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
+            state.session.session_id.as_ref(),
         )
         .await?;
         shared.response = response;

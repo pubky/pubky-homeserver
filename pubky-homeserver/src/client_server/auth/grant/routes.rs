@@ -8,7 +8,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use pubky_common::auth::{grant_session_responses::GrantInfo, jws::GrantId};
+use pubky_common::auth::{
+    grant_session_responses::GrantInfo,
+    jws::{GrantId, RandomId},
+};
 use serde::Deserialize;
 
 use super::crypto::jws_crypto::JwsCompact;
@@ -24,6 +27,9 @@ use crate::shared::{HttpError, HttpResult};
 /// JSON request body for grant-based session creation.
 #[derive(Deserialize)]
 pub struct CreateGrantSessionRequest {
+    /// Independent slot; absent for clients using legacy rotation.
+    #[serde(default)]
+    pub session_id: Option<RandomId>,
     /// Grant JWS (user-signed).
     pub grant: JwsCompact,
     /// PoP proof JWS (client-signed).
@@ -62,7 +68,7 @@ pub async fn create_grant_session(
 ) -> HttpResult<impl IntoResponse> {
     let response = state
         .grant_auth_service
-        .create_grant_session(&request.grant, &request.pop)
+        .create_grant_session(&request.grant, &request.pop, request.session_id)
         .await?;
     Ok(Json(response))
 }

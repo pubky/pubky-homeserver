@@ -18,6 +18,8 @@ pub mod storage {
 
 /// Features advertised by the homeserver client API.
 pub mod features {
+    /// Independent session identities and per-slot rotation.
+    pub const GRANT_SESSION_SLOTS: &str = "grant-session-slots";
     /// Grant + proof-of-possession logout without a live bearer.
     pub const GRANT_PROOF_LOGOUT: &str = "grant-proof-logout";
     /// Homeserver supports storage URLs containing the resource owner in the path.

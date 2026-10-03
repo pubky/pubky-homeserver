@@ -252,6 +252,7 @@ impl GrantCredential {
         let response = GrantSessionResponse {
             token: String::new(),
             session: GrantSessionInfo {
+                session_id: None,
                 homeserver: homeserver.clone(),
                 pubky: claims.iss.clone(),
                 client_id: claims.client_id.clone(),
@@ -374,6 +375,7 @@ impl GrantCredential {
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
+            state.session.session_id.as_ref(),
         )
         .await?;
 
@@ -692,7 +694,7 @@ mod tests {
         };
         let jws = grant.sign(&user, GRANT_JWS_TYP);
         let signer = GrantPopSigner::local(pop_key);
-        let response = post_grant_session(&client, &jws, &grant, &signer, &homeserver)
+        let response = post_grant_session(&client, &jws, &grant, &signer, &homeserver, None)
             .await
             .unwrap();
         let bearer = response.token.clone();
@@ -890,6 +892,7 @@ mod tests {
             GrantSessionResponse {
                 token: "test-bearer".into(),
                 session: GrantSessionInfo {
+                    session_id: None,
                     homeserver: stored.homeserver_pk.clone(),
                     pubky: claims.iss.clone(),
                     client_id: claims.client_id.clone(),

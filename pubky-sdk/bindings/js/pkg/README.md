@@ -222,12 +222,14 @@ like a bearer token. Delegated browser grant sessions should use
 **Multiple browser tabs**
 
 `browserSessionStore.restore(id)` shares one bearer per grant across tabs on the
-same origin, including after reloads. It uses the existing single-session protocol.
+same origin, including after reloads. On homeservers advertising
+`grant-session-slots`, that shared session occupies one independent slot.
 Browser persistence requires IndexedDB and Web Locks in a secure context.
 
-Signout revokes the grant for every tab. Separate applications should obtain
-their own grants: restoring the same exported grant outside browser coordination
-replaces its current bearer.
+Signout revokes the grant for every client using it. On slot-aware homeservers,
+generic restore creates an independent bearer under the same exported grant.
+Older homeservers retain one bearer per grant, so generic restore replaces it.
+Separate apps should obtain their own grants unless sharing credentials is intended.
 See [grant session lifecycle](../../../../docs/grant-session-lifecycle.md)
 for compatibility and expiry behavior.
 

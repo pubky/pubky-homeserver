@@ -1,8 +1,9 @@
 # Grant sessions in multiple tabs
 
-A grant has one current bearer. Each exchange replaces that bearer. Browser tabs
-on the same origin share it and coordinate refresh through the SDK; applications
-do not need to synchronize credentials themselves.
+Homeservers advertising `grant-session-slots` support independent sessions under
+one grant. Each slot has one current bearer; refresh replaces only that bearer.
+Browser tabs on the same origin share one slot and coordinate refresh through the
+SDK. Homeservers without slot support retain one bearer per grant.
 
 ## Browser applications
 
@@ -43,30 +44,38 @@ state, so missed notifications cannot restore removed credentials.
 
 ## Other applications and generic restore
 
-Coordination is limited to one origin and browser profile. Independent apps
-should authenticate with separate grants. Generic Rust/JS
-`restore_session`/`restoreSession` exchanges the exported grant for a fresh bearer,
-replacing its previous bearer. Copying a grant to another origin does not provide
-independent sessions: those clients can invalidate each other's bearers.
+Coordination is limited to one origin and browser profile. Generic Rust/JS
+`restore_session`/`restoreSession` creates a new independent slot on supporting
+homeservers. Independent clients can use the same exported grant without
+invalidating each other's bearers. Each generic restore can consume capacity;
+browser applications should use the browser store to share a session across tabs.
 
-Browser applications should use the browser store. Requests made with a manually
-copied bearer or by older SDKs are outside this coordination.
+Sharing a grant and client key gives every recipient the same permissions and
+revocation scope. Credential handoff remains the application's responsibility.
+Independent applications can instead authenticate with their own grants.
+
+On older homeservers, generic restore replaces the grant's previous bearer.
+Browser coordination still works through the existing single-session protocol.
 
 ## Upgrading stored browser sessions
 
-Existing grant records remain readable. On first restore, the SDK exchanges the
-grant once and saves a shared bearer in the existing record. Concurrent restores
-reuse that bearer. Reload older app tabs so they participate in the SDK's locks.
+Existing grant records remain readable. When no shared bearer exists, the SDK
+selects a slot on supporting homeservers and persists its identity before
+exchanging the grant. Concurrent restores and interrupted exchanges reuse it.
+An existing shared legacy bearer continues to rotate without a slot ID. Reload older app tabs so they participate in the SDK's locks.
 The shared bearer remains saved when every tab closes.
 
 ## Protocol and compatibility
 
-Tab coordination uses the existing `POST /auth/grant/session` grant + PoP
-exchange, without session IDs, capacity limits or a database migration.
-It works with homeservers that support the existing grant session protocol.
-The updated server serializes bearer replacement with other exchanges and grant
-revocation, so a delayed exchange cannot create a second session or undo logout.
-The SDK reuses a valid bearer that already lasts until grant expiry.
+`POST /auth/grant/session` accepts an optional `session_id` and echoes it in
+`session.session_id`. Exchanges without an ID rotate the legacy slot; they do not
+replace identified sessions. Slots still require a valid grant and fresh PoP.
+The SDK discovers slot support before allocating one, while browser coordination
+also works with older homeservers.
+
+The server locks the grant row while checking expiry, revocation and limits,
+then issues the bearer in the same transaction. The SDK reuses a valid bearer
+that already lasts until grant expiry.
 
 Homeservers advertising `grant-proof-logout` accept grant + PoP JSON at
 `DELETE /auth/grant/session`. This allows logout after bearer or grant expiry.
@@ -77,3 +86,25 @@ When proof logout is not advertised, the SDK retains bearer-authenticated logout
 and uses the latest shared bearer. Remote revocation on those older servers
 requires that bearer to remain valid. Upgrade all homeserver nodes to support
 logout after expiry; mixed server versions must not advertise proof logout.
+
+
+## Homeserver limits and deployment
+
+```toml
+[grant_auth]
+max_sessions_per_grant = 20
+session_issuance_per_minute = 60
+```
+
+Both limits must be positive. The cap counts non-expired slots, including the
+legacy slot. Rotating an active slot is allowed at capacity; a new slot receives
+HTTP 409 with `grant_session_limit_reached` without evicting other sessions.
+
+The issuance budget counts successful exchanges per grant in a 60-second fixed
+window. Excess requests receive HTTP 429 with `grant_session_rate_limited`.
+Existing path/IP limits also apply. Each successful exchange deletes up to 100
+expired sessions from other grants; expired bearers are rejected before cleanup.
+
+Upgrade every homeserver node before using slots. The migration preserves
+existing bearers, but an old binary still replaces all sessions under a grant.
+Mixed old/new server binaries or a binary downgrade can invalidate other clients.

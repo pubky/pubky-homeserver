@@ -140,6 +140,16 @@ async function scenario(delegated) {
   assert.equal((await call(a, "exchangeCount")) + (await call(b, "exchangeCount")), upgradeCounts[0] + upgradeCounts[1] + 1);
   await Promise.all([call(a, "write"), call(b, "write")]);
 
+  // A failed first restore persists its slot before exchanging.
+  await call(a, "forgetSharedBearer");
+  await call(a, "loseNext");
+  await assert.rejects(call(a, "restore", id));
+  const interruptedSlot = (await call(a, "shared")).slot;
+  assert.equal(typeof interruptedSlot, "string");
+  await call(b, "restore", id);
+  assert.equal((await call(b, "shared")).slot, interruptedSlot);
+  await Promise.all([call(a, "write"), call(b, "write")]);
+
   // Other origins have their own storage and authenticate with a separate grant.
   if (!delegated) {
     const other = await windowAtOrigin();
@@ -198,7 +208,9 @@ async function scenario(delegated) {
   await assert.rejects(call(b, "write"));
   // Bearer-only logout must use the shared token after another tab rotates it.
   const legacy = await call(a, "create", delegated);
+  await call(a, "forgetSharedBearer");
   await call(b, "restoreLegacy", legacy.id);
+  assert.equal((await call(b, "shared")).slot, undefined);
   await call(a, "expire");
   await call(a, "write");
   assert.ok((await call(a, "activeGrants")).includes(legacy.grant));

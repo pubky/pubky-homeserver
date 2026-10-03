@@ -47,9 +47,6 @@ globalThis.fetch = async (input, init) => {
     holdWrite = false;
     await new Promise<void>(resolve => { releaseFetch = resolve; });
   }
-  if (request.method === "POST" && new URL(request.url).pathname === "/auth/grant/session") {
-    if ("session_id" in await request.clone().json()) throw new Error("Tab coordination must not allocate a session slot");
-  }
   const response = await realFetch(input, init);
   if (new URL(request.url).pathname === "/auth/grant/session" && response.ok) {
     if (request.method === "POST") {
@@ -164,6 +161,7 @@ const tabs = {
     const value = await record();
     return value?.sharedSession && {
       grant: value.sharedSession.response.session.grant_id,
+      slot: value.sharedSession.response.session.session_id,
       bearer: value.sharedSession.response.token,
       pending: value.sharedSession.refresh_pending,
       logout: value.sharedSession.logout_pending,

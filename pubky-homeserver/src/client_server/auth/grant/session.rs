@@ -1,6 +1,6 @@
 //! Grant-based session — the resolved session attached to authenticated requests.
 
-use pubky_common::auth::jws::GrantId;
+use pubky_common::auth::jws::{GrantId, RandomId};
 use pubky_common::capabilities::Capabilities;
 use pubky_common::crypto::PublicKey;
 
@@ -15,6 +15,8 @@ use super::crypto::session_token::SessionTokenHash;
 /// by the authentication middleware.
 #[derive(Clone, Debug)]
 pub struct GrantSession {
+    /// Independent slot, if requested by the client.
+    pub session_id: Option<RandomId>,
     /// User public key.
     pub user_key: PublicKey,
     /// Capabilities from the underlying grant.
@@ -36,6 +38,7 @@ impl GrantSession {
         token_expires_at: u64,
     ) -> Self {
         Self {
+            session_id: None,
             user_key,
             capabilities,
             grant_id,
