@@ -1,0 +1,2 @@
+[general]
+database_url = "postgres://test_user:test_pass@localhost:5432/postgres"

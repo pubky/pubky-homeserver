@@ -69,12 +69,7 @@ impl GrantManager {
     pub async fn list(&self) -> Result<Vec<GrantInfo>> {
         let url = user_endpoint_url(&self.user, "/auth/grant/sessions")?;
         let rb = self.client.cross_request(Method::GET, url).await?;
-        let resp = self
-            .credential
-            .attach(rb, &self.client)
-            .await?
-            .send()
-            .await?;
+        let resp = self.credential.send(rb, &self.client).await?;
         let resp = self.client.check_http_status(resp).await?;
         let grants: Vec<GrantInfo> = resp.json().await.map_err(|e| RequestError::DecodeJson {
             message: format!("decoding /auth/grant/sessions response: {e}"),
@@ -94,12 +89,7 @@ impl GrantManager {
         let path = format!("/auth/grant/session/{}", grant_id.as_str());
         let url = user_endpoint_url(&self.user, &path)?;
         let rb = self.client.cross_request(Method::DELETE, url).await?;
-        let resp = self
-            .credential
-            .attach(rb, &self.client)
-            .await?
-            .send()
-            .await?;
+        let resp = self.credential.send(rb, &self.client).await?;
         self.client.check_http_status(resp).await?;
         Ok(())
     }

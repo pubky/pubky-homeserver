@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    auth::jws::{ClientId, GrantId},
+    auth::jws::{ClientId, GrantId, RandomId},
     capabilities::Capability,
     crypto::PublicKey,
 };
@@ -51,6 +51,9 @@ pub struct GrantInfo {
 /// Timestamps are Unix seconds (not microseconds).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantSessionInfo {
+    /// Independent session slot. Absent on legacy homeservers/requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<RandomId>,
     /// Homeserver that issued this session.
     pub homeserver: PublicKey,
     /// User this session belongs to.
@@ -83,6 +86,7 @@ mod tests {
         let response = GrantSessionResponse {
             token: "eyJhbGciOiJFZERTQSIs.payload.signature".to_string(),
             session: GrantSessionInfo {
+                session_id: None,
                 homeserver: hs_kp.public_key(),
                 pubky: user_kp.public_key(),
                 client_id: ClientId::new("franky.pubky.app").unwrap(),

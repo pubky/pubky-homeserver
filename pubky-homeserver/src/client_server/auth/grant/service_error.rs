@@ -4,7 +4,7 @@
 //! The HTTP status code mapping lives in [`error_mapping`](super::error_mapping).
 
 use super::crypto::{grant_verifier, pop_verifier};
-use super::persistence::grant::GrantStatus;
+use super::persistence::{grant::GrantStatus, grant_session::SessionIssueError};
 use crate::client_server::auth::SignupServiceError;
 
 /// Domain errors from auth service operations.
@@ -74,6 +74,14 @@ pub enum AuthServiceError {
     #[error("Root capability required")]
     RootCapabilityRequired,
 
+    /// A new slot would exceed the configured limit.
+    #[error("grant_session_limit_reached")]
+    SessionLimitReached,
+
+    /// Too many exchanges for this grant in the current window.
+    #[error("grant_session_rate_limited")]
+    SessionRateLimited,
+
     /// Database or infrastructure error.
     #[error("Internal error: {0}")]
     Internal(#[from] sqlx::Error),
@@ -96,6 +104,18 @@ impl From<SignupServiceError> for AuthServiceError {
             SignupServiceError::InvalidSignupToken => Self::InvalidSignupToken,
             SignupServiceError::SignupTokenAlreadyUsed => Self::SignupTokenAlreadyUsed,
             SignupServiceError::Internal(e) => Self::Internal(e),
+        }
+    }
+}
+
+impl From<SessionIssueError> for AuthServiceError {
+    fn from(error: SessionIssueError) -> Self {
+        match error {
+            SessionIssueError::Revoked => Self::GrantRevoked,
+            SessionIssueError::Expired => Self::GrantExpired,
+            SessionIssueError::Capacity => Self::SessionLimitReached,
+            SessionIssueError::RateLimited => Self::SessionRateLimited,
+            SessionIssueError::Database(error) => Self::Internal(error),
         }
     }
 }

@@ -219,6 +219,20 @@ like a bearer token. Delegated browser grant sessions should use
 > applications should use grant auth plus `browserSessionStore` or
 > `exportLocalSecret()`.
 
+**Multiple browser tabs**
+
+`browserSessionStore.restore(id)` shares one bearer per grant across tabs on the
+same origin, including after reloads. On homeservers advertising
+`grant-session-slots`, that shared session occupies one independent slot.
+Browser persistence requires IndexedDB and Web Locks in a secure context.
+
+Signout revokes the grant for every client using it. On slot-aware homeservers,
+generic restore creates an independent bearer under the same exported grant.
+Older homeservers retain one bearer per grant, so generic restore replaces it.
+Separate apps should obtain their own grants unless sharing credentials is intended.
+See [grant session lifecycle](../../../../docs/grant-session-lifecycle.md)
+for compatibility and expiry behavior.
+
 **Approve a pubkyauth request URL**
 
 ```js
