@@ -267,16 +267,6 @@ export async function __pubkyGrantDelegatedSign(keyId, signingInput) {
   return new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, existing.privateKey, data));
 }
 
-/**
- * Delete a browser-held delegated grant key by id.
- *
- * Used when a persisted delegated session record is removed from the SDK
- * session store. Missing keys are treated as already deleted.
- */
-export async function __pubkyGrantDeleteDelegatedKey(keyId) {
-  requireBrowserCrypto();
-  await deleteRecord(keyId);
-}
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = __pubkyGrantIsDelegationAvailable)]
@@ -294,8 +284,6 @@ extern "C" {
     #[wasm_bindgen(js_name = __pubkyGrantDelegatedSign)]
     fn js_delegated_sign(key_id: String, signing_input: String) -> js_sys::Promise;
 
-    #[wasm_bindgen(js_name = __pubkyGrantDeleteDelegatedKey)]
-    fn js_delete_delegated_key(key_id: String) -> js_sys::Promise;
 }
 
 /// Stateless namespace for browser-held delegated grant PoP keys.
@@ -386,14 +374,6 @@ impl BrowserGrantKeyStore {
                 ))
             })
         }
-    }
-
-    /// Delete a browser-held delegated grant key. Missing keys are ignored by IndexedDB.
-    pub(crate) async fn delete_key(key_id: String) -> JsResult<()> {
-        JsFuture::from(js_delete_delegated_key(key_id))
-            .await
-            .map_err(js_error)?;
-        Ok(())
     }
 }
 

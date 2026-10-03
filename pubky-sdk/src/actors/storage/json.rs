@@ -24,13 +24,11 @@ impl SessionStorage {
         P: IntoResourcePath + Send,
         T: serde::de::DeserializeOwned,
     {
-        let resp = self
+        let rb = self
             .request(reqwest::Method::GET, path)
             .await?
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await?;
-        let resp = self.client.check_http_status(resp).await?;
+            .header(reqwest::header::ACCEPT, "application/json");
+        let resp = self.client.check_http_status(self.send(rb).await?).await?;
         Ok(resp.json::<T>().await?)
     }
 
@@ -49,13 +47,8 @@ impl SessionStorage {
         P: IntoResourcePath + Send,
         B: serde::Serialize + Sync + ?Sized,
     {
-        let resp = self
-            .request(reqwest::Method::PUT, path)
-            .await?
-            .json(body)
-            .send()
-            .await?;
-        self.client.check_http_status(resp).await
+        let rb = self.request(reqwest::Method::PUT, path).await?.json(body);
+        self.client.check_http_status(self.send(rb).await?).await
     }
 }
 

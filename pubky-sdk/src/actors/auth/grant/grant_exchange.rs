@@ -19,8 +19,8 @@ use super::{
     credential::{GrantCredential, sign_pop_for_grant},
     pop_signer::GrantPopSigner,
 };
+use crate::PubkyHttpClient;
 use crate::errors::{RequestError, Result};
-use crate::{PubkyHttpClient, cross_log};
 
 /// Establish a grant-backed session by exchanging a user-signed grant for
 /// an opaque bearer at the user's homeserver.
@@ -39,12 +39,6 @@ pub(crate) async fn credential_from_grant_exchange(
     client_signer: GrantPopSigner,
     homeserver_pubkey: PublicKey,
 ) -> Result<GrantCredential> {
-    cross_log!(
-        info,
-        "Exchanging grant for grant credential (user={}, hs={})",
-        grant_claims.iss.z32(),
-        homeserver_pubkey.z32()
-    );
     let response = post_grant_session(
         client,
         &grant_jws,
@@ -94,7 +88,7 @@ pub(crate) async fn signup_account_from_grant(
 }
 
 /// `POST` a grant + `PoP` proof to `/auth/grant/session`.
-async fn post_grant_session(
+pub(crate) async fn post_grant_session(
     client: &PubkyHttpClient,
     grant_jws: &str,
     grant_claims: &GrantClaims,
@@ -116,10 +110,9 @@ async fn post_grant_session(
         .send()
         .await?;
     let resp = client.check_http_status(resp).await?;
-    resp.json().await.map_err(|e| {
-        RequestError::DecodeJson {
+    let response: GrantSessionResponse =
+        resp.json().await.map_err(|e| RequestError::DecodeJson {
             message: format!("decoding grant session response: {e}"),
-        }
-        .into()
-    })
+        })?;
+    Ok(response)
 }

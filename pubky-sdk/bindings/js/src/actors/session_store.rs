@@ -1,3 +1,7 @@
+use super::browser_session::BrowserSessionCoordinator;
+use pubky::GrantSessionCoordinator;
+use std::sync::Arc;
+
 use js_sys::Reflect;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -75,30 +79,18 @@ async function withSessionStore(mode, operation) {
       const tx = db.transaction(PUBKY_SESSIONS_STORE_NAME, mode);
       const store = tx.objectStore(PUBKY_SESSIONS_STORE_NAME);
       let result;
-      let settled = false;
-
-      function fail(error) {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      }
-
       try {
         const request = operation(store);
         request.onsuccess = () => {
           result = request.result;
         };
-        request.onerror = () => fail(request.error ?? new Error("Pubky session store request failed."));
+        request.onerror = () => reject(request.error ?? new Error("Pubky session store request failed."));
       } catch (error) {
-        fail(error);
+        reject(error);
       }
-      tx.onerror = () => fail(tx.error ?? new Error("Pubky session store transaction failed."));
-      tx.onabort = () => fail(tx.error ?? new Error("Pubky session store transaction aborted."));
-      tx.oncomplete = () => {
-        if (settled) return;
-        settled = true;
-        resolve(result);
-      };
+      tx.onerror = () => reject(tx.error ?? new Error("Pubky session store transaction failed."));
+      tx.onabort = () => reject(tx.error ?? new Error("Pubky session store transaction aborted."));
+      tx.oncomplete = () => resolve(result);
     });
   } finally {
     db.close();
@@ -109,6 +101,7 @@ async function withSessionStore(mode, operation) {
 export async function __pubkySessionStoreIsAvailable() {
   if (!globalThis.indexedDB) return false;
   try {
+    if (!globalThis.navigator?.locks) return false;
     const db = await openSessionStoreDb();
     db.close();
     return true;
@@ -118,10 +111,15 @@ export async function __pubkySessionStoreIsAvailable() {
 }
 
 /** Persist or replace a browser session record. */
-export async function __pubkySessionStorePut(record) {
+export async function __pubkySessionStorePut(record, lease) {
   requireIndexedDb();
   try {
-    await withSessionStore("readwrite", (store) => store.put(record));
+    const previous = await __pubkySessionStoreGet(record.id);
+    if (previous?.sharedSession) record.sharedSession = previous.sharedSession;
+    await withSessionStore("readwrite", (store) => {
+      requireSessionLease(lease, true);
+      return store.put(record);
+    });
   } catch (error) {
     throw contextualSessionStoreError("Saving Pubky session failed.", error);
   }
@@ -147,73 +145,155 @@ export async function __pubkySessionStoreList() {
   }
 }
 
-/** Remove one browser session record by id. */
-export async function __pubkySessionStoreDelete(id) {
-  requireIndexedDb();
-  try {
-    await withSessionStore("readwrite", (store) => store.delete(id));
-  } catch (error) {
-    throw contextualSessionStoreError("Removing Pubky session failed.", error);
-  }
-}
-
-/**
- * Clear saved session records and the delegated keys referenced by those records.
- *
- * Delegated keys not referenced by the supplied ids are intentionally preserved,
- * because they may belong to pending or unsaved grant flows.
- */
-export async function __pubkySessionStoreClear(delegatedKeyIds) {
+/** Clear saved sessions and their keys, or every key when clearing all auth state. */
+async function clearSessionStore(allKeys = false) {
   requireIndexedDb();
   const db = await openSessionStoreDb();
   try {
     await new Promise((resolve, reject) => {
       const tx = db.transaction(
-        [PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME],
-        "readwrite",
+        [PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME], "readwrite",
       );
       const sessions = tx.objectStore(PUBKY_SESSIONS_STORE_NAME);
       const keys = tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME);
-      sessions.clear();
-      for (const keyId of new Set(delegatedKeyIds ?? [])) {
-        keys.delete(keyId);
-      }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error ?? new Error("Clearing Pubky session store failed."));
-      tx.onabort = () => reject(tx.error ?? new Error("Clearing Pubky session store aborted."));
+      const records = sessions.getAll();
+      records.onsuccess = () => {
+        try {
+          if (allKeys) keys.clear();
+          else for (const record of records.result) {
+            if (record.storageMode === "delegated") keys.delete(JSON.parse(record.credential).keyId);
+          }
+          sessions.clear();
+        } catch (error) { tx.abort(); reject(error); }
+      };
+      tx.oncomplete = resolve;
+      tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("Clearing browser sessions failed."));
     });
-  } finally {
-    db.close();
-  }
+  } finally { db.close(); }
 }
 
-/** Clear all browser auth records, including all delegated key handles. */
-export async function __pubkySessionStoreClearAll() {
-  requireIndexedDb();
+const SESSION_STORE_LOCK = "pubky-session-store";
+const sessionLeases = new Map();
+let nextSessionLease = 0;
+const sessionChannel = typeof indexedDB !== "undefined" && typeof BroadcastChannel === "function"
+  ? new BroadcastChannel("pubky-session-store") : null;
+function notifySessionChange(detail) {
+  if (typeof globalThis.dispatchEvent === "function") {
+    globalThis.dispatchEvent(new CustomEvent("pubky-session-changed", { detail }));
+  }
+}
+if (sessionChannel) sessionChannel.onmessage = event => notifySessionChange(event.data);
+function sessionChanged(id, action) {
+  const detail = { id, action };
+  notifySessionChange(detail);
+  sessionChannel?.postMessage(detail);
+}
+
+export function __pubkySessionAcquire(id, homeserver, exclusive) {
+  if (!globalThis.navigator?.locks) throw new Error("Browser sessions require Web Locks in a secure context.");
+  const token = ++nextSessionLease;
+  const abort = new AbortController();
+  let release, ready, failed;
+  const held = new Promise(resolve => { release = resolve; });
+  const waiting = new Promise((resolve, reject) => { ready = resolve; failed = reject; });
+  // Cancellation can drop the Rust future before it starts awaiting this promise.
+  waiting.catch(() => {});
+  const lease = { id, homeserver, exclusive, abort, release, waiting, active: false };
+  sessionLeases.set(token, lease);
+  navigator.locks.request(SESSION_STORE_LOCK, { mode: "shared", signal: abort.signal }, () =>
+    navigator.locks.request(`pubky-shared-session:${homeserver}:${id}`, {
+      mode: exclusive ? "exclusive" : "shared", signal: abort.signal,
+    }, async () => {
+      lease.active = true;
+      ready();
+      await held;
+    })
+  ).catch(failed);
+  return token;
+}
+export function __pubkySessionWait(token) {
+  return sessionLeases.get(token).waiting;
+}
+export function __pubkySessionRelease(token) {
+  const lease = sessionLeases.get(token);
+  if (!lease) return;
+  lease.active = false;
+  lease.abort.abort();
+  lease.release();
+  sessionLeases.delete(token);
+}
+function requireSessionLease(token, write = false) {
+  const lease = sessionLeases.get(token);
+  if (!lease?.active || (write && !lease.exclusive)) throw new Error("Browser session lock was released.");
+  return lease;
+}
+export async function __pubkySharedSessionLoad(token) {
+  const lease = requireSessionLease(token);
+  const record = await __pubkySessionStoreGet(lease.id);
+  if (record && record.homeserver !== lease.homeserver) throw new Error("Stored session homeserver changed.");
+  return record?.sharedSession;
+}
+export async function __pubkySharedSessionStore(token, sharedSession) {
+  const lease = requireSessionLease(token, true);
+  const record = await __pubkySessionStoreGet(lease.id);
+  if (!record || record.homeserver !== lease.homeserver) throw new Error("Browser session was removed or changed.");
+  await withSessionStore("readwrite", store => {
+    requireSessionLease(token, true);
+    return store.put({ ...record, sharedSession });
+  });
+}
+export async function __pubkySharedSessionRemove(token) {
+  const lease = requireSessionLease(token, true);
+  const record = await __pubkySessionStoreGet(lease.id);
+  if (!record) return;
   const db = await openSessionStoreDb();
   try {
+    requireSessionLease(token, true);
     await new Promise((resolve, reject) => {
-      const tx = db.transaction(
-        [PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME],
-        "readwrite",
-      );
-      tx.objectStore(PUBKY_SESSIONS_STORE_NAME).clear();
-      tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error ?? new Error("Clearing Pubky auth store failed."));
-      tx.onabort = () => reject(tx.error ?? new Error("Clearing Pubky auth store aborted."));
+      const tx = db.transaction([PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME], "readwrite");
+      tx.objectStore(PUBKY_SESSIONS_STORE_NAME).delete(lease.id);
+      if (record.storageMode === "delegated") {
+        const { keyId } = JSON.parse(record.credential);
+        tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).delete(keyId);
+      }
+      tx.oncomplete = resolve;
+      tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("Removing browser session failed."));
     });
-  } finally {
-    db.close();
-  }
+  } finally { db.close(); }
+  sessionChanged(lease.id, "removed");
+}
+export async function __pubkySessionStoreClear() {
+  await navigator.locks.request(SESSION_STORE_LOCK, () => clearSessionStore());
+  sessionChanged(null, "cleared");
+}
+export async function __pubkySessionStoreClearAll() {
+  await navigator.locks.request(SESSION_STORE_LOCK, () => clearSessionStore(true));
+  sessionChanged(null, "cleared");
 }
 "#)]
 extern "C" {
+    #[wasm_bindgen(catch, js_name = __pubkySessionAcquire)]
+    pub(crate) fn js_session_acquire(
+        id: &str,
+        homeserver: &str,
+        exclusive: bool,
+    ) -> Result<u32, JsValue>;
+    #[wasm_bindgen(js_name = __pubkySessionWait)]
+    pub(crate) fn js_session_wait(token: u32) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkySessionRelease)]
+    pub(crate) fn js_session_release(token: u32);
+    #[wasm_bindgen(js_name = __pubkySharedSessionLoad)]
+    pub(crate) fn js_shared_load(token: u32) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkySharedSessionStore)]
+    pub(crate) fn js_shared_store(token: u32, state: JsValue) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkySharedSessionRemove)]
+    pub(crate) fn js_shared_remove(token: u32) -> js_sys::Promise;
+
     #[wasm_bindgen(js_name = __pubkySessionStoreIsAvailable)]
     fn js_store_is_available() -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStorePut)]
-    fn js_store_put(record: JsValue) -> js_sys::Promise;
+    fn js_store_put(record: JsValue, lease: u32) -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStoreGet)]
     fn js_store_get(id: String) -> js_sys::Promise;
@@ -221,11 +301,8 @@ extern "C" {
     #[wasm_bindgen(js_name = __pubkySessionStoreList)]
     fn js_store_list() -> js_sys::Promise;
 
-    #[wasm_bindgen(js_name = __pubkySessionStoreDelete)]
-    fn js_store_delete(id: String) -> js_sys::Promise;
-
     #[wasm_bindgen(js_name = __pubkySessionStoreClear)]
-    fn js_store_clear(delegated_key_ids: JsValue) -> js_sys::Promise;
+    fn js_store_clear() -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStoreClearAll)]
     fn js_store_clear_all() -> js_sys::Promise;
@@ -314,7 +391,7 @@ pub struct BrowserSessionStore(pub(crate) pubky::Pubky);
 
 #[wasm_bindgen]
 impl BrowserSessionStore {
-    /// Whether IndexedDB is available for durable session persistence.
+    /// Whether IndexedDB and Web Locks are available.
     #[wasm_bindgen(js_name = "isAvailable")]
     pub async fn is_available(&self) -> JsResult<bool> {
         let value = JsFuture::from(js_store_is_available())
@@ -376,9 +453,15 @@ impl BrowserSessionStore {
                 format!("Failed to serialize stored session: {e}"),
             )
         })?;
-        JsFuture::from(js_store_put(value))
+        let coordinator = Arc::new(BrowserSessionCoordinator::new(
+            &record.id,
+            &record.homeserver,
+        ));
+        let lease = coordinator.acquire_browser(true).await?;
+        JsFuture::from(js_store_put(value, lease.token))
             .await
             .map_err(store_error)?;
+        grant.coordinate(coordinator, &lease).await?;
         Ok(StoredSessionInfo(record))
     }
 
@@ -391,10 +474,15 @@ impl BrowserSessionStore {
     }
 
     /// Restore a specific stored session by id.
+    ///
+    /// Shares one bearer with other tabs on this origin. Requires IndexedDB and
+    /// Web Locks in a secure browser context.
     #[wasm_bindgen]
     pub async fn restore(&self, id: String) -> JsResult<Session> {
-        let record = self.load_record(id).await?;
-        match record.storage_mode.as_str() {
+        let record = self.load_record(id.clone()).await?;
+        let coordinator = Arc::new(BrowserSessionCoordinator::new(&id, &record.homeserver));
+        let lease = coordinator.acquire(true).await?;
+        let credential = match record.storage_mode.as_str() {
             MODE_DELEGATED => {
                 let state = decode_delegated_grant_state(&record.credential)?;
                 let stored_public_key =
@@ -406,30 +494,56 @@ impl BrowserSessionStore {
                     ));
                 }
                 let sign = BrowserGrantKeyStore::signer(state.key_id.clone());
-                Ok(Session(
-                    self.0.restore_delegated_grant_session(state, sign).await?,
-                ))
+                pubky::GrantCredential::from_shared_delegated_state(state, sign)?
             }
-            MODE_LOCAL_SECRET => Ok(Session(self.0.restore_session(&record.credential).await?)),
-            _ => Err(PubkyError::new(
+            MODE_LOCAL_SECRET => pubky::GrantCredential::from_shared_secret(&record.credential)?,
+            _ => {
+                return Err(PubkyError::new(
+                    PubkyErrorName::ClientStateError,
+                    "Unsupported stored session storage mode.",
+                ));
+            }
+        };
+        let session =
+            pubky::PubkySession::from_grant_credential(self.0.client().clone(), credential);
+        let grant = session.as_grant().expect("grant credential");
+        let info = grant.session_info().await;
+        if record.id != format!("{}:{}", info.pubky.z32(), info.grant_id)
+            || record.homeserver != info.homeserver.z32()
+        {
+            return Err(PubkyError::new(
                 PubkyErrorName::ClientStateError,
-                "Unsupported stored session storage mode.",
-            )),
+                "Stored session identity does not match its grant.",
+            ));
         }
+        grant.coordinate(coordinator, lease.as_ref()).await?;
+        let logout_pending = lease
+            .load()
+            .await?
+            .is_some_and(|shared| shared.logout_pending);
+        drop(lease);
+        if logout_pending {
+            session.signout().await.map_err(|(error, _)| error)?;
+            return Err(PubkyError::new(
+                PubkyErrorName::ClientStateError,
+                "Browser session was signed out.",
+            ));
+        }
+        if session.revalidate().await?.is_none() {
+            return Err(PubkyError::new(
+                PubkyErrorName::ClientStateError,
+                "Browser session is no longer valid.",
+            ));
+        }
+        Ok(Session(session))
     }
 
     /// Remove local stored session metadata and any SDK-owned delegated key for that record.
     #[wasm_bindgen]
     pub async fn remove(&self, id: String) -> JsResult<()> {
         let record = self.load_record(id.clone()).await?;
-        JsFuture::from(js_store_delete(id))
-            .await
-            .map_err(store_error)?;
-
-        if record.storage_mode == MODE_DELEGATED {
-            let state = decode_delegated_grant_state(&record.credential)?;
-            BrowserGrantKeyStore::delete_key(state.key_id).await?;
-        }
+        let coordinator = BrowserSessionCoordinator::new(&id, &record.homeserver);
+        coordinator.acquire(true).await?.remove().await?;
 
         Ok(())
     }
@@ -440,15 +554,7 @@ impl BrowserSessionStore {
     /// Delegated keys that only belong to pending grant flows are preserved.
     #[wasm_bindgen]
     pub async fn clear(&self) -> JsResult<()> {
-        let records = self.stored_records().await?;
-        let delegated_key_ids = delegated_key_ids_for_records(&records)?;
-        let delegated_key_ids = serde_wasm_bindgen::to_value(&delegated_key_ids).map_err(|e| {
-            PubkyError::new(
-                PubkyErrorName::InternalError,
-                format!("Failed to serialize delegated key ids: {e}"),
-            )
-        })?;
-        JsFuture::from(js_store_clear(delegated_key_ids))
+        JsFuture::from(js_store_clear())
             .await
             .map_err(store_error)?;
         Ok(())
@@ -459,7 +565,7 @@ impl BrowserSessionStore {
     /// This removes all stored session records and all browser-held delegated
     /// grant keys, including keys for pending delegated grant flows. Saved
     /// delegated flow state becomes unrestorable. This does not revoke remote
-    /// grants or immediately invalidate already-live in-memory sessions.
+    /// grants. Browser-managed handles stop working when their saved record is removed.
     #[wasm_bindgen(js_name = "clearAll")]
     pub async fn clear_all(&self) -> JsResult<()> {
         JsFuture::from(js_store_clear_all())
@@ -506,14 +612,6 @@ impl BrowserSessionStore {
     }
 }
 
-fn delegated_key_ids_for_records(records: &[StoredSessionRecord]) -> JsResult<Vec<String>> {
-    records
-        .iter()
-        .filter(|record| record.storage_mode == MODE_DELEGATED)
-        .map(|record| decode_delegated_grant_state(&record.credential).map(|state| state.key_id))
-        .collect()
-}
-
 fn validate_record(record: StoredSessionRecord) -> JsResult<StoredSessionInfo> {
     if record.version != STORE_VERSION {
         return Err(PubkyError::new(
@@ -530,7 +628,7 @@ fn validate_record(record: StoredSessionRecord) -> JsResult<StoredSessionInfo> {
     Ok(StoredSessionInfo(record))
 }
 
-fn store_error(value: JsValue) -> PubkyError {
+pub(crate) fn store_error(value: JsValue) -> PubkyError {
     PubkyError::new(PubkyErrorName::ClientStateError, js_error_message(value))
 }
 
