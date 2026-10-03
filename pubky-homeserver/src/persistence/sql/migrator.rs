@@ -11,7 +11,6 @@ use crate::persistence::sql::{
         M20260325CreateGrantSessionsMigration, M20260327AddQuotaColumnsMigration,
         M20260507AddAllowedWritePathsMigration, M20260609AddSignupCodeUsedAtMigration,
         M20260723SanitizeCapabilitiesMigration, M20260921CreateEntryLocksMigration,
-        M20260921GrantSessionSlotsMigration,
     },
     sql_db::SqlDb,
 };
@@ -47,7 +46,6 @@ impl<'a> Migrator<'a> {
             Box::new(M20260609AddSignupCodeUsedAtMigration),
             Box::new(M20260723SanitizeCapabilitiesMigration),
             Box::new(M20260921CreateEntryLocksMigration),
-            Box::new(M20260921GrantSessionSlotsMigration),
         ]
     }
 

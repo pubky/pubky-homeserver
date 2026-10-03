@@ -10,7 +10,7 @@
 //! `grant_id`) live on [`super::view::GrantSessionView`].
 
 use pubky_common::{
-    auth::{grant::GrantClaims, grant_session_responses::GrantSessionResponse, jws::RandomId},
+    auth::{grant::GrantClaims, grant_session_responses::GrantSessionResponse},
     crypto::PublicKey,
 };
 use reqwest::Method;
@@ -39,22 +39,12 @@ pub(crate) async fn credential_from_grant_exchange(
     client_signer: GrantPopSigner,
     homeserver_pubkey: PublicKey,
 ) -> Result<GrantCredential> {
-    let supports_slots = client
-        .features
-        .supports(
-            client,
-            &homeserver_pubkey,
-            pubky_common::constants::features::GRANT_SESSION_SLOTS,
-        )
-        .await;
-    let session_id = supports_slots.then(RandomId::generate);
     let response = post_grant_session(
         client,
         &grant_jws,
         &grant_claims,
         &client_signer,
         &homeserver_pubkey,
-        session_id.as_ref(),
     )
     .await?;
     Ok(GrantCredential::from_response(
@@ -104,13 +94,9 @@ pub(crate) async fn post_grant_session(
     grant_claims: &GrantClaims,
     client_signer: &GrantPopSigner,
     homeserver_pk: &PublicKey,
-    session_id: Option<&RandomId>,
 ) -> Result<GrantSessionResponse> {
     let pop_jws = sign_pop_for_grant(client_signer, homeserver_pk, &grant_claims.jti).await?;
-    let mut body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
-    if let Some(id) = session_id {
-        body["session_id"] = serde_json::json!(id);
-    }
+    let body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
 
     let resp = client
         .cross_request_via_homeserver(
@@ -128,11 +114,5 @@ pub(crate) async fn post_grant_session(
         resp.json().await.map_err(|e| RequestError::DecodeJson {
             message: format!("decoding grant session response: {e}"),
         })?;
-    if response.session.session_id.as_ref() != session_id {
-        return Err(RequestError::Validation {
-            message: "Homeserver returned a different grant session identity".into(),
-        }
-        .into());
-    }
     Ok(response)
 }

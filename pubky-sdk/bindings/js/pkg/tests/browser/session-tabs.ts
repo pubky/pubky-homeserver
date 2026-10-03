@@ -8,7 +8,7 @@ let current: Session;
 let signer: Signer;
 let savedId: string;
 let exchanges = 0;
-let hideSlots = false;
+let hideFeatures = false;
 let exchangeFailure: number | undefined;
 let loseExchange = false;
 let loseLogout = false;
@@ -30,7 +30,7 @@ IDBObjectStore.prototype.put = function(value, key) {
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
   const request = input instanceof Request ? input : new Request(input, init);
-  if (hideSlots && new URL(request.url).pathname === "/info") {
+  if (hideFeatures && new URL(request.url).pathname === "/info") {
     const response = Response.json({ features: [] });
     Object.defineProperty(response, "url", { value: request.url });
     return response;
@@ -46,6 +46,9 @@ globalThis.fetch = async (input, init) => {
   if (holdWrite && request.method === "PUT") {
     holdWrite = false;
     await new Promise<void>(resolve => { releaseFetch = resolve; });
+  }
+  if (request.method === "POST" && new URL(request.url).pathname === "/auth/grant/session") {
+    if ("session_id" in await request.clone().json()) throw new Error("Tab coordination must not allocate a session slot");
   }
   const response = await realFetch(input, init);
   if (new URL(request.url).pathname === "/auth/grant/session" && response.ok) {
@@ -89,7 +92,7 @@ async function record(update?: (value: any) => any) {
     });
   } finally { db.close(); }
 }
-async function identity() { return (await current.grant!.sessionInfo()).sessionId; }
+async function identity() { return current.grant!.grantId(); }
 
 const tabs = {
   async create(delegated = false) {
@@ -108,17 +111,27 @@ const tabs = {
     const saved = await store.save(current);
     savedId = saved.id;
     await storage.putText("/pub/tabs.test/before-save-handle", "ok");
-    return { id: saved.id, slot: await identity() };
+    return { id: saved.id, grant: await identity() };
   },
   async restore(id: string) {
     savedId = id;
     current = await store.restore(id);
     return identity();
   },
-  async restoreWithoutSlots() {
-    hideSlots = true;
-    try { await Pubky.testnet().browserSessionStore.restore(savedId); }
-    finally { hideSlots = false; }
+  async restoreWithoutFeatures() {
+    hideFeatures = true;
+    try { return (await Pubky.testnet().browserSessionStore.restore(savedId)).grant!.grantId(); }
+    finally { hideFeatures = false; }
+  },
+  async restoreLegacy(id: string) {
+    savedId = id;
+    hideFeatures = true;
+    current = await Pubky.testnet().browserSessionStore.restore(id);
+  },
+  async activeGrants() {
+    const other = await signer.signin("grant-audit.test");
+    try { return (await new GrantManager(other).list()).map(grant => grant.grantId); }
+    finally { await other.signout(); }
   },
   async restoreTogether(id: string) {
     const sessions = await Promise.all([store.restore(id), store.restore(id), store.restore(id)]);
@@ -150,22 +163,16 @@ const tabs = {
   async shared() {
     const value = await record();
     return value?.sharedSession && {
-      slot: value.sharedSession.response.session.session_id,
+      grant: value.sharedSession.response.session.grant_id,
+      bearer: value.sharedSession.response.token,
       pending: value.sharedSession.refresh_pending,
       logout: value.sharedSession.logout_pending,
     };
   },
-  async exportRecord() {
-    const value = await record();
-    delete value.sharedSession;
-    return value;
+  async forgetSharedBearer() {
+    await record(value => { delete value.sharedSession; return value; });
   },
-  async importRecord(value: any) {
-    savedId = value.id;
-    await store.isAvailable();
-    await record(() => value);
-    return tabs.restore(savedId);
-  },
+  async hasRecord(id: string) { return (await store.list()).some(record => record.id === id); },
   loseNext() { loseExchange = true; },
   failExchange(status: number) { exchangeFailure = status; },
   loseLogout() { loseLogout = true; },

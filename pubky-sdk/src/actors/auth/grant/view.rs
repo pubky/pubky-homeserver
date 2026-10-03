@@ -94,9 +94,7 @@ impl<'a> GrantSessionView<'a> {
         coordinator: std::sync::Arc<dyn crate::GrantSessionCoordinator>,
         lease: &dyn crate::GrantSessionLease,
     ) -> Result<()> {
-        self.credential
-            .coordinate(self.session.client(), coordinator, lease)
-            .await
+        self.credential.coordinate(coordinator, lease).await
     }
 
     /// Test/debug helper: force a refresh of the credential right now.

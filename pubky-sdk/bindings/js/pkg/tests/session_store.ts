@@ -183,12 +183,11 @@ test("BrowserSessionStore: saves and restores a completed grant session", async 
   );
 
   // Older SDKs saved grant material without the shared bearer state.
-  const oldSlot = (await restored.grant!.sessionInfo()).sessionId;
   await removeSharedSession(stored.id);
   const migrated = await Promise.all([store.restore(stored.id), store.restore(stored.id)]);
-  const newSlot = (await migrated[0].grant!.sessionInfo()).sessionId;
-  t.notEqual(newSlot, oldSlot, "migration creates a shared slot");
-  t.equal((await migrated[1].grant!.sessionInfo()).sessionId, newSlot, "concurrent migration reuses it");
+  for (const session of migrated) {
+    t.equal(await session.grant!.grantId(), stored.grantId, "migration preserves the grant");
+  }
   await Promise.all([restored, ...migrated].map(session => session.storage.putText(path, "migrated")));
   t.pass("existing and migrated handles adopt the shared bearer");
 

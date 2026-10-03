@@ -47,14 +47,15 @@ async function until(check) {
 }
 async function scenario(delegated) {
   let a = await windowAtOrigin();
-  const { id, slot } = await call(a, "create", delegated);
+  const { id, grant } = await call(a, "create", delegated);
   const b = await windowAtOrigin();
-  assert.equal(await call(b, "restore", id), slot);
+  assert.equal(await call(b, "restore", id), grant);
   assert.equal(await call(b, "exchangeCount"), 0, "restore reuses a valid bearer");
-  await assert.rejects(call(b, "restoreWithoutSlots"), /does not advertise grant-session-slots/);
-  assert.equal(await call(b, "exchangeCount"), 0, "unsupported restore does not issue a bearer");
+  assert.equal(await call(b, "restoreWithoutFeatures"), grant);
+  assert.equal(await call(b, "exchangeCount"), 0, "restore works without slot or proof-logout support");
+  assert.equal((await call(a, "shared")).bearer, (await call(b, "shared")).bearer);
   await Promise.all([call(a, "write"), call(b, "write")]);
-  assert.equal(await call(a, "restoreTogether", id), slot);
+  assert.equal(await call(a, "restoreTogether", id), grant);
 
   // Revalidation distinguishes rejected credentials from transient refresh failures.
   for (const [status, error] of [
@@ -67,19 +68,19 @@ async function scenario(delegated) {
     await call(a, "expire");
     await call(a, "failExchange", status);
     await assert.rejects(call(a, "restore", id), error);
-    assert.equal(await call(a, "restore", id), slot);
+    assert.equal(await call(a, "restore", id), grant);
   }
 
-  // With a one-slot cap, even one extra allocation fails.
+  // Reopening tabs and reloading never exchange a still-valid shared bearer.
   for (let i = 0; i < 3; i++) {
     const tab = await windowAtOrigin();
-    assert.equal(await call(tab, "restore", id), slot);
+    assert.equal(await call(tab, "restore", id), grant);
     assert.equal(await call(tab, "exchangeCount"), 0);
     await call(tab, "write");
     tab.destroy();
   }
   await reload(a);
-  assert.equal(await call(a, "restore", id), slot);
+  assert.equal(await call(a, "restore", id), grant);
   assert.equal(await call(a, "exchangeCount"), 0);
 
   // Ordinary writes share the lock; a refresh waits for an in-flight write.
@@ -112,7 +113,7 @@ async function scenario(delegated) {
     assert.equal((await call(b, "shared")).pending, true);
     await call(b, "write");
     assert.equal((await call(b, "shared")).pending, false);
-    assert.equal((await call(b, "shared")).slot, slot);
+    assert.equal((await call(b, "shared")).grant, grant);
     await call(a, "write");
   }
 
@@ -129,13 +130,21 @@ async function scenario(delegated) {
   await call(b, "write");
   assert.equal((await call(b, "shared")).pending, false);
   a = await windowAtOrigin();
-  assert.equal(await call(a, "restore", id), slot);
+  assert.equal(await call(a, "restore", id), grant);
 
-  // A different origin cannot borrow the first origin's bearer or slot.
+  // Upgrade a record saved before shared bearers existed: concurrent restores
+  // perform one exchange, then every handle adopts the persisted bearer.
+  await call(a, "forgetSharedBearer");
+  const upgradeCounts = await Promise.all([call(a, "exchangeCount"), call(b, "exchangeCount")]);
+  await Promise.all([call(a, "restore", id), call(b, "restore", id)]);
+  assert.equal((await call(a, "exchangeCount")) + (await call(b, "exchangeCount")), upgradeCounts[0] + upgradeCounts[1] + 1);
+  await Promise.all([call(a, "write"), call(b, "write")]);
+
+  // Other origins have their own storage and authenticate with a separate grant.
   if (!delegated) {
     const other = await windowAtOrigin();
     await other.loadURL(base.replace("127.0.0.1", "localhost"));
-    await assert.rejects(call(other, "importRecord", await call(a, "exportRecord")), /409/);
+    assert.equal(await call(other, "hasRecord", id), false);
     const otherGrant = await call(other, "create");
     assert.notEqual(otherGrant.id, id);
     await Promise.all([call(other, "write"), call(a, "write")]);
@@ -187,8 +196,16 @@ async function scenario(delegated) {
   await Promise.all([call(a, "logout"), call(b, "logout")]);
   await assert.rejects(call(a, "write"));
   await assert.rejects(call(b, "write"));
+  // Bearer-only logout must use the shared token after another tab rotates it.
+  const legacy = await call(a, "create", delegated);
+  await call(b, "restoreLegacy", legacy.id);
+  await call(a, "expire");
+  await call(a, "write");
+  assert.ok((await call(a, "activeGrants")).includes(legacy.grant));
+  await call(b, "logout");
+  assert.equal((await call(a, "activeGrants")).includes(legacy.grant), false);
   a.destroy(); b.destroy();
-  console.log(`PASS ${delegated ? "delegated" : "local secret"}: shared slot, tab reopen/reload, concurrent writes/refresh, interrupted exchanges, logout, removal`);
+  console.log(`PASS ${delegated ? "delegated" : "local secret"}: shared bearer, tab reopen/reload, concurrent writes/refresh, interrupted exchanges, logout, removal`);
 }
 
 const timeout = setTimeout(() => { console.error("Browser session tests timed out"); app.exit(1); }, 300000);

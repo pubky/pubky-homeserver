@@ -301,6 +301,7 @@ jobs:
         run: |
           npx electron --version || true
           xvfb-run -a npm run test-browser:ci
+          xvfb-run -a npm run test-browser:tabs -- --no-sandbox
 
       - name: Show testnet logs if tests fail
         working-directory: pubky-sdk/bindings/js/pkg

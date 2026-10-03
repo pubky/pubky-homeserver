@@ -38,6 +38,6 @@ The demo does not persist root keypairs. If a saved grant expires or is revoked,
 
 ## Multiple tabs
 
-Use a homeserver advertising `grant-session-slots`. Tabs on the same origin share
-one slot and bearer, including after reloads. The SDK coordinates requests and
-refreshes with Web Locks. Signing out revokes all sessions using the same grant.
+Tabs on the same origin share one bearer per grant, including after reloads.
+The SDK coordinates requests and refreshes with Web Locks. Signing out revokes
+the grant for every tab. Other apps should authenticate with their own grants.

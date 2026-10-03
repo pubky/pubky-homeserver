@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
-use pubky_common::auth::{grant_session_responses::GrantSessionResponse, jws::RandomId};
+use pubky_common::auth::grant_session_responses::GrantSessionResponse;
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
@@ -58,10 +58,9 @@ impl GrantCredentialState {
         }
     }
 
-    fn adopt(&mut self, response: GrantSessionResponse) -> Result<()> {
+    pub(super) fn adopt(&mut self, response: GrantSessionResponse) -> Result<()> {
         let session = &response.session;
-        if session.session_id.is_none()
-            || session.homeserver != self.homeserver_pk
+        if session.homeserver != self.homeserver_pk
             || session.pubky != self.grant_claims.iss
             || session.grant_id != self.grant_claims.jti
             || session.client_id != self.grant_claims.client_id
@@ -86,33 +85,13 @@ impl GrantCredential {
     /// Join shared state while the caller holds its exclusive browser lease.
     pub(crate) async fn coordinate(
         &self,
-        client: &PubkyHttpClient,
         coordinator: Arc<dyn GrantSessionCoordinator>,
         lease: &dyn GrantSessionLease,
     ) -> Result<()> {
-        let homeserver = self.state.lock().await.homeserver_pk.clone();
-        if !client
-            .features
-            .supports(
-                client,
-                &homeserver,
-                pubky_common::constants::features::GRANT_SESSION_SLOTS,
-            )
-            .await
-        {
-            return Err(AuthError::Validation(
-                "Homeserver does not advertise grant-session-slots; browser restore requires an upgraded homeserver".into()
-            ).into());
-        }
         let mut state = self.state.lock().await;
         if let Some(shared) = lease.load().await? {
             state.adopt(shared.response)?;
         } else {
-            if state.session.session_id.is_none() {
-                state.session.session_id = Some(RandomId::generate());
-                state.bearer.clear();
-                state.session.token_expires_at = 0;
-            }
             lease
                 .store(&SharedGrantSession {
                     response: state.response(),
@@ -149,7 +128,6 @@ impl GrantCredential {
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
-            state.session.session_id.as_ref(),
         )
         .await?;
         shared.response = response;

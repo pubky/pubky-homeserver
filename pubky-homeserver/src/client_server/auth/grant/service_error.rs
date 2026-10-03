@@ -74,14 +74,6 @@ pub enum AuthServiceError {
     #[error("Root capability required")]
     RootCapabilityRequired,
 
-    /// A new slot would exceed the configured limit.
-    #[error("grant_session_limit_reached")]
-    SessionLimitReached,
-
-    /// Too many exchanges for this grant in the current window.
-    #[error("grant_session_rate_limited")]
-    SessionRateLimited,
-
     /// Database or infrastructure error.
     #[error("Internal error: {0}")]
     Internal(#[from] sqlx::Error),
@@ -113,8 +105,6 @@ impl From<SessionIssueError> for AuthServiceError {
         match error {
             SessionIssueError::Revoked => Self::GrantRevoked,
             SessionIssueError::Expired => Self::GrantExpired,
-            SessionIssueError::Capacity => Self::SessionLimitReached,
-            SessionIssueError::RateLimited => Self::SessionRateLimited,
             SessionIssueError::Database(error) => Self::Internal(error),
         }
     }

@@ -221,15 +221,15 @@ like a bearer token. Delegated browser grant sessions should use
 
 **Multiple browser tabs**
 
-On homeservers advertising `grant-session-slots`, `browserSessionStore.restore(id)`
-shares one slot and bearer across tabs on the same origin, including after reloads.
+`browserSessionStore.restore(id)` shares one bearer per grant across tabs on the
+same origin, including after reloads. It uses the existing single-session protocol.
 Browser persistence requires IndexedDB and Web Locks in a secure context.
 
-Signout revokes the grant for every tab. Separate origins and browser profiles use
-separate slots. The default homeserver limit is 20 active slots per grant; reaching
-it returns a capacity error without evicting existing sessions.
+Signout revokes the grant for every tab. Separate applications should obtain
+their own grants: restoring the same exported grant outside browser coordination
+replaces its current bearer.
 See [grant session lifecycle](../../../../docs/grant-session-lifecycle.md)
-for compatibility, configuration and expiry behavior.
+for compatibility and expiry behavior.
 
 **Approve a pubkyauth request URL**
 

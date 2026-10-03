@@ -19,5 +19,3 @@ pub use data_dir::DataDir;
 #[cfg(any(test, feature = "testing"))]
 pub use mock_data_dir::MockDataDir;
 pub use persistent_data_dir::PersistentDataDir;
-
-pub use config_toml::GrantAuthToml;

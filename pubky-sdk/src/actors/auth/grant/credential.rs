@@ -15,7 +15,7 @@ use pubky_common::{
     auth::{
         grant::GrantClaims,
         grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
-        jws::{POP_JWS_TYP, PopNonce, RandomId},
+        jws::{POP_JWS_TYP, PopNonce},
         pop::PopProofClaims,
     },
     crypto::{Keypair, PublicKey},
@@ -252,7 +252,6 @@ impl GrantCredential {
         let response = GrantSessionResponse {
             token: String::new(),
             session: GrantSessionInfo {
-                session_id: Some(RandomId::generate()),
                 homeserver: homeserver.clone(),
                 pubky: claims.iss.clone(),
                 client_id: claims.client_id.clone(),
@@ -375,7 +374,6 @@ impl GrantCredential {
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
-            state.session.session_id.as_ref(),
         )
         .await?;
 
@@ -419,13 +417,23 @@ impl SessionCredential for GrantCredential {
             let Some(mut shared) = lease.load().await? else {
                 return Ok(());
             };
+            self.state.lock().await.adopt(shared.response.clone())?;
             shared.logout_pending = true;
             lease.store(&shared).await?;
         }
         let request = self.grant_session_request(client, Method::DELETE).await?;
+        let homeserver = self.state.lock().await.homeserver_pk.clone();
+        let supports_proof_logout = client
+            .features
+            .supports(
+                client,
+                &homeserver,
+                pubky_common::constants::features::GRANT_PROOF_LOGOUT,
+            )
+            .await;
         let proof = {
             let state = self.state.lock().await;
-            if state.session.session_id.is_some() {
+            if supports_proof_logout {
                 let pop = sign_pop_for_grant(
                     &state.client_signer,
                     &state.homeserver_pk,
@@ -437,7 +445,7 @@ impl SessionCredential for GrantCredential {
                 None
             }
         };
-        // Grant proof avoids issuance limits; older servers require a bearer.
+        // Older servers only understand bearer-authenticated logout.
         let request = match proof {
             Some(proof) => request.json(&proof),
             None => request.bearer_auth(self.current_bearer().await),
@@ -647,20 +655,14 @@ mod tests {
         auth::jws::{ClientId, GRANT_JWS_TYP, GrantId},
         capabilities::Capability,
     };
-    use pubky_testnet::{EphemeralTestnet, pubky_homeserver::ConfigToml};
+    use pubky_testnet::EphemeralTestnet;
 
     use super::*;
 
     #[tokio::test]
     #[pubky_testnet::test]
     async fn capped_bearer_requests_and_legacy_logout_do_not_refresh() {
-        let mut config = ConfigToml::default_test_config();
-        config.grant_auth.session_issuance_per_minute = 1.try_into().unwrap();
-        let testnet = EphemeralTestnet::builder()
-            .config(config)
-            .build()
-            .await
-            .unwrap();
+        let testnet = EphemeralTestnet::builder().build().await.unwrap();
         let user = Keypair::random();
         let homeserver = testnet.homeserver_app().public_key();
         testnet
@@ -676,6 +678,7 @@ mod tests {
             b
         });
         let client = builder.build().unwrap();
+        client.features.insert(&homeserver, &[]);
         let pop_key = Keypair::random();
         let now = now_unix();
         let grant = GrantClaims {
@@ -689,7 +692,7 @@ mod tests {
         };
         let jws = grant.sign(&user, GRANT_JWS_TYP);
         let signer = GrantPopSigner::local(pop_key);
-        let response = post_grant_session(&client, &jws, &grant, &signer, &homeserver, None)
+        let response = post_grant_session(&client, &jws, &grant, &signer, &homeserver)
             .await
             .unwrap();
         let bearer = response.token.clone();
@@ -887,7 +890,6 @@ mod tests {
             GrantSessionResponse {
                 token: "test-bearer".into(),
                 session: GrantSessionInfo {
-                    session_id: None,
                     homeserver: stored.homeserver_pk.clone(),
                     pubky: claims.iss.clone(),
                     client_id: claims.client_id.clone(),

@@ -392,7 +392,6 @@ pub struct BrowserSessionStore(pub(crate) pubky::Pubky);
 #[wasm_bindgen]
 impl BrowserSessionStore {
     /// Whether IndexedDB and Web Locks are available.
-    /// A homeserver advertising `grant-session-slots` is also required for restore.
     #[wasm_bindgen(js_name = "isAvailable")]
     pub async fn is_available(&self) -> JsResult<bool> {
         let value = JsFuture::from(js_store_is_available())
@@ -476,8 +475,8 @@ impl BrowserSessionStore {
 
     /// Restore a specific stored session by id.
     ///
-    /// Shares a slot and bearer with other tabs on this origin. Requires a secure
-    /// browser context and homeserver `grant-session-slots` support.
+    /// Shares one bearer with other tabs on this origin. Requires IndexedDB and
+    /// Web Locks in a secure browser context.
     #[wasm_bindgen]
     pub async fn restore(&self, id: String) -> JsResult<Session> {
         let record = self.load_record(id.clone()).await?;

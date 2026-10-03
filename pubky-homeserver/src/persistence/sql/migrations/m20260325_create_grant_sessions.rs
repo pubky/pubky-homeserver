@@ -204,7 +204,6 @@ pub enum GrantIden {
 
 #[derive(Iden)]
 pub enum GrantSessionIden {
-    SessionId,
     Id,
     TokenHash,
     GrantId,
