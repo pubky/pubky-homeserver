@@ -19,6 +19,12 @@ See [README.md](README.md) for the repository layout and project overview.
 - Keep Rust and JS/WASM APIs consistent, accounting for platform differences.
   Preserve compatibility; call out intentional API, protocol, or storage changes
   and document migration steps when needed.
+- Define configuration defaults explicitly in
+  [config.default.toml](pubky-homeserver/src/data_directory/config.default.toml)
+  rather than relying on Serde defaults.
+- Update the relevant OpenAPI specs when changing HTTP APIs:
+  [client](pubky-homeserver/openapi-client.yml) and
+  [admin](pubky-homeserver/openapi-admin.yml).
 - Document public APIs and update affected examples. Keep docs concise and link
   to detailed guides. Keep unrelated refactors out of the change.
 
