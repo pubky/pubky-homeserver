@@ -25,7 +25,9 @@ for (const credential of ["cookie", "grant"]) {
     const originalFetch = globalThis.fetch;
     let uploads = 0;
     let exchanges = 0;
+    let requests = 0;
     globalThis.fetch = async (input, init) => {
+      requests++;
       const request = input instanceof Request ? input : new Request(input, init);
       if (request.method === "PUT") {
         uploads++;
@@ -62,6 +64,20 @@ for (const credential of ["cookie", "grant"]) {
       }
       t.equal(uploads, 3, "each upload sends one PUT");
       if (credential === "grant") t.equal(exchanges, 2, "expired bearer refreshes before upload");
+      await session.storage.putText(PATH, "original contents");
+      for (const body of [undefined, null, "not a Blob", new Uint8Array([1]), {}]) {
+        const before = requests;
+        try {
+          // @ts-expect-error Exercise runtime validation for invalid JavaScript inputs.
+          await session.storage.putBlob(PATH, body);
+          t.fail("non-Blob body must reject");
+        } catch (error) {
+          assertPubkyError(t, error);
+          t.equal(error.name, "InvalidInput", "non-Blob body rejects with InvalidInput");
+        }
+        t.equal(requests, before, "invalid body never sends a request");
+        t.equal(await session.storage.getText(PATH), "original contents", "invalid body preserves the existing file");
+      }
       await session.storage.delete(PATH);
       await session.signout();
       try {
