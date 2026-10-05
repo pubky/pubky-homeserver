@@ -136,8 +136,8 @@ async fn grant_secret_restore_mints_fresh_bearer() {
         "restoring a grant secret must mint a fresh bearer"
     );
     assert!(
-        session.revalidate().await.unwrap().is_none(),
-        "minting the restored bearer replaces the old grant session"
+        session.revalidate().await.unwrap().is_some(),
+        "restoring creates an independent session without evicting the original"
     );
     restored
         .storage()
@@ -707,4 +707,48 @@ async fn auth_flow_signup_creates_scoped_session() {
         .put("/pub/other.app/test", b"hello".to_vec())
         .await
         .unwrap_err();
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn independent_sessions_refresh_and_signout_together() {
+    let testnet = build_full_testnet().await;
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer
+        .signup(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let a = signer
+        .signin(ClientId::new("tabs.test").unwrap())
+        .await
+        .unwrap();
+    let secret = a.as_grant().unwrap().export_local_secret().await.unwrap();
+    let b = pubky.restore_session(&secret).await.unwrap();
+    let slot_b = b.as_grant().unwrap().session_info().await.session_id;
+    let original_a = a.as_grant().unwrap().current_bearer().await;
+    let original_b = b.as_grant().unwrap().current_bearer().await;
+    for _ in 0..3 {
+        a.as_grant().unwrap().force_refresh().await.unwrap();
+        b.as_grant().unwrap().force_refresh().await.unwrap();
+        a.storage()
+            .put("/pub/tabs.test/a", b"a".to_vec())
+            .await
+            .unwrap();
+        b.storage()
+            .put("/pub/tabs.test/b", b"b".to_vec())
+            .await
+            .unwrap();
+    }
+    assert_ne!(a.as_grant().unwrap().current_bearer().await, original_a);
+    assert_ne!(b.as_grant().unwrap().current_bearer().await, original_b);
+    assert_eq!(
+        b.as_grant().unwrap().session_info().await.session_id,
+        slot_b
+    );
+    assert!(a.revalidate().await.unwrap().is_some());
+    assert!(b.revalidate().await.unwrap().is_some());
+    b.signout().await.unwrap();
+    assert!(a.revalidate().await.unwrap().is_none());
+    assert!(pubky.restore_session(&secret).await.is_err());
 }

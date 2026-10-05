@@ -77,6 +77,26 @@ impl<'a> GrantSessionView<'a> {
         self.credential.state.lock().await.grant_claims.jti.clone()
     }
 
+    /// Refresh shared credential state if its bearer is near expiry.
+    ///
+    /// Browser restore calls this to keep existing handles usable.
+    /// # Errors
+    /// Propagates grant exchange errors.
+    #[doc(hidden)]
+    pub async fn refresh_if_needed(&self) -> Result<()> {
+        self.credential.refresh(self.session.client()).await
+    }
+
+    /// Attach browser coordination to this session and its existing clones.
+    #[doc(hidden)]
+    pub async fn coordinate(
+        &self,
+        coordinator: std::sync::Arc<dyn crate::GrantSessionCoordinator>,
+        lease: &dyn crate::GrantSessionLease,
+    ) -> Result<()> {
+        self.credential.coordinate(coordinator, lease).await
+    }
+
     /// Test/debug helper: force a refresh of the credential right now.
     ///
     /// Used by integration tests to verify that a refresh yields a new
@@ -88,9 +108,16 @@ impl<'a> GrantSessionView<'a> {
     /// - Propagates HTTP errors from the refresh exchange.
     #[doc(hidden)]
     pub async fn force_refresh(&self) -> Result<String> {
+        if let Some(coordinator) = self.credential.coordinator().await {
+            let bearer = self.credential.current_bearer().await;
+            self.credential
+                .refresh_shared(self.session.client(), coordinator.as_ref(), Some(&bearer))
+                .await?;
+            return Ok(self.credential.current_bearer().await);
+        }
         // Bypass the proactive-refresh time check by setting the expiry
         // to 0; the refresh helper then always hits the network.
-        self.credential.state.lock().await.token_expires_at = 0;
+        self.credential.state.lock().await.session.token_expires_at = 0;
         self.credential.refresh(self.session.client()).await?;
         Ok(self.credential.state.lock().await.bearer.clone())
     }

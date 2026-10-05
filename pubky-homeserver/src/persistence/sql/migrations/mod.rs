@@ -10,6 +10,7 @@ mod m20260507_add_allowed_write_paths;
 mod m20260609_add_signup_code_used_at;
 mod m20260723_sanitize_capabilities;
 mod m20260921_create_entry_locks;
+mod m20260921_grant_session_slots;
 
 pub(crate) use m20250806_create_user::M20250806CreateUserMigration;
 pub(crate) use m20250812_create_signup_code::M20250812CreateSignupCodeMigration;
@@ -23,3 +24,4 @@ pub(crate) use m20260507_add_allowed_write_paths::M20260507AddAllowedWritePathsM
 pub(crate) use m20260609_add_signup_code_used_at::M20260609AddSignupCodeUsedAtMigration;
 pub(crate) use m20260723_sanitize_capabilities::M20260723SanitizeCapabilitiesMigration;
 pub(crate) use m20260921_create_entry_locks::M20260921CreateEntryLocksMigration;
+pub(crate) use m20260921_grant_session_slots::M20260921GrantSessionSlotsMigration;

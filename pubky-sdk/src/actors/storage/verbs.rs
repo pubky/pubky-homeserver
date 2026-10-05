@@ -62,7 +62,7 @@ impl SessionStorage {
     /// See [`SessionStorage`] for shared errors.
     pub async fn get<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::GET, path).await?;
-        send_checked(&self.client, rb).await
+        self.client.check_http_status(self.send(rb).await?).await
     }
 
     /// Lightweight existence check (HEAD) for an **absolute path**.
@@ -73,7 +73,9 @@ impl SessionStorage {
     /// Other failures return `Err`; see [`SessionStorage`].
     pub async fn exists<P: IntoResourcePath>(&self, path: P) -> Result<bool> {
         let rb = self.request(Method::HEAD, path).await?;
-        Ok(send_head(&self.client, rb).await?.is_some())
+        Ok(interpret_head(&self.client, self.send(rb).await?)
+            .await?
+            .is_some())
     }
 
     /// Retrieve metadata via `HEAD` for an **absolute path** (no body).
@@ -86,7 +88,7 @@ impl SessionStorage {
     /// Other failures return `Err`; see [`SessionStorage`].
     pub async fn stats<P: IntoResourcePath>(&self, path: P) -> Result<Option<ResourceStats>> {
         let rb = self.request(Method::HEAD, path).await?;
-        Ok(send_head(&self.client, rb)
+        Ok(interpret_head(&self.client, self.send(rb).await?)
             .await?
             .map(|resp| ResourceStats::from_headers(resp.headers())))
     }
@@ -108,7 +110,7 @@ impl SessionStorage {
         B: Into<reqwest::Body>,
     {
         let rb = self.request(Method::PUT, path).await?.body(body);
-        send_checked(&self.client, rb).await
+        self.client.check_http_status(self.send(rb).await?).await
     }
 
     /// Delete a file at an **absolute path** and return the successful response.
@@ -121,7 +123,7 @@ impl SessionStorage {
     /// See [`SessionStorage`] for shared errors.
     pub async fn delete<P: IntoResourcePath>(&self, path: P) -> Result<Response> {
         let rb = self.request(Method::DELETE, path).await?;
-        send_checked(&self.client, rb).await
+        self.client.check_http_status(self.send(rb).await?).await
     }
 }
 
