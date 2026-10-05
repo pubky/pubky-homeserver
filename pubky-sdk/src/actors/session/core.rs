@@ -114,7 +114,7 @@ impl PubkySession {
     /// - `Ok(None)` if the session no longer exists (expired/invalidated).
     /// - `Err(_)` for transport or server errors unrelated to validity.
     ///
-    /// This does *not* mutate the session; it's a sanity/validity check.
+    /// Browser-managed sessions may adopt or refresh their shared bearer during this check.
     ///
     /// # Errors
     /// - Propagates transport failures from the session endpoint.

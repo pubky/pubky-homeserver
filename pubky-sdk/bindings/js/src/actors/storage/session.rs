@@ -184,9 +184,17 @@ impl SessionStorage {
                 "body must be a Blob or File",
             ));
         }
-        let (request, limit) = self.0.prepare_blob_put(path).await?;
-        let response = super::utils::send_blob_put(&request, body).await?;
-        super::utils::check_web_http_status(response, limit).await
+        let mut retried = false;
+        loop {
+            let (request, limit, lease) = self.0.prepare_blob_put(path.as_str()).await?;
+            let response = super::utils::send_blob_put(&request, body).await?;
+            drop(lease);
+            if !retried && response.status() == 401 && self.0.retry_blob_put(&request).await? {
+                retried = true;
+                continue;
+            }
+            return super::utils::check_web_http_status(response, limit).await;
+        }
     }
 
     /// Create or replace a file with text at an absolute session path.

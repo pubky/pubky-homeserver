@@ -1,70 +1,51 @@
 //! Repository for grant-based session entities.
 
 use pubky_common::auth::jws::GrantId;
-use sea_query::{
-    Alias, CommonTableExpression, Expr, ExprTrait, Iden, PostgresQueryBuilder, Query, WithClause,
-    WithQuery,
-};
+use sea_query::{Expr, ExprTrait, Iden, PostgresQueryBuilder, Query};
 use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::client_server::auth::grant::crypto::session_token::SessionTokenHash;
 use crate::persistence::sql::{
     migrations::m20260325_create_grant_sessions::{GrantSessionIden, GRANT_SESSIONS_TABLE},
-    UnifiedExecutor,
+    SqlDb, UnifiedExecutor,
 };
 
 /// Repository for grant-based session CRUD operations.
 pub struct GrantSessionRepository;
 
 impl GrantSessionRepository {
-    /// Atomically replace any existing session for this grant with the new one.
-    ///
-    /// Enforces the "1 session per grant" invariant. Implemented as a CTE
-    /// (DELETE then INSERT) in a single statement so that two concurrent
-    /// `mint_session` calls for the same grant cannot both observe 0 prior
-    /// sessions and produce 2 rows. Do **not** split into
-    /// `delete_all_for_grant` followed by an insert — `mint_session` is
-    /// called outside a transaction in `AuthService::create_grant_session`,
-    /// so the atomicity must come from the SQL statement itself.
-    pub async fn replace_for_grant<'a>(
+    /// Serialize replacement with other exchanges and grant revocation.
+    pub async fn replace_for_grant(
         session: &NewGrantSession,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<(), sqlx::Error> {
-        let delete_cte = CommonTableExpression::new()
-            .query(
-                Query::delete()
-                    .from_table(GRANT_SESSIONS_TABLE)
-                    .and_where(
-                        Expr::col(GrantSessionIden::GrantId).eq(session.grant_id.to_string()),
-                    )
-                    .to_owned(),
-            )
-            .table_name(Alias::new("delete_old"))
-            .to_owned();
-
-        let insert = Query::insert()
-            .into_table(GRANT_SESSIONS_TABLE)
-            .columns([
-                GrantSessionIden::TokenHash,
-                GrantSessionIden::GrantId,
-                GrantSessionIden::ExpiresAt,
-            ])
-            .values_panic([
-                session.token_hash.as_ref().to_vec().into(),
-                session.grant_id.to_string().into(),
-                (session.expires_at as i64).into(),
-            ])
-            .to_owned();
-
-        let statement = WithQuery::new()
-            .with_clause(WithClause::new().cte(delete_cte).to_owned())
-            .query(insert)
-            .to_owned();
-
-        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
-        let con = executor.get_con().await?;
-        sqlx::query_with(&query, values).execute(con).await?;
+        db: &SqlDb,
+    ) -> Result<(), SessionIssueError> {
+        let mut tx = db.pool().begin().await?;
+        let grant_id = session.grant_id.to_string();
+        let grant =
+            sqlx::query("SELECT revoked_at, expires_at FROM grants WHERE id = $1 FOR UPDATE")
+                .bind(&grant_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if grant.try_get::<Option<i64>, _>("revoked_at")?.is_some() {
+            return Err(SessionIssueError::Revoked);
+        }
+        if grant.try_get::<i64, _>("expires_at")? <= chrono::Utc::now().timestamp() {
+            return Err(SessionIssueError::Expired);
+        }
+        sqlx::query("DELETE FROM grant_sessions WHERE grant_id = $1")
+            .bind(&grant_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO grant_sessions (token_hash, grant_id, expires_at) VALUES ($1, $2, $3)",
+        )
+        .bind(session.token_hash.as_ref())
+        .bind(&grant_id)
+        .bind(session.expires_at as i64)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -147,6 +128,17 @@ impl FromRow<'_, PgRow> for GrantSessionEntity {
     }
 }
 
+/// Expected issuance failures; callers map these to protocol errors.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionIssueError {
+    #[error("Grant has been revoked")]
+    Revoked,
+    #[error("Grant has expired")]
+    Expired,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,7 +195,7 @@ mod tests {
         let (new_session, hash) = make_new_session(&grant_id);
         let expires_at = new_session.expires_at;
 
-        GrantSessionRepository::replace_for_grant(&new_session, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&new_session, &db)
             .await
             .unwrap();
 
@@ -224,13 +216,13 @@ mod tests {
 
         // With MAX_SESSIONS_PER_GRANT = 1, each new session evicts the previous one.
         let (s1, s1_hash) = make_new_session(&grant_id);
-        GrantSessionRepository::replace_for_grant(&s1, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&s1, &db)
             .await
             .unwrap();
 
         // s2 evicts s1
         let (s2, s2_hash) = make_new_session(&grant_id);
-        GrantSessionRepository::replace_for_grant(&s2, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&s2, &db)
             .await
             .unwrap();
 
@@ -240,7 +232,7 @@ mod tests {
 
         // s3 evicts s2
         let (s3, s3_hash) = make_new_session(&grant_id);
-        GrantSessionRepository::replace_for_grant(&s3, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&s3, &db)
             .await
             .unwrap();
 
@@ -281,20 +273,20 @@ mod tests {
         // With MAX_SESSIONS_PER_GRANT = 1, each grant independently holds 1 session.
         // sa2 evicts sa1, sb2 evicts sb1.
         let (sa1, _) = make_new_session(&grant_a);
-        GrantSessionRepository::replace_for_grant(&sa1, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&sa1, &db)
             .await
             .unwrap();
         let (sa2, sa2_hash) = make_new_session(&grant_a);
-        GrantSessionRepository::replace_for_grant(&sa2, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&sa2, &db)
             .await
             .unwrap();
 
         let (sb1, _) = make_new_session(&grant_b_id);
-        GrantSessionRepository::replace_for_grant(&sb1, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&sb1, &db)
             .await
             .unwrap();
         let (sb2, sb2_hash) = make_new_session(&grant_b_id);
-        GrantSessionRepository::replace_for_grant(&sb2, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&sb2, &db)
             .await
             .unwrap();
 
@@ -314,12 +306,12 @@ mod tests {
         let grant_id = setup_user_and_grant(&db).await;
 
         let (s1, s1_hash) = make_new_session(&grant_id);
-        GrantSessionRepository::replace_for_grant(&s1, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&s1, &db)
             .await
             .unwrap();
 
         let (s2, s2_hash) = make_new_session(&grant_id);
-        GrantSessionRepository::replace_for_grant(&s2, &mut db.pool().into())
+        GrantSessionRepository::replace_for_grant(&s2, &db)
             .await
             .unwrap();
 
@@ -347,5 +339,60 @@ mod tests {
         let result =
             GrantSessionRepository::get_by_token_hash(&unknown, &mut db.pool().into()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn issuance_waiting_for_logout_cannot_resurrect_sessions() {
+        let db = SqlDb::test().await;
+        let grant = setup_user_and_grant(&db).await;
+        let mut tx = db.pool().begin().await.unwrap();
+        sqlx::query("UPDATE grants SET revoked_at = 1 WHERE id = $1")
+            .bind(grant.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let (session, _) = make_new_session(&grant);
+        let task_db = db.clone();
+        let task = tokio::spawn(async move {
+            GrantSessionRepository::replace_for_grant(&session, &task_db).await
+        });
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SessionIssueError::Revoked)
+        ));
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM grant_sessions WHERE grant_id = $1")
+                .bind(grant.to_string())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn concurrent_exchanges_leave_one_bearer() {
+        let db = SqlDb::test().await;
+        let grant = setup_user_and_grant(&db).await;
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..20 {
+            let db = db.clone();
+            let (session, _) = make_new_session(&grant);
+            tasks.spawn(
+                async move { GrantSessionRepository::replace_for_grant(&session, &db).await },
+            );
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM grant_sessions WHERE grant_id = $1")
+                .bind(grant.to_string())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
     }
 }
