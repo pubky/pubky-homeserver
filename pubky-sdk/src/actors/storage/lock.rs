@@ -95,7 +95,7 @@ impl SessionStorage {
             .request(lock_method(), &path)
             .await?
             .header("Timeout", timeout_header(timeout));
-        let resp = self.client.check_http_status(rb.send().await?).await?;
+        let resp = self.client.check_http_status(self.send(rb).await?).await?;
 
         let token = granted_token(resp.headers()).ok_or_else(|| RequestError::Validation {
             message: "homeserver granted a lock without a Lock-Token".into(),
@@ -122,7 +122,7 @@ impl SessionStorage {
             .await?
             .header("If", lock.if_header())
             .header("Timeout", timeout_header(timeout));
-        let resp = self.client.check_http_status(rb.send().await?).await?;
+        let resp = self.client.check_http_status(self.send(rb).await?).await?;
         lock.timeout = granted_timeout(resp.headers()).unwrap_or(timeout);
         Ok(())
     }
@@ -137,7 +137,7 @@ impl SessionStorage {
             .request(unlock_method(), &lock.path)
             .await?
             .header("Lock-Token", lock.lock_token_header());
-        self.client.check_http_status(rb.send().await?).await?;
+        self.client.check_http_status(self.send(rb).await?).await?;
         Ok(())
     }
 
@@ -156,7 +156,7 @@ impl SessionStorage {
             .await?
             .header("If", lock.if_header())
             .body(body);
-        self.client.check_http_status(rb.send().await?).await
+        self.client.check_http_status(self.send(rb).await?).await
     }
 
     /// `DELETE` the path of a lock this client holds. The lock stays in place.
@@ -169,7 +169,7 @@ impl SessionStorage {
             .request(Method::DELETE, &lock.path)
             .await?
             .header("If", lock.if_header());
-        self.client.check_http_status(rb.send().await?).await
+        self.client.check_http_status(self.send(rb).await?).await
     }
 }
 

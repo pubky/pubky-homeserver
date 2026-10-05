@@ -25,6 +25,7 @@ name = "bundle_npm"
 path = "scripts/bundle_npm.rs"
 
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
 console_log = { version = "1", features = ["color"] }
 futures-util.workspace = true

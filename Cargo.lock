@@ -4176,6 +4176,7 @@ dependencies = [
 name = "pubky-wasm"
 version = "0.14.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "console_log",
  "futures-util",

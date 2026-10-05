@@ -105,7 +105,7 @@ let session = signer
 
 ## Session Persistence
 
-Persisting the current one-hour bearer token is not useful. Persist the grant and its PoP key material; restoring it mints a fresh bearer. Treat exported local credentials as bearer-equivalent secrets until the grant is revoked.
+Portable session exports contain the grant and its PoP key material. Generic restore exchanges them for a fresh bearer. Treat exported local credentials as bearer-equivalent secrets until the grant is revoked. The browser store also caches the current bearer to coordinate tabs; see the [browser session lifecycle](../grant-session-lifecycle.md).
 
 ### JavaScript Browsers
 
