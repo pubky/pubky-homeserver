@@ -21,7 +21,8 @@ const TS_PATH: &'static str = r#"export type Path = `/pub/${string}` | `/priv/${
 /// Only {@link SessionStorage.exists} and {@link SessionStorage.stats} treat
 /// HTTP 404/410 as missing. Other HTTP failures, including 401/403 and 5xx, reject.
 /// Writes require write permission and can fail on directory targets (400),
-/// file/directory path conflicts (409), or exceeded quotas (507).
+/// file/directory path conflicts (409), a path someone holds a
+/// {@link StorageLock} on (423), or exceeded quotas (507).
 #[wasm_bindgen]
 pub struct SessionStorage(pub(crate) pubky::SessionStorage);
 
