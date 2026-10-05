@@ -160,6 +160,26 @@ impl SessionStorage {
         Ok(())
     }
 
+    /// Upload a Blob or File without copying its contents into WASM memory.
+    ///
+    /// @param {Path} path File path; must not end with `/`.
+    /// @param {Blob} body A Blob or File to upload.
+    /// @returns {Promise<void>}
+    /// @throws {PubkyError} Upload or shared write/request errors (see {@link SessionStorage}).
+    /// @example
+    /// await session.storage.putBlob("/pub/example.com/file.bin", file);
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = "putBlob")]
+    pub async fn put_blob(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
+        body: &web_sys::Blob,
+    ) -> JsResult<()> {
+        let (request, limit) = self.0.prepare_blob_put(path).await?;
+        let response = super::utils::send_blob_put(&request, body).await?;
+        super::utils::check_web_http_status(response, limit).await
+    }
+
     /// Create or replace a file with text at an absolute session path.
     ///
     /// @param {Path} path File path; must not end with `/`.

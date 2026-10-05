@@ -111,6 +111,22 @@ impl SessionStorage {
         send_checked(&self.client, rb).await
     }
 
+    /// Prepare an authenticated PUT for the JS binding's native Blob transport.
+    ///
+    /// Returns the bodyless request and the client's error-body byte limit.
+    ///
+    /// # Errors
+    /// See [`SessionStorage`] for path, resolution, and credential errors.
+    #[cfg(target_arch = "wasm32")]
+    #[doc(hidden)]
+    pub async fn prepare_blob_put<P: IntoResourcePath>(
+        &self,
+        path: P,
+    ) -> Result<(reqwest::Request, usize)> {
+        let request = self.request(Method::PUT, path).await?.build()?;
+        Ok((request, self.client.max_error_body_bytes))
+    }
+
     /// Delete a file at an **absolute path** and return the successful response.
     ///
     /// Requires write permission.

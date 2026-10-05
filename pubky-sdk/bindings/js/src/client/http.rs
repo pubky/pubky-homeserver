@@ -114,7 +114,7 @@ impl Client {
     }
 }
 
-fn map_fetch_error(err: JsValue) -> PubkyError {
+pub(crate) fn map_fetch_error(err: JsValue) -> PubkyError {
     if err.is_instance_of::<js_sys::Error>() {
         let js_err: js_sys::Error = err.unchecked_into();
         let message = js_err
@@ -141,8 +141,7 @@ extern "C" {
     fn fetch_with_request(input: &web_sys::Request) -> Promise;
 }
 
-fn js_fetch(req: &web_sys::Request) -> Promise {
-    use wasm_bindgen::{JsCast, JsValue};
+pub(crate) fn js_fetch(req: &web_sys::Request) -> Promise {
     let global = js_sys::global();
     if let Ok(true) = js_sys::Reflect::has(&global, &JsValue::from_str("ServiceWorkerGlobalScope"))
     {
