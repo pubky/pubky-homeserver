@@ -34,6 +34,9 @@ use reqwest::{RequestBuilder, Response, StatusCode};
 
 use crate::{PubkyHttpClient, errors::Result};
 
+#[cfg(target_arch = "wasm32")]
+use crate::actors::auth::grant::shared_session::GrantSessionLease;
+
 /// Shared `revalidate` helper: a `404` or `401` from the homeserver means
 /// the credential is gone (revoked / expired), not a transport failure.
 pub(crate) fn credential_session_missing(response: &Response) -> bool {
@@ -83,6 +86,26 @@ pub(crate) trait SessionCredential: Debug + Send + Sync {
     /// Send with authentication, retaining any session lock until response headers arrive.
     async fn send(&self, rb: RequestBuilder, client: &PubkyHttpClient) -> Result<Response> {
         Ok(self.attach(rb, client).await?.send().await?)
+    }
+
+    /// Prepare authentication for a transport that sends outside reqwest.
+    #[cfg(target_arch = "wasm32")]
+    async fn prepare_external(
+        &self,
+        rb: RequestBuilder,
+        client: &PubkyHttpClient,
+    ) -> Result<(RequestBuilder, Option<Box<dyn GrantSessionLease>>)> {
+        Ok((self.attach(rb, client).await?, None))
+    }
+
+    /// Recover a rejected shared bearer. Other credentials do not replay requests.
+    #[cfg(target_arch = "wasm32")]
+    async fn refresh_rejected_bearer(
+        &self,
+        _bearer: &str,
+        _client: &PubkyHttpClient,
+    ) -> Result<bool> {
+        Ok(false)
     }
 
     /// Whether this credential may be attached to a request targeting

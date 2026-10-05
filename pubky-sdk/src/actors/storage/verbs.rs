@@ -5,6 +5,9 @@ use super::resource::{IntoPubkyResource, IntoResourcePath};
 use super::stats::ResourceStats;
 use crate::{PubkyHttpClient, Result, cross_log};
 
+#[cfg(target_arch = "wasm32")]
+use crate::actors::auth::grant::shared_session::GrantSessionLease;
+
 /// Interpret the result of a `HEAD` request into a shared outcome used by both
 /// session and public storage clients.
 async fn interpret_head(client: &PubkyHttpClient, resp: Response) -> Result<Option<Response>> {
@@ -111,6 +114,49 @@ impl SessionStorage {
     {
         let rb = self.request(Method::PUT, path).await?.body(body);
         self.client.check_http_status(self.send(rb).await?).await
+    }
+
+    /// Prepare an authenticated PUT for the JS binding's native Blob transport.
+    ///
+    /// Returns the bodyless request, error-body byte limit, and optional session lease.
+    /// Hold the lease until response headers arrive.
+    ///
+    /// # Errors
+    /// See [`SessionStorage`] for path, resolution, and credential errors.
+    #[cfg(target_arch = "wasm32")]
+    #[doc(hidden)]
+    pub async fn prepare_blob_put<P: IntoResourcePath>(
+        &self,
+        path: P,
+    ) -> Result<(reqwest::Request, usize, Option<Box<dyn GrantSessionLease>>)> {
+        let request = self.request(Method::PUT, path).await?;
+        let (request, lease) = self
+            .credential
+            .prepare_external(request, &self.client)
+            .await?;
+        Ok((request.build()?, self.client.max_error_body_bytes, lease))
+    }
+
+    /// Recover a shared bearer after a Blob PUT receives HTTP 401.
+    ///
+    /// Release the request's session lease before calling this method.
+    ///
+    /// # Errors
+    /// Propagates shared session loading and credential refresh errors.
+    #[cfg(target_arch = "wasm32")]
+    #[doc(hidden)]
+    pub async fn retry_blob_put(&self, request: &reqwest::Request) -> Result<bool> {
+        let Some(bearer) = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+        else {
+            return Ok(false);
+        };
+        self.credential
+            .refresh_rejected_bearer(bearer, &self.client)
+            .await
     }
 
     /// Delete a file at an **absolute path** and return the successful response.

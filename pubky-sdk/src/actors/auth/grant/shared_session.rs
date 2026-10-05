@@ -144,6 +144,34 @@ impl GrantCredential {
     ) -> Result<Response> {
         let mut retried = false;
         loop {
+            let retry = request.try_clone();
+            let (prepared, lease, bearer) =
+                self.prepare_shared(request, client, coordinator).await?;
+            let response = prepared.send().await?;
+            drop(lease);
+            // A delayed exchange from a closed tab can still replace our bearer.
+            // Only retry a replayable request rejected before authentication.
+            if !retried
+                && response.status() == StatusCode::UNAUTHORIZED
+                && let Some(retry) = retry
+            {
+                self.refresh_shared(client, coordinator, Some(&bearer))
+                    .await?;
+                request = retry;
+                retried = true;
+                continue;
+            }
+            return Ok(response);
+        }
+    }
+
+    pub(crate) async fn prepare_shared(
+        &self,
+        request: RequestBuilder,
+        client: &PubkyHttpClient,
+        coordinator: &dyn GrantSessionCoordinator,
+    ) -> Result<(RequestBuilder, Box<dyn GrantSessionLease>, String)> {
+        loop {
             let lease = coordinator.acquire(false).await?;
             let shared = active_session(lease.as_ref()).await?;
             let (bearer, refresh) = {
@@ -160,22 +188,7 @@ impl GrantCredential {
                 self.refresh_shared(client, coordinator, None).await?;
                 continue;
             }
-            let retry = request.try_clone();
-            let response = request.bearer_auth(&bearer).send().await?;
-            drop(lease);
-            // A delayed exchange from a closed tab can still replace our bearer.
-            // Only retry a replayable request rejected before authentication.
-            if !retried
-                && response.status() == StatusCode::UNAUTHORIZED
-                && let Some(retry) = retry
-            {
-                self.refresh_shared(client, coordinator, Some(&bearer))
-                    .await?;
-                request = retry;
-                retried = true;
-                continue;
-            }
-            return Ok(response);
+            return Ok((request.bearer_auth(&bearer), lease, bearer));
         }
     }
 }

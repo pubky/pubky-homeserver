@@ -83,22 +83,24 @@ async function scenario(delegated) {
   assert.equal(await call(a, "restore", id), grant);
   assert.equal(await call(a, "exchangeCount"), 0);
 
-  // Ordinary writes share the lock; a refresh waits for an in-flight write.
-  await call(a, "holdWrite");
-  const write = call(a, "write");
-  await until(() => call(a, "held"));
-  await call(b, "write");
-  await call(b, "expire");
-  const before = await call(b, "exchangeCount");
-  let finished = false;
-  const refresh = call(b, "write").then(() => { finished = true; });
-  await new Promise(resolve => setTimeout(resolve, 100));
-  assert.equal(finished, false);
-  assert.equal(await call(b, "exchangeCount"), before);
-  await call(a, "release");
-  await Promise.all([write, refresh]);
-  assert.equal(await call(b, "exchangeCount"), before + 1);
-  await call(a, "write");
+  // Text and Blob writes share the lock; a refresh waits for an in-flight write.
+  for (const method of ["write", "writeBlob"]) {
+    await call(a, "holdWrite");
+    const write = call(a, method);
+    await until(() => call(a, "held"));
+    await call(b, method);
+    await call(b, "expire");
+    const before = await call(b, "exchangeCount");
+    let finished = false;
+    const refresh = call(b, method).then(() => { finished = true; });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(finished, false);
+    assert.equal(await call(b, "exchangeCount"), before);
+    await call(a, "release");
+    await Promise.all([write, refresh]);
+    assert.equal(await call(b, "exchangeCount"), before + 1);
+    await call(a, method);
+  }
 
   // Tabs competing to refresh send just one exchange.
   await call(a, "expire");
@@ -117,9 +119,13 @@ async function scenario(delegated) {
     await call(a, "write");
   }
 
-  await call(a, "staleBearer");
-  await call(b, "write");
-  await call(a, "write");
+  for (const method of ["write", "writeBlob"]) {
+    await call(a, "staleBearer");
+    const before = await call(b, "exchangeCount");
+    await call(b, method);
+    assert.equal(await call(b, "exchangeCount"), before + 1);
+    await call(a, method);
+  }
 
   // The server accepted a refresh, but its tab disappears before persisting it.
   await call(a, "expire");

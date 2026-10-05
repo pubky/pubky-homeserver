@@ -10,7 +10,10 @@ use crate::{
 };
 
 impl PubkyHttpClient {
-    pub(crate) async fn check_http_status(&self, response: Response) -> Result<Response> {
+    pub(crate) async fn check_http_status(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<reqwest::Response> {
         if response.status().is_success() {
             return Ok(response);
         }

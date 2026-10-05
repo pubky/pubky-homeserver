@@ -24,6 +24,8 @@ use pubky_common::{
 use reqwest::{Method, RequestBuilder, StatusCode};
 use tokio::sync::Mutex;
 
+#[cfg(target_arch = "wasm32")]
+use super::shared_session::GrantSessionLease;
 use super::{
     grant_exchange::{credential_from_grant_exchange, post_grant_session},
     pop_signer::{DelegatedSignFn, GrantPopSigner},
@@ -481,6 +483,35 @@ impl SessionCredential for GrantCredential {
         }
         let bearer = self.state.lock().await.bearer.clone();
         Ok(rb.bearer_auth(bearer))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn prepare_external(
+        &self,
+        rb: RequestBuilder,
+        client: &PubkyHttpClient,
+    ) -> Result<(RequestBuilder, Option<Box<dyn GrantSessionLease>>)> {
+        if let Some(coordinator) = self.coordinator().await {
+            let (request, lease, _) = self
+                .prepare_shared(rb, client, coordinator.as_ref())
+                .await?;
+            return Ok((request, Some(lease)));
+        }
+        Ok((self.attach(rb, client).await?, None))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn refresh_rejected_bearer(
+        &self,
+        bearer: &str,
+        client: &PubkyHttpClient,
+    ) -> Result<bool> {
+        let Some(coordinator) = self.coordinator().await else {
+            return Ok(false);
+        };
+        self.refresh_shared(client, coordinator.as_ref(), Some(bearer))
+            .await?;
+        Ok(true)
     }
 
     async fn can_attach_to(&self, homeserver: &PublicKey) -> bool {

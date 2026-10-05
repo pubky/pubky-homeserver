@@ -140,6 +140,7 @@ const tabs = {
     return identity();
   },
   async write() { await current.storage.putText("/pub/tabs.test/value", "ok"); },
+  async writeBlob() { await current.storage.putBlob("/pub/tabs.test/value", new Blob(["ok"])); },
   async logout() { await current.signout(); },
   async revoke() {
     const other = await signer.signin("other-app.test");
