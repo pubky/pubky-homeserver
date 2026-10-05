@@ -101,7 +101,10 @@ pub(crate) async fn send_blob_put(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) async fn check_web_http_status(response: Response, limit: usize) -> JsResult<()> {
+pub(crate) async fn check_web_http_status(
+    response: web_sys::Response,
+    limit: usize,
+) -> JsResult<()> {
     let status = reqwest::StatusCode::from_u16(response.status())
         .map_err(|error| PubkyError::new(PubkyErrorName::RequestError, error))?;
     if status.is_success() {
