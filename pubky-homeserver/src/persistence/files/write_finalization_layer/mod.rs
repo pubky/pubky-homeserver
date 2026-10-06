@@ -4,6 +4,7 @@ mod delete;
 mod layer;
 mod quota;
 mod write;
+pub(crate) mod write_lock;
 
 pub use delete::WriteFinalizationDeleter;
 pub use layer::WriteFinalizationLayer;

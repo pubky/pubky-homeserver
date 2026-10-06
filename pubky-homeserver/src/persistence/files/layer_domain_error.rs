@@ -12,4 +12,6 @@ pub enum LayerDomainError {
     DiskSpaceQuotaExceeded,
     #[error("path_collision")]
     PathCollision,
+    #[error("lock_lost")]
+    LockLost,
 }

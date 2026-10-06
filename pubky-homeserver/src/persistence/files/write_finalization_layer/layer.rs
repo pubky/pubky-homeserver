@@ -8,7 +8,7 @@ use opendal::raw::*;
 use opendal::Result;
 use tracing::Instrument;
 
-use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
+use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
 
 /// Keeps file entries, events, and user quotas in sync with blob writes and deletes.
 ///
@@ -97,11 +97,12 @@ pub(super) fn already_closed(subject: &str) -> opendal::Error {
 /// [`files`](crate::persistence::files) module docs.
 ///
 /// The task runs in the caller's tracing span, so whatever the finalization
-/// logs still carries the request's context.
+/// logs still carries the request's context. The lock the caller runs under is
+/// carried over the same way, see [`write_lock`].
 pub(super) async fn spawn_finalization<T: Send + 'static>(
     finalization: impl Future<Output = Result<T>> + Send + 'static,
 ) -> Result<T> {
-    match tokio::spawn(finalization.in_current_span()).await {
+    match tokio::spawn(write_lock::carry(finalization).in_current_span()).await {
         Ok(result) => result,
         Err(error) => Err(opendal::Error::new(
             opendal::ErrorKind::Unexpected,
