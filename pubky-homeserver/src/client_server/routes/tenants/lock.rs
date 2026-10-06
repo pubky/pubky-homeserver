@@ -378,7 +378,7 @@ mod tests {
         body::Bytes,
         http::{header, HeaderValue, Method},
     };
-    use axum_test::{TestResponse, TestServer};
+    use axum_test::{TestRequest, TestResponse, TestServer};
     use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
 
     use super::*;
@@ -461,12 +461,17 @@ mod tests {
     }
 
     async fn signed_up_server() -> (TestServer, Keypair, String) {
+        let (_, server, keypair, cookie) = signed_up_server_with_context().await;
+        (server, keypair, cookie)
+    }
+
+    async fn signed_up_server_with_context() -> (Arc<AppContext>, TestServer, Keypair, String) {
         let context = AppContext::test().await;
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router);
         let keypair = Keypair::random();
         let cookie = signup(&server, &keypair).await;
-        (server, keypair, cookie)
+        (context, server, keypair, cookie)
     }
 
     async fn signup(server: &TestServer, keypair: &Keypair) -> String {
@@ -770,6 +775,106 @@ mod tests {
             .await;
         response.assert_status(StatusCode::OK);
         assert_ne!(lock_token(&response), token);
+    }
+
+    /// The lock is checked when a request starts, but the file changes later,
+    /// on a finalization task. A lock lost in between must refuse the `PUT`
+    /// and the `DELETE` like a stale token, leaving the file as it was. This
+    /// drives the whole chain from the route to the finalization: the token
+    /// has to survive every layer in between, or the write lands unrefused.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn write_and_delete_are_refused_once_their_lock_is_lost_in_flight() {
+        let (context, server, keypair, cookie) = signed_up_server_with_context().await;
+        let url = storage_url(&keypair, "/pub/state.bin");
+        let path = EntryPath::new(
+            keypair.public_key(),
+            StoragePath::new("/pub/state.bin").unwrap(),
+        );
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(b"kept".to_vec().into())
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        for verb in ["PUT", "DELETE"] {
+            let response = server
+                .method(method("LOCK"), &url)
+                .add_header(header::COOKIE, cookie.clone())
+                .add_header("timeout", "Second-5")
+                .await;
+            response.assert_status(StatusCode::OK);
+            let token = lock_token(&response);
+
+            let request = match verb {
+                "PUT" => server.put(&url).bytes(b"lost".to_vec().into()),
+                _ => server.delete(&url),
+            }
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header("if", holding(&token));
+            with_lock_lost_in_flight(&context, &path, request)
+                .await
+                .assert_status(StatusCode::PRECONDITION_FAILED);
+
+            let stored = server
+                .get(&url)
+                .add_header(header::COOKIE, cookie.clone())
+                .await;
+            stored.assert_status(StatusCode::OK);
+            assert_eq!(
+                stored.text(),
+                "kept",
+                "a refused {verb} must not change the file"
+            );
+        }
+
+        // The lost locks are gone: the path is free again.
+        server
+            .delete(&url)
+            .add_header(header::COOKIE, cookie)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+
+    /// Run `request`, which presents the live lock on `path`, and lose that
+    /// lock after the request passed its check but before its finalization
+    /// changes the file. The finalization is held back on the user row until
+    /// the check is seen to pass (it keeps the lock alive over the write's
+    /// horizon) and the lock is expired.
+    async fn with_lock_lost_in_flight(
+        context: &AppContext,
+        path: &EntryPath,
+        request: TestRequest,
+    ) -> TestResponse {
+        let db = &context.sql_db;
+        let granted = expires_at(db, path)
+            .await
+            .expect("the request should run under a live lock");
+        let mut holder = db.pool().begin().await.unwrap();
+        context
+            .user_service
+            .get_for_no_key_update(path.pubkey(), &mut UnifiedExecutor::from_tx(&mut holder))
+            .await
+            .unwrap();
+
+        let lose_lock = async {
+            let mut checked = false;
+            for _ in 0..500 {
+                if expires_at(db, path).await.is_some_and(|at| at > granted) {
+                    checked = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(checked, "the request never passed the lock check");
+            EntryLockRepository::expire(path, &mut db.pool().into())
+                .await
+                .unwrap();
+            holder.commit().await.unwrap();
+        };
+        let (response, ()) = tokio::join!(async { request.await }, lose_lock);
+        response
     }
 
     #[tokio::test]
