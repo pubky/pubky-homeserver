@@ -3,6 +3,16 @@ use wasm_bindgen::prelude::*;
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 use crate::wrappers::keys::PublicKey;
 use serde::{Deserialize, Serialize};
+use tsify::{Ts, Tsify};
+
+/// Credentials to submit to an external service's authentication endpoint.
+#[derive(Serialize, Tsify)]
+pub struct ServiceAuthProof {
+    /// Original root-signed grant JWS.
+    pub grant: String,
+    /// Fresh audience-bound proof JWS.
+    pub pop: String,
+}
 
 const DELEGATED_GRANT_CREDENTIAL_VERSION: &str = "pubky-delegated-grant-credential-v1";
 
@@ -25,6 +35,29 @@ pub struct GrantSession(pub(crate) pubky::PubkySession);
 
 #[wasm_bindgen]
 impl GrantSession {
+    /// Create credentials without network requests or bearer refresh.
+    ///
+    /// Audience is preserved exactly and must contain 1–1024 UTF-8 bytes.
+    /// Generate a fresh proof for every exchange attempt, including retries.
+    /// Homeserver revocation does not revoke external sessions. The accepting
+    /// service should bound its session lifetime by the grant's expiry.
+    /// Failures expose `InvalidServiceAudience`, `GrantExpired`, `InvalidGrant`,
+    /// `SigningKeyUnavailable`, or `SigningFailed` in `PubkyError.data.reason`.
+    #[wasm_bindgen(js_name = "createServiceAuthProof")]
+    pub async fn create_service_auth_proof(
+        &self,
+        audience: String,
+    ) -> JsResult<Ts<ServiceAuthProof>> {
+        let proof = self
+            .as_grant()?
+            .create_service_auth_proof(&audience)
+            .await?;
+        crate::js_error::serialize_ts(&ServiceAuthProof {
+            grant: proof.grant,
+            pop: proof.pop,
+        })
+    }
+
     /// Full grant session metadata.
     ///
     /// @returns {Promise<GrantSessionInfo>}

@@ -7,9 +7,10 @@
 
 use pubky_common::auth::{grant_session_responses::GrantSessionInfo, jws::GrantId};
 
-use super::{DelegatedGrantCredentialState, GrantCredential};
+use super::{DelegatedGrantCredentialState, GrantCredential, ServiceAuthProofError};
 use crate::actors::session::core::PubkySession;
 use crate::errors::Result;
+use crate::service_auth::ServiceAuthProof;
 
 /// grant-only operations on a [`PubkySession`].
 #[derive(Debug)]
@@ -32,6 +33,26 @@ impl PubkySession {
 }
 
 impl<'a> GrantSessionView<'a> {
+    /// Create external-service credentials without making network requests.
+    ///
+    /// The audience is an opaque, case-sensitive string of 1–1024 UTF-8 bytes,
+    /// preserved exactly. Agree on its value with the service. The homeserver
+    /// bearer may be expired; only the grant and signing key are needed.
+    /// Generate fresh credentials for each exchange attempt, including retries.
+    /// Homeserver revocation does not revoke external sessions; services should
+    /// bound their sessions by grant expiry.
+    ///
+    /// # Errors
+    /// Returns [`ServiceAuthProofError`] for invalid audiences, expired or unusable
+    /// grants, unavailable signing keys, and signing failures. Browser coordination
+    /// and lifecycle failures retain their source in its `SessionState` variant.
+    pub async fn create_service_auth_proof(
+        &self,
+        audience: &str,
+    ) -> std::result::Result<ServiceAuthProof, ServiceAuthProofError> {
+        self.credential.create_service_auth_proof(audience).await
+    }
+
     pub(crate) const fn new(session: &'a PubkySession, credential: &'a GrantCredential) -> Self {
         Self {
             session,

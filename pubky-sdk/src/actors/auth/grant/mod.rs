@@ -12,6 +12,7 @@ pub(crate) mod flow;
 pub(crate) mod grant_exchange;
 pub mod manager;
 pub(crate) mod pop_signer;
+pub mod service_auth;
 #[doc(hidden)]
 pub mod shared_session;
 pub mod view;
@@ -19,4 +20,5 @@ pub mod view;
 pub use credential::{DelegatedGrantCredentialState, GrantCredential};
 pub use flow::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
 pub use manager::GrantManager;
+pub use service_auth::ServiceAuthProofError;
 pub use view::GrantSessionView;

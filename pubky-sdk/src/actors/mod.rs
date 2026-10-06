@@ -12,10 +12,11 @@ pub use auth::cookie::PubkyCookieAuthFlow;
 pub use auth::cookie::{CookieCredential, CookieSessionView};
 pub use auth::deep_links;
 #[doc(hidden)]
-pub use auth::grant::pop_signer::{DelegatedSignFn, delegated_sign_callback};
+pub use auth::grant::pop_signer::{DelegatedSignFn, GrantSigningError, delegated_sign_callback};
 pub use auth::grant::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
 pub use auth::grant::{
     DelegatedGrantCredentialState, GrantCredential, GrantManager, GrantSessionView,
+    ServiceAuthProofError,
 };
 pub use auth::relay::http_relay_inbox_channel::{
     DEFAULT_HTTP_RELAY_INBOX, EncryptedHttpRelayInboxChannel, HttpRelayInboxChannel,

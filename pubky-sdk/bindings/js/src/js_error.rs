@@ -211,6 +211,27 @@ impl From<pubky::Error> for PubkyError {
     }
 }
 
+/// Preserve the service-proof error contract independently of general auth errors.
+impl From<pubky::ServiceAuthProofError> for PubkyError {
+    fn from(error: pubky::ServiceAuthProofError) -> Self {
+        use pubky::ServiceAuthProofError;
+        let reason = match error {
+            ServiceAuthProofError::InvalidAudience => "InvalidServiceAudience",
+            ServiceAuthProofError::GrantExpired => "GrantExpired",
+            ServiceAuthProofError::InvalidGrant(_) => "InvalidGrant",
+            ServiceAuthProofError::SigningKeyUnavailable(_) => "SigningKeyUnavailable",
+            ServiceAuthProofError::SigningFailed(_) => "SigningFailed",
+            ServiceAuthProofError::SessionState(source) => return Self::from(*source),
+        };
+        let name = if matches!(error, ServiceAuthProofError::InvalidAudience) {
+            PubkyErrorName::InvalidInput
+        } else {
+            PubkyErrorName::AuthenticationError
+        };
+        Self::new(name, error).with_data(json!({ "reason": reason }))
+    }
+}
+
 /// Converts a `pubky::BuildError` into a `PubkyError`.
 impl From<BuildError> for PubkyError {
     fn from(err: BuildError) -> Self {
@@ -331,5 +352,60 @@ impl IntoWasmAbi for PubkyError {
 impl WasmDescribe for PubkyError {
     fn describe() {
         JsValue::describe();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pubky::ServiceAuthProofError;
+
+    #[test]
+    fn service_proof_errors_preserve_javascript_names_and_reasons() {
+        for (error, name, reason) in [
+            (
+                ServiceAuthProofError::InvalidAudience,
+                "InvalidInput",
+                "InvalidServiceAudience",
+            ),
+            (
+                ServiceAuthProofError::GrantExpired,
+                "AuthenticationError",
+                "GrantExpired",
+            ),
+            (
+                ServiceAuthProofError::InvalidGrant("binding mismatch".into()),
+                "AuthenticationError",
+                "InvalidGrant",
+            ),
+            (
+                ServiceAuthProofError::SigningKeyUnavailable("deleted".into()),
+                "AuthenticationError",
+                "SigningKeyUnavailable",
+            ),
+            (
+                ServiceAuthProofError::SigningFailed("WebCrypto failure".into()),
+                "AuthenticationError",
+                "SigningFailed",
+            ),
+        ] {
+            let expected_message = error.to_string();
+            let actual = PubkyError::from(error);
+            assert_eq!(actual.name.as_str(), name);
+            assert_eq!(actual.message, expected_message);
+            assert_eq!(actual.data, Some(json!({ "reason": reason })));
+        }
+    }
+
+    #[test]
+    fn service_proof_session_state_preserves_the_original_error_shape() {
+        let source = pubky::errors::AuthError::Validation("Browser session was removed".into());
+        let actual = PubkyError::from(ServiceAuthProofError::SessionState(Box::new(source.into())));
+        assert_eq!(actual.name.as_str(), "AuthenticationError");
+        assert_eq!(
+            actual.message,
+            "Authentication error: General authentication error: Browser session was removed"
+        );
+        assert_eq!(actual.data, None);
     }
 }

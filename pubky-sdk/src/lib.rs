@@ -17,6 +17,7 @@ mod actors;
 mod client;
 pub mod errors;
 mod macros;
+pub mod service_auth;
 
 mod util;
 
@@ -49,7 +50,7 @@ pub use actors::deep_links;
 #[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use actors::{
     CookieCredential, CookieSessionView, DelegatedGrantCredentialState, GrantCredential,
-    GrantManager, GrantSessionView,
+    GrantManager, GrantSessionView, ServiceAuthProofError,
 };
 #[doc(inline)]
 pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
@@ -57,6 +58,8 @@ pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuth
 pub use actors::{Event, EventCursor, EventStreamBuilder, EventType};
 #[doc(inline)]
 pub use actors::{PublicStorage, SessionStorage};
+#[doc(inline)]
+pub use service_auth::ServiceAuthProof;
 
 // Error and global client
 #[doc(inline)]
@@ -81,7 +84,7 @@ pub use actors::pkdns::DEFAULT_STALE_AFTER;
 #[doc(inline)]
 pub use actors::{DEFAULT_HTTP_RELAY_INBOX, EncryptedHttpRelayInboxChannel, HttpRelayInboxChannel};
 #[doc(hidden)]
-pub use actors::{DelegatedSignFn, delegated_sign_callback};
+pub use actors::{DelegatedSignFn, GrantSigningError, delegated_sign_callback};
 #[doc(inline)]
 pub use pkarr;
 
