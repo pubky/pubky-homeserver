@@ -172,6 +172,9 @@ impl From<FileIoError> for HttpError {
                     BACKEND_RATE_LIMIT_RETRY_AFTER_SECS,
                 )
             }
+            // The same answer a stale token gets up front: the client learns
+            // its lock is gone rather than seeing its write silently land.
+            FileIoError::LockLost => Self::lock_token_mismatch(),
             e => Self::internal_server_and_log(format!("FileIoError: {}", e)),
         }
     }

@@ -12,6 +12,7 @@ use opendal::raw::{oio, OpDelete};
 use opendal::{Error, Result};
 
 use super::layer::{already_closed, spawn_finalization, unexpected, Finalizer};
+use super::write_lock;
 
 struct StagedDelete {
     user: UserEntity,
@@ -239,6 +240,8 @@ impl Finalizer {
             }
         };
 
+        write_lock::hold(entry_path, executor).await?;
+
         let deleted_entry = match EntryRepository::get_by_path(entry_path, executor).await {
             Ok(entry) => entry,
             Err(sqlx::Error::RowNotFound) => return Ok(None),
@@ -306,7 +309,7 @@ mod tests {
 
     use crate::persistence::files::events::EventType;
     use crate::persistence::files::FileIoError;
-    use crate::persistence::sql::{entry::EntryRepository, SqlDb};
+    use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
 
@@ -351,6 +354,53 @@ mod tests {
         )
         .await;
         assert_eq!(all_events(&db).await.len(), 2);
+    }
+
+    /// A delete under a lock that has changed hands must not remove the file
+    /// the new holder is working on. Under the live lock it goes through.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn delete_under_a_lost_lock_is_refused() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        operator
+            .write(entry_path.as_str(), b"kept".to_vec())
+            .await
+            .unwrap();
+        EntryLockRepository::acquire(&entry_path, "token-b", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+
+        let rejection = write_lock::run_under(
+            Some("token-a".to_string()),
+            operator.delete(entry_path.as_str()),
+        )
+        .await
+        .expect_err("the delete should be refused under a lock it does not hold");
+
+        assert!(matches!(
+            FileIoError::from(rejection),
+            FileIoError::LockLost
+        ));
+        assert_eq!(
+            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
+            b"kept"
+        );
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect("a refused delete must preserve the entry");
+        assert_eq!(all_events(&db).await.len(), 1);
+
+        write_lock::run_under(
+            Some("token-b".to_string()),
+            operator.delete(entry_path.as_str()),
+        )
+        .await
+        .expect("a delete under its live lock should land");
+        assert!(!operator.exists(entry_path.as_str()).await.unwrap());
     }
 
     #[derive(Default)]

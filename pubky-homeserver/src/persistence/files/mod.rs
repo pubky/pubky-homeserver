@@ -27,10 +27,13 @@
 //! the operator, cannot stop it halfway. A writer dropped before it closes, as
 //! a disconnect mid-upload does, discards its staged bytes the same way.
 //!
-//! Two limits of that task: a disconnect also drops the request's lock
-//! keep-alive, so a lock can expire while its finalization is still running;
-//! and a runtime shutdown that cancels the task leaves the staged upload
-//! neither published nor aborted.
+//! A disconnect also drops the request's lock keep-alive, so a lock can expire
+//! before its write is finalized. The finalization then refuses the write
+//! rather than let it land on top of the next holder, see
+//! [`write_finalization_layer::write_lock`].
+//!
+//! One limit of that task: a runtime shutdown that cancels it leaves the
+//! staged upload neither published nor aborted.
 //!
 //! [`file`] provides the high-level [`FileService`](file::file_service::FileService)
 //! used by route handlers.

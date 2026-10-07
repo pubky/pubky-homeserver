@@ -6,12 +6,13 @@
 //! Locks expire after the granted `Timeout`, so a client that disappears blocks
 //! a path for at most [`MAX_LOCK_TIMEOUT_SECS`].
 //!
-//! A write checks the lock once, before it starts, see [`with_write_lock`]. An
+//! A write checks the lock before it starts, see [`with_write_lock`]. An
 //! unlocked write holds nothing: a lock taken while it is still streaming does
 //! not stop it from landing. A write that presents a token runs under that lock
 //! and keeps it alive until the write ends, so a slow upload cannot outlive its
-//! lock. Lifetimes are measured on the database clock, so every instance agrees
-//! on which locks are live.
+//! lock; should the lock be lost anyway, the write is refused before it is
+//! published. Lifetimes are measured on the database clock, so every instance
+//! agrees on which locks are live.
 //!
 //! `LOCK` and `UNLOCK` exist on the path-addressed `/storage` route only. The
 //! deprecated owner-relative routes cannot take a lock, but their writes make
@@ -34,6 +35,7 @@ use tokio::task::JoinHandle;
 use super::authorize::authorize_write;
 use crate::{
     client_server::{auth::AuthSession, AppState},
+    persistence::files::write_finalization_layer::write_lock,
     persistence::sql::{
         entry_lock::{EntryLockEntity, EntryLockRepository},
         SqlDb, UnifiedExecutor,
@@ -84,7 +86,9 @@ pub async fn dispatch(
 /// - No token and a live lock: 423 Locked.
 /// - The `If` header names the live lock: the write runs under that lock, which
 ///   is kept alive until the write ends. Checking and extending the lock is one
-///   statement, so it cannot expire between the two.
+///   statement, so it cannot expire between the two. The token is also handed
+///   to the write itself, which is refused if the lock is gone by the time it
+///   comes to change the file.
 /// - Tokens that name no live lock on this path: 412 Precondition Failed. A
 ///   client whose lock expired learns that instead of silently writing unlocked.
 pub async fn with_write_lock<T>(
@@ -93,19 +97,19 @@ pub async fn with_write_lock<T>(
     headers: &HeaderMap,
     write: impl Future<Output = HttpResult<T>>,
 ) -> HttpResult<T> {
-    let _keepalive = check_lock(sql_db, entry_path, headers).await?;
-    write.await
+    let (lock_token, _keepalive) = check_lock(sql_db, entry_path, headers).await?.unzip();
+    write_lock::run_under(lock_token, write).await
 }
 
-/// The check of [`with_write_lock`], returning the keep-alive of a write under
-/// a held lock. A separate function so its pool connection is returned before
-/// the write runs: an upload can take a long time, and holding a connection
-/// for its duration would starve the write itself of one.
+/// The check of [`with_write_lock`], returning the token and keep-alive of a
+/// write under a held lock. A separate function so its pool connection is
+/// returned before the write runs: an upload can take a long time, and holding
+/// a connection for its duration would starve the write itself of one.
 async fn check_lock(
     sql_db: &SqlDb,
     entry_path: &EntryPath,
     headers: &HeaderMap,
-) -> HttpResult<Option<KeepAlive>> {
+) -> HttpResult<Option<(String, KeepAlive)>> {
     let mut executor: UnifiedExecutor = sql_db.pool().into();
     let held = if_header_tokens(headers);
     if held.is_empty() {
@@ -119,12 +123,13 @@ async fn check_lock(
         EntryLockRepository::keep_alive(entry_path, &held, WRITE_LOCK_HORIZON_SECS, &mut executor)
             .await?
             .ok_or_else(HttpError::lock_token_mismatch)?;
-    Ok(Some(KeepAlive::spawn(
+    let keepalive = KeepAlive::spawn(
         sql_db.clone(),
         entry_path.clone(),
-        live.token,
+        live.token.clone(),
         KEEPALIVE_INTERVAL,
-    )))
+    );
+    Ok(Some((live.token, keepalive)))
 }
 
 /// Pushes a lock's expiry out every `interval` for as long as it is held.
@@ -146,8 +151,8 @@ impl KeepAlive {
                 match extended {
                     Ok(Some(_)) => {}
                     // Expired through failed keep-alives, or the holder unlocked
-                    // it. The write is not stopped: nothing checks the lock at
-                    // commit.
+                    // it. The write is not stopped here: its finalization
+                    // refuses it once it finds the lock gone.
                     Ok(None) => {
                         tracing::warn!(path = %entry_path, "Lock lost while its write is in flight");
                         return;
@@ -373,7 +378,7 @@ mod tests {
         body::Bytes,
         http::{header, HeaderValue, Method},
     };
-    use axum_test::{TestResponse, TestServer};
+    use axum_test::{TestRequest, TestResponse, TestServer};
     use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
 
     use super::*;
@@ -456,12 +461,17 @@ mod tests {
     }
 
     async fn signed_up_server() -> (TestServer, Keypair, String) {
+        let (_, server, keypair, cookie) = signed_up_server_with_context().await;
+        (server, keypair, cookie)
+    }
+
+    async fn signed_up_server_with_context() -> (Arc<AppContext>, TestServer, Keypair, String) {
         let context = AppContext::test().await;
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router);
         let keypair = Keypair::random();
         let cookie = signup(&server, &keypair).await;
-        (server, keypair, cookie)
+        (context, server, keypair, cookie)
     }
 
     async fn signup(server: &TestServer, keypair: &Keypair) -> String {
@@ -765,6 +775,106 @@ mod tests {
             .await;
         response.assert_status(StatusCode::OK);
         assert_ne!(lock_token(&response), token);
+    }
+
+    /// The lock is checked when a request starts, but the file changes later,
+    /// on a finalization task. A lock lost in between must refuse the `PUT`
+    /// and the `DELETE` like a stale token, leaving the file as it was. This
+    /// drives the whole chain from the route to the finalization: the token
+    /// has to survive every layer in between, or the write lands unrefused.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn write_and_delete_are_refused_once_their_lock_is_lost_in_flight() {
+        let (context, server, keypair, cookie) = signed_up_server_with_context().await;
+        let url = storage_url(&keypair, "/pub/state.bin");
+        let path = EntryPath::new(
+            keypair.public_key(),
+            StoragePath::new("/pub/state.bin").unwrap(),
+        );
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(b"kept".to_vec().into())
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        for verb in ["PUT", "DELETE"] {
+            let response = server
+                .method(method("LOCK"), &url)
+                .add_header(header::COOKIE, cookie.clone())
+                .add_header("timeout", "Second-5")
+                .await;
+            response.assert_status(StatusCode::OK);
+            let token = lock_token(&response);
+
+            let request = match verb {
+                "PUT" => server.put(&url).bytes(b"lost".to_vec().into()),
+                _ => server.delete(&url),
+            }
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header("if", holding(&token));
+            with_lock_lost_in_flight(&context, &path, request)
+                .await
+                .assert_status(StatusCode::PRECONDITION_FAILED);
+
+            let stored = server
+                .get(&url)
+                .add_header(header::COOKIE, cookie.clone())
+                .await;
+            stored.assert_status(StatusCode::OK);
+            assert_eq!(
+                stored.text(),
+                "kept",
+                "a refused {verb} must not change the file"
+            );
+        }
+
+        // The lost locks are gone: the path is free again.
+        server
+            .delete(&url)
+            .add_header(header::COOKIE, cookie)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+
+    /// Run `request`, which presents the live lock on `path`, and lose that
+    /// lock after the request passed its check but before its finalization
+    /// changes the file. The finalization is held back on the user row until
+    /// the check is seen to pass (it keeps the lock alive over the write's
+    /// horizon) and the lock is expired.
+    async fn with_lock_lost_in_flight(
+        context: &AppContext,
+        path: &EntryPath,
+        request: TestRequest,
+    ) -> TestResponse {
+        let db = &context.sql_db;
+        let granted = expires_at(db, path)
+            .await
+            .expect("the request should run under a live lock");
+        let mut holder = db.pool().begin().await.unwrap();
+        context
+            .user_service
+            .get_for_no_key_update(path.pubkey(), &mut UnifiedExecutor::from_tx(&mut holder))
+            .await
+            .unwrap();
+
+        let lose_lock = async {
+            let mut checked = false;
+            for _ in 0..500 {
+                if expires_at(db, path).await.is_some_and(|at| at > granted) {
+                    checked = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(checked, "the request never passed the lock check");
+            EntryLockRepository::expire(path, &mut db.pool().into())
+                .await
+                .unwrap();
+            holder.commit().await.unwrap();
+        };
+        let (response, ()) = tokio::join!(async { request.await }, lose_lock);
+        response
     }
 
     #[tokio::test]
