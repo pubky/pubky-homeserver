@@ -1,10 +1,11 @@
-//! External-service credentials and optional native verification with replay protection.
+//! External-service credentials and optional verification with replay protection.
 //!
-//! Enable `service-auth-verifier` to use `ServiceAuthVerifier` on native targets.
+//! Enable `service-auth-verifier` to use `ServiceAuthVerifier` on native and WASM targets.
+//! File replay storage is available only on native targets.
 //! The application owns authorization and the resulting service session.
 //!
 //! ```no_run
-//! # #[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
+//! # #[cfg(feature = "service-auth-verifier")]
 //! # async fn example(credentials: pubky::ServiceAuthProof) -> Result<(), Box<dyn std::error::Error>> {
 //! use pubky::service_auth::{MemoryReplayStore, ServiceAuthVerifier, VerificationPolicy};
 //! let verifier = ServiceAuthVerifier::new(
@@ -59,20 +60,20 @@ pub(crate) fn valid_audience(audience: &str) -> bool {
 
 #[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
 mod file_store;
-#[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
+#[cfg(feature = "service-auth-verifier")]
 mod memory_store;
-#[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
+#[cfg(feature = "service-auth-verifier")]
 mod replay_store;
-#[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
+#[cfg(feature = "service-auth-verifier")]
 mod verifier;
 
 #[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
 pub use file_store::{FileReplayStore, FileReplayStoreOptions};
-#[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
+#[cfg(feature = "service-auth-verifier")]
 pub use memory_store::MemoryReplayStore;
-#[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
+#[cfg(feature = "service-auth-verifier")]
 pub use replay_store::{ConsumeOutcome, ReplayKey, ReplayRequest, ReplayStore, ReplayStoreError};
-#[cfg(all(feature = "service-auth-verifier", not(target_arch = "wasm32")))]
+#[cfg(feature = "service-auth-verifier")]
 pub use verifier::{
     ServiceAuthVerificationError, ServiceAuthVerifier, VerificationPolicy, VerifiedServiceAuth,
 };

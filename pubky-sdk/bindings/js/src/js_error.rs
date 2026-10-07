@@ -232,6 +232,66 @@ impl From<pubky::ServiceAuthProofError> for PubkyError {
     }
 }
 
+/// Preserve verifier and storage failures as machine-readable authentication errors.
+impl From<pubky::service_auth::ServiceAuthVerificationError> for PubkyError {
+    fn from(error: pubky::service_auth::ServiceAuthVerificationError) -> Self {
+        use pubky::service_auth::ServiceAuthVerificationError as Error;
+        let reason = match &error {
+            Error::InvalidAudience => "InvalidServiceAudience",
+            Error::InvalidPolicy => "InvalidPolicy",
+            Error::InputTooLarge => "InputTooLarge",
+            Error::MalformedCredential => "MalformedCredential",
+            Error::UnsupportedHeader => "UnsupportedHeader",
+            Error::InvalidGrantSignature => "InvalidGrantSignature",
+            Error::InvalidProofSignature => "InvalidProofSignature",
+            Error::InvalidGrant => "InvalidGrant",
+            Error::GrantExpired => "GrantExpired",
+            Error::InvalidTimestamp => "InvalidTimestamp",
+            Error::AudienceMismatch => "AudienceMismatch",
+            Error::GrantMismatch => "GrantMismatch",
+            Error::InvalidNonce => "InvalidNonce",
+            Error::Replay => "Replay",
+            Error::Storage(_) => "Storage",
+        };
+        let name = if matches!(error, Error::InvalidAudience | Error::InvalidPolicy) {
+            PubkyErrorName::InvalidInput
+        } else {
+            PubkyErrorName::AuthenticationError
+        };
+        let mut data = json!({ "reason": reason });
+        if let Error::Storage(source) = &error {
+            data["storageReason"] = json!(replay_store_reason(source));
+        }
+        Self::new(name, error).with_data(data)
+    }
+}
+
+impl From<pubky::service_auth::ReplayStoreError> for PubkyError {
+    fn from(error: pubky::service_auth::ReplayStoreError) -> Self {
+        Self::new(PubkyErrorName::ClientStateError, &error)
+            .with_data(json!({ "reason": replay_store_reason(&error) }))
+    }
+}
+
+fn replay_store_reason(error: &pubky::service_auth::ReplayStoreError) -> &'static str {
+    use pubky::service_auth::ReplayStoreError as Error;
+    match error {
+        Error::InvalidConfiguration(_) => "InvalidConfiguration",
+        Error::Capacity => "Capacity",
+        Error::AlreadyOpen => "AlreadyOpen",
+        Error::PolicyMismatch => "PolicyMismatch",
+        Error::ClockRollback => "ClockRollback",
+        Error::OutsideTimeWindow => "OutsideTimeWindow",
+        Error::Corrupt(_) => "Corrupt",
+        Error::Unavailable => "Unavailable",
+        Error::Io(_) => "Io",
+        #[cfg(not(target_arch = "wasm32"))]
+        Error::Task(_) => "Task",
+        Error::Backend(_) => "Backend",
+        Error::InvalidResponse(_) => "InvalidResponse",
+    }
+}
+
 /// Converts a `pubky::BuildError` into a `PubkyError`.
 impl From<BuildError> for PubkyError {
     fn from(err: BuildError) -> Self {

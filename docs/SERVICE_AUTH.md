@@ -1,69 +1,160 @@
-# Authenticate to an external service
+# Sign in to your service with Pubky
 
-Use an existing Pubky grant to authenticate your application to an external
-service, such as an inbox. The SDK creates credentials using the grant's client
-signing key. A Rust service can use the SDK verifier to check those credentials
-and reject replayed proofs before issuing its own session. Exchange the grant
-and proof for a service-owned credential, then use that credential for ordinary
-requests.
+Let users sign in to your API using an existing Pubky session. The client creates
+a short-lived, signed proof and sends it to your server. Your server verifies
+which user it represents, decides whether to allow access, and creates its own
+session for subsequent requests.
 
-This guide covers the APIs in this checkout:
+Start with the [JavaScript client and Node.js server example](#verify-credentials-in-nodejs-or-a-browser).
+For a Rust application, see [credential generation](#rust) and
+[server verification](#verify-credentials-in-a-rust-service).
 
-- [Generate and submit credentials](#generate-and-submit-credentials) from JavaScript or Rust.
-- [Verify credentials in a Rust service](#verify-credentials-in-a-rust-service).
-- [Choose and operate a replay store](#choose-and-operate-a-replay-store).
+After the example, use these sections as needed:
+
 - [Handle errors and retries](#handle-errors-and-retries).
-- Look up the [protocol and verification rules](#protocol-reference).
+- [Configure verification limits](#configure-verification).
+- [Implement a custom replay store](#use-a-custom-replay-store).
+- [Manage service sessions](#expiration-and-session-lifecycle).
 
 ## How the exchange works
 
-1. Your application already has a grant-backed Pubky session from an approved
-   login. The user’s root key signed the grant, which identifies a client key.
-2. The SDK uses that client key to sign a proof of possession (PoP). The proof
-   contains the target service's audience, the grant ID, a fresh random nonce,
-   and an issue timestamp. A nonce is a single-use identifier for the exchange.
-3. Your application sends `{ "grant": "<JWS>", "pop": "<JWS>" }` to the service.
-   Each value uses JSON Web Signature (JWS) compact serialization.
-4. The service calls `verify_and_consume`. The verifier checks the credentials
-   and atomically records the nonce as consumed. Of concurrent exchanges using
-   the same proof, at most one succeeds.
-5. The service applies its own authorization policy to the verified identity
-   and issues a service-owned session, represented by a bearer token, session
-   cookie, or another mechanism the service supports.
-6. Your application uses that service credential for subsequent requests. When
-   the session expires, generate a fresh proof to establish another session.
-
-Proof generation and verification make no network requests. Generating a proof
-doesn't prompt the signer, export a private key, or refresh the homeserver bearer.
-A valid grant still works when its homeserver bearer has expired. Existing SDK
-session-restoration methods retain their network behavior.
-
-### Use the proof to establish a session
-
-Use the grant/PoP exchange at the service's authentication endpoint rather than
-on every API request. A service session avoids repeatedly signing proofs,
-transmitting the root-signed grant, verifying two signatures, and recording
-nonce consumption. With the file replay store, each consumption also requires
-a durable disk write.
-
-An opaque bearer token is a straightforward choice: the application sends it in
-`Authorization: Bearer <token>` on later requests. For browser applications, a
-secure, HTTP-only session cookie can also fit. The service chooses the mechanism
-and owns its logout, revocation, and session-management behavior.
-
-The same grant/PoP pair cannot authenticate multiple requests: the first
-successful exchange consumes its nonce. Per-request use would require a fresh
-proof each time. Using a service session avoids that repeated work.
+1. The client creates credentials for your service using its existing Pubky grant.
+   A grant is the user's signed permission for an application to act on their behalf.
+2. Your server checks those credentials and records the proof as used. The SDK
+   calls this *consuming* the proof. A second attempt with the same proof fails.
+3. Your server creates a service session. The client uses that session to call
+   your API, rather than sending the Pubky proof on every request.
 
 ## Before you start
 
-- Obtain a grant-backed session. Cookie-only sessions have no grant view and
-  can't create these credentials.
-- Agree on an audience identifier with the service. The examples use
-  `inbox:production`; replace it with your service's identifier on both sides.
-- Define the service's authentication endpoint and response format. The example
-  URL `https://inbox.example.com/auth/session` is illustrative, not a Pubky endpoint.
-- For native Rust verification, enable the `service-auth-verifier` feature.
+- Have a Pubky session with `session.grant` available. A cookie-only session cannot
+  create these credentials; first sign in through a grant-based flow.
+- Install `@synonymdev/pubky` in the client and server projects. The JavaScript
+  verifier supports Node 20+ and browsers. The example verifies on your server,
+  where your API makes access decisions.
+- Choose a name for your service, called its **audience**. The example uses
+  `example.com`. Use exactly the same value in the client and server.
+- Provide an API endpoint and your own session management. The example URL
+  `https://example.com/auth/session` is a placeholder for your endpoint,
+  not a Pubky endpoint.
+
+## Verify credentials in Node.js or a browser
+
+### 1. Client: create and send credentials
+
+Run this function in the application that already holds the user's Pubky session.
+Replace the URL with your server's endpoint. This example expects that endpoint
+to return JSON containing a service token and its expiry time.
+
+```typescript
+import type { Session } from "@synonymdev/pubky";
+
+export async function signInToService(session: Session) {
+  if (!session.grant) {
+    throw new Error("Sign in with a Pubky grant before accessing this service");
+  }
+
+  const credentials = await session.grant.createServiceAuthProof("example.com");
+  const response = await fetch("https://example.com/auth/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(credentials),
+  });
+  if (!response.ok) {
+    throw new Error(`Service sign-in failed: HTTP ${response.status}`);
+  }
+  return response.json(); // { token, expiresAt } from your server
+}
+```
+
+The SDK creates `{ grant, pop }`: the existing grant and a new signed proof.
+It does not contact your server; `fetch` sends the credentials. Create new
+credentials for every attempt, including retries after a failed request.
+
+### 2. Server: verify and create your session
+
+Create the verifier once at server startup. It must remember used proofs between
+requests. The memory store below holds up to 10,000 proofs that have not expired.
+It loses that history on restart, and separate server processes do not share it.
+Use a [custom replay store](#use-a-custom-replay-store) when you need shared storage
+or protection across restarts. A replay store records which proofs have been used.
+
+In the example, `ServiceSessions` describes **your application's code**, not a
+Pubky API. Implement `isAllowed` using your access rules and `create` using your
+session system. `create` must return a service token that stops working at
+`expiresAt`, expressed as seconds since the Unix epoch.
+
+```typescript
+import {
+  MemoryReplayStore,
+  ServiceAuthVerifier,
+  type ServiceAuthProof,
+} from "@synonymdev/pubky";
+
+const verifier = new ServiceAuthVerifier(
+  "example.com",
+  new MemoryReplayStore(10_000),
+);
+
+interface ServiceSessions {
+  isAllowed(identity: string): Promise<boolean>;
+  create(identity: string, expiresAt: number): Promise<string>;
+}
+
+export async function authenticateRequest(
+  credentials: ServiceAuthProof,
+  sessions: ServiceSessions,
+) {
+  const auth = await verifier.verifyAndConsume(credentials);
+  if (!await sessions.isAllowed(auth.identity)) {
+    throw new Error("This user is not allowed to access the service");
+  }
+
+  const oneHourFromNow = Math.floor(Date.now() / 1000) + 3600;
+  const expiresAt = Math.min(oneHourFromNow, auth.grantExpiresAt);
+  const token = await sessions.create(auth.identity, expiresAt);
+  return { token, expiresAt };
+}
+```
+
+Connect your `POST /auth/session` route to `authenticateRequest`: read a bounded
+JSON request body, pass the credentials and your session implementation, and
+return the result as JSON. Map rejected calls to an error response using the
+[error guidance](#handle-errors-and-retries). The SDK checks the credentials;
+your HTTP framework owns body-size limits, routing, and responses.
+
+Two fields drive this example:
+
+- `identity` identifies the user whose grant was verified. It is their public key
+  encoded as a z-base-32 string, suitable for an account lookup.
+- `grantExpiresAt` is the latest time your service session may expire. You can
+  choose a shorter lifetime, as the example does.
+
+Verification confirms identity, not permission to use your service. Apply your
+own access rules before issuing a session. A successful verification also marks
+the proof as used: trying the same credentials again fails with `Replay`.
+
+### 3. Client: use the service session
+
+The response contains the token created by your server. Send it as
+`Authorization: Bearer <token>` on later requests to your API, according to your
+API's contract. Your service implements token validation, expiry, and logout.
+An HTTP-only session cookie is another option if that fits your application.
+
+Signing out of the homeserver does not end this service session. See
+[session lifecycle](#expiration-and-session-lifecycle) for revocation and renewal.
+
+### Common sign-in failures
+
+| Error | Next step |
+| --- | --- |
+| `Replay` | Create a new proof and submit it once. Check that the client is not reusing a previous request body. |
+| `AudienceMismatch` | Use the exact same service name on both sides, including case and whitespace. |
+| `GrantExpired` | Obtain a valid Pubky grant before signing in to the service again. |
+| `Storage` | Check the replay store. Verification cannot succeed while it cannot safely record used proofs. |
+
+JavaScript errors expose these codes in `PubkyError.data.reason`. See
+[errors and retries](#handle-errors-and-retries) for storage details and other failures.
 
 ### Choose an audience
 
@@ -71,18 +162,20 @@ An audience binds a proof to the service you intend to authenticate to. Without
 that binding, someone who obtains a valid proof—including the service receiving
 it—could submit it to another service that accepts Pubky credentials.
 
-For example, a proof signed for `inbox:production` must be rejected by a service
-configured for `calendar:production`. Because the audience is part of the signed
+For example, a proof signed for `example.com` must be rejected by a service
+configured for `other.example.com`. Because the audience is part of the signed
 proof, changing it invalidates the signature.
 
-The audience prevents cross-service replay. The nonce check prevents repeated
+The audience prevents cross-service replay. Each proof also has a **nonce**, a
+random single-use identifier. The nonce check prevents repeated
 use at the intended service. You need both: separate services don't necessarily
 share nonce history.
 
 An audience is an opaque string of **1–1,024 UTF-8 bytes**. It doesn't need to be
 a URL. The SDK preserves it exactly, without trimming, case folding, URL parsing,
-or Unicode normalization. `inbox:production`, `https://inbox.example.com`, and
-`Inbox` are valid identifiers, but `Inbox` and `inbox` are different audiences.
+or Unicode normalization. `example.com`, `https://example.com`, and
+`Example.com` are valid identifiers, but each is a different audience.
+Using a domain as the audience does not verify ownership of that domain.
 
 ## Generate and submit credentials
 
@@ -91,34 +184,14 @@ failed request or a lost response. Treat the returned credentials as sensitive.
 
 ### JavaScript
 
-Pass an existing `Session` to this function. It returns the service's response;
-your application handles the service-specific bearer or session body.
+Use `session.grant.createServiceAuthProof(audience)`, as shown in the
+[client example](#1-client-create-and-send-credentials). It supports SDK-held keys
+and non-extractable browser WebCrypto keys. Applications don't need to access
+IndexedDB or export the signing key.
 
-```typescript
-import type { Session } from "@synonymdev/pubky";
-
-export async function authenticateService(session: Session): Promise<Response> {
-  const grant = session.grant;
-  if (!grant) {
-    throw new Error("A grant-backed Pubky session is required");
-  }
-
-  const credentials = await grant.createServiceAuthProof("inbox:production");
-  const response = await fetch("https://inbox.example.com/auth/session", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(credentials),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Service authentication failed: HTTP ${response.status}`);
-  }
-  return response;
-}
-```
-
-The method supports SDK-held keys and non-extractable browser WebCrypto keys.
-Applications don't need to access IndexedDB or export the signing key.
+Proof generation does not prompt the signer or refresh the homeserver bearer
+token. A valid grant still works when that bearer has expired. Restoring a session
+can still require network requests; creating the proof does not.
 
 ### Rust
 
@@ -134,7 +207,7 @@ pub async fn create_service_credentials(
     let grant = session.as_grant().ok_or_else(|| {
         std::io::Error::other("A grant-backed Pubky session is required")
     })?;
-    Ok(grant.create_service_auth_proof("inbox:production").await?)
+    Ok(grant.create_service_auth_proof("example.com").await?)
 }
 ```
 
@@ -163,7 +236,7 @@ dependencies beyond those the SDK already uses.
 ### Create a long-lived verifier
 
 Call this function once at service startup, inside your Tokio runtime. The store
-creates `./inbox-replay` beneath the existing current directory. Use a persistent
+creates `./service-replay` beneath the existing current directory. Use a persistent
 location appropriate for your deployment.
 
 ```rust
@@ -175,7 +248,7 @@ use pubky::service_auth::{
 pub async fn create_verifier(
 ) -> Result<ServiceAuthVerifier<FileReplayStore>, Box<dyn std::error::Error>> {
     let store = FileReplayStore::open(
-        "./inbox-replay",
+        "./service-replay",
         FileReplayStoreOptions {
             max_entries: 100_000,
             max_journal_bytes: 16 * 1024 * 1024,
@@ -184,7 +257,7 @@ pub async fn create_verifier(
     .await?;
 
     Ok(ServiceAuthVerifier::new(
-        "inbox:production",
+        "example.com",
         VerificationPolicy::default(),
         store,
     )?)
@@ -236,22 +309,85 @@ contract. Ordinary API endpoints authenticate that credential rather than
 calling `verify_and_consume` again. The SDK verifies the exchange; your service
 implements session issuance and subsequent request authentication.
 
-| Accessor | Verified value |
-| --- | --- |
-| `identity()` | The grant's root identity, `iss` |
-| `client_id()` | The root-signed application identifier |
-| `grant_id()` | The grant's `jti` |
-| `grant_expires_at()` | Grant expiration in Unix seconds |
-| `grant_claims()` | Immutable reference to the complete `GrantClaims` |
-| `proof_claims()` | Immutable reference to the complete `ServiceProofClaims` |
-
-Proof claims expose the audience, nonce, grant binding, and issue time for
-auditing or request correlation. Reading or retaining them doesn't make the
-proof reusable.
-
 Verified provenance doesn't establish service permissions. Homeserver storage
-capabilities aren't inbox permissions, and `client_id` isn't a verified web
+capabilities don't grant service-specific permissions, and `client_id` isn't a verified web
 origin. Apply your own policy to the authenticated identity.
+
+## Configure verification
+
+Use the defaults to start. If your service needs a shorter sign-in window, pass
+a policy override when creating the verifier. This example accepts proofs for
+less than 120 seconds after they were created, rather than the default 180:
+
+```typescript
+import { MemoryReplayStore, ServiceAuthVerifier } from "@synonymdev/pubky";
+
+const verifier = new ServiceAuthVerifier(
+  "example.com",
+  new MemoryReplayStore(10_000),
+  { maxProofAgeSeconds: 120 },
+);
+```
+
+Omitted settings keep their defaults. In Rust, set `max_proof_age_seconds` on
+`VerificationPolicy` and use `..VerificationPolicy::default()` for the other
+fields. See the [API documentation](#api-documentation) for available settings
+and their bounds.
+
+These settings control when a proof can be accepted, not how long your service
+session lasts. Before changing settings on an existing store, follow the
+[policy-change procedure](#change-policy-or-replace-replay-state).
+
+## Use a custom replay store
+
+The memory store is bounded and rejects new entries when full. Verifiers retain
+their own Rust handles to its state. You can pass one store to several verifiers;
+freeing a JS store wrapper does not clear a verifier's history. State is shared
+only within its WASM instance; restarts lose history and separate Node workers
+do not share it.
+
+For shared or persistent storage, use `ServiceAuthVerifier.withStore`, passing an
+object implementing `consumeOnce(request): Promise<ConsumeOutcome>`. In this
+example, `database.consumeServiceProof` represents your database adapter; it must
+implement the atomic contract below.
+
+```typescript
+import { ServiceAuthVerifier, type ReplayStore } from "@synonymdev/pubky";
+
+const store: ReplayStore = {
+  async consumeOnce(request) {
+    return database.consumeServiceProof({
+      key: request.key,
+      policyFingerprint: request.policyFingerprint,
+      notBefore: request.notBefore,
+      expiresAt: request.expiresAt,
+    });
+  },
+};
+const verifier = ServiceAuthVerifier.withStore("example.com", store);
+```
+
+The verifier supplies a request that identifies the proof, its allowed times,
+and the verification settings. Use it to enforce the following storage contract;
+see `ReplayRequest` in the [API documentation](#api-documentation) for field details.
+
+The operation must be **atomic**: two requests for the same proof cannot both
+report success. Within one lock or database transaction, the store must:
+
+1. Reject a policy fingerprint that differs from the store's existing binding.
+   Also reject clock rollback: the current time must not be earlier than the last
+   time the store observed. Persist the binding and observed time with the records
+   when using persistent storage.
+2. Recheck `notBefore <= now < expiresAt` after acquiring the lock.
+3. Return `"alreadyConsumed"` if the key is present. Otherwise, insert it atomically
+   and retain it until `expiresAt`. Never evict live entries to recover capacity.
+4. Save the key and metadata durably before returning `"consumed"` from a persistent
+   store, so a restart cannot make an accepted proof usable again.
+
+Throw on storage failure. Rejected promises, synchronous exceptions, and invalid
+results reject authentication. All service instances must use the same
+authoritative storage. Follow the [policy-change procedure](#change-policy-or-replace-replay-state)
+before replacing a store or changing its bound policy.
 
 ## Choose and operate a replay store
 
@@ -323,41 +459,38 @@ To replace replay state or change its bound policy:
 
 ### Credential generation fails
 
-Rust returns `ServiceAuthProofError`. JavaScript uses `PubkyError.data.reason`
-for the corresponding structured reasons below. Invalid audiences use the JS
-name `InvalidInput`; the other listed reasons use `AuthenticationError`.
+Check that the client still has a grant-backed session and that the grant has not
+expired. If a browser reports `SigningKeyUnavailable`, check access to its saved
+signing key; clearing browser storage can remove that key. A removed session or
+pending logout also prevents proof generation.
 
-| Rust variant | JavaScript reason | What to check |
-| --- | --- | --- |
-| `InvalidAudience` | `InvalidServiceAudience` | Use 1–1,024 UTF-8 bytes and the service's exact configured identifier. |
-| `GrantExpired` | `GrantExpired` | Obtain a valid grant before generating another proof. |
-| `InvalidGrant` | `InvalidGrant` | Check the grant's validity period and its signing-key binding. |
-| `SigningKeyUnavailable` | `SigningKeyUnavailable` | Check browser storage access and whether the bound key still exists. |
-| `SigningFailed` | `SigningFailed` | Inspect the signing diagnostic. |
-
-Rust's `SessionState` variant retains the underlying SDK error for browser
-coordination or local lifecycle failures. JavaScript preserves that underlying
-error's shape, which may have no `data.reason`. A removed session or pending
-logout rejects proof generation locally. Cookie sessions have no grant view.
+JavaScript exposes SDK failures as `PubkyError`; Rust returns
+`ServiceAuthProofError`. Inspect the diagnostic before deciding whether the user
+needs to sign in again. Underlying session errors may have no `data.reason`.
 
 ### Verification or replay storage fails
 
-`verify_and_consume` returns `ServiceAuthVerificationError`; its `Storage`
-variant wraps `ReplayStoreError`. Map these errors to your service's HTTP
-responses rather than treating every failure as a successful login or an
-automatic retry.
+Map verification failures to error responses from your endpoint. Never create a
+service session after verification fails. Start with the
+[common sign-in failures](#common-sign-in-failures); if timestamps are rejected,
+also check the client and server clocks.
 
-| Error or symptom | Action |
-| --- | --- |
-| `AudienceMismatch` | Compare the client audience with trusted service configuration, including case and whitespace. |
-| `InvalidTimestamp`, `GrantExpired`, or `Storage(OutsideTimeWindow)` | Check system time, grant expiry, and the acceptance window. Generate a fresh proof when the grant remains valid. |
-| `Replay` | Generate a new proof. Don't resubmit the consumed credentials. |
-| `InputTooLarge`, malformed credentials, or invalid signatures/bindings | Reject the exchange and check the producer's wire format and configured limits. |
-| `Storage(AlreadyOpen)` | Reuse the existing owner or stop it before opening the same file store. |
-| `Storage(Capacity)` | Check live-entry and journal limits. Don't evict unexpired records or reset replay history. |
-| `Storage(ClockRollback)` | Restore accurate time at or beyond the recorded clock floor. Don't clear the store to bypass the check. |
-| `Storage(PolicyMismatch)` | Restore the bound configuration or use the policy-change procedure above. |
-| `Storage(Unavailable)`, `Storage(Io(_))`, or `Storage(Corrupt(_))` | Inspect the underlying failure and follow the file-store recovery procedure. |
+In JavaScript, inspect `PubkyError.data.reason` and, for `Storage` failures,
+`data.storageReason`. In Rust, `ServiceAuthVerificationError::Storage` wraps the
+underlying `ReplayStoreError`. Use the storage diagnostic to choose a remedy:
+
+- **The store is full:** increase capacity or wait for records to expire. Do not
+  delete unexpired records to make room.
+- **The clock moved backwards:** restore accurate time at or beyond the store's
+  last observed time. Clearing replay history does not safely fix the problem.
+- **The settings changed:** restore the previous settings or follow the
+  [policy-change procedure](#change-policy-or-replace-replay-state).
+- **The custom backend failed:** inspect the callback's error message. If it
+  returned an invalid result, fix its `consumeOnce` implementation.
+- **The file store cannot open or write:** reuse its existing owner if it is
+  already open, or follow the [file-store recovery guidance](#maintain-the-file-store).
+
+See the [API documentation](#api-documentation) for the complete error types.
 
 An exchange can consume a nonce even if a later authorization decision, session
 creation, or HTTP response fails. Cancellation and a lost response can also leave
@@ -365,6 +498,13 @@ the outcome uncertain. Generate a fresh proof for the next attempt; nonce
 consumption isn't rolled back with your service's session transaction.
 
 ## Expiration and session lifecycle
+
+### Use the proof to establish a session
+
+Use a Pubky proof when signing in to your service, then use the service token or
+cookie for ordinary API requests. Reusing the proof fails. Creating a new proof
+for every API request would repeat signing, signature checks, and replay-store
+writes; the native file store also needs a durable disk write for each acceptance.
 
 The short proof window controls when credentials can be exchanged. It doesn't
 set the lifetime of the resulting service session. That session must expire no
@@ -380,80 +520,15 @@ sessions or prevent an otherwise unexpired grant from being used at the service.
 Removing a local browser session prevents further use through its managed
 handles, but doesn't revoke sessions already issued by external services.
 
-## Protocol reference
+## API documentation
 
-### Credentials and proof claims
+For complete field descriptions, method signatures, and errors, use the SDK's
+API documentation:
 
-The JSON body contains two compact JWS strings:
-
-- `grant`: the original root-signed grant, unchanged. Its type is `pubky-grant`.
-- `pop`: an Ed25519 proof with header
-  `{"alg":"EdDSA","typ":"pubky-service-pop-v1"}`.
-
-| Proof claim | Value |
-| --- | --- |
-| `aud` | Exact audience string |
-| `gid` | Supplied grant's `jti` |
-| `nonce` | 32 random bytes, unpadded base64url: 43 characters |
-| `iat` | Issue time as integer Unix seconds |
-
-All JWS segments use unpadded base64url. The signature covers the original ASCII
-`base64url(header).base64url(payload)` bytes. The root key signs the grant; the
-key identified by its `cnf` signs the proof. The grant's required fields are
-`iss`, `client_id`, `caps`, `cnf`, `jti`, `iat`, and `exp`.
-
-The verifier checks both signatures, grant validity, exact audience equality,
-grant binding, nonce format, and proof freshness before allocating replay state.
-It accepts only `alg` and `typ` headers and the documented grant/proof fields.
-It rejects header extensions, unsupported algorithms or types, unknown claims,
-duplicate fields, padded or noncanonical base64url, and extra JWS segments.
-External proofs and homeserver `pubky-pop` proofs aren't interchangeable.
-Decoding claims alone doesn't authenticate them.
-
-### Verification policy
-
-`VerificationPolicy::default()` defines these values:
-
-| Field | Default | Accepted configuration |
-| --- | --- | --- |
-| `max_proof_age_seconds` | 180 | 1–86,400 seconds |
-| `future_clock_skew_seconds` | 30 | 0–86,400 seconds |
-| `max_grant_bytes` | 65,536 | Positive compact-JWS byte limit |
-| `max_proof_bytes` | 16,384 | Positive compact-JWS byte limit |
-
-Let `now` be the current Unix second, `max_age` the maximum proof age, and `skew`
-the future-clock allowance. Acceptance requires:
-
-- `grant.iat < grant.exp` and `now < grant.exp`, with no expiration grace.
-- `max(grant.iat, proof.iat) - skew <= now < proof.iat + max_age`.
-- `grant.iat - skew <= proof.iat < grant.exp`.
-
-Subtraction saturates at zero; addition overflow is rejected. The replay
-retention deadline is `min(grant.exp, proof.iat + max_age)`, exclusive. There is
-no additional old-proof grace beyond `max_age`. The store checks this window
-under its consumption lock, and verification checks it again after persistence.
-
-Audience limits count bytes, not characters: `é` repeated 512 times is valid;
-513 times is not. Composed and decomposed Unicode strings remain different
-audiences, even if they look the same.
-
-### Replay keys
-
-The replay key is a BLAKE3 digest of length-prefixed issuer key bytes, grant ID,
-exact audience UTF-8 bytes, and canonical encoded nonce. Each length is an
-unsigned 64-bit big-endian byte count. The policy fingerprint similarly includes
-the proof type, audience, maximum age, future skew, and both input limits.
-
-### Interoperability vectors
-
-The [service-auth v1 fixture](../pubky-sdk/tests/fixtures/service-auth-v1.json)
-contains fixed test-only keys, claims, an evaluation time, and exact credentials
-produced independently with Node's Ed25519 implementation. SDK tests assert
-byte-identical signing and verify both signatures. Evaluate this historical
-fixture at its documented time, not the current wall clock.
-
-At that time, the vector is valid for the exact audience ` Inbox:é/生产 `.
-Changing its case or whitespace must fail. The proof is acceptable at Unix
-second 1,700,000,239 and expired at 1,700,000,240. Using type `pubky-pop`, adding
-a duplicate `aud`, appending base64 padding, or changing a claim without resigning
-must fail. Repeating a successful exchange must fail as replay.
+- **JavaScript:** the installed package includes TypeScript declarations and
+  documentation for editor hover help. To build the HTML reference from this
+  checkout, run `npm run docs` in `pubky-sdk/bindings/js/pkg` after building the
+  [JS bindings](../pubky-sdk/bindings/js/README.md#development-quick-start).
+- **Rust:** run `cargo doc -p pubky --all-features --open` from the repository root
+  and open the `service_auth` module. Its `VerifiedServiceAuth`, `VerificationPolicy`,
+  and `ReplayStore` documentation describes the corresponding types and contracts.

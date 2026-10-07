@@ -32,7 +32,7 @@ futures-util.workspace = true
 js-sys.workspace = true
 log.workspace = true
 pkarr = { workspace = true, default-features = false }
-pubky = { workspace = true, features = [ "json" ] }
+pubky = { workspace = true, features = [ "json", "service-auth-verifier" ] }
 pubky-common.workspace = true
 reqwest = { workspace = true, features = [ "stream" ] }
 serde.workspace = true

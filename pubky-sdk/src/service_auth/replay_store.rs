@@ -1,11 +1,7 @@
 //! Atomic replay consumption and the state shared by built-in stores.
 
-use std::{
-    collections::HashMap,
-    fmt,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, fmt, sync::Arc};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Digest of the verified issuer, grant ID, audience, and nonce.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,9 +96,30 @@ pub enum ReplayStoreError {
     #[error("Replay store I/O failed: {0}")]
     Io(#[from] std::io::Error),
     /// Blocking storage task could not complete.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Replay store task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
+    /// A custom storage operation failed.
+    #[error("Replay store backend failed: {0}")]
+    Backend(String),
+    /// A custom store returned a value that violates its consumption contract.
+    #[error("Invalid replay store response: {0}")]
+    InvalidResponse(&'static str),
 }
+
+/// Native stores must be thread-safe; WASM stores may hold JavaScript objects.
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub trait ReplayStoreBounds: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync + ?Sized> ReplayStoreBounds for T {}
+
+/// WASM replay stores run on the local JavaScript executor.
+#[doc(hidden)]
+#[cfg(target_arch = "wasm32")]
+pub trait ReplayStoreBounds {}
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> ReplayStoreBounds for T {}
 
 /// Atomic consumption boundary used by a service verifier.
 ///
@@ -113,8 +130,11 @@ pub enum ReplayStoreError {
 /// Multi-instance deployments must share the same authoritative storage.
 /// Persistent implementations must make consumption durable before returning
 /// success; the memory store explicitly provides only process-local protection.
-#[async_trait::async_trait]
-pub trait ReplayStore: fmt::Debug + Send + Sync {
+/// Native implementations and their futures must be `Send`; WASM implementations
+/// may hold JavaScript objects and use `#[async_trait::async_trait(?Send)]`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait ReplayStore: fmt::Debug + ReplayStoreBounds {
     /// Consume a verified proof once, or report a prior consumption.
     ///
     /// # Errors
@@ -125,7 +145,8 @@ pub trait ReplayStore: fmt::Debug + Send + Sync {
     ) -> Result<ConsumeOutcome, ReplayStoreError>;
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S: ReplayStore + ?Sized> ReplayStore for Arc<S> {
     async fn consume_once(
         &self,

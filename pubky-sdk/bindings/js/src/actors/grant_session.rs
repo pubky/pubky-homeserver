@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use tsify::{Ts, Tsify};
 
 /// Credentials to submit to an external service's authentication endpoint.
-#[derive(Serialize, Tsify)]
+#[derive(Serialize, Deserialize, Tsify)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceAuthProof {
     /// Original root-signed grant JWS.
     pub grant: String,

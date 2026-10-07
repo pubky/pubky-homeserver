@@ -472,6 +472,15 @@ await signer.pkdns.publishHomeserverForce(/* optional override homeserver*/);
 await signer.pkdns.getHomeserver();
 ```
 
+### ServiceAuthVerifier
+
+Let users sign in to your API using an existing Pubky session. Use
+`ServiceAuthVerifier` on your server to check credentials created by the client,
+then apply your access rules and create your own service session.
+
+See [Sign in to your service with Pubky](../../../../docs/SERVICE_AUTH.md#verify-credentials-in-nodejs-or-a-browser)
+for a JavaScript client and Node.js server example.
+
 ## Logging
 
 The SDK ships with a WASM logger that bridges Rust `log` output into the browser or Node console. Call `setLogLevel` **once at application start**, before constructing `Pubky` or other SDK actors, to choose how verbose the logs should be.
