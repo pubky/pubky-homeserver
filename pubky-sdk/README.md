@@ -252,6 +252,13 @@ let response = client.request_async(Method::GET, url).await?.send().await?;
 
 The high-level Rust storage APIs and JavaScript `Client.fetch` do this automatically, so their storage requests remain compatible with older homeservers. Other HTTP clients can send the canonical `/storage/{owner}/...` URL only to homeservers that advertise `path-addressed-storage`.
 
+Feature-discovery transport errors, unsuccessful responses other than a missing
+`/info` endpoint (404), and invalid response bodies fail request preparation.
+They are not cached as missing features. A subsequent attempt retries discovery
+without waiting for the successful-result cache to expire. A valid response
+without the feature, or a missing `/info` endpoint, retains legacy addressing.
+Storage requests are not automatically replayed.
+
 ## PKDNS (Pkarr)
 
 Resolve another user’s homeserver (`_pubky` record), or publish your own via the signer.

@@ -50,7 +50,8 @@ impl PubkyHttpClient {
     /// the homeserver does not advertise path-addressed storage.
     ///
     /// # Errors
-    /// Returns a validation or resolution error if the request cannot be prepared.
+    /// Returns a validation, resolution, or feature-discovery error if the request
+    /// cannot be prepared. Failed discovery does not dispatch a storage request.
     pub async fn request_async(&self, method: Method, url: Url) -> Result<RequestBuilder> {
         self.cross_request(method, url).await
     }
@@ -73,7 +74,8 @@ impl PubkyHttpClient {
     /// resolves the native transport.
     ///
     /// # Errors
-    /// Returns a validation or resolution error if the URL cannot be prepared.
+    /// Returns a validation, resolution, or feature-discovery error if the URL
+    /// cannot be prepared.
     pub async fn prepare_request(&self, url: &mut Url) -> Result<Option<String>> {
         let (addressing, pubky_host) = self.prepare_request_parts(url).await?;
         Ok(addressing.into_pubky_host(pubky_host))
@@ -82,7 +84,8 @@ impl PubkyHttpClient {
     /// Prepare a URL and browser-fetch metadata for the JavaScript bindings.
     ///
     /// # Errors
-    /// Returns a validation or resolution error if the URL cannot be prepared.
+    /// Returns a validation, resolution, or feature-discovery error if the URL
+    /// cannot be prepared.
     #[doc(hidden)]
     pub async fn prepare_fetch(&self, url: &mut Url) -> Result<crate::client::core::PreparedFetch> {
         let (addressing, pubky_host) = self.prepare_request_parts(url).await?;

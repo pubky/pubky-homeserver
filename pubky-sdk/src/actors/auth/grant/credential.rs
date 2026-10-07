@@ -430,7 +430,7 @@ impl SessionCredential for GrantCredential {
                 &homeserver,
                 pubky_common::constants::features::GRANT_PROOF_LOGOUT,
             )
-            .await;
+            .await?;
         let proof = {
             let state = self.state.lock().await;
             if supports_proof_logout {

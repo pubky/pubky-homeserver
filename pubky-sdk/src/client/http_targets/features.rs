@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use web_time::Instant;
 
-use crate::{PubkyHttpClient, PublicKey};
+use crate::{PubkyHttpClient, PublicKey, Result, errors::RequestError};
 
 const MAX_INFO_BYTES: usize = 16 * 1024;
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,7 +64,7 @@ impl HomeserverFeatures {
         client: &PubkyHttpClient,
         homeserver: &PublicKey,
         feature: &str,
-    ) -> bool {
+    ) -> Result<bool> {
         self.supports_for(homeserver, feature, || self.fetch(client, homeserver))
             .await
     }
@@ -80,45 +80,63 @@ impl HomeserverFeatures {
         cell
     }
 
-    async fn supports_for<F, Fut>(&self, homeserver: &PublicKey, feature: &str, fetch: F) -> bool
+    async fn supports_for<F, Fut>(
+        &self,
+        homeserver: &PublicKey,
+        feature: &str,
+        fetch: F,
+    ) -> Result<bool>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Option<Vec<String>>>,
+        Fut: Future<Output = Result<Vec<String>>>,
     {
         let cell = self.cell(homeserver);
         let mut cached = cell.lock().await;
         if let Some(features) = cached.as_ref().and_then(CachedFeatures::current) {
-            return features.iter().any(|candidate| candidate == feature);
+            return Ok(features.iter().any(|candidate| candidate == feature));
         }
 
-        let features = fetch().await.unwrap_or_default();
+        let features = fetch().await?;
         let supports = features.iter().any(|candidate| candidate == feature);
         *cached = Some(CachedFeatures {
             features,
             expires_at: Instant::now() + INFO_CACHE_TTL,
         });
-        supports
+        Ok(supports)
     }
 
-    async fn fetch(&self, client: &PubkyHttpClient, homeserver: &PublicKey) -> Option<Vec<String>> {
-        let Ok(request) = client.homeserver_info_request(homeserver).await else {
-            return None;
-        };
-        let Ok(response) = request.timeout(self.request_timeout).send().await else {
-            return None;
-        };
+    async fn fetch(&self, client: &PubkyHttpClient, homeserver: &PublicKey) -> Result<Vec<String>> {
+        let response = client
+            .homeserver_info_request(homeserver)
+            .await?
+            .timeout(self.request_timeout)
+            .send()
+            .await?;
+        Self::read_response(response).await
+    }
+
+    async fn read_response(response: reqwest::Response) -> Result<Vec<String>> {
+        // Older homeservers do not expose /info.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
         if !response.status().is_success() {
-            return None;
+            return Err(RequestError::Server {
+                status: response.status(),
+                message: "Could not discover homeserver features".to_string(),
+            }
+            .into());
         }
 
         let mut body = Vec::new();
         let mut chunks = response.bytes_stream();
         while let Some(chunk) = chunks.next().await {
-            let Ok(chunk) = chunk else {
-                return None;
-            };
+            let chunk = chunk?;
             if !Self::append_chunk(&mut body, &chunk) {
-                return None;
+                return Err(RequestError::DecodeJson {
+                    message: "Homeserver info exceeds the response size limit".to_string(),
+                }
+                .into());
             }
         }
 
@@ -134,10 +152,15 @@ impl HomeserverFeatures {
         true
     }
 
-    fn decode(body: &[u8]) -> Option<Vec<String>> {
+    fn decode(body: &[u8]) -> Result<Vec<String>> {
         serde_json::from_slice::<InfoResponse>(body)
             .map(|response| response.features)
-            .ok()
+            .map_err(|error| {
+                RequestError::DecodeJson {
+                    message: error.to_string(),
+                }
+                .into()
+            })
     }
 
     #[cfg(test)]
@@ -175,14 +198,17 @@ mod tests {
             (br#"{"features":["unknown"]}"#, Some(false)),
             (br#"{"features":{}}"#, None),
             (br"{}", None),
+            (br"[]", None),
             (b"not json", None),
         ];
 
         for (body, expected) in cases {
             assert_eq!(
-                HomeserverFeatures::decode(body).map(|features| features
-                    .iter()
-                    .any(|candidate| candidate == PATH_ADDRESSED_STORAGE)),
+                HomeserverFeatures::decode(body)
+                    .ok()
+                    .map(|features| features
+                        .iter()
+                        .any(|candidate| candidate == PATH_ADDRESSED_STORAGE)),
                 expected,
                 "body={}",
                 String::from_utf8_lossy(body)
@@ -235,7 +261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn temporarily_stores_failures_and_coalesces_feature_fetches() {
+    async fn retries_failed_discovery_without_caching_unsupported_features() {
         let discovery = HomeserverFeatures::default();
         let homeserver = crate::Keypair::random().public_key();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -244,28 +270,104 @@ mod tests {
         let first = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             first_calls.fetch_add(1, Ordering::Relaxed);
             tokio::task::yield_now().await;
-            None
+            Err(RequestError::Server {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                message: "unavailable".to_string(),
+            }
+            .into())
         });
         let second_calls = Arc::clone(&calls);
         let second = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             second_calls.fetch_add(1, Ordering::Relaxed);
-            Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
+            Ok(vec![PATH_ADDRESSED_STORAGE.to_string()])
         });
 
         let (first, second) = tokio::join!(first, second);
 
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert!(!first);
-        assert!(!second);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert!(matches!(
+            first,
+            Err(crate::Error::Request(RequestError::Server { .. }))
+        ));
+        assert!(second.unwrap());
 
         let cached = discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
-                Some(Vec::new())
+                Ok(Vec::new())
             })
+            .await
+            .unwrap();
+        assert!(cached);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn caches_confirmed_features_across_clones() {
+        for features in [Vec::new(), vec![PATH_ADDRESSED_STORAGE.to_string()]] {
+            let discovery = HomeserverFeatures::default();
+            let clone = discovery.clone();
+            let homeserver = crate::Keypair::random().public_key();
+            let calls = AtomicUsize::new(0);
+            let supported = !features.is_empty();
+            let first = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                calls.fetch_add(1, Ordering::Relaxed);
+                tokio::task::yield_now().await;
+                Ok(features)
+            });
+            let second = clone.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Vec::new())
+            });
+
+            let (first, second) = tokio::join!(first, second);
+
+            assert_eq!(first.unwrap(), supported);
+            assert_eq!(second.unwrap(), supported);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn distinguishes_absent_info_from_failed_discovery() {
+        let server = httpmock::MockServer::start();
+        let client = reqwest::Client::new();
+        for (status, body, expected) in [
+            (404, String::new(), "legacy"),
+            (200, r#"{"features":[]}"#.to_string(), "legacy"),
+            (403, String::new(), "server"),
+            (429, String::new(), "server"),
+            (503, String::new(), "server"),
+            (200, "not json".to_string(), "decode"),
+            (200, "x".repeat(MAX_INFO_BYTES + 1), "decode"),
+        ] {
+            let mut response = server.mock(|when, then| {
+                when.method("GET").path("/info");
+                then.status(status).body(body);
+            });
+
+            let result = HomeserverFeatures::read_response(
+                client.get(server.url("/info")).send().await.unwrap(),
+            )
             .await;
-        assert!(!cached);
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+            match result {
+                Ok(features) => {
+                    assert_eq!(expected, "legacy");
+                    assert!(features.is_empty());
+                }
+                Err(crate::Error::Request(RequestError::Server { status: actual, .. })) => {
+                    assert_eq!(expected, "server");
+                    assert_eq!(actual.as_u16(), status);
+                }
+                Err(crate::Error::Request(RequestError::DecodeJson { .. })) => {
+                    assert_eq!(expected, "decode");
+                }
+                other => panic!("unexpected discovery result: {other:?}"),
+            }
+            response.assert();
+            response.delete();
+        }
     }
 
     #[tokio::test]
@@ -280,9 +382,10 @@ mod tests {
 
         let supported = discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
-                Some(Vec::new())
+                Ok(Vec::new())
             })
-            .await;
+            .await
+            .unwrap();
 
         assert!(!supported);
     }

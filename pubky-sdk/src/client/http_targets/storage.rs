@@ -65,7 +65,7 @@ impl PubkyHttpClient {
             && self
                 .features
                 .supports(self, &homeserver, PATH_ADDRESSED_STORAGE)
-                .await
+                .await?
         {
             return Ok(StorageAddressing::PathAddressedStorage);
         }
@@ -103,6 +103,42 @@ mod tests {
 
         assert_eq!(addressing, StorageAddressing::PathAddressedStorage);
         assert_eq!(url.path(), format!("/storage/{}/pub/file.txt", owner.z32()));
+    }
+
+    #[tokio::test]
+    async fn failed_discovery_does_not_prepare_a_legacy_lock_request() {
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .request_timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let homeserver = Keypair::random().public_key();
+        let owner = Keypair::random().public_key();
+        let url = Url::parse(&format!(
+            "https://{}/storage/{}/priv/state",
+            homeserver.z32(),
+            owner.z32()
+        ))
+        .unwrap();
+        let method = reqwest::Method::from_bytes(b"LOCK").unwrap();
+
+        assert!(matches!(
+            client.request_async(method.clone(), url.clone()).await,
+            Err(crate::Error::Request(RequestError::Transport(_)))
+        ));
+
+        // A recovered feature result can be used immediately by the same client.
+        client
+            .features
+            .insert(&homeserver, &[PATH_ADDRESSED_STORAGE]);
+        let request = client
+            .request_async(method, url.clone())
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().path(), url.path());
+        assert!(!request.headers().contains_key("pubky-host"));
     }
 
     #[tokio::test]
