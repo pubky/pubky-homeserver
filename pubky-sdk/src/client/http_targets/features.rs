@@ -112,21 +112,19 @@ impl HomeserverFeatures {
             .timeout(self.request_timeout)
             .send()
             .await?;
-        Self::read_response(response).await
+        Self::read_response(client, response).await
     }
 
-    async fn read_response(response: reqwest::Response) -> Result<Vec<String>> {
+    async fn read_response(
+        client: &PubkyHttpClient,
+        response: reqwest::Response,
+    ) -> Result<Vec<String>> {
         // Older homeservers do not expose /info.
         if response.status() == reqwest::StatusCode::NOT_FOUND {
+            drop(response.bytes_stream());
             return Ok(Vec::new());
         }
-        if !response.status().is_success() {
-            return Err(RequestError::Server {
-                status: response.status(),
-                message: "Could not discover homeserver features".to_string(),
-            }
-            .into());
-        }
+        let response = client.check_http_status(response).await?;
 
         let mut body = Vec::new();
         let mut chunks = response.bytes_stream();
@@ -331,7 +329,10 @@ mod tests {
     #[tokio::test]
     async fn distinguishes_absent_info_from_failed_discovery() {
         let server = httpmock::MockServer::start();
-        let client = reqwest::Client::new();
+        let client = PubkyHttpClient::builder()
+            .isolated_pkarr_test()
+            .build()
+            .unwrap();
         for (status, body, expected) in [
             (404, String::new(), "legacy"),
             (200, r#"{"features":[]}"#.to_string(), "legacy"),
@@ -347,7 +348,8 @@ mod tests {
             });
 
             let result = HomeserverFeatures::read_response(
-                client.get(server.url("/info")).send().await.unwrap(),
+                &client,
+                client.http.get(server.url("/info")).send().await.unwrap(),
             )
             .await;
 
@@ -368,6 +370,37 @@ mod tests {
             response.assert();
             response.delete();
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_errors_use_the_client_limit() {
+        let server = httpmock::MockServer::start();
+        let response = server.mock(|when, then| {
+            when.method("GET").path("/info");
+            then.status(500).body("diagnostic");
+        });
+        for (limit, expected) in [
+            (0, "Internal Server Error"),
+            (4, "diag\n[response body truncated at 4 bytes]"),
+        ] {
+            let client = PubkyHttpClient::builder()
+                .isolated_pkarr_test()
+                .max_error_body_bytes(limit)
+                .build()
+                .unwrap();
+            let error = HomeserverFeatures::read_response(
+                &client,
+                client.http.get(server.url("/info")).send().await.unwrap(),
+            )
+            .await
+            .unwrap_err();
+            let crate::Error::Request(RequestError::Server { status, message }) = error else {
+                panic!("unexpected discovery error: {error:?}");
+            };
+            assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(message, expected);
+        }
+        response.assert_calls(2);
     }
 
     #[tokio::test]
