@@ -3,6 +3,105 @@ use crate::{Keypair, service_auth::MemoryReplayStore};
 use pubky_common::auth::jws::{finish_jws, sign_jws};
 use serde_json::json;
 
+#[tokio::test]
+async fn signed_malformed_claims_do_not_consume_replay_capacity() {
+    let fixture = Fixture::new();
+    let verifier = ServiceAuthVerifier::new(
+        "inbox",
+        VerificationPolicy::default(),
+        MemoryReplayStore::new(1).unwrap(),
+    )
+    .unwrap();
+    for is_grant in [true, false] {
+        let claims = if is_grant {
+            serde_json::to_value(&fixture.grant).unwrap()
+        } else {
+            serde_json::to_value(&fixture.proof).unwrap()
+        };
+        let fields: Vec<_> = claims.as_object().unwrap().keys().cloned().collect();
+        for field in fields {
+            for replacement in [None, Some(json!(null)), Some(json!({})), Some(json!(true))] {
+                let mut changed = claims.clone();
+                if let Some(value) = replacement {
+                    changed[&field] = value;
+                } else {
+                    changed.as_object_mut().unwrap().remove(&field);
+                }
+                let mut credentials = fixture.credentials();
+                if is_grant {
+                    credentials.grant = sign_jws(&fixture.root, GRANT_JWS_TYP, &changed);
+                } else {
+                    credentials.pop = sign_jws(&fixture.client, SERVICE_POP_JWS_TYP, &changed);
+                }
+                assert!(
+                    verifier.verify_and_consume(&credentials).await.is_err(),
+                    "accepted malformed {field}"
+                );
+            }
+        }
+    }
+    verifier
+        .verify_and_consume(&fixture.credentials())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn exact_size_limits_and_noncanonical_nonce() {
+    let mut fixture = Fixture::new();
+    let credentials = fixture.credentials();
+    for (grant_delta, proof_delta, accepted) in [(0, 0, true), (1, 0, false), (0, 1, false)] {
+        let verifier = ServiceAuthVerifier::new(
+            "inbox",
+            VerificationPolicy {
+                max_grant_bytes: credentials.grant.len() - grant_delta,
+                max_proof_bytes: credentials.pop.len() - proof_delta,
+                ..VerificationPolicy::default()
+            },
+            MemoryReplayStore::new(1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            verifier.verify_and_consume(&credentials).await.is_ok(),
+            accepted
+        );
+    }
+    // A zero nonce ends in A; B differs only in unused base64 pad bits.
+    fixture.proof.nonce = format!("{}B", "A".repeat(42));
+    assert!(matches!(
+        verifier().verify_and_consume(&fixture.credentials()).await,
+        Err(ServiceAuthVerificationError::InvalidNonce)
+    ));
+}
+
+#[tokio::test]
+async fn audience_is_not_unicode_or_url_normalized() {
+    let mut fixture = Fixture::new();
+    for (expected, supplied) in [
+        ("é", "e\u{301}"),
+        ("https://inbox", "https://inbox/"),
+        ("inbox", " inbox"),
+        ("inbox", "Inbox"),
+    ] {
+        fixture.proof.aud = supplied.into();
+        let verifier = ServiceAuthVerifier::new(
+            expected,
+            VerificationPolicy::default(),
+            MemoryReplayStore::new(1).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            verifier.verify_and_consume(&fixture.credentials()).await,
+            Err(ServiceAuthVerificationError::AudienceMismatch)
+        ));
+        fixture.proof.aud = expected.into();
+        verifier
+            .verify_and_consume(&fixture.credentials())
+            .await
+            .unwrap();
+    }
+}
+
 struct Fixture {
     root: Keypair,
     client: Keypair,
