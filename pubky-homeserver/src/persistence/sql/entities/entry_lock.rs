@@ -190,14 +190,35 @@ impl EntryLockRepository {
         Self::set_expiry_of_live_lock(path, tokens, expires_at.into(), executor).await
     }
 
-    /// One statement that both finds the live lock by token and updates it, so
-    /// a caller that gets a lock back holds it.
+    /// Find the live lock by token and update it, holding its row from the
+    /// one to the other, so a caller that gets a lock back holds it.
+    ///
+    /// The row is taken with `SELECT ... FOR UPDATE` in a transaction before
+    /// the `UPDATE`, rather than by the `UPDATE` alone. A finalization holds
+    /// the row until it commits (see [`Self::hold`]), and a statement that
+    /// waits for it keeps the clock it started with: a lone `UPDATE` would set
+    /// an expiry measured from before the wait, and count a lock that ran out
+    /// during the wait as live. The select absorbs the wait, so the update
+    /// runs on a clock read after it.
     async fn set_expiry_of_live_lock<'a>(
         path: &EntryPath,
         tokens: &[String],
         expires_at: SimpleExpr,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
+        let con = executor.get_con().await?;
+        let mut tx = sqlx::Connection::begin(con).await?;
+
+        let take_row = Query::select()
+            .from(ENTRY_LOCK_TABLE)
+            .column(EntryLockIden::Path)
+            .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
+            .and_where(Expr::col(EntryLockIden::Token).is_in(tokens))
+            .lock(sea_query::LockType::Update)
+            .to_owned();
+        let (query, values) = take_row.build_sqlx(PostgresQueryBuilder);
+        sqlx::query_with(&query, values).execute(&mut *tx).await?;
+
         let statement = Query::update()
             .table(ENTRY_LOCK_TABLE)
             .value(EntryLockIden::ExpiresAt, expires_at)
@@ -207,10 +228,11 @@ impl EntryLockRepository {
             .returning_all()
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
-        let con = executor.get_con().await?;
-        sqlx::query_as_with(&query, values)
-            .fetch_optional(con)
-            .await
+        let lock = sqlx::query_as_with(&query, values)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(lock)
     }
 
     /// Remove the lock held with `token` on `path`, expired or not. Returns
@@ -360,6 +382,72 @@ mod tests {
             .unwrap()
             .expect("an expired lock is replaced once nothing holds it");
         assert_eq!(taken.token, "t2");
+    }
+
+    /// A refresh that waits for a held lock measures the lock on the clock
+    /// after the wait, not on the one it started with: the new lifetime runs
+    /// from the end of the wait, and a lock that ran out meanwhile is gone.
+    /// Keep-alive takes the same path.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn refresh_that_waited_for_a_held_lock_uses_the_clock_after_the_wait() {
+        let db = SqlDb::test().await;
+        let path = path("/pub/a.txt");
+        let refresh = |lifetime: i64| {
+            let (db, path) = (db.clone(), path.clone());
+            tokio::spawn(async move {
+                EntryLockRepository::refresh(
+                    &path,
+                    &tokens(&["t1"]),
+                    lifetime,
+                    &mut db.pool().into(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+
+        // Still live after the wait: refreshed for the full lifetime from then.
+        let first = EntryLockRepository::acquire(&path, "t1", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .unwrap();
+        let acquired_at = first.expires_at - 60;
+        let mut holder = db.pool().begin().await.unwrap();
+        assert!(hold(&mut holder, &path, "t1").await);
+        let refreshing = refresh(30);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!refreshing.is_finished(), "a refresh waits for a held lock");
+        holder.commit().await.unwrap();
+        let refreshed = refreshing.await.unwrap().expect("the lock is still live");
+        // Measured from before the wait it would end at most 31 seconds after
+        // acquisition, allowing a clock tick; from after it, at least 32.
+        assert!(
+            refreshed.expires_at - acquired_at >= 32,
+            "the lifetime runs from the end of the wait"
+        );
+        assert_eq!(live(&db, &path).await, Some(refreshed));
+
+        // Ran out during the wait: not refreshed, whatever it looked like before.
+        assert!(
+            EntryLockRepository::release(&path, "t1", &mut db.pool().into())
+                .await
+                .unwrap()
+        );
+        EntryLockRepository::acquire(&path, "t1", 2, &mut db.pool().into())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut holder = db.pool().begin().await.unwrap();
+        assert!(hold(&mut holder, &path, "t1").await);
+        let refreshing = refresh(60);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        holder.commit().await.unwrap();
+        assert!(
+            refreshing.await.unwrap().is_none(),
+            "a lock that ran out while held is not revived"
+        );
+        assert!(live(&db, &path).await.is_none());
     }
 
     /// Acquisition is one atomic statement: of many acquirers racing for a
