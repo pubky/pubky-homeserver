@@ -17,7 +17,8 @@
 //! aborted instead, leaving the existing blob untouched.
 //!
 //! Finalizing a write publishes the blob and then commits the entry row;
-//! finalizing a delete commits the row removal and then removes the blob. Blob
+//! finalizing a delete commits the row removal and then removes the blob,
+//! unless a write has put the file back in between. Blob
 //! storage cannot join the database transaction, so the two can diverge if the
 //! database update fails after publication or the process dies between the
 //! steps: the blob then holds new content while the entry describes the old,
