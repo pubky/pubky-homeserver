@@ -29,26 +29,6 @@ function openAuthDatabase(): Promise<IDBDatabase> {
   });
 }
 
-// Reproduce a record saved by an earlier encryption draft, including its
-// encrypted approval and wrapping key. Migration must not change its AAD.
-async function moveToLegacyStore(id: string): Promise<void> {
-  const db = await openAuthDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(["storedSessions", "delegatedGrantKeys"], "readwrite");
-      const keys = tx.objectStore("delegatedGrantKeys");
-      const request = keys.get(`session:${id}`);
-      request.onsuccess = () => {
-        const { keyId, ...record } = request.result;
-        tx.objectStore("storedSessions").put(record);
-        keys.delete(keyId);
-      };
-      tx.oncomplete = () => resolve();
-      tx.onerror = tx.onabort = () => reject(tx.error);
-    });
-  } finally { db.close(); }
-}
-
 for (const delegated of [false, true]) {
   test(`BrowserSessionStore: Grant to V1 compatibility (${delegated ? "delegated" : "local"})`, async t => {
     if (typeof indexedDB === "undefined") {
@@ -102,11 +82,8 @@ for (const delegated of [false, true]) {
       await store.save(restoredGrant);
       t.deepEqual((await store.restore(saved.id)).grant!.deriveEncryptionKey("/pub/compat/value"), key, "re-saving original Grant preserves V1 keys");
 
-      await moveToLegacyStore(saved.id);
-      t.equal((await store.list()).length, 3, "current SDK lists both formats after migration");
-      t.deepEqual(await legacySessionIds(), [original.id], "migration removes V2 from the legacy list");
-      t.deepEqual((await store.restore(saved.id)).grant!.deriveEncryptionKey("/pub/compat/value"), key, "migration preserves approval and content keys");
-      t.deepEqual((await store.restoreEncryptionKeys(saved.id))!.deriveForPath("/pub/compat/value"), key, "migration preserves offline recovery");
+      t.equal((await store.list()).length, 3, "current SDK lists both formats");
+      t.deepEqual((await store.restoreEncryptionKeys(saved.id))!.deriveForPath("/pub/compat/value"), key, "V1 preserves offline recovery");
 
       const later = await store.save(await authorize("grant"));
       t.deepEqual(await legacySessionIds(), [original.id, later.id].sort(), "Grant requested after V1 stays compatible");

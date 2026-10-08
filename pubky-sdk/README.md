@@ -75,6 +75,11 @@ println!("Your current homeserver: {:?}", resolved);
 Select approval format V1 and request `e` for scopes that need keys. Storage
 permissions `r` and `w` deliver no keys; signers may narrow or decline `e`.
 
+Older homeservers reject any grant containing `e`. Upgrade the homeserver before
+approving requests for encryption keys. Apps forward signer-issued grants
+unchanged. See the
+[compatibility guide](../docs/scoped-encryption-keys.md#compatibility).
+
 ```rust
 # use pubky::{Capabilities, PubkyGrantAuthFlow, AuthFlowKind, ClientId};
 # fn example() -> Result<(), Box<dyn std::error::Error>> {

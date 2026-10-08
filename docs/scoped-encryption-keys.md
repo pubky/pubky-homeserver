@@ -19,8 +19,14 @@ Signers should show separate "Encrypt and decrypt content" consent for `e`.
 
 Grant flows default to bare grants, which reject `e`. V1 approvals require
 support in the app and signer, plus a homeserver that accepts `e`. V1 flows
-reject bare-grant responses without downgrading. Local signer sign-ins grant
-root `rwe` access because the caller already holds the identity secret.
+reject bare-grant responses without downgrading.
+
+This is an intentional compatibility break: older homeservers reject any grant
+containing `e`. Upgrade the homeserver before approving requests for encryption
+keys. Requests using only `r`/`w` remain compatible.
+
+The signer signs the approved capabilities, including `e`, into the grant.
+Apps forward that grant unchanged; removing `e` would invalidate its signature.
 
 Approval and derivation versions are `v1`. Credential storage versions are
 separate; see [persistence](#persistence-and-offline-recovery).

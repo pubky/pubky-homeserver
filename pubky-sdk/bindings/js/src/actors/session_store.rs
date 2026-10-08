@@ -26,7 +26,6 @@ const PUBKY_SESSIONS_DB_VERSION = 1;
 const PUBKY_SESSIONS_STORE_NAME = "storedSessions";
 const PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME = "delegatedGrantKeys";
 const KEYED_SESSION_PREFIX = "session:";
-let sessionStoreMigration;
 
 function keyedSessionId(id) { return `${KEYED_SESSION_PREFIX}${id}`; }
 
@@ -43,31 +42,6 @@ function putSessionRecord(tx, record) {
   } else {
     return sessions.put(record);
   }
-}
-
-/** Atomically move earlier V2 records without changing approval authentication data. */
-function migrateKeyedSessions(db) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(
-      [PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME], "readwrite",
-    );
-    const sessions = tx.objectStore(PUBKY_SESSIONS_STORE_NAME);
-    const keys = tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME);
-    const records = sessions.getAll();
-    records.onsuccess = () => {
-      for (const record of records.result) {
-        if (record.version !== "pubky-session-v2") continue;
-        const existing = keys.get(keyedSessionId(record.id));
-        existing.onsuccess = () => {
-          // A current record takes precedence over a stale draft's copy.
-          if (!existing.result) putSessionRecord(tx, record);
-          else sessions.delete(record.id);
-        };
-      }
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("Migrating stored approvals failed."));
-  });
 }
 
 /** Assert that IndexedDB is available for browser session persistence. */
@@ -107,19 +81,7 @@ function openSessionStoreDb() {
         db.createObjectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME, { keyPath: "keyId" });
       }
     };
-    request.onsuccess = async () => {
-      const db = request.result;
-      try {
-        if (!sessionStoreMigration) {
-          sessionStoreMigration = migrateKeyedSessions(db).catch(error => {
-            sessionStoreMigration = undefined;
-            throw error;
-          });
-        }
-        await sessionStoreMigration;
-        resolve(db);
-      } catch (error) { db.close(); reject(error); }
-    };
+    request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("Opening Pubky session store failed."));
   });
 }
@@ -297,10 +259,6 @@ export async function __pubkySessionStoreGet(id) {
 export async function __pubkySessionStoreList() {
   if (!globalThis.indexedDB) return [];
   try {
-    // Also handle a draft SDK writing a legacy-location V2 record after this
-    // instance first opened the database.
-    const db = await openSessionStoreDb();
-    try { await migrateKeyedSessions(db); } finally { db.close(); }
     let legacy = [];
     const keys = await withSessionStores("readonly", tx => {
       const request = tx.objectStore(PUBKY_SESSIONS_STORE_NAME).getAll();
@@ -954,11 +912,6 @@ export async function inspectApprovalStore(id, action) {
       const key = keys.get(`approval:${id}`);
       record.onsuccess = () => {
         if (action === "tamper") keys.put({ ...record.result, clientId: "tampered" });
-        if (action === "legacy-location") {
-          const { keyId, ...stored } = record.result;
-          sessions.put(stored);
-          keys.delete(keyId);
-        }
         if (action === "delete-key") keys.delete(`approval:${id}`);
         if (action === "delete-pop") keys.delete("test-pop");
         if (action === "tamper-ciphertext") {
@@ -1110,22 +1063,6 @@ export async function inspectApprovalStore(id, action) {
                 "secretApproval"
             ),
             JsValue::from_str("confidential-approval")
-        );
-
-        // Earlier drafts saved V2 in the legacy session list. Move the complete
-        // record atomically; ciphertext AAD, wrapping key and bearer stay valid.
-        inspect(id, "legacy-location").await;
-        assert!(!field(&inspect(id, "read").await, "legacy").is_undefined());
-        JsFuture::from(js_store_list()).await.unwrap();
-        assert!(field(&inspect(id, "read").await, "legacy").is_undefined());
-        let migrated = JsFuture::from(js_store_get(id.into())).await.unwrap();
-        assert_eq!(
-            field(&migrated, "secretApproval"),
-            JsValue::from_str("confidential-approval")
-        );
-        assert_eq!(
-            field(&field(&migrated, "sharedSession"), "bearer"),
-            JsValue::from_str("test-bearer")
         );
 
         // A second save must replace ciphertext and key together and retain the bearer.
