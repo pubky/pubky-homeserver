@@ -69,7 +69,7 @@ The handshake uses `window.postMessage`. All later messages go over a dedicated 
 | `{ type: "signout", id }` | App to agent | `{ id, ok }` |
 | `{ type: "ui", height }` | Agent to app | None. The client resizes the frame. |
 
-`bearer` is `{ token, expires_at, pubky, capabilities, homeserver }`. The agent never sends the grant JWS, the grant id or the key. A `rejected` bearer that is still current makes the agent exchange the grant, which invalidates the bearer every other app holds, so the agent forces at most one replacement per 10 seconds; within that window it answers with the current bearer.
+`bearer` is `{ token, expires_at, pubky, capabilities, homeserver }`. The agent never sends the grant JWS, the grant id or the key. A `rejected` bearer that is still current makes the agent exchange the grant, which invalidates the bearer every other app holds; apps only name a bearer the homeserver actually refused.
 
 Error codes on a reply: `signed-out`, `insufficient-scope`, `unavailable`, `unsupported-message`, or `error` with a message.
 
@@ -100,7 +100,6 @@ To cut off an app, remove its origin from the allowlist and from `frame-ancestor
 
 `v` in the hello is the protocol version. A change to message shapes or to the meaning of a state bumps it; an agent that does not support the requested version answers `unsupported-version` and the client reports a `ClientStateError` whose `data.code` carries that code.
 
-## Example and tests
+## Tests
 
-- [examples/javascript/9-sso](../examples/javascript/9-sso): a static agent page and app page on localhost ports.
-- `npm run test-browser:sso` in `pubky-sdk/bindings/js/pkg`: the Electron regression with five origins, covering in-frame sign-in, silent second-origin sign-in, bearer rotation and retry, allowlist and sibling-frame refusal, `insufficient-scope`, cross-site partitioning, the raw protocol replies, a user switch, sign-out propagation and a cleared store. The `unavailable` state has no automated coverage: Electron offers no profile where IndexedDB and Web Locks are missing.
+`npm run test-browser:sso` in `pubky-sdk/bindings/js/pkg` runs the Electron regression with five origins (ports stand in for hostnames: every `localhost:<port>` is one site, `127.0.0.1` another). It covers in-frame sign-in, silent second-origin sign-in, bearer rotation and retry, allowlist and sibling-frame refusal, `insufficient-scope`, cross-site partitioning, the raw protocol replies, a user switch, sign-out propagation and a cleared store. The `unavailable` state has no automated coverage: Electron offers no profile where IndexedDB and Web Locks are missing.

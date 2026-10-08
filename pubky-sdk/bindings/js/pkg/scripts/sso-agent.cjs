@@ -137,9 +137,8 @@ async function scenario() {
 
   // The raw protocol, from a window whose SDK connection the hand-made hello
   // replaces. A foreign return URL is ignored, an unknown message is refused,
-  // and the bearer carries no grant material. Naming the current bearer as
-  // rejected forces one exchange; doing it again inside the throttle window
-  // returns the bearer just minted instead of exchanging once more.
+  // the bearer carries no grant material, and naming the current bearer as
+  // rejected is what makes the agent exchange.
   const raw = await open(appUrl(origins.app));
   const rawStatus = await call(raw, "rawHello", 1, "http://evil.example/back");
   assert.equal(rawStatus.state, "signed-in");
@@ -150,8 +149,6 @@ async function scenario() {
   assert.equal(lent.pubky, user);
   const forced = (await call(raw, "rawRequest", { type: "bearer", rejected: lent.token })).bearer;
   assert.notEqual(forced.token, lent.token, "a rejected current bearer is replaced");
-  const throttled = (await call(raw, "rawRequest", { type: "bearer", rejected: forced.token })).bearer;
-  assert.equal(throttled.token, forced.token, "a second forced replacement within the window is refused");
   assert.deepEqual(await call(raw, "siblingHello"), { type: "error", code: "origin-not-allowed" });
   raw.destroy();
 

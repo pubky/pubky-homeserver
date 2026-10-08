@@ -27,20 +27,3 @@ pub(crate) fn parse_capabilities(input: &str) -> JsResult<Capabilities> {
 pub fn validate_capabilities(input: &str) -> JsResult<String> {
     Ok(parse_capabilities(input)?.to_string())
 }
-
-/// Whether every capability in `wanted` is covered by one in `held`.
-///
-/// Used by session agents to answer `insufficient-scope` before lending a
-/// bearer. Both inputs are capabilities strings.
-///
-/// @param {string} held Capabilities the session holds.
-/// @param {string} wanted Capabilities an app asks for.
-/// @returns {boolean}
-/// @throws {PubkyError} `{ name: "InvalidInput" }` when either string is malformed.
-#[wasm_bindgen(js_name = "capabilitiesCoverAll")]
-pub fn capabilities_cover_all(
-    #[wasm_bindgen(unchecked_param_type = "Capabilities")] held: &str,
-    #[wasm_bindgen(unchecked_param_type = "Capabilities")] wanted: &str,
-) -> JsResult<bool> {
-    Ok(parse_capabilities(held)?.covers_all(&parse_capabilities(wanted)?))
-}

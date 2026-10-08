@@ -208,20 +208,11 @@ struct Served {
     homeserver: PublicKey,
 }
 
-/// Minimum time between bearer replacements forced by an app's `rejected`.
-///
-/// A replacement invalidates the bearer every other app holds, so an app
-/// stuck in a retry loop would otherwise keep every app on the site
-/// exchanging. Within this window a rejected ask gets the current bearer.
-const FORCED_EXCHANGE_INTERVAL_MS: f64 = 10_000.0;
-
 struct HostState {
     client: PubkyHttpClient,
     scope: Capabilities,
     unavailable: bool,
     served: Option<Served>,
-    /// `Date.now()` of the last bearer replacement an app forced.
-    forced_at: Option<f64>,
 }
 
 type SharedHost = Rc<RefCell<HostState>>;
@@ -433,7 +424,6 @@ impl SessionAgent {
             scope,
             unavailable,
             served: None,
-            forced_at: None,
         }));
         let token_cell = Rc::new(Cell::new(0u32));
         let callbacks = HostCallbacks::new(&host, &token_cell);
@@ -505,16 +495,7 @@ async fn lend(
         .session
         .as_grant()
         .ok_or_else(|| AgentFailure::new("error", "Served session is not grant-backed."))?;
-    let now = js_sys::Date::now();
-    let throttled = host
-        .borrow()
-        .forced_at
-        .is_some_and(|at| now - at < FORCED_EXCHANGE_INTERVAL_MS);
-    let rejected = if throttled { None } else { rejected };
     let lent: LentBearer = grant.lend_bearer(rejected.as_deref()).await?;
-    if rejected.is_some_and(|rejected| rejected != lent.token) {
-        host.borrow_mut().forced_at = Some(now);
-    }
     serde_wasm_bindgen::to_value(&lent)
         .map_err(|error| AgentFailure::new("error", format!("Encoding the bearer failed: {error}")))
 }

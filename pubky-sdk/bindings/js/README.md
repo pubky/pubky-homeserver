@@ -41,8 +41,7 @@ To share one signed-in session across several first-party origins (for
 example `pubky.app` and `shop.pubky.app`), serve it from a dedicated origin
 with `pubky.listenSessionAgent(options)` and connect from each app with
 `pubky.connectSessionAgent(frame, options)`. See
-[docs/sso-agent.md](../../../docs/sso-agent.md) and the
-[example](../../../examples/javascript/9-sso). Its multi-origin regression
+[docs/sso-agent.md](../../../docs/sso-agent.md). Its multi-origin regression
 runs with `npm run test-browser:sso` against the same testnet as the
 multi-window one below.
 

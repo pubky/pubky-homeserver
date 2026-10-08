@@ -6,7 +6,6 @@ import {
   Session,
   SessionAgent,
   SessionAgentClient,
-  capabilitiesCoverAll,
   type Capabilities,
 } from "../index.js";
 import { Assert, IsExact, assertPubkyError } from "./utils.js";
@@ -28,22 +27,7 @@ type _State = Assert<
 const hasWindow = typeof globalThis.addEventListener === "function";
 
 // The multi-origin flow runs in `npm run test-browser:sso`. These cover the
-// single-runtime edges and the capability check the agent relies on.
-
-test("capabilitiesCoverAll: subset check", (t) => {
-  t.ok(capabilitiesCoverAll("/pub/app/:rw", "/pub/app/notes/:r"));
-  t.ok(capabilitiesCoverAll("/pub/app/:rw", ""));
-  t.notOk(capabilitiesCoverAll("/pub/app/:r", "/pub/app/:rw"));
-  t.notOk(capabilitiesCoverAll("/pub/app/:rw", "/pub/:r"));
-  try {
-    capabilitiesCoverAll("nonsense" as Capabilities, "");
-    t.fail("accepted malformed capabilities");
-  } catch (error) {
-    assertPubkyError(t, error);
-    t.equal(error.name, "InvalidInput");
-  }
-  t.end();
-});
+// single-runtime edges.
 
 test("SessionAgent.listen: validates origins and scope before listening", async (t) => {
   const sdk = Pubky.testnet();
