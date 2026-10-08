@@ -91,8 +91,8 @@ pub fn verify_custom_grant_pop(
         pubky::custom_pop::DEFAULT_CUSTOM_POP_CLOCK_SKEW,
         |seconds| std::time::Duration::from_secs(u64::from(seconds)),
     );
-    let verified = pubky::verify_custom_grant_pop(
-        &pubky::CustomPop {
+    let verified = pubky::custom_pop::verify_custom_grant_pop(
+        &pubky::custom_pop::CustomPop {
             grant: credentials.grant,
             pop: credentials.pop,
         },

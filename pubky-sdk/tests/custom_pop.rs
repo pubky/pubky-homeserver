@@ -1,6 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use pubky::{ClientId, CustomPop, DEFAULT_CUSTOM_POP_CLOCK_SKEW, Keypair, verify_custom_grant_pop};
+use pubky::custom_pop::{CustomPop, DEFAULT_CUSTOM_POP_CLOCK_SKEW, verify_custom_grant_pop};
+use pubky::{ClientId, Keypair};
 use serde_json::json;
 
 #[tokio::test]

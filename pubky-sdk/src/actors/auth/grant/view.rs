@@ -40,7 +40,7 @@ impl<'a> GrantSessionView<'a> {
     /// Future grant issue times are checked by the verifier using its clock-skew policy.
     ///
     /// # Errors
-    /// Returns [`CustomPopError`] for expired or unusable
+    /// Returns [`CustomPopError`](crate::custom_pop::CustomPopError) for expired or unusable
     /// grants, unavailable signing keys, and signing failures. Browser coordination
     /// and lifecycle failures retain their source in its `SessionState` variant.
     pub async fn create_custom_pop(

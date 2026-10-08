@@ -10,6 +10,11 @@ use crate::{GRANT_JWS_TYP, GrantClaims, PopNonce, PublicKey};
 /// Grant expiry is never extended.
 pub const DEFAULT_CUSTOM_POP_CLOCK_SKEW: Duration = Duration::from_secs(30);
 
+/// Upper bound on the encoded JWS header; ours is `{"alg":"EdDSA","typ":"…"}`.
+const MAX_JWS_HEADER_LEN: usize = 512;
+/// Base64url (unpadded) length of a 64-byte Ed25519 signature.
+const ED25519_SIGNATURE_B64_LEN: usize = 86;
+
 /// Verified provenance and application data. This does not establish freshness
 /// or application authorization and does not check homeserver revocation.
 #[derive(Debug)]
@@ -182,9 +187,9 @@ impl<'a> ParsedJws<'a> {
         let signature = parts.next().ok_or(MalformedCredential)?;
         if parts.next().is_some()
             || header.is_empty()
-            || header.len() > 512
+            || header.len() > MAX_JWS_HEADER_LEN
             || payload.is_empty()
-            || signature.len() != 86
+            || signature.len() != ED25519_SIGNATURE_B64_LEN
         {
             return Err(MalformedCredential);
         }

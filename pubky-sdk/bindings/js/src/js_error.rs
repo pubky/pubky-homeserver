@@ -212,9 +212,9 @@ impl From<pubky::Error> for PubkyError {
 }
 
 /// Preserve custom proof errors independently of general auth errors.
-impl From<pubky::CustomPopError> for PubkyError {
-    fn from(error: pubky::CustomPopError) -> Self {
-        use pubky::CustomPopError as Error;
+impl From<pubky::custom_pop::CustomPopError> for PubkyError {
+    fn from(error: pubky::custom_pop::CustomPopError) -> Self {
+        use pubky::custom_pop::CustomPopError as Error;
         let reason = match error {
             Error::GrantExpired => "GrantExpired",
             Error::InvalidGrant(_) => "InvalidGrant",
@@ -373,7 +373,7 @@ impl WasmDescribe for PubkyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky::CustomPopError;
+    use pubky::custom_pop::CustomPopError;
 
     #[test]
     fn custom_proof_errors_preserve_javascript_names_and_reasons() {

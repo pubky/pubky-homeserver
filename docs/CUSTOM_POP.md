@@ -14,18 +14,16 @@ let credentials = session.as_grant()?.create_custom_pop(serde_json::json!({
 })).await?;
 
 // On the recipient, after transporting the entire credentials bundle:
-let verified = pubky::verify_custom_grant_pop(
-    &credentials, pubky::DEFAULT_CUSTOM_POP_CLOCK_SKEW,
-)?;
+use pubky::custom_pop::{DEFAULT_CUSTOM_POP_CLOCK_SKEW, verify_custom_grant_pop};
+
+let verified = verify_custom_grant_pop(&credentials, DEFAULT_CUSTOM_POP_CLOCK_SKEW)?;
 let identity = verified.identity();
 let grant = verified.grant_claims();
 let data = verified.data();
 let (signed_at, nonce) = (verified.iat(), verified.nonce());
 
 // Or choose an explicit allowance (Duration::ZERO disables it):
-let verified = pubky::verify_custom_grant_pop(
-    &credentials, std::time::Duration::from_secs(60),
-)?;
+let verified = verify_custom_grant_pop(&credentials, std::time::Duration::from_secs(60))?;
 ```
 
 ## JavaScript

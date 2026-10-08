@@ -103,7 +103,7 @@ impl GrantCredential {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DEFAULT_CUSTOM_POP_CLOCK_SKEW;
+    use crate::custom_pop::{DEFAULT_CUSTOM_POP_CLOCK_SKEW, verify_custom_grant_pop};
     use crate::{
         ClientId, DelegatedGrantCredentialState, GRANT_JWS_TYP, GrantClaims, GrantId,
         actors::auth::grant::pop_signer::{GrantPopSigner, delegated_sign_callback},
@@ -163,7 +163,7 @@ mod tests {
                 let proof = credential.create_custom_pop(data.clone()).await.unwrap();
                 assert_eq!(proof.grant, credential.state.lock().await.grant_jws);
                 let verified =
-                    crate::verify_custom_grant_pop(&proof, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
+                    verify_custom_grant_pop(&proof, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
                 assert_eq!(verified.data(), &data);
                 assert_eq!(verified.grant_claims().cnf, key.public_key());
             }
@@ -178,9 +178,8 @@ mod tests {
         let first = credential.create_custom_pop(json!(null)).await.unwrap();
         let second = credential.create_custom_pop(json!(null)).await.unwrap();
         let after = now_unix();
-        let first = crate::verify_custom_grant_pop(&first, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
-        let second =
-            crate::verify_custom_grant_pop(&second, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
+        let first = verify_custom_grant_pop(&first, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
+        let second = verify_custom_grant_pop(&second, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
         assert!((before..=after).contains(&first.iat()));
         assert_ne!(first.nonce(), second.nonce());
     }
@@ -203,7 +202,6 @@ mod tests {
     #[tokio::test]
     async fn future_issue_times_use_the_verifiers_policy_instead_of_blocking_creation() {
         use crate::custom_pop::CustomPopVerificationError;
-        use crate::verify_custom_grant_pop;
         use std::time::Duration;
 
         let (credential, _) = credential_with_issue_offset(20);
@@ -263,7 +261,7 @@ mod tests {
         let proof = task.await.unwrap().unwrap();
         assert_eq!(proof.grant, original);
         assert_eq!(
-            crate::verify_custom_grant_pop(&proof, DEFAULT_CUSTOM_POP_CLOCK_SKEW)
+            verify_custom_grant_pop(&proof, DEFAULT_CUSTOM_POP_CLOCK_SKEW)
                 .unwrap()
                 .data(),
             &json!({"challenge": "abc"})

@@ -6,6 +6,7 @@
 mod proof;
 mod verifier;
 
+pub use crate::actors::CustomPopError;
 pub(crate) use proof::CustomPopClaims;
 pub use proof::{CUSTOM_POP_JWS_TYP, CustomPop};
 pub use verifier::{

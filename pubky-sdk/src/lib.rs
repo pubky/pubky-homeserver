@@ -49,8 +49,8 @@ pub use actors::deep_links;
 #[doc(inline)]
 #[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use actors::{
-    CookieCredential, CookieSessionView, CustomPopError, DelegatedGrantCredentialState,
-    GrantCredential, GrantManager, GrantSessionView,
+    CookieCredential, CookieSessionView, DelegatedGrantCredentialState, GrantCredential,
+    GrantManager, GrantSessionView,
 };
 #[doc(inline)]
 pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
@@ -58,10 +58,6 @@ pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuth
 pub use actors::{Event, EventCursor, EventStreamBuilder, EventType};
 #[doc(inline)]
 pub use actors::{PublicStorage, SessionStorage};
-#[doc(inline)]
-pub use custom_pop::{
-    CustomPop, DEFAULT_CUSTOM_POP_CLOCK_SKEW, VerifiedCustomPop, verify_custom_grant_pop,
-};
 
 // Error and global client
 #[doc(inline)]
