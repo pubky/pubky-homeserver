@@ -15,7 +15,7 @@ A small page on a dedicated origin, the *agent*, holds the user's single grant s
 | The user is signed out | The handshake returns `signed-out` and the app shows the frame. The agent runs the grant flow for the shared scope, shows the QR code or the Ring link, saves the session with `browserSessionStore`, and sends `signed-in` to every connected app. The app hides the frame. |
 | The bearer rotated | A request gets a 401, so the client asks the agent again and names the rejected bearer. The agent exchanges the grant only if that bearer is still current, exactly as tabs do today. The client retries once if the request body can be cloned. |
 | The user signs out | Sign-out starts on the agent page or from an app's `session.signout()`, which forwards it. The agent revokes the grant and removes the stored session; every agent frame sees `pubky-session-changed` and sends `signed-out` to its app. |
-| The grant is revoked elsewhere or expires | For example, the user revokes it in Ring. The next bearer request that needs an exchange fails, so the agent checks the grant with the homeserver. It stops serving the session, removes the stored record and sends `signed-out` before replying, so every app shows the frame again. |
+| The grant is revoked elsewhere or expires | For example, the user revokes it in Ring. The next exchange fails, and the homeserver says the grant is revoked, expired or unknown. The agent stops serving the session, removes the stored record and sends `signed-out` before replying, so every app shows the frame again. A rejected proof, for example from a skewed clock, is not treated as a dead grant: the session and its key are kept. |
 
 ### Browser support
 

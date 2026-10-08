@@ -6,13 +6,14 @@
 //! the grant-only API impossible to misuse against a cookie session.
 
 use pubky_common::auth::{grant_session_responses::GrantSessionInfo, jws::GrantId};
+use reqwest::StatusCode;
 
 use super::credential::{REFRESH_SLACK_SECS, now_unix};
 use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::lent::LentBearer;
 use crate::custom_pop::CustomPop;
-use crate::errors::Result;
+use crate::errors::{Error, RequestError, Result};
 
 /// grant-only operations on a [`PubkySession`].
 #[derive(Debug)]
@@ -168,5 +169,63 @@ impl<'a> GrantSessionView<'a> {
             .refresh(self.session.client(), Some(&bearer))
             .await?;
         Ok(self.credential.current_bearer().await)
+    }
+}
+
+/// Whether a grant exchange failed because the homeserver no longer accepts
+/// the grant itself: unknown user or grant (404), or a revoked, expired or
+/// invalid grant (401).
+///
+/// Proof rejections, for example `Invalid PoP proof: PoP timestamp out of
+/// range` from a skewed clock or `PoP nonce already used`, are also 401 but
+/// say nothing about the grant, so they return `false`. The messages come from
+/// the homeserver's grant error mapping. The local clock is not consulted.
+#[doc(hidden)]
+#[must_use]
+pub fn grant_rejected(error: &Error) -> bool {
+    let Error::Request(RequestError::Server { status, message }) = error else {
+        return false;
+    };
+    *status == StatusCode::NOT_FOUND
+        || (*status == StatusCode::UNAUTHORIZED
+            && (message.starts_with("Grant has") || message.starts_with("Invalid grant")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(status: StatusCode, message: &str) -> Error {
+        RequestError::Server {
+            status,
+            message: message.into(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn grant_rejected_only_for_a_dead_grant() {
+        for gone in [
+            server(StatusCode::UNAUTHORIZED, "Grant has been revoked"),
+            server(StatusCode::UNAUTHORIZED, "Grant has expired"),
+            server(StatusCode::UNAUTHORIZED, "Invalid grant: grant has expired"),
+            server(StatusCode::NOT_FOUND, "Not Found"),
+        ] {
+            assert!(grant_rejected(&gone), "{gone}");
+        }
+        for kept in [
+            // Clock skew: the proof is rejected, not the grant.
+            server(
+                StatusCode::UNAUTHORIZED,
+                "Invalid PoP proof: PoP timestamp out of range",
+            ),
+            server(StatusCode::UNAUTHORIZED, "PoP nonce already used"),
+            // No body (the error-body limit is 0): ambiguous, keep it.
+            server(StatusCode::UNAUTHORIZED, "Unauthorized"),
+            server(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable"),
+            crate::errors::AuthError::Validation("Browser session was removed".into()).into(),
+        ] {
+            assert!(!grant_rejected(&kept), "{kept}");
+        }
     }
 }

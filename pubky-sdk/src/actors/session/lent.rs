@@ -531,7 +531,7 @@ mod tests {
                         // longer accepts signs the holder out, and the
                         // borrower gets the agent's message without the
                         // HTTP status.
-                        if matches!(self.session.revalidate().await, Ok(None)) {
+                        if crate::grant_rejected(&error) {
                             self.signed_out.store(true, Ordering::SeqCst);
                         }
                         Err(AuthError::Validation(format!("session agent: {error}")).into())

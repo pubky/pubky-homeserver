@@ -511,7 +511,7 @@ async fn lend(
     let lent: LentBearer = match grant.lend_bearer(rejected.as_deref()).await {
         Ok(lent) => lent,
         Err(error) => {
-            if drop_if_gone(&host, token, &served).await {
+            if drop_if_gone(&host, token, &served, &error).await {
                 return Err(AgentFailure::signed_out());
             }
             return Err(error.into());
@@ -528,8 +528,13 @@ async fn lend(
 ///
 /// The `signed-out` status is sent before the caller's error reply, so an
 /// app sees the new state by the time its request fails.
-async fn drop_if_gone(host: &SharedHost, token: u32, served: &Served) -> bool {
-    if !matches!(served.session.revalidate().await, Ok(None)) {
+async fn drop_if_gone(
+    host: &SharedHost,
+    token: u32,
+    served: &Served,
+    error: &pubky::Error,
+) -> bool {
+    if !pubky::grant_rejected(error) {
         return false;
     }
     let Some(grant) = served.session.as_grant() else {

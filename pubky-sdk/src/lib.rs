@@ -114,4 +114,6 @@ pub use actors::auth::grant::shared_session::{
     GrantSessionCoordinator, GrantSessionLease, SharedGrantSession,
 };
 #[doc(hidden)]
+pub use actors::auth::grant::view::grant_rejected;
+#[doc(hidden)]
 pub use actors::{BearerSource, LentBearer};
