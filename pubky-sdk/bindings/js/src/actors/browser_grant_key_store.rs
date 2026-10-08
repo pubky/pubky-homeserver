@@ -260,9 +260,21 @@ export async function __pubkyGrantLoadDelegatedPublicKey(keyId) {
  * bytes are returned to Rust, which finishes compact JWS serialization.
  */
 export async function __pubkyGrantDelegatedSign(keyId, signingInput) {
-  requireBrowserCrypto();
-  const existing = await getRecord(keyId);
-  if (!existing?.privateKey) throw new Error(`Delegated grant key not found: ${keyId}`);
+  let existing;
+  try {
+    requireBrowserCrypto();
+    existing = await getRecord(keyId);
+    if (!existing?.privateKey) throw new Error(`Delegated grant key not found: ${keyId}`);
+  } catch (cause) {
+    // getRecord wraps IndexedDB failures; retain the underlying diagnostic.
+    const detail = cause?.cause ?? cause;
+    const error = contextualError(
+      `Delegated grant signing key unavailable: ${detail?.message ?? String(detail)}`,
+      cause,
+    );
+    error.code = "SigningKeyUnavailable";
+    throw error;
+  }
   const data = new TextEncoder().encode(signingInput);
   return new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, existing.privateKey, data));
 }
@@ -354,9 +366,17 @@ impl BrowserGrantKeyStore {
                     let value = JsFuture::from(js_delegated_sign(key_id, signing_input))
                         .await
                         .map_err(|value| {
-                            pubky::Error::Authentication(pubky::errors::AuthError::Validation(
-                                js_error_message(&value, "Delegated grant signing failed."),
-                            ))
+                            let unavailable = Reflect::get(&value, &JsValue::from_str("code"))
+                                .ok()
+                                .and_then(|code| code.as_string())
+                                .is_some_and(|code| code == "SigningKeyUnavailable");
+                            let message =
+                                js_error_message(&value, "Delegated grant signing failed.");
+                            if unavailable {
+                                pubky::GrantSigningError::KeyUnavailable(message)
+                            } else {
+                                pubky::GrantSigningError::SigningFailed(message)
+                            }
                         })?;
                     Ok(Uint8Array::new(&value).to_vec())
                 }
@@ -367,10 +387,8 @@ impl BrowserGrantKeyStore {
         {
             let _ = key_id;
             delegated_sign_callback(|_| async {
-                Err(pubky::Error::Authentication(
-                    pubky::errors::AuthError::Validation(
-                        "Delegated grant signing is only available in wasm browser builds.".into(),
-                    ),
+                Err(pubky::GrantSigningError::KeyUnavailable(
+                    "Delegated grant signing is only available in wasm browser builds.".into(),
                 ))
             })
         }

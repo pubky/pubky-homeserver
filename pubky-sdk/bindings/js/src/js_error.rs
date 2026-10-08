@@ -224,6 +224,42 @@ impl From<pubky::Error> for PubkyError {
     }
 }
 
+/// Preserve custom proof errors independently of general auth errors.
+impl From<pubky::custom_pop::CustomPopError> for PubkyError {
+    fn from(error: pubky::custom_pop::CustomPopError) -> Self {
+        use pubky::custom_pop::CustomPopError as Error;
+        let reason = match error {
+            Error::GrantExpired => "GrantExpired",
+            Error::InvalidGrant(_) => "InvalidGrant",
+            Error::SigningKeyUnavailable(_) => "SigningKeyUnavailable",
+            Error::SigningFailed(_) => "SigningFailed",
+            Error::SessionState(source) => return Self::from(*source),
+        };
+        Self::new(PubkyErrorName::AuthenticationError, error).with_data(json!({ "reason": reason }))
+    }
+}
+
+/// Preserve verifier failures as machine-readable authentication errors.
+impl From<pubky::custom_pop::CustomPopVerificationError> for PubkyError {
+    fn from(error: pubky::custom_pop::CustomPopVerificationError) -> Self {
+        use pubky::custom_pop::CustomPopVerificationError as Error;
+        let reason = match &error {
+            Error::MalformedCredential => "MalformedCredential",
+            Error::UnsupportedHeader => "UnsupportedHeader",
+            Error::InvalidGrantSignature => "InvalidGrantSignature",
+            Error::InvalidProofSignature => "InvalidProofSignature",
+            Error::InvalidGrant => "InvalidGrant",
+            Error::GrantExpired => "GrantExpired",
+            Error::GrantNotYetValid => "GrantNotYetValid",
+            Error::ProofNotYetValid => "ProofNotYetValid",
+            Error::ProofOutsideGrantValidity => "ProofOutsideGrantValidity",
+            Error::InvalidClock => "InvalidClock",
+            Error::GrantMismatch => "GrantMismatch",
+        };
+        Self::new(PubkyErrorName::AuthenticationError, error).with_data(json!({ "reason": reason }))
+    }
+}
+
 /// Converts a `pubky::BuildError` into a `PubkyError`.
 impl From<BuildError> for PubkyError {
     fn from(err: BuildError) -> Self {
@@ -344,5 +380,55 @@ impl IntoWasmAbi for PubkyError {
 impl WasmDescribe for PubkyError {
     fn describe() {
         JsValue::describe();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pubky::custom_pop::CustomPopError;
+
+    #[test]
+    fn custom_proof_errors_preserve_javascript_names_and_reasons() {
+        for (error, name, reason) in [
+            (
+                CustomPopError::GrantExpired,
+                "AuthenticationError",
+                "GrantExpired",
+            ),
+            (
+                CustomPopError::InvalidGrant("binding mismatch".into()),
+                "AuthenticationError",
+                "InvalidGrant",
+            ),
+            (
+                CustomPopError::SigningKeyUnavailable("deleted".into()),
+                "AuthenticationError",
+                "SigningKeyUnavailable",
+            ),
+            (
+                CustomPopError::SigningFailed("WebCrypto failure".into()),
+                "AuthenticationError",
+                "SigningFailed",
+            ),
+        ] {
+            let expected_message = error.to_string();
+            let actual = PubkyError::from(error);
+            assert_eq!(actual.name.as_str(), name);
+            assert_eq!(actual.message, expected_message);
+            assert_eq!(actual.data, Some(json!({ "reason": reason })));
+        }
+    }
+
+    #[test]
+    fn custom_proof_session_state_preserves_the_original_error_shape() {
+        let source = pubky::errors::AuthError::Validation("Browser session was removed".into());
+        let actual = PubkyError::from(CustomPopError::SessionState(Box::new(source.into())));
+        assert_eq!(actual.name.as_str(), "AuthenticationError");
+        assert_eq!(
+            actual.message,
+            "Authentication error: General authentication error: Browser session was removed"
+        );
+        assert_eq!(actual.data, None);
     }
 }
