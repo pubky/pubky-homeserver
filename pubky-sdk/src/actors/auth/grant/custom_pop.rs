@@ -5,6 +5,7 @@ use super::{
     pop_signer::GrantSigningError,
     shared_session::active_session,
 };
+use crate::PopNonce;
 use crate::custom_pop::{CUSTOM_POP_JWS_TYP, CustomPop, CustomPopClaims};
 
 /// Failures when signing custom data with a grant session.
@@ -87,6 +88,8 @@ impl GrantCredential {
         }
         let proof = CustomPopClaims {
             gid: claims.jti,
+            iat: now,
+            nonce: PopNonce::generate(),
             data,
         };
         let pop = signer.sign_jws(CUSTOM_POP_JWS_TYP, &proof).await?;
@@ -166,6 +169,20 @@ mod tests {
             }
         }
         assert!(credential.current_bearer().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_proof_carries_its_issue_time_and_a_fresh_nonce() {
+        let (credential, _) = credential();
+        let before = now_unix();
+        let first = credential.create_custom_pop(json!(null)).await.unwrap();
+        let second = credential.create_custom_pop(json!(null)).await.unwrap();
+        let after = now_unix();
+        let first = crate::verify_custom_grant_pop(&first, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
+        let second =
+            crate::verify_custom_grant_pop(&second, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
+        assert!((before..=after).contains(&first.iat()));
+        assert_ne!(first.nonce(), second.nonce());
     }
 
     #[tokio::test]

@@ -28,11 +28,12 @@ pub struct GrantSession(pub(crate) pubky::PubkySession);
 #[wasm_bindgen]
 impl GrantSession {
     /// Sign JSON data and return both the custom proof and its root-signed grant.
+    /// Data follows `JSON.stringify` semantics, e.g. `undefined` properties are omitted.
+    /// Each proof carries its signing time (`iat`) and a random `nonce`.
     /// Makes no network requests. Your applications handle freshness and replay protection.
     #[wasm_bindgen(js_name = "createCustomPop")]
     pub async fn create_custom_pop(&self, data: JsonValue) -> JsResult<Ts<CustomPop>> {
-        let data = serde_wasm_bindgen::from_value(data.into())
-            .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))?;
+        let data = json_value_from_js(&data.into())?;
         let proof = self.as_grant()?.create_custom_pop(data).await?;
         crate::js_error::serialize_ts(&CustomPop {
             grant: proof.grant,
@@ -226,4 +227,20 @@ impl GrantSessionInfo {
     pub fn created_at(&self) -> f64 {
         self.0.created_at as f64
     }
+}
+
+/// Convert through `JSON.stringify` so signed data matches what JSON transports carry.
+fn json_value_from_js(value: &JsValue) -> JsResult<serde_json::Value> {
+    let invalid = || {
+        PubkyError::new(
+            PubkyErrorName::InvalidInput,
+            "Data must be JSON-serializable",
+        )
+    };
+    let json = js_sys::JSON::stringify(value)
+        .map_err(|_error| invalid())?
+        .as_string()
+        .ok_or_else(invalid)?;
+    serde_json::from_str(&json)
+        .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))
 }

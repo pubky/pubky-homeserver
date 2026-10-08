@@ -238,6 +238,8 @@ impl From<pubky::custom_pop::CustomPopVerificationError> for PubkyError {
             Error::InvalidGrant => "InvalidGrant",
             Error::GrantExpired => "GrantExpired",
             Error::GrantNotYetValid => "GrantNotYetValid",
+            Error::ProofNotYetValid => "ProofNotYetValid",
+            Error::ProofOutsideGrantValidity => "ProofOutsideGrantValidity",
             Error::InvalidClock => "InvalidClock",
             Error::GrantMismatch => "GrantMismatch",
         };

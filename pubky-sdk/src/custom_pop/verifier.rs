@@ -4,7 +4,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use std::time::Duration;
 
 use super::{CUSTOM_POP_JWS_TYP, CustomPop, CustomPopClaims};
-use crate::{GRANT_JWS_TYP, GrantClaims, PublicKey};
+use crate::{GRANT_JWS_TYP, GrantClaims, PopNonce, PublicKey};
 
 /// Default allowance for a grant issuer's clock being ahead of the verifier.
 /// Grant expiry is never extended.
@@ -15,6 +15,8 @@ pub const DEFAULT_CUSTOM_POP_CLOCK_SKEW: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub struct VerifiedCustomPop {
     grant_claims: GrantClaims,
+    iat: u64,
+    nonce: PopNonce,
     data: serde_json::Value,
 }
 
@@ -29,6 +31,19 @@ impl VerifiedCustomPop {
     #[must_use]
     pub const fn identity(&self) -> &PublicKey {
         &self.grant_claims.iss
+    }
+
+    /// Unix seconds at which the client signed the proof. The verifier only bounds
+    /// it by the clock-skew allowance and the grant's validity; apply your own max age.
+    #[must_use]
+    pub const fn iat(&self) -> u64 {
+        self.iat
+    }
+
+    /// Random per-proof value. Record it until grant expiry to detect replays.
+    #[must_use]
+    pub const fn nonce(&self) -> &PopNonce {
+        &self.nonce
     }
 
     /// Signed application data; the caller must validate its meaning.
@@ -62,6 +77,12 @@ pub enum CustomPopVerificationError {
     /// The grant's issue timestamp exceeds the configured future-clock allowance.
     #[error("Grant is not yet valid")]
     GrantNotYetValid,
+    /// The proof's issue timestamp exceeds the configured future-clock allowance.
+    #[error("Proof is not yet valid")]
+    ProofNotYetValid,
+    /// The proof's issue timestamp lies outside the grant's validity period.
+    #[error("Proof was issued outside the grant validity period")]
+    ProofOutsideGrantValidity,
     /// The proof references a different grant.
     #[error("Proof grant ID does not match the supplied grant")]
     GrantMismatch,
@@ -72,8 +93,10 @@ pub enum CustomPopVerificationError {
 
 /// Verify both signatures, the grant binding, and grant validity without network access.
 ///
-/// Accepts `iat <= now + clock_skew` while always requiring `now < exp` and
-/// `iat < exp`. The allowance is truncated to whole seconds; zero disables it.
+/// Accepts a grant `iat <= now + clock_skew` while always requiring `now < exp` and
+/// `iat < exp`. The proof `iat` must satisfy `iat <= now + clock_skew` and
+/// `grant.iat <= iat + clock_skew` and `iat < grant.exp`; no maximum proof age is
+/// enforced. The allowance is truncated to whole seconds; zero disables it.
 /// Pass [`DEFAULT_CUSTOM_POP_CLOCK_SKEW`] for the recommended 30-second allowance.
 /// It applies only to the grant, not timestamps in application data.
 /// Applications own input size limits, data validation, replay protection, and
@@ -122,8 +145,16 @@ fn verify_at(
     if now.saturating_add(clock_skew_seconds) < grant.iat {
         return Err(Error::GrantNotYetValid);
     }
+    if now.saturating_add(clock_skew_seconds) < proof.iat {
+        return Err(Error::ProofNotYetValid);
+    }
+    if proof.iat.saturating_add(clock_skew_seconds) < grant.iat || proof.iat >= grant.exp {
+        return Err(Error::ProofOutsideGrantValidity);
+    }
     Ok(VerifiedCustomPop {
         grant_claims: grant,
+        iat: proof.iat,
+        nonce: proof.nonce,
         data: proof.data,
     })
 }

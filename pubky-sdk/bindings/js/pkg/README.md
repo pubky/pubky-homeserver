@@ -478,7 +478,7 @@ Use `session.grant.createCustomPop(data)` to sign JSON and return both the proof
 and its root-signed grant. Use `verifyCustomGrantPop(credentials)` to verify the bundle
 offline.
 
-See [Sign and verify custom data](../../../../docs/CUSTOM_POP.md) for Rust and
+See [Sign and verify custom data](https://github.com/pubky/pubky-homeserver/blob/main/docs/CUSTOM_POP.md) for Rust and
 JavaScript examples and the verification contract.
 
 ## Logging

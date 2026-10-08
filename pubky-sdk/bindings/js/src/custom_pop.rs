@@ -27,8 +27,8 @@ extern "C" {
 }
 
 /// Self-contained credentials for offline custom-proof verification.
+/// Unknown fields are ignored so future bundles remain readable by older verifiers.
 #[derive(Serialize, Deserialize, Tsify)]
-#[serde(deny_unknown_fields)]
 pub struct CustomPop {
     /// Original root-signed grant JWS.
     pub grant: String,
@@ -45,6 +45,10 @@ pub struct VerifiedCustomPop {
     /// Root-signed claims; storage capabilities do not grant service permissions.
     #[tsify(type = "VerifiedGrantClaims")]
     pub grant_claims: pubky::GrantClaims,
+    /// Unix seconds at which the client signed the proof. No maximum age is enforced.
+    pub iat: u64,
+    /// Random per-proof value. Record it until grant expiry to detect replays.
+    pub nonce: String,
     /// Signed JSON data, without application-specific validation.
     #[tsify(type = "JsonValue")]
     pub data: serde_json::Value,
@@ -97,6 +101,8 @@ pub fn verify_custom_grant_pop(
     serialize_ts(&VerifiedCustomPop {
         identity: verified.identity().to_z32(),
         grant_claims: verified.grant_claims().clone(),
+        iat: verified.iat(),
+        nonce: verified.nonce().to_string(),
         data: verified.data().clone(),
     })
 }

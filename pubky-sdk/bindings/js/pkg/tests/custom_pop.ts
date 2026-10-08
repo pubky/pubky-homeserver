@@ -15,12 +15,15 @@ test("custom PoP: restored local session signs arbitrary JSON offline", async t 
   globalThis.fetch = async () => { throw new Error("custom proofs must be network-free"); };
   try {
     const values: JsonValue[] = [null, true, 42, "é/生产", [1, "two"], { gid: "application-field", nested: { challenge: "abc" } }];
+    const nonces = new Set<string>();
     for (const data of values) {
       const proof = await restored.grant!.createCustomPop(data);
       t.equal(proof.grant, original.grant, "bundle preserves the original grant");
       const verified = verifyCustomGrantPop(JSON.parse(JSON.stringify(proof)));
       t.deepEqual(verified.data, data, "arbitrary JSON round-trips through verification");
       t.equal(verified.identity, verified.grantClaims.iss, "identity comes from verified grant");
+      t.ok(Math.abs(verified.iat - Date.now() / 1000) < 60, "proof carries its signing time");
+      nonces.add(verified.nonce);
       t.deepEqual(verifyCustomGrantPop(proof).data, data, "stateless verification permits reuse");
       const [header, payload, signature] = proof.pop.split(".");
       const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
@@ -34,11 +37,28 @@ test("custom PoP: restored local session signs arbitrary JSON offline", async t 
         t.deepEqual(error.data, { reason: "InvalidProofSignature" });
       }
     }
+    t.equal(nonces.size, values.length, "each proof gets a fresh nonce");
+
+    const omitted = await restored.grant!.createCustomPop({ dropped: undefined, kept: 1 } as unknown as JsonValue);
+    t.deepEqual(verifyCustomGrantPop(omitted).data, { kept: 1 }, "data follows JSON.stringify semantics");
+    const extended = { ...omitted, future: "field" } as CustomPop;
+    t.deepEqual(verifyCustomGrantPop(extended).data, { kept: 1 }, "unknown bundle fields are ignored");
+    try {
+      await restored.grant!.createCustomPop(undefined as unknown as JsonValue);
+      t.fail("non-JSON data must fail");
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "InvalidInput");
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
 
-  const { iat, exp } = verifyCustomGrantPop(original).grantClaims;
+  const verifiedOriginal = verifyCustomGrantPop(original);
+  const { exp } = verifiedOriginal.grantClaims;
+  // The proof is signed at or after the grant's issue time; skew is measured from the later one.
+  const iat = Math.max(verifiedOriginal.iat, verifiedOriginal.grantClaims.iat);
+  const notYetValid = verifiedOriginal.iat > verifiedOriginal.grantClaims.iat ? "ProofNotYetValid" : "GrantNotYetValid";
   const originalNow = Date.now;
   try {
     Date.now = () => (iat - 30) * 1000;
@@ -51,7 +71,7 @@ test("custom PoP: restored local session signs arbitrary JSON offline", async t 
         t.fail("issue time beyond allowance must fail");
       } catch (error) {
         assertPubkyError(t, error);
-        t.deepEqual(error.data, { reason: "GrantNotYetValid" });
+        t.deepEqual(error.data, { reason: notYetValid });
       }
     }
     Date.now = () => (iat - 60) * 1000;
