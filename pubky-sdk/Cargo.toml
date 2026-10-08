@@ -40,7 +40,8 @@ futures-util.workspace = true
 futures-lite.workspace = true
 lru = { version = "0.18", default-features = false }
 serde.workspace = true
-serde_json.workspace = true
+# Parse floats in signed custom proof data exactly, not within 1 ULP.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 httpdate.workspace = true
 web-time = "1"
 # Cross-target async sync primitives. The `sync` feature is portable to

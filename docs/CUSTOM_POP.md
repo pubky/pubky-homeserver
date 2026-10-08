@@ -45,7 +45,9 @@ const verified = verifyCustomGrantPop(credentials, { clockSkewSeconds: 60 });
 
 `data` can be any JSON value: an object, array, string, number, boolean, or `null`.
 Encode binary data as a string. In JavaScript, data follows `JSON.stringify` semantics,
-so `undefined` properties are omitted. The proof payload is
+so `undefined` properties are omitted. JavaScript numbers are 64-bit floats, so
+integers outside ±2^53 lose precision when JavaScript verifies a proof signed in
+Rust; encode such values as strings. The proof payload is
 `{ "gid": "<grant ID>", "iat": <Unix seconds>, "nonce": "<random ID>", "data": ... }`
 and its JWS type is `pubky-custom-pop-v1`, distinct from homeserver proofs.
 The SDK sets `gid`, `iat`, and `nonce`; application fields remain nested under `data`

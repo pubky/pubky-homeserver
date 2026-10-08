@@ -279,3 +279,20 @@ fn transport_bundle_ignores_unknown_fields() {
     let received: CustomPop = serde_json::from_value(bundle).unwrap();
     assert!(verify_at(&received, NOW, 0).is_ok());
 }
+
+#[test]
+fn returns_signed_floats_exactly() {
+    // serde_json's default float parser is off by one ULP for this value.
+    let value = 1.071_566_039_146_582_6e-75_f64;
+    let (_, client, grant, mut credentials) = fixture();
+    credentials.pop = sign_jws(
+        &client,
+        CUSTOM_POP_JWS_TYP,
+        &claims(&grant.jti, json!({ "value": value })),
+    );
+    let verified = verify_at(&credentials, NOW, 0).unwrap();
+    assert_eq!(
+        verified.data()["value"].as_f64().map(f64::to_bits),
+        Some(value.to_bits())
+    );
+}
