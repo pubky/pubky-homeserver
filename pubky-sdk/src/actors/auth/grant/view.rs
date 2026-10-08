@@ -7,8 +7,9 @@
 
 use pubky_common::auth::{grant_session_responses::GrantSessionInfo, jws::GrantId};
 
-use super::{DelegatedGrantCredentialState, GrantCredential};
+use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
+use crate::custom_pop::CustomPop;
 use crate::errors::Result;
 
 /// grant-only operations on a [`PubkySession`].
@@ -32,6 +33,23 @@ impl PubkySession {
 }
 
 impl<'a> GrantSessionView<'a> {
+    /// Sign arbitrary JSON and return both the custom proof and its root-signed grant.
+    ///
+    /// Makes no network requests and does not require a fresh homeserver bearer.
+    /// Applications define the data's meaning and handle freshness and replay protection.
+    /// Future grant issue times are checked by the verifier using its clock-skew policy.
+    ///
+    /// # Errors
+    /// Returns [`CustomPopError`](crate::custom_pop::CustomPopError) for expired or unusable
+    /// grants, unavailable signing keys, and signing failures. Browser coordination
+    /// and lifecycle failures retain their source in its `SessionState` variant.
+    pub async fn create_custom_pop(
+        &self,
+        data: serde_json::Value,
+    ) -> std::result::Result<CustomPop, CustomPopError> {
+        self.credential.create_custom_pop(data).await
+    }
+
     pub(crate) const fn new(session: &'a PubkySession, credential: &'a GrantCredential) -> Self {
         Self {
             session,

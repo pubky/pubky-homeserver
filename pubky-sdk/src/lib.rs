@@ -15,6 +15,7 @@ mod pubky;
 
 mod actors;
 mod client;
+pub mod custom_pop;
 pub mod errors;
 mod macros;
 
@@ -81,7 +82,7 @@ pub use actors::pkdns::DEFAULT_STALE_AFTER;
 #[doc(inline)]
 pub use actors::{DEFAULT_HTTP_RELAY_INBOX, EncryptedHttpRelayInboxChannel, HttpRelayInboxChannel};
 #[doc(hidden)]
-pub use actors::{DelegatedSignFn, delegated_sign_callback};
+pub use actors::{DelegatedSignFn, GrantSigningError, delegated_sign_callback};
 #[doc(inline)]
 pub use pkarr;
 

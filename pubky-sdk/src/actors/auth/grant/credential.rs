@@ -643,7 +643,10 @@ pub(crate) async fn sign_pop_for_grant(
         nonce: PopNonce::generate(),
         iat: now_unix(),
     };
-    client_signer.sign_jws(POP_JWS_TYP, &claims).await
+    client_signer
+        .sign_jws(POP_JWS_TYP, &claims)
+        .await
+        .map_err(|error| AuthError::Validation(error.to_string()).into())
 }
 
 #[cfg(test)]

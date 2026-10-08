@@ -472,6 +472,15 @@ await signer.pkdns.publishHomeserverForce(/* optional override homeserver*/);
 await signer.pkdns.getHomeserver();
 ```
 
+### Custom proofs
+
+Use `session.grant.createCustomPop(data)` to sign JSON and return both the proof
+and its root-signed grant. Use `verifyCustomGrantPop(credentials)` to verify the bundle
+offline.
+
+See [Sign and verify custom data](https://github.com/pubky/pubky-homeserver/blob/main/docs/CUSTOM_POP.md) for Rust and
+JavaScript examples and the verification contract.
+
 ## Logging
 
 The SDK ships with a WASM logger that bridges Rust `log` output into the browser or Node console. Call `setLogLevel` **once at application start**, before constructing `Pubky` or other SDK actors, to choose how verbose the logs should be.

@@ -1,4 +1,5 @@
 import test from "tape";
+import { verifyCustomGrantPop } from "../index.js";
 
 import {
   AuthFlowKind,
@@ -329,6 +330,111 @@ test("BrowserSessionStore: stores and restores multiple accounts", async (t) => 
 
   t.equal(await restoredAlice.storage.getText(alicePath), "alice", "Alice restored session works");
   t.equal(await restoredBob.storage.getText(bobPath), "bob", "Bob restored session works");
+  t.end();
+});
+
+test("custom PoP: restored delegated grant signs concurrently with an expired bearer", async t => {
+  if (typeof indexedDB === "undefined") {
+    t.comment("browser-only delegated signing test skipped without IndexedDB");
+    t.end();
+    return;
+  }
+  const sdk = Pubky.testnet();
+  const { session } = await grantSessionFor(sdk, "custom-pop-expired-bearer.test", "/pub/app/:rw");
+  const stored = await sdk.browserSessionStore.save(session);
+  t.equal(stored.storageMode, "delegated", "uses a non-extractable browser key");
+  const restored = await sdk.browserSessionStore.restore(stored.id);
+  await expireSharedBearer(stored.id);
+
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    throw new Error("proof generation must be network-free");
+  };
+  try {
+    const data = { audience: " Inbox:é/生产 ", challenge: "application-challenge" };
+    const proofs = await Promise.all(
+      Array.from({ length: 8 }, () => restored.grant!.createCustomPop(data)),
+    );
+    for (const proof of proofs) {
+      t.deepEqual(verifyCustomGrantPop(proof).data, data, "delegated proof verifies with its bundled grant");
+    }
+    t.equal(requests, 0, "expired bearer does not trigger a network request");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await sdk.browserSessionStore.remove(stored.id);
+  }
+  t.end();
+});
+
+test("custom PoP: missing delegated key reports an actionable error", async t => {
+  if (typeof indexedDB === "undefined") {
+    t.comment("browser-only missing-key test skipped without IndexedDB");
+    t.end();
+    return;
+  }
+  const sdk = Pubky.testnet();
+  const { session } = await grantSessionFor(sdk, "custom-pop-missing-key.test", "/pub/app/:rw");
+  const stored = await sdk.browserSessionStore.save(session);
+  t.equal(stored.storageMode, "delegated", "uses a browser-held key");
+  await removeDelegatedKey(stored.id);
+  try {
+    await session.grant!.createCustomPop("inbox");
+    t.fail("missing browser key must fail");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.deepEqual(error.data, { reason: "SigningKeyUnavailable" }, "missing key is distinguishable from signing failure");
+    t.match(error.message, /key not found/i, "diagnostic retains the missing-key cause");
+  } finally {
+    await sdk.browserSessionStore.remove(stored.id);
+  }
+  t.end();
+});
+
+test("custom PoP: inaccessible key storage preserves the IndexedDB diagnostic", async t => {
+  if (typeof indexedDB === "undefined") {
+    t.comment("browser-only key-storage failure test skipped without IndexedDB");
+    t.end();
+    return;
+  }
+  const sdk = Pubky.testnet();
+  const { session } = await grantSessionFor(sdk, "custom-pop-key-storage.test", "/pub/app/:rw");
+  const originalOpen = indexedDB.open;
+  indexedDB.open = () => {
+    throw new DOMException("Test storage access denied", "SecurityError");
+  };
+  try {
+    await session.grant!.createCustomPop("inbox");
+    t.fail("inaccessible browser key storage must fail");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.deepEqual(error.data, { reason: "SigningKeyUnavailable" }, "storage failure identifies an unavailable key");
+    t.match(error.message, /Test storage access denied/, "diagnostic retains the IndexedDB cause");
+  } finally {
+    indexedDB.open = originalOpen;
+  }
+  t.end();
+});
+
+test("custom PoP: removed browser session rejects a stale handle", async t => {
+  if (typeof indexedDB === "undefined") {
+    t.comment("browser-only session removal test skipped without IndexedDB");
+    t.end();
+    return;
+  }
+  const sdk = Pubky.testnet();
+  const { session } = await grantSessionFor(sdk, "custom-pop-removed.test", "/pub/app/:rw");
+  const stored = await sdk.browserSessionStore.save(session);
+  const restored = await sdk.browserSessionStore.restore(stored.id);
+  await sdk.browserSessionStore.remove(stored.id);
+  try {
+    await restored.grant!.createCustomPop("inbox");
+    t.fail("removed browser session must not create proofs");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.match(error.message, /removed/i, "removed session is rejected locally");
+  }
 
   t.end();
 });
@@ -601,6 +707,43 @@ function removeSharedSession(id: string): Promise<void> {
       record.onsuccess = () => {
         delete record.result.sharedSession;
         store.put(record.result);
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+function expireSharedBearer(id: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("pubky-auth", 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("storedSessions", "readwrite");
+      const store = tx.objectStore("storedSessions");
+      const record = store.get(id);
+      record.onsuccess = () => {
+        record.result.sharedSession.response.session.token_expires_at = 0;
+        store.put(record.result);
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+function removeDelegatedKey(id: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("pubky-auth", 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction(["storedSessions", "delegatedGrantKeys"], "readwrite");
+      const record = tx.objectStore("storedSessions").get(id);
+      record.onsuccess = () => {
+        const { keyId } = JSON.parse(record.result.credential);
+        tx.objectStore("delegatedGrantKeys").delete(keyId);
       };
       tx.oncomplete = () => { db.close(); resolve(); };
       tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
