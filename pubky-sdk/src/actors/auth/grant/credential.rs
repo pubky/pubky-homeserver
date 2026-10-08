@@ -76,26 +76,11 @@ pub(crate) struct GrantCredentialState {
 
 impl GrantCredentialState {
     pub(super) fn needs_refresh(&self, now: u64, slack: u64) -> bool {
-        bearer_needs_refresh(
-            self.session.token_expires_at,
-            self.grant_claims.exp,
-            now,
-            slack,
-        )
+        // Refresh cannot extend a valid bearer that already reaches grant expiry.
+        self.session.token_expires_at <= now
+            || (self.session.token_expires_at < self.grant_claims.exp
+                && self.session.token_expires_at.saturating_sub(slack) <= now)
     }
-}
-
-/// Whether a bearer expiring at `token_expires_at` should be replaced now.
-///
-/// Refresh cannot extend a valid bearer that already reaches grant expiry.
-pub(crate) fn bearer_needs_refresh(
-    token_expires_at: u64,
-    grant_expires_at: u64,
-    now: u64,
-    slack: u64,
-) -> bool {
-    token_expires_at <= now
-        || (token_expires_at < grant_expires_at && token_expires_at.saturating_sub(slack) <= now)
 }
 
 /// Cheap-to-clone grant credential. The mutable token state is shared across

@@ -25,10 +25,10 @@ pub use auth::relay::http_relay_inbox_channel::{
     reason = "Re-exporting deprecated public API for backwards compat"
 )]
 pub use auth::relay::http_relay_link_channel::DEFAULT_HTTP_RELAY;
-pub use auth::remote::{RemoteBearerCredential, RemoteBearerProvider};
 pub use event_stream::{Event, EventCursor, EventStreamBuilder, EventType};
 pub use pkdns::Pkdns;
 pub use session::SessionInfo;
 pub use session::core::PubkySession;
+pub use session::lent::{BearerSource, LentBearer};
 pub use signer::PubkySigner;
 pub use storage::core::{PublicStorage, SessionStorage};

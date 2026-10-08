@@ -11,6 +11,8 @@ mod in_flight;
 pub mod pkdns;
 pub mod session;
 pub mod session_agent;
+pub mod session_agent_client;
+pub mod session_agent_protocol;
 pub mod session_store;
 pub mod signer;
 pub mod storage;

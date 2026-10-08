@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>App</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; color: #222; }
+    code { background: #f3f3f3; padding: 1px 4px; }
+    iframe#agent { width: 100%; max-width: 480px; height: 240px; border: 1px solid #ccc; }
+    #log { white-space: pre-wrap; color: #555; margin-top: 12px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>App on <code id="origin"></code></h1>
+  <p id="status">Connecting to the session agent…</p>
+  <!-- Hidden while signed in; shown so the user can sign in inside it. -->
+  <iframe id="agent" src="http://localhost:8083/" hidden></iframe>
+  <p>
+    <button id="write" disabled>Write a note as this app</button>
+    <button id="read" disabled>Read every app's note</button>
+    <button id="signout" disabled>Sign out everywhere</button>
+  </p>
+  <div id="log"></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

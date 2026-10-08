@@ -5,6 +5,7 @@ use pubky_common::crypto::PublicKey;
 use super::SessionInfo;
 
 use super::credential::SessionCredential;
+use super::lent::{BearerSource, LentBearerCredential};
 use crate::errors::Error;
 use crate::{PubkyHttpClient, Result, SessionStorage, cross_log};
 
@@ -68,6 +69,21 @@ impl PubkySession {
         credential: Arc<dyn SessionCredential>,
     ) -> Self {
         Self { client, credential }
+    }
+
+    /// Build a session that borrows bearers from a [`BearerSource`], such as
+    /// a same-site session agent. `homeserver` and `info` come from the
+    /// agent's handshake; the session never sees the grant or its key.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_bearer_source(
+        client: PubkyHttpClient,
+        source: Arc<dyn BearerSource>,
+        homeserver: PublicKey,
+        info: SessionInfo,
+    ) -> Self {
+        let credential = LentBearerCredential::new(source, homeserver, info);
+        Self::from_credential(client, Arc::new(credential))
     }
 
     /// Returns the current session info.

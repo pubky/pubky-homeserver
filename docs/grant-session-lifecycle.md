@@ -37,42 +37,22 @@ shared browser session.
 The SDK dispatches `pubky-session-changed` on `window` after local removal or
 successful signout, and forwards the notification to other tabs with
 BroadcastChannel when available. `event.detail` contains `{ id, action }`:
-`action` is `removed` for one record or `cleared` for all records (`id: null`).
+`action` is `saved` or `removed` for one record, or `cleared` for all records
+(`id: null`).
 Applications decide how to update their UI. Requests always check persisted
 state, so missed notifications cannot restore removed credentials.
 
 ## Sharing one session across first-party origins
 
 Browser storage is per origin, so `pubky.app` and `shop.pubky.app` cannot
-read each other's saved sessions. A *session agent* bridges them without
-copying any restore material: a page on a dedicated origin owns the grant
-through the browser store, and apps embed it in a hidden iframe and ask it for
-the current bearer over `postMessage`.
+read each other's saved sessions. A *session agent* on a dedicated same-site
+origin owns the grant through the browser store and lends its bearer to apps
+over `postMessage`; only the agent exchanges. See [sso-agent.md](sso-agent.md)
+for the protocol, the SDK API and the deployment requirements.
 
-- Agent origin: restore the stored session, then
-  `const agent = pubky.serveSessionAgent(allowedOrigins)` and
-  `agent.setSession(session)`. Only exact origin matches are answered, so a
-  sibling subdomain that is not listed is refused even though it is same-site.
-  Serve a `frame-ancestors` CSP with the same list. The agent stops serving by
-  itself when the browser store removes the session, so a signout in any tab
-  reaches every app.
-- App origins: `const session = await pubky.connectSessionAgent(agentUrl)`.
-  The result is a normal `Session` whose requests carry bearers the agent
-  hands out. It resolves to `undefined` when the agent has no session; send
-  the user to the agent's sign-in page in that case.
-- Only the agent holds the grant and the PoP key and only the agent exchanges.
-  Apps cache the bearer until it nears expiry, re-ask when the homeserver
-  rejects it (one retry for replayable requests), and forward signout to the
-  agent, which revokes the grant for everyone.
-- Browsers do not partition storage for a same-site frame, so every
-  first-party origin sees the agent's one stored session. A cross-site
-  embedder gets an empty, partitioned agent and sees no session; sharing with
-  other sites needs an interaction on first visit and is out of scope here.
-- Every app runs under the agent's single grant: one `client_id`, one
-  capability set, one entry in the user's session list.
-
-See [examples/javascript/9-session-agent](../examples/javascript/9-session-agent)
-for a runnable demo and browser test.
+The store now also dispatches `pubky-session-changed` with `action: "saved"`
+after `browserSessionStore.save`, so agent frames in other tabs pick up a new
+sign-in without a reload.
 
 ## Other applications and generic restore
 

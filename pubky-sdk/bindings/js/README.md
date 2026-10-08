@@ -39,11 +39,12 @@ storage requirements and upgrades from older stored records.
 
 To share one signed-in session across several first-party origins (for
 example `pubky.app` and `shop.pubky.app`), serve it from a dedicated origin
-with `pubky.serveSessionAgent(allowedOrigins)` and connect from each app with
-`pubky.connectSessionAgent(agentUrl)`. See the
-[session agent example](../../../examples/javascript/9-session-agent). Its
-multi-origin regression runs with `npm run test-browser:agent` against the
-same testnet as the multi-window one below.
+with `pubky.listenSessionAgent(options)` and connect from each app with
+`pubky.connectSessionAgent(frame, options)`. See
+[docs/sso-agent.md](../../../docs/sso-agent.md) and the
+[example](../../../examples/javascript/9-sso). Its multi-origin regression
+runs with `npm run test-browser:sso` against the same testnet as the
+multi-window one below.
 
 To run the multi-window regression, start a fresh testnet with
 `cargo run -p pubky-testnet -- --homeserver-config pubky-sdk/bindings/js/pkg/scripts/session-tabs.toml`

@@ -57,8 +57,6 @@ pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuth
 pub use actors::{Event, EventCursor, EventStreamBuilder, EventType};
 #[doc(inline)]
 pub use actors::{PublicStorage, SessionStorage};
-#[doc(inline)]
-pub use actors::{RemoteBearerCredential, RemoteBearerProvider};
 
 // Error and global client
 #[doc(inline)]
@@ -114,3 +112,5 @@ use pubky_testnet as _; // Used in docstring tests.
 pub use actors::auth::grant::shared_session::{
     GrantSessionCoordinator, GrantSessionLease, SharedGrantSession,
 };
+#[doc(hidden)]
+pub use actors::{BearerSource, LentBearer};

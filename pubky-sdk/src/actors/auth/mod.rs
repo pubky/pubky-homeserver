@@ -3,7 +3,6 @@ pub mod deep_links;
 pub mod grant;
 pub mod kind;
 pub mod relay;
-pub mod remote;
 
 pub use kind::AuthFlowKind;
 

@@ -192,6 +192,17 @@ node 8-session-management.mjs --testnet delete <grant-id>
 
 This example defaults to `../sample_recovery.key`, which has an empty passphrase. Listing and deleting sessions creates a temporary root-capability management session, then signs it out.
 
+### 9) SSO across first-party origins
+
+Static pages on four localhost ports: an agent origin that holds one grant session and app origins that borrow it through an iframe with `connectSessionAgent`. Sign in once, and every allowlisted app on the site is signed in.
+
+```bash
+cd 9-sso
+node serve.mjs
+```
+
+See [**9-sso**](./9-sso/README.md) and [docs/sso-agent.md](../../docs/sso-agent.md).
+
 ## Concepts you’ll bump into
 
 - **Pubky** facade: `new Pubky()` (mainnet defaults) or `Pubky.testnet()` (localhost wiring).

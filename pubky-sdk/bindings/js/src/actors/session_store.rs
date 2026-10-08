@@ -122,6 +122,7 @@ export async function __pubkySessionStorePut(record, lease) {
   } catch (error) {
     throw contextualSessionStoreError("Saving Pubky session failed.", error);
   }
+  sessionChanged(record.id, "saved");
 }
 
 /** Load a browser session record by id. */
@@ -289,7 +290,7 @@ extern "C" {
     pub(crate) fn js_shared_remove(token: u32) -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStoreIsAvailable)]
-    fn js_store_is_available() -> js_sys::Promise;
+    pub(crate) fn js_store_is_available() -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStorePut)]
     fn js_store_put(record: JsValue, lease: u32) -> js_sys::Promise;

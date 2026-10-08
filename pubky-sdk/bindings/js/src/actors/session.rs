@@ -76,13 +76,17 @@ impl Session {
     /// @returns {string}
     /// A base64 string to store (e.g. in `localStorage`).
     ///
+    /// @throws {PubkyError} `{ name: "ClientStateError" }` for sessions that are not cookie-backed.
+    ///
     /// @deprecated Use `GrantSession.exportLocalSecret()` instead.
     #[wasm_bindgen]
-    pub fn export(&self) -> String {
-        self.0
-            .as_cookie()
-            .expect("export() is only valid for cookie sessions")
-            .export()
+    pub fn export(&self) -> JsResult<String> {
+        self.0.as_cookie().map(|cookie| cookie.export()).ok_or_else(|| {
+            PubkyError::new(
+                PubkyErrorName::ClientStateError,
+                "export() is only valid for cookie sessions. Use exportLocalSecret() or BrowserSessionStore.",
+            )
+        })
     }
 
     /// Export the local secret material needed to restore this session.

@@ -5,13 +5,12 @@
 //! The view borrows the session, so it cannot outlive it; this is what makes
 //! the grant-only API impossible to misuse against a cookie session.
 
-use pubky_common::auth::{
-    grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
-    jws::GrantId,
-};
+use pubky_common::auth::{grant_session_responses::GrantSessionInfo, jws::GrantId};
 
+use super::credential::{REFRESH_SLACK_SECS, now_unix};
 use super::{DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
+use crate::actors::session::lent::LentBearer;
 use crate::errors::Result;
 
 /// grant-only operations on a [`PubkySession`].
@@ -100,22 +99,40 @@ impl<'a> GrantSessionView<'a> {
         self.credential.coordinate(coordinator, lease).await
     }
 
-    /// Current bearer for a remote client that shares this grant.
+    /// Lend the current bearer to a client on another origin.
     ///
-    /// Auth agents call this to answer another origin's bearer request.
-    /// `rejected` is the bearer the homeserver refused: the grant is exchanged
-    /// when that is still the current bearer or the bearer is near expiry,
-    /// otherwise the newer bearer already held is returned. Shared browser
-    /// sessions do this under the tab lock, so concurrent asks and the
-    /// agent's own requests cannot produce competing exchanges.
+    /// Session agents call this to answer an app's bearer request. The grant
+    /// is exchanged when `rejected` is still the current bearer (the
+    /// homeserver refused it) or when less than the refresh slack remains;
+    /// otherwise the bearer already held is returned. Shared browser sessions
+    /// do this under the tab lock, so concurrent asks and the agent's own
+    /// requests cannot produce competing exchanges. The result carries no
+    /// grant JWS, grant id or key.
     ///
     /// # Errors
     /// Propagates grant exchange errors.
-    pub async fn bearer_for_remote(&self, rejected: Option<&str>) -> Result<GrantSessionResponse> {
+    #[doc(hidden)]
+    pub async fn lend_bearer(&self, rejected: Option<&str>) -> Result<LentBearer> {
+        let near_expiry = {
+            let state = self.credential.state.lock().await;
+            state
+                .needs_refresh(now_unix(), REFRESH_SLACK_SECS)
+                .then(|| state.bearer.clone())
+        };
+        // A near-expiry bearer is treated like a rejected one: exchanged if
+        // it is still current, otherwise the newer shared bearer is adopted.
+        let rejected = rejected.map(str::to_owned).or(near_expiry);
         self.credential
-            .refresh(self.session.client(), rejected)
+            .refresh(self.session.client(), rejected.as_deref())
             .await?;
-        Ok(self.credential.state.lock().await.response())
+        let state = self.credential.state.lock().await;
+        Ok(LentBearer {
+            token: state.bearer.clone(),
+            expires_at: state.session.token_expires_at,
+            pubky: state.session.pubky.clone(),
+            capabilities: state.session.capabilities.clone(),
+            homeserver: state.session.homeserver.clone(),
+        })
     }
 
     /// Test/debug helper: force a refresh of the credential right now.
