@@ -57,6 +57,8 @@ pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuth
 pub use actors::{Event, EventCursor, EventStreamBuilder, EventType};
 #[doc(inline)]
 pub use actors::{PublicStorage, SessionStorage};
+#[doc(inline)]
+pub use actors::{RemoteBearerCredential, RemoteBearerProvider};
 
 // Error and global client
 #[doc(inline)]

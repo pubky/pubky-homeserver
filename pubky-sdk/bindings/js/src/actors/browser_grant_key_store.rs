@@ -10,7 +10,7 @@ use pubky::{PublicKey as NativePublicKey, delegated_sign_callback};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
+use crate::js_error::{JsResult, PubkyError, PubkyErrorName, js_error_message};
 
 #[wasm_bindgen(inline_js = r#"
 const PUBKY_GRANT_KEYS_DB_NAME = "pubky-auth";
@@ -355,7 +355,7 @@ impl BrowserGrantKeyStore {
                         .await
                         .map_err(|value| {
                             pubky::Error::Authentication(pubky::errors::AuthError::Validation(
-                                js_error_message(value),
+                                js_error_message(&value, "Delegated grant signing failed."),
                             ))
                         })?;
                     Ok(Uint8Array::new(&value).to_vec())
@@ -391,16 +391,8 @@ fn public_key_from_js(value: JsValue) -> JsResult<NativePublicKey> {
 }
 
 fn js_error(value: JsValue) -> PubkyError {
-    PubkyError::new(PubkyErrorName::ClientStateError, js_error_message(value))
-}
-
-fn js_error_message(value: JsValue) -> String {
-    value
-        .as_string()
-        .or_else(|| {
-            Reflect::get(&value, &JsValue::from_str("message"))
-                .ok()
-                .and_then(|value| value.as_string())
-        })
-        .unwrap_or_else(|| "Delegated grant key operation failed.".to_string())
+    PubkyError::new(
+        PubkyErrorName::ClientStateError,
+        js_error_message(&value, "Delegated grant key operation failed."),
+    )
 }

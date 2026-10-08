@@ -5,7 +5,10 @@
 //! The view borrows the session, so it cannot outlive it; this is what makes
 //! the grant-only API impossible to misuse against a cookie session.
 
-use pubky_common::auth::{grant_session_responses::GrantSessionInfo, jws::GrantId};
+use pubky_common::auth::{
+    grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
+    jws::GrantId,
+};
 
 use super::{DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
@@ -84,7 +87,7 @@ impl<'a> GrantSessionView<'a> {
     /// Propagates grant exchange errors.
     #[doc(hidden)]
     pub async fn refresh_if_needed(&self) -> Result<()> {
-        self.credential.refresh(self.session.client()).await
+        self.credential.refresh(self.session.client(), None).await
     }
 
     /// Attach browser coordination to this session and its existing clones.
@@ -97,28 +100,38 @@ impl<'a> GrantSessionView<'a> {
         self.credential.coordinate(coordinator, lease).await
     }
 
+    /// Current bearer for a remote client that shares this grant.
+    ///
+    /// Auth agents call this to answer another origin's bearer request.
+    /// `rejected` is the bearer the homeserver refused: the grant is exchanged
+    /// when that is still the current bearer or the bearer is near expiry,
+    /// otherwise the newer bearer already held is returned. Shared browser
+    /// sessions do this under the tab lock, so concurrent asks and the
+    /// agent's own requests cannot produce competing exchanges.
+    ///
+    /// # Errors
+    /// Propagates grant exchange errors.
+    pub async fn bearer_for_remote(&self, rejected: Option<&str>) -> Result<GrantSessionResponse> {
+        self.credential
+            .refresh(self.session.client(), rejected)
+            .await?;
+        Ok(self.credential.state.lock().await.response())
+    }
+
     /// Test/debug helper: force a refresh of the credential right now.
     ///
     /// Used by integration tests to verify that a refresh yields a new
     /// bearer. Returns the new bearer for assertions.
     ///
-    /// Bypasses the proactive-refresh time check so the refresh always runs.
-    ///
     /// # Errors
     /// - Propagates HTTP errors from the refresh exchange.
     #[doc(hidden)]
     pub async fn force_refresh(&self) -> Result<String> {
-        if let Some(coordinator) = self.credential.coordinator().await {
-            let bearer = self.credential.current_bearer().await;
-            self.credential
-                .refresh_shared(self.session.client(), coordinator.as_ref(), Some(&bearer))
-                .await?;
-            return Ok(self.credential.current_bearer().await);
-        }
-        // Bypass the proactive-refresh time check by setting the expiry
-        // to 0; the refresh helper then always hits the network.
-        self.credential.state.lock().await.session.token_expires_at = 0;
-        self.credential.refresh(self.session.client()).await?;
-        Ok(self.credential.state.lock().await.bearer.clone())
+        // Treating the current bearer as rejected bypasses the time check.
+        let bearer = self.credential.current_bearer().await;
+        self.credential
+            .refresh(self.session.client(), Some(&bearer))
+            .await?;
+        Ok(self.credential.current_bearer().await)
     }
 }

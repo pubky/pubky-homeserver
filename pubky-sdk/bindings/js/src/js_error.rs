@@ -31,6 +31,19 @@ where
         .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))
 }
 
+/// Message carried by a thrown JS value: a plain string, an `Error`'s
+/// `message`, or `fallback` when neither is present.
+pub(crate) fn js_error_message(value: &JsValue, fallback: &str) -> String {
+    value
+        .as_string()
+        .or_else(|| {
+            Reflect::get(value, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|message| message.as_string())
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 pub(crate) fn serialize_ts<T>(value: &T) -> JsResult<Ts<T>>
 where
     T: Tsify + Serialize,
