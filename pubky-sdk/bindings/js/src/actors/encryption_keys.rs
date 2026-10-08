@@ -21,8 +21,9 @@ extern "C" {
     fn import_crypto_key(bytes: &js_sys::Uint8Array) -> js_sys::Promise;
 }
 
-/// Verified scoped encryption keys recovered independently of authentication.
-/// This object grants no storage access. Secret bytes are zeroized on free/drop.
+/// Verified scoped encryption keys obtained from a session or offline recovery.
+/// This object owns its secrets independently of the session and grants no storage
+/// access. Call `free()` when finished; secret bytes are zeroized on free/drop.
 #[wasm_bindgen]
 pub struct EncryptionKeys(pub(crate) pubky_common::encryption_keys::ScopedEncryptionKeyBundle);
 
@@ -30,7 +31,8 @@ pub struct EncryptionKeys(pub(crate) pubky_common::encryption_keys::ScopedEncryp
 impl EncryptionKeys {
     /// Recover keys from an exportLocalSecret() token without network access.
     /// Verifies the signed approval and grant binding even if the grant expired
-    /// or was revoked. Legacy tokens without keys return undefined.
+    /// or was revoked. Bare-grant tokens return undefined; signed approvals
+    /// without `e` scopes return an empty bundle.
     #[wasm_bindgen(js_name = "fromLocalSecret")]
     pub fn from_local_secret(token: &str) -> JsResult<Option<EncryptionKeys>> {
         Ok(pubky::GrantCredential::restore_encryption_keys(token)?.map(Self))
@@ -47,21 +49,29 @@ impl EncryptionKeys {
     /// owns the JS byte copy and should clear it after use.
     #[wasm_bindgen(js_name = "deriveForPath")]
     pub fn derive_for_path(&self, path: &str) -> JsResult<js_sys::Uint8Array> {
-        derive_file_key(&self.0, path)
+        let path = pubky_common::StoragePath::new(path).map_err(|_| {
+            PubkyError::new(
+                PubkyErrorName::InvalidInput,
+                "Invalid canonical storage path.",
+            )
+        })?;
+        let secret = self
+            .0
+            .derive_for_path(&path)
+            .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error.to_string()))?;
+        Ok(js_sys::Uint8Array::from(secret.as_slice()))
     }
 
     /// Derive a non-extractable AES-GCM-256 key for WebCrypto encryption/decryption.
     /// Rejects directories and files outside approved scopes. Requires WebCrypto.
     /// Temporary JS key bytes are cleared after import, including on failure.
-    #[wasm_bindgen(js_name = "deriveEncryptionCryptoKey")]
-    pub async fn derive_encryption_crypto_key(&self, path: &str) -> JsResult<web_sys::CryptoKey> {
+    #[wasm_bindgen(js_name = "deriveCryptoKeyForPath")]
+    pub async fn derive_crypto_key_for_path(&self, path: &str) -> JsResult<web_sys::CryptoKey> {
         import_encryption_crypto_key(self.derive_for_path(path)?).await
     }
 }
 
-pub(crate) async fn import_encryption_crypto_key(
-    bytes: js_sys::Uint8Array,
-) -> JsResult<web_sys::CryptoKey> {
+async fn import_encryption_crypto_key(bytes: js_sys::Uint8Array) -> JsResult<web_sys::CryptoKey> {
     JsFuture::from(import_crypto_key(&bytes))
         .await
         .map_err(|error| {
@@ -75,22 +85,6 @@ pub(crate) async fn import_encryption_crypto_key(
                 "WebCrypto returned an invalid CryptoKey.",
             )
         })
-}
-
-pub(crate) fn derive_file_key(
-    keys: &pubky_common::encryption_keys::ScopedEncryptionKeyBundle,
-    path: &str,
-) -> JsResult<js_sys::Uint8Array> {
-    let path = pubky_common::StoragePath::new(path).map_err(|_| {
-        PubkyError::new(
-            PubkyErrorName::InvalidInput,
-            "Invalid canonical storage path.",
-        )
-    })?;
-    let secret = keys
-        .derive_for_path(&path)
-        .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error.to_string()))?;
-    Ok(js_sys::Uint8Array::from(secret.as_slice()))
 }
 
 #[cfg(test)]
@@ -143,12 +137,12 @@ export async function __pubkyTestEncryptionCryptoKey(key, raw) {
         );
         let keys = EncryptionKeys(bundle);
         let path = "/pub/chat/message";
-        let key = keys.derive_encryption_crypto_key(path).await.unwrap();
+        let key = keys.derive_crypto_key_for_path(path).await.unwrap();
         let raw = keys.derive_for_path(path).unwrap();
         JsFuture::from(test_crypto_key(&key, &raw)).await.unwrap();
 
         for path in ["/", "/pub/chat/", "/pub/other/message", "not-a-path"] {
-            let error = keys.derive_encryption_crypto_key(path).await.unwrap_err();
+            let error = keys.derive_crypto_key_for_path(path).await.unwrap_err();
             assert!(matches!(error.name, PubkyErrorName::InvalidInput));
         }
     }

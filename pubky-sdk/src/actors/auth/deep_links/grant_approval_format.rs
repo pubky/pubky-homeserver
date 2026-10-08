@@ -2,23 +2,25 @@ use pubky_common::capabilities::{Action, Capabilities};
 
 /// Relay payload format understood by a grant client.
 ///
-/// V1 delivers keys only for explicit `e` permissions, independently of storage
-/// read/write permissions. Bare-grant requests cannot ask for keys.
+/// Signed approvals (V1) deliver keys only for explicit `e` permissions,
+/// independently of storage read/write permissions. Bare grants cannot ask
+/// for keys.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GrantApprovalFormat {
-    /// A bare grant JWS for clients that predate scoped encryption keys.
+    /// A signed grant JWS without an approval envelope or encryption-key bundle.
     #[default]
-    Grant,
-    /// A signed approval with keys only for approved `e` scopes.
+    BareGrant,
+    /// A V1 signed approval containing a grant and an encryption-key bundle.
+    /// The bundle contains keys only for approved `e` scopes and may be empty.
     ///
     /// Encoded as `approval=v1` in the deep link. Both formats use the
     /// existing shared-secret relay encryption.
-    V1,
+    SignedApprovalV1,
 }
 
 impl GrantApprovalFormat {
     pub(crate) fn validate_capabilities(self, capabilities: &Capabilities) -> crate::Result<()> {
-        if self == Self::Grant
+        if self == Self::BareGrant
             && capabilities
                 .iter()
                 .any(|cap| cap.actions().contains(&Action::EncryptionKeys))

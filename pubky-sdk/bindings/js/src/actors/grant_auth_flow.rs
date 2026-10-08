@@ -31,9 +31,10 @@ pub struct GrantAuthFlowOptions {
     /// Optional return destinations for success, error, and cancellation.
     #[tsify(optional, type = "XCallbackParams | null")]
     pub(crate) x_callback: Option<XCallbackParams>,
-    /// Relay approval format. `v1` delivers keys only for approved `e` scopes
+    /// Relay approval format. `signedApprovalV1` delivers keys for approved `e` scopes
     /// and rejects bare-grant downgrades.
-    /// Omitted or `grant` preserves compatibility with older signers.
+    /// Omitted or `bareGrant` selects a grant without an approval envelope.
+    /// `signedApprovalV1` sets `approval=v1` in the authorization link.
     #[tsify(optional)]
     pub(crate) approval_format: Option<GrantApprovalFormat>,
 }
@@ -42,15 +43,17 @@ pub struct GrantAuthFlowOptions {
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub enum GrantApprovalFormat {
-    Grant,
-    V1,
+    /// A signed grant without an approval envelope or encryption-key bundle.
+    BareGrant,
+    /// A V1 signed approval with a grant and a possibly empty key bundle.
+    SignedApprovalV1,
 }
 
 impl From<GrantApprovalFormat> for pubky::deep_links::GrantApprovalFormat {
     fn from(format: GrantApprovalFormat) -> Self {
         match format {
-            GrantApprovalFormat::Grant => Self::Grant,
-            GrantApprovalFormat::V1 => Self::V1,
+            GrantApprovalFormat::BareGrant => Self::BareGrant,
+            GrantApprovalFormat::SignedApprovalV1 => Self::SignedApprovalV1,
         }
     }
 }

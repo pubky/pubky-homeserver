@@ -72,8 +72,10 @@ println!("Your current homeserver: {:?}", resolved);
 
 ## Scoped encryption keys
 
-Select approval format V1 and request `e` for scopes that need keys. Storage
-permissions `r` and `w` deliver no keys; signers may narrow or decline `e`.
+Select `GrantApprovalFormat::SignedApprovalV1` and request `e` for scopes that
+need keys. Storage permissions `r` and `w` deliver no keys; signers may narrow
+or decline `e`. Ordinary `signer.signin()` grants root storage access (`/:rw`)
+without encryption keys.
 
 Older homeservers reject any grant containing `e`. Upgrade the homeserver before
 approving requests for encryption keys. Apps forward signer-issued grants
@@ -90,7 +92,7 @@ let caps = Capabilities::builder()
 let flow = PubkyGrantAuthFlow::builder(
     &caps, AuthFlowKind::signin(), ClientId::new("backup.example").unwrap(),
 )
-.approval_format(pubky::deep_links::GrantApprovalFormat::V1)
+.approval_format(pubky::deep_links::GrantApprovalFormat::SignedApprovalV1)
 .start()?;
 # Ok(()) }
 ```
@@ -104,7 +106,9 @@ Keys remain usable after expiry or revocation; renames require re-encryption.
 See the [key guide](../docs/scoped-encryption-keys.md) for compatibility,
 [approval delivery](../docs/scoped-encryption-keys.md#approval-delivery), and
 [relay limits](../docs/scoped-encryption-keys.md#relay-limits). Approvals above
-the relay's default 2 KiB limit fail with HTTP 413.
+the relay's default 2 KiB limit are rejected with HTTP 413 when the signer
+posts them. The requesting app receives no approval and keeps waiting until
+its flow expires or is cancelled.
 
 ## Offline encryption-key recovery
 
@@ -126,8 +130,8 @@ if let Some(keys) = GrantCredential::restore_encryption_keys(saved_token)? {
 For delegated credentials, call
 `GrantCredential::restore_delegated_encryption_keys(&state, signed_approval)`
 with the saved confidential approval as `Some(&str)`. No signing callback is
-needed. Both methods verify the signature, grant binding, and scopes; records
-without keys return `None`.
+needed. Both methods verify the signature, grant binding, and scopes. Bare-grant
+records return `None`; signed approvals without `e` scopes return an empty bundle.
 
 Recovery creates no session. Authentication still requires an unexpired grant
 and a successful homeserver exchange.
@@ -517,7 +521,11 @@ let restored = pubky.restore_session(&secret).await?;
 The deprecated `.sess` helpers are cookie-only; [`write_secret_file`](PubkySession::write_secret_file)
 panics on grant sessions.
 
-> Security: the exported secret is unencrypted and contains the grant and its private proof-of-possession key. Anyone holding it can act within the granted capabilities until the grant expires or is revoked. Store it securely and never log it.
+> Security: the exported secret is unencrypted and contains the grant, its
+> private proof-of-possession key, and any retained signed approval with scoped
+> encryption keys. Anyone holding it can authenticate within the granted
+> capabilities until the grant expires or is revoked. Delivered encryption keys
+> remain usable afterwards. Store it securely and never log it.
 
 ## Example code
 

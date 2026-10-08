@@ -30,7 +30,7 @@ function openAuthDatabase(): Promise<IDBDatabase> {
 }
 
 for (const delegated of [false, true]) {
-  test(`BrowserSessionStore: Grant to V1 compatibility (${delegated ? "delegated" : "local"})`, async t => {
+  test(`BrowserSessionStore: bare grant and signed approval compatibility (${delegated ? "delegated" : "local"})`, async t => {
     if (typeof indexedDB === "undefined") {
       t.comment("browser-only compatibility test");
       t.end();
@@ -47,7 +47,7 @@ for (const delegated of [false, true]) {
         await createSignupToken(),
       );
       const clientId = "session-store-compatibility.test";
-      async function authorize(approvalFormat: "grant" | "v1", capabilities: Capabilities = "/pub/compat/:rw") {
+      async function authorize(approvalFormat: "bareGrant" | "signedApprovalV1", capabilities: Capabilities = "/pub/compat/:rw") {
         const flow = await sdk.startGrantAuthFlow(capabilities, AuthFlowKind.signin(), {
           clientId, approvalFormat, relay: "http://localhost:15412/inbox",
         });
@@ -55,45 +55,55 @@ for (const delegated of [false, true]) {
         return flow.awaitApproval();
       }
 
-      const grant = await authorize("grant");
+      const grant = await authorize("bareGrant");
       const original = await store.save(grant);
       const restoredGrant = await store.restore(original.id);
-      t.equal(restoredGrant.grant!.encryptionScopes, undefined, "Grant restores without keys");
+      t.equal(restoredGrant.grant!.encryptionKeys, undefined, "Grant restores without keys");
       await store.save(restoredGrant);
-      t.deepEqual(await legacySessionIds(), [original.id], "re-saving Grant keeps it visible to old SDKs");
+      t.deepEqual(await legacySessionIds(), [original.id], "re-saving a bare grant keeps it visible to old SDKs");
 
-      // V1 without e still retains a signed approval; old readers must not see
-      // that V2 row even though the bundle is empty.
-      const empty = await store.save(await authorize("v1"));
-      t.deepEqual((await store.restore(empty.id)).grant!.encryptionScopes, [], "V1 without e restores an empty bundle");
-      t.deepEqual(await legacySessionIds(), [original.id], "empty V1 approval does not break old session listing");
+      // Signed approvals without e still use storage V2, even with an empty
+      // bundle. Old readers must not see these records.
+      const empty = await store.save(await authorize("signedApprovalV1"));
+      const emptyKeys = (await store.restore(empty.id)).grant!.encryptionKeys!;
+      t.deepEqual(emptyKeys.scopes, [], "signed approval without e restores an empty bundle");
+      emptyKeys.free();
+      t.deepEqual(await legacySessionIds(), [original.id], "empty signed approval does not break old session listing");
 
-      const keyed = await authorize("v1", "/pub/compat/:rwe");
-      const saved = await store.save(keyed);
-      const key = keyed.grant!.deriveEncryptionKey("/pub/compat/value");
+      const sessionWithKeys = await authorize("signedApprovalV1", "/pub/compat/:rwe");
+      const saved = await store.save(sessionWithKeys);
+      const keys = sessionWithKeys.grant!.encryptionKeys!;
+      const key = keys.deriveForPath("/pub/compat/value");
       t.notEqual(saved.id, original.id, "reauthorization creates a separate record");
       t.equal(saved.clientId, original.clientId, "both grants belong to the same client");
       t.equal(saved.storageMode, delegated ? "delegated" : "localSecret", "requested storage mode is exercised");
-      t.deepEqual(await legacySessionIds(), [original.id], "key-bearing V1 does not break old session listing");
+      t.deepEqual(await legacySessionIds(), [original.id], "signed approval with keys does not break old session listing");
       const restored = await store.restore(saved.id);
-      t.deepEqual(restored.grant!.deriveEncryptionKey("/pub/compat/value"), key, "V1 keys survive restore");
+      const restoredKeys = restored.grant!.encryptionKeys!;
+      t.deepEqual(restoredKeys.deriveForPath("/pub/compat/value"), key, "scoped keys survive restore");
       await restored.storage.putText("/pub/compat/value", "shared storage");
-      t.equal(await restoredGrant.storage.getText("/pub/compat/value"), "shared storage", "original Grant still reads storage");
+      t.equal(await restoredGrant.storage.getText("/pub/compat/value"), "shared storage", "original bare grant still reads storage");
       await store.save(restoredGrant);
-      t.deepEqual((await store.restore(saved.id)).grant!.deriveEncryptionKey("/pub/compat/value"), key, "re-saving original Grant preserves V1 keys");
+      const resavedKeys = (await store.restore(saved.id)).grant!.encryptionKeys!;
+      t.deepEqual(resavedKeys.deriveForPath("/pub/compat/value"), key, "re-saving original bare grant preserves scoped keys");
 
       t.equal((await store.list()).length, 3, "current SDK lists both formats");
-      t.deepEqual((await store.restoreEncryptionKeys(saved.id))!.deriveForPath("/pub/compat/value"), key, "V1 preserves offline recovery");
+      const offlineKeys = (await store.restoreEncryptionKeys(saved.id))!;
+      t.deepEqual(offlineKeys.deriveForPath("/pub/compat/value"), key, "signed approval preserves offline recovery");
 
-      const later = await store.save(await authorize("grant"));
-      t.deepEqual(await legacySessionIds(), [original.id, later.id].sort(), "Grant requested after V1 stays compatible");
-      t.equal((await store.restore(original.id)).grant!.encryptionScopes, undefined, "original Grant never gains keys");
+      const later = await store.save(await authorize("bareGrant"));
+      t.deepEqual(await legacySessionIds(), [original.id, later.id].sort(), "bare grant requested after signed approval stays compatible");
+      t.equal((await store.restore(original.id)).grant!.encryptionKeys, undefined, "original bare grant never gains keys");
       await store.remove(saved.id);
-      t.equal((await store.list()).length, 3, "removing V1 preserves the other grants");
+      t.equal((await store.list()).length, 3, "removing a signed approval preserves the other grants");
       await store.clear();
       t.deepEqual(await store.list(), [], "clear removes both record formats");
       t.deepEqual(await legacySessionIds(), [], "legacy list is also cleared");
       key.fill(0);
+      keys.free();
+      restoredKeys.free();
+      resavedKeys.free();
+      offlineKeys.free();
     } finally {
       Reflect.deleteProperty(globalThis, "__pubkyGrantCanUseDelegationOverride");
       await store.clearAll();

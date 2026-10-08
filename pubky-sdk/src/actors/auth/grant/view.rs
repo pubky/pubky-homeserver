@@ -62,18 +62,20 @@ impl<'a> GrantSessionView<'a> {
 
     /// Verified scoped keys retained by this session's grant credential.
     ///
-    /// V2 secret exports preserve this bundle; legacy V1 exports have no keys.
+    /// Bare grants return `None`; signed approvals return `Some`, with an empty
+    /// bundle when no `e` scopes were approved. Storage V2 secret exports preserve
+    /// the bundle; storage V1 exports have no keys.
     pub fn encryption_keys(&self) -> Option<&ScopedEncryptionKeyBundle> {
         self.credential.encryption_keys()
     }
 
     /// Borrow the confidential signed approval for secure browser persistence.
     ///
-    /// Contains scoped secret keys. Store separately from non-secret delegated
+    /// May contain scoped secret keys. Store separately from non-secret delegated
     /// metadata. Use [`GrantCredential::restore_delegated_encryption_keys`] for
     /// offline key recovery, or import the credential to authenticate again.
-    pub fn secret_approval(&self) -> Option<&str> {
-        self.credential.secret_approval()
+    pub fn signed_approval(&self) -> Option<&str> {
+        self.credential.signed_approval()
     }
 
     /// Returns the full grant session metadata from the homeserver.
@@ -90,8 +92,9 @@ impl<'a> GrantSessionView<'a> {
     /// Export the portable local secret material needed to restore this session.
     ///
     /// The returned token contains the grant JWS and `PoP` client secret. Treat
-    /// it as a bearer-equivalent secret. Key-bearing sessions include their
-    /// signed approval; those keys remain sensitive after expiry or revocation.
+    /// it as a bearer-equivalent secret. Sessions with signed approvals include
+    /// those approvals, even with an empty key bundle. Delivered keys remain
+    /// sensitive after expiry or revocation.
     /// Delegated/browser-held `PoP` keys return `None` because the private key
     /// is intentionally not extractable.
     pub async fn export_local_secret(&self) -> Option<String> {
@@ -100,7 +103,7 @@ impl<'a> GrantSessionView<'a> {
 
     /// Export non-secret delegated restore metadata, if this session uses a
     /// browser-held delegated `PoP` key.
-    /// Scoped keys are omitted; persist [`Self::secret_approval`] separately
+    /// Scoped keys are omitted; persist [`Self::signed_approval`] separately
     /// to restore keys alongside authentication.
     pub async fn export_delegated_restore_state(&self) -> Option<DelegatedGrantCredentialState> {
         self.credential.export_delegated_restore_state().await

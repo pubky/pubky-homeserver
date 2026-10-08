@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 #[pubky_testnet::test]
-async fn v1_storage_and_encryption_permissions_are_independent() {
+async fn signed_approval_storage_and_encryption_permissions_are_independent() {
     let testnet = build_full_testnet().await;
     let pubky = testnet.sdk().unwrap();
     let signer = pubky.signer(Keypair::random());
@@ -44,7 +44,7 @@ async fn v1_storage_and_encryption_permissions_are_independent() {
             AuthFlowKind::signin(),
             ClientId::new("backup.test").unwrap(),
         )
-        .approval_format(GrantApprovalFormat::V1)
+        .approval_format(GrantApprovalFormat::SignedApprovalV1)
         .relay(testnet.http_relay().local_link_url())
         .client(pubky.client().clone())
         .start()
@@ -160,7 +160,7 @@ async fn auth_flow() {
         AuthFlowKind::signin(),
         ClientId::new("test.app").unwrap(),
     )
-    .approval_format(GrantApprovalFormat::V1)
+    .approval_format(GrantApprovalFormat::SignedApprovalV1)
     .relay(http_relay_url)
     .client(pubky.client().clone())
     .client_keypair(app_kp.clone())
@@ -247,6 +247,16 @@ async fn auth_flow() {
         .derive_for_path(&StoragePath::root())
         .is_err());
     assert_scoped_write_access(&restored).await;
+    restored.signout().await.unwrap();
+    let recovered = pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&exported)
+        .unwrap()
+        .unwrap();
+    assert_eq!(*recovered.derive_for_path(&path).unwrap(), *derived);
+    let error = pubky.restore_session(&exported).await.unwrap_err();
+    assert!(
+        matches!(error, Error::Request(RequestError::Server { status, .. })
+        if status == StatusCode::UNAUTHORIZED)
+    );
 }
 
 #[tokio::test]
@@ -277,7 +287,7 @@ async fn multi_scope_key_approvals_use_the_default_relay_limit() {
             AuthFlowKind::signin(),
             ClientId::new("shop.example").unwrap(),
         )
-        .approval_format(GrantApprovalFormat::V1)
+        .approval_format(GrantApprovalFormat::SignedApprovalV1)
         .relay(relay)
         .client(pubky.client().clone())
         .start()
@@ -328,7 +338,7 @@ async fn delegated_restore_keeps_keys_separate_from_public_metadata() {
         AuthFlowKind::signin(),
         ClientId::new("delegated-keys.test").unwrap(),
     )
-    .approval_format(GrantApprovalFormat::V1)
+    .approval_format(GrantApprovalFormat::SignedApprovalV1)
     .delegated_client_signer("test-key".into(), client_pk, sign.clone())
     .client(pubky.client().clone())
     .relay(testnet.http_relay().local_link_url())
@@ -351,7 +361,7 @@ async fn delegated_restore_keeps_keys_separate_from_public_metadata() {
         .unwrap()
         .derive_for_path(&path)
         .unwrap();
-    let approval = credential.secret_approval().unwrap();
+    let approval = credential.signed_approval().unwrap();
     let restored = pubky_testnet::pubky::GrantCredential::import_delegated_state_with_approval(
         state.clone(),
         pubky.client(),
@@ -391,7 +401,7 @@ async fn grant_secret_restore_mints_fresh_bearer() {
     let signer = pubky.signer(identity.clone());
     signer.signup(&server.public_key(), None).await.unwrap();
     let session = signer
-        .signin(ClientId::new("restore-bearer.test").unwrap())
+        .signin_blocking(ClientId::new("restore-bearer.test").unwrap())
         .await
         .unwrap();
 
@@ -405,21 +415,21 @@ async fn grant_secret_restore_mints_fresh_bearer() {
 
     let restored = pubky.restore_session(&secret_token).await.unwrap();
     let restored_bearer = restored.as_grant().unwrap().current_bearer().await;
-    assert!(secret_token.starts_with("pubky-grant-credential-v2:"));
-    let path = StoragePath::new("/pub/restore-bearer.test/hello").unwrap();
-    let expected = ScopedEncryptionKeyBundle::from_identity_secret(&identity.secret(), [&path]);
+    assert!(secret_token.starts_with("pubky-grant-credential-v1:"));
     for candidate in [&session, &restored] {
+        let grant = candidate.as_grant().unwrap();
+        assert!(grant.encryption_keys().is_none());
+        assert!(grant.signed_approval().is_none());
         assert_eq!(
-            *candidate
-                .as_grant()
-                .unwrap()
-                .encryption_keys()
-                .unwrap()
-                .derive_for_path(&path)
-                .unwrap(),
-            *expected.derive_for_path(&path).unwrap(),
+            candidate.info().capabilities(),
+            &[pubky_testnet::pubky::Capability::root()]
         );
     }
+    assert!(
+        pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&secret_token)
+            .unwrap()
+            .is_none()
+    );
 
     assert_ne!(
         original_bearer, restored_bearer,
@@ -456,19 +466,18 @@ async fn grant_secret_restore_rejects_revoked_grant() {
         .export_local_secret()
         .await
         .unwrap();
-    let path = StoragePath::new("/pub/revoked-restore.test/file").unwrap();
-    let expected = session
-        .as_grant()
-        .unwrap()
-        .encryption_keys()
-        .unwrap()
-        .derive_for_path(&path)
-        .unwrap();
+    assert!(secret_token.starts_with("pubky-grant-credential-v1:"));
+    assert!(session.as_grant().unwrap().encryption_keys().is_none());
+    assert_eq!(
+        session.info().capabilities(),
+        &[pubky_testnet::pubky::Capability::root()]
+    );
     session.signout().await.unwrap();
-    let recovered = pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&secret_token)
-        .unwrap()
-        .unwrap();
-    assert_eq!(*recovered.derive_for_path(&path).unwrap(), *expected);
+    assert!(
+        pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&secret_token)
+            .unwrap()
+            .is_none()
+    );
 
     let err = pubky.restore_session(&secret_token).await.unwrap_err();
 
@@ -983,7 +992,7 @@ async fn auth_flow_signup_creates_scoped_session() {
         AuthFlowKind::signup(server.public_key(), None),
         ClientId::new("signup.app").unwrap(),
     )
-    .approval_format(GrantApprovalFormat::V1)
+    .approval_format(GrantApprovalFormat::SignedApprovalV1)
     .relay(http_relay_url)
     .client(pubky.client().clone())
     .start()

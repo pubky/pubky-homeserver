@@ -156,7 +156,7 @@ test("BrowserSessionStore: saves and restores a completed grant session", async 
   t.equal(stored.clientId, clientId, "stored record keeps client id");
   t.deepEqual(
     stored.capabilities,
-    "/:rwe".split(","),
+    "/:rw".split(","),
     "stored record keeps capabilities",
   );
   t.ok(stored.grantId.length > 0, "stored record includes grant id");
@@ -266,7 +266,7 @@ test("BrowserSessionStore: facade local fallback is stored with local secret mat
   t.end();
 });
 
-test("BrowserSessionStore: V1 approvals preserve scoped keys after restore", async (t) => {
+test("BrowserSessionStore: signed approvals preserve scoped keys after restore", async (t) => {
   if (typeof indexedDB === "undefined") {
     t.comment("browser persistence test skipped without IndexedDB");
     t.end();
@@ -281,21 +281,25 @@ test("BrowserSessionStore: V1 approvals preserve scoped keys after restore", asy
     setBrowserDelegationOverride(delegated);
     try {
       const { session, signer } = await grantSessionFor(
-        sdk, `keys-${delegated}.test`, "/pub/chat/:rwe", "v1",
+        sdk, `keys-${delegated}.test`, "/pub/chat/:rwe", "signedApprovalV1",
       );
       const grant = session.grant!;
-      const key = grant.deriveEncryptionKey("/pub/chat/message");
+      const keys = grant.encryptionKeys!;
+      const key = keys.deriveForPath("/pub/chat/message");
       t.equal(key.length, 32, "derivation returns 32 bytes");
-      t.deepEqual(grant.encryptionScopes, ["/pub/chat/"], "only approved scopes are exposed");
+      t.deepEqual(keys.scopes, ["/pub/chat/"], "only approved scopes are exposed");
       const stored = await store.save(session);
       t.equal(stored.storageMode, delegated ? "delegated" : "localSecret", "expected persistence mode");
       grant.free();
       session.free();
+      t.deepEqual(keys.deriveForPath("/pub/chat/message"), key, "keys outlive freed session and grant handles");
+      keys.free();
       const restored = await Pubky.testnet().browserSessionStore.restore(stored.id);
-      t.deepEqual(restored.grant!.deriveEncryptionKey("/pub/chat/message"), key, "restore retains keys");
-      t.deepEqual(restored.grant!.encryptionScopes, ["/pub/chat/"], "restore retains scopes");
+      const restoredKeys = restored.grant!.encryptionKeys!;
+      t.deepEqual(restoredKeys.deriveForPath("/pub/chat/message"), key, "restore retains keys");
+      t.deepEqual(restoredKeys.scopes, ["/pub/chat/"], "restore retains scopes");
       try {
-        restored.grant!.deriveEncryptionKey("/pub/other/message");
+        restoredKeys.deriveForPath("/pub/other/message");
         t.fail("undelegated paths must be rejected");
       } catch (error) {
         assertPubkyError(t, error);
@@ -320,6 +324,7 @@ test("BrowserSessionStore: V1 approvals preserve scoped keys after restore", asy
         globalThis.fetch = savedFetch;
       }
       key.fill(0);
+      restoredKeys.free();
       await store.remove(stored.id);
     } finally {
       setBrowserDelegationOverride(undefined);
@@ -616,7 +621,7 @@ test("BrowserSessionStore: delegated browser pending flow can be resumed", async
   const flow = await sdk.startGrantAuthFlow(
     capabilities,
     AuthFlowKind.signin(),
-    { clientId: "session-store-delegated-resume.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "v1" },
+    { clientId: "session-store-delegated-resume.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "signedApprovalV1" },
   );
   const savedUrl = flow.authorizationUrl;
   const delegatedState = flow.saveDelegated();
@@ -643,7 +648,9 @@ test("BrowserSessionStore: delegated browser pending flow can be resumed", async
     capabilities.split(","),
     "resumed pending session keeps capabilities",
   );
-  t.deepEqual(session.grant!.encryptionScopes, ["/pub/pubky.app/"], "resumed delegated V1 flow decrypts scoped keys");
+  const keys = session.grant!.encryptionKeys!;
+  t.deepEqual(keys.scopes, ["/pub/pubky.app/"], "resumed delegated signed approval flow decrypts scoped keys");
+  keys.free();
   t.pass("delegated browser pending flow was resumed");
 
   t.end();
@@ -710,7 +717,7 @@ async function grantSessionFor(
   sdk: Pubky,
   clientId: string,
   capabilities: Capabilities,
-  approvalFormat: "grant" | "v1" = "grant",
+  approvalFormat: "bareGrant" | "signedApprovalV1" = "bareGrant",
 ): Promise<{ publicKey: string; session: Session; signer: Signer }> {
   const signer = sdk.signer(Keypair.random());
   const publicKey = signer.publicKey.z32();
@@ -767,9 +774,9 @@ function removeSharedSession(id: string): Promise<void> {
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
-      const tx = db.transaction("delegatedGrantKeys", "readwrite");
-      const store = tx.objectStore("delegatedGrantKeys");
-      const record = store.get(`session:${id}`);
+      const tx = db.transaction("storedSessions", "readwrite");
+      const store = tx.objectStore("storedSessions");
+      const record = store.get(id);
       record.onsuccess = () => {
         delete record.result.sharedSession;
         store.put(record.result);

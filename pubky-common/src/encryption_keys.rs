@@ -49,8 +49,9 @@
 
 use std::fmt;
 
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -257,8 +258,11 @@ fn validate_overlap_consistency(keys: &[KeyEntry]) -> Result<(), ConflictingKeys
 
 /// Derive the root seed with HKDF-SHA-256 extract and one expand block.
 fn derive_root_secret(identity_secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
-    let root_prk = hmac_sha256(&[0; 32], &[identity_secret]);
-    hmac_sha256(&root_prk, &[ROOT_INFO, b"\x01"])
+    let hkdf = Hkdf::<Sha256>::new(None, identity_secret);
+    let mut secret = Zeroizing::new([0; 32]);
+    hkdf.expand(ROOT_INFO, secret.as_mut_slice())
+        .expect("32-byte output is within the HKDF limit");
+    secret
 }
 
 /// Derive bytes after the constructor, lookup, or overlap check proves coverage.
@@ -281,42 +285,14 @@ fn derive_path(
             Some(directory) => (directory, DIRECTORY_INFO),
             None => (segment, FILE_INFO),
         };
-        // The parent is already a PRK. RFC 5869 expand needs only block 0x01.
-        secret = hmac_sha256(&secret, &[info, b"\0", segment.as_bytes(), b"\x01"]);
+        // The parent is already a PRK; do not run HKDF extract again.
+        let hkdf = Hkdf::<Sha256>::from_prk(secret.as_slice()).expect("SHA-256 PRKs are 32 bytes");
+        let mut child = Zeroizing::new([0; 32]);
+        hkdf.expand_multi_info(&[info, b"\0", segment.as_bytes()], child.as_mut_slice())
+            .expect("32-byte output is within the HKDF limit");
+        secret = child;
     }
     secret
-}
-
-/// HMAC-SHA-256 for the fixed 32-byte keys used by this derivation format.
-///
-/// Keep padding and digest outputs in wiping buffers. SHA-256's `zeroize`
-/// feature wipes its hash state and block buffer on drop. The generic HKDF/HMAC
-/// helpers do not wipe all these temporaries, so use the RFC 2104 construction
-/// directly. Keys are shorter than SHA-256's 64-byte block; no key hashing or
-/// variable-length HKDF output is needed.
-fn hmac_sha256(key: &[u8; 32], parts: &[&[u8]]) -> Zeroizing<[u8; 32]> {
-    let mut pad = Zeroizing::new([0x36; 64]);
-    for (byte, key_byte) in pad.iter_mut().zip(key) {
-        *byte ^= key_byte;
-    }
-    let mut inner = Sha256::new();
-    inner.update(pad.as_slice());
-    for part in parts {
-        inner.update(part);
-    }
-    let mut inner_digest = Zeroizing::new([0; 32]);
-    inner.finalize_into((&mut *inner_digest).into());
-
-    // Convert K xor ipad into K xor opad without another key-bearing buffer.
-    for byte in pad.iter_mut() {
-        *byte ^= 0x36 ^ 0x5c;
-    }
-    let mut outer = Sha256::new();
-    outer.update(pad.as_slice());
-    outer.update(inner_digest.as_slice());
-    let mut output = Zeroizing::new([0; 32]);
-    outer.finalize_into((&mut *output).into());
-    output
 }
 
 #[cfg(test)]

@@ -379,16 +379,16 @@ impl PubkyGrantAuthFlow {
         client_signer: GrantPopSigner,
     ) -> Result<GrantCredential> {
         let GrantApproval {
-            jws,
+            grant_jws,
             claims,
-            approval_keys,
+            verified_approval,
         } = approval;
 
         let pkdns = Pkdns::with_client(client.clone());
         let hs_pk = pkdns.require_homeserver_of(&claims.iss).await?;
         let mut credential =
-            credential_from_grant_exchange(client, jws, claims, client_signer, hs_pk).await?;
-        credential.retain_approval_keys(approval_keys);
+            credential_from_grant_exchange(client, grant_jws, claims, client_signer, hs_pk).await?;
+        credential.retain_verified_approval(verified_approval);
         Ok(credential)
     }
 
@@ -451,13 +451,10 @@ fn decode_and_validate_approval(
         )
         .into());
     }
-    if approval.claims.exp <= super::credential::now_unix()
-        || approval.claims.iat >= approval.claims.exp
-    {
-        return Err(AuthError::Validation(
-            "approved grant has expired or invalid timestamps".into(),
-        )
-        .into());
+    // The homeserver decides expiry using its own clock during exchange.
+    // A different app clock must not reject a grant the homeserver can accept.
+    if approval.claims.iat >= approval.claims.exp {
+        return Err(AuthError::Validation("approved grant has invalid timestamps".into()).into());
     }
     // Signers may narrow scopes or actions. Each approved action must be
     // covered by a requested capability, including split read/write requests.
@@ -514,7 +511,7 @@ mod tests {
         SigninGrantParams {
             client_id: ClientId::new("test.app").unwrap(),
             client_pk: Keypair::from_secret(&[8; 32]).public_key(),
-            capabilities: if format == GrantApprovalFormat::V1 {
+            capabilities: if format == GrantApprovalFormat::SignedApprovalV1 {
                 "/pub/app/:rwe".parse().unwrap()
             } else {
                 "/pub/app/:rw".parse().unwrap()
@@ -526,7 +523,7 @@ mod tests {
     }
 
     fn claims(user: &Keypair) -> GrantClaims {
-        let request = request(GrantApprovalFormat::V1);
+        let request = request(GrantApprovalFormat::SignedApprovalV1);
         GrantClaims {
             iss: user.public_key(),
             client_id: request.client_id,
@@ -557,8 +554,8 @@ mod tests {
         decode_and_validate_approval(message, &request)
     }
 
-    fn decode_v1(message: &AuthRelayMessage) -> Result<GrantApproval> {
-        decode_request(message, &request(GrantApprovalFormat::V1))
+    fn decode_signed_approval(message: &AuthRelayMessage) -> Result<GrantApproval> {
+        decode_request(message, &request(GrantApprovalFormat::SignedApprovalV1))
     }
 
     #[test]
@@ -570,20 +567,20 @@ mod tests {
                 .sign(&user, pubky_common::auth::jws::GRANT_JWS_TYP)
                 .into_bytes(),
         );
-        assert!(decode_v1(&bare).is_err());
+        assert!(decode_signed_approval(&bare).is_err());
     }
 
     #[test]
     fn signer_may_decline_keys_but_cannot_expand_key_scopes() {
         let user = Keypair::random();
-        let mut request = request(GrantApprovalFormat::V1);
+        let mut request = request(GrantApprovalFormat::SignedApprovalV1);
         request.capabilities = "/:rw,/pub/chat/:e".parse().unwrap();
         let mut claims = claims(&user);
         claims.caps = "/:rw".parse::<Capabilities>().unwrap().to_vec();
         let approval = decode_request(&message(&user, &claims), &request).unwrap();
         assert_eq!(
             approval
-                .approval_keys
+                .verified_approval
                 .unwrap()
                 .encryption_keys
                 .scopes()
@@ -629,13 +626,6 @@ mod tests {
                 },
             ),
             (
-                "expired grant",
-                GrantClaims {
-                    exp: now_unix(),
-                    ..original.clone()
-                },
-            ),
-            (
                 "invalid timestamps",
                 GrantClaims {
                     iat: original.exp,
@@ -643,11 +633,45 @@ mod tests {
                 },
             ),
         ] {
-            assert!(decode_v1(&message(&user, &changed)).is_err(), "{label}");
+            assert!(
+                decode_signed_approval(&message(&user, &changed)).is_err(),
+                "{label}"
+            );
         }
-        let mut read_only = request(GrantApprovalFormat::V1);
+        let mut read_only = request(GrantApprovalFormat::SignedApprovalV1);
         read_only.capabilities = Capabilities::from(vec![Capability::read("/pub/app/").unwrap()]);
         decode_request(&message(&user, &original), &read_only).unwrap_err();
+    }
+
+    #[test]
+    fn approval_expiry_is_left_to_the_homeserver() {
+        let user = Keypair::random();
+        let now = now_unix();
+        for format in [
+            GrantApprovalFormat::BareGrant,
+            GrantApprovalFormat::SignedApprovalV1,
+        ] {
+            let request = request(format);
+            // Both past and future timestamps can disagree with the app clock.
+            for (iat, exp) in [(1, 2), (now + 3600, now + 7200)] {
+                let claims = GrantClaims {
+                    caps: request.capabilities.to_vec(),
+                    iat,
+                    exp,
+                    ..claims(&user)
+                };
+                let message = match format {
+                    GrantApprovalFormat::BareGrant => AuthRelayMessage::new(
+                        claims
+                            .sign(&user, pubky_common::auth::jws::GRANT_JWS_TYP)
+                            .into_bytes(),
+                    ),
+                    GrantApprovalFormat::SignedApprovalV1 => message(&user, &claims),
+                };
+                let approval = decode_request(&message, &request).unwrap();
+                assert_eq!(approval.claims, claims);
+            }
+        }
     }
 
     #[test]
@@ -658,10 +682,10 @@ mod tests {
                 caps,
                 ..claims(&user)
             };
-            let approval = decode_v1(&message(&user, &claims)).unwrap();
+            let approval = decode_signed_approval(&message(&user, &claims)).unwrap();
             assert_eq!(
                 approval
-                    .approval_keys
+                    .verified_approval
                     .unwrap()
                     .encryption_keys
                     .scopes()
@@ -669,7 +693,7 @@ mod tests {
                 claims.caps.len()
             );
         }
-        let mut split_request = request(GrantApprovalFormat::V1);
+        let mut split_request = request(GrantApprovalFormat::SignedApprovalV1);
         split_request.capabilities = Capabilities::from(vec![
             Capability::read("/pub/app/").unwrap(),
             Capability::write("/pub/app/").unwrap(),
@@ -679,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_requires_explicit_v1_for_key_requests() {
+    async fn builder_requires_signed_approval_for_key_requests() {
         let caps = "/pub/app/:rwe".parse().unwrap();
         let rejected = PubkyGrantAuthFlow::builder(
             &caps,
@@ -698,7 +722,7 @@ mod tests {
             AuthFlowKind::signup(Keypair::random().public_key(), None),
         ] {
             let flow = PubkyGrantAuthFlow::builder(&caps, kind, ClientId::new("test.app").unwrap())
-                .approval_format(GrantApprovalFormat::V1)
+                .approval_format(GrantApprovalFormat::SignedApprovalV1)
                 .relay(relay.local_url().join("inbox").unwrap())
                 .start()
                 .unwrap();
@@ -709,6 +733,62 @@ mod tests {
                     .any(|(name, value)| name == "approval" && value == "v1")
             );
             assert!(!url.query_pairs().any(|(name, _)| name == "ek"));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_approvals_return_413_to_the_signer_without_reaching_the_app() {
+        use crate::{Error, Pubky, errors::RequestError};
+        use std::time::Duration;
+
+        let relay = http_relay::HttpRelay::builder()
+            .http_port(0)
+            .run()
+            .await
+            .unwrap();
+        let client = PubkyHttpClient::new().unwrap();
+        let signer = Pubky::with_client(client.clone()).signer(Keypair::random());
+        let mut capabilities = Capabilities::builder();
+        for index in 0..32 {
+            capabilities = capabilities
+                .encryption_keys(format!("/pub/app{index}.example/"))
+                .unwrap();
+        }
+        let capabilities = capabilities.finish();
+
+        for relay_path in ["link", "inbox"] {
+            let flow = PubkyGrantAuthFlow::builder(
+                &capabilities,
+                AuthFlowKind::signin(),
+                ClientId::new("oversized.test").unwrap(),
+            )
+            .approval_format(GrantApprovalFormat::SignedApprovalV1)
+            .relay(relay.local_url().join(relay_path).unwrap())
+            .client(client.clone())
+            .start()
+            .unwrap();
+
+            let error = tokio::time::timeout(
+                Duration::from_secs(5),
+                signer.approve_auth(flow.authorization_url()),
+            )
+            .await
+            .expect("the signer POST must finish within the test deadline")
+            .unwrap_err();
+            assert!(
+                matches!(error, Error::Request(RequestError::Server { status, .. })
+                    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE),
+                "{relay_path}: {error}"
+            );
+
+            // Observe relay delivery directly, before any homeserver exchange.
+            // Bound the wait because the rejected POST never delivers a message.
+            let received = tokio::time::timeout(
+                Duration::from_millis(250),
+                flow.relay_listener.await_message(),
+            )
+            .await;
+            assert!(received.is_err(), "{relay_path}: the app must keep waiting");
         }
     }
 
@@ -731,7 +811,7 @@ mod tests {
             AuthFlowKind::signin(),
             client_id,
         )
-        .approval_format(GrantApprovalFormat::V1)
+        .approval_format(GrantApprovalFormat::SignedApprovalV1)
         .relay(relay_url)
         .client(client.clone())
         .x_callback(x_callback.clone())
@@ -909,7 +989,7 @@ mod tests {
                 secret: [7; 32],
                 client_id: ClientId::new("mismatch.test").unwrap(),
                 client_pk: expected_client.public_key(),
-                approval_format: GrantApprovalFormat::Grant,
+                approval_format: GrantApprovalFormat::BareGrant,
             },
         )
         .to_string();

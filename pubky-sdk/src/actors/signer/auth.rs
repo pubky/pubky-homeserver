@@ -204,14 +204,15 @@ impl PubkySigner {
             iat: now,
             exp: now + DEFAULT_GRANT_LIFETIME_SECS,
         };
-        let payload = match format {
-            GrantApprovalFormat::Grant => Zeroizing::new(pubky_common::auth::jws::sign_jws(
-                &self.keypair,
-                GRANT_JWS_TYP,
-                &claims,
-            )),
-            GrantApprovalFormat::V1 => GrantApprovalEnvelope::sign(&self.keypair, &claims),
-        };
+        let payload =
+            match format {
+                GrantApprovalFormat::BareGrant => Zeroizing::new(
+                    pubky_common::auth::jws::sign_jws(&self.keypair, GRANT_JWS_TYP, &claims),
+                ),
+                GrantApprovalFormat::SignedApprovalV1 => {
+                    GrantApprovalEnvelope::sign(&self.keypair, &claims)
+                }
+            };
         Ok(encrypt(payload.as_bytes(), client_secret))
     }
 
@@ -259,8 +260,11 @@ mod tests {
             .unwrap()
             .finish();
         let secret = [42; 32];
-        for approval_format in [GrantApprovalFormat::Grant, GrantApprovalFormat::V1] {
-            let caps = if approval_format == GrantApprovalFormat::V1 {
+        for approval_format in [
+            GrantApprovalFormat::BareGrant,
+            GrantApprovalFormat::SignedApprovalV1,
+        ] {
+            let caps = if approval_format == GrantApprovalFormat::SignedApprovalV1 {
                 Capabilities::builder()
                     .extend(caps.to_vec())
                     .encryption_keys("/priv/chat/")
@@ -319,8 +323,8 @@ mod tests {
                                     return false;
                                 };
                                 let claims = match approval_format {
-                                    GrantApprovalFormat::Grant => GrantClaims::decode(text),
-                                    GrantApprovalFormat::V1 => {
+                                    GrantApprovalFormat::BareGrant => GrantClaims::decode(text),
+                                    GrantApprovalFormat::SignedApprovalV1 => {
                                         let Ok(envelope) =
                                             decode_jws_payload::<GrantApprovalEnvelope>(text)
                                         else {
@@ -363,7 +367,7 @@ mod tests {
                 ClientId::new("test.app").unwrap(),
                 Keypair::random().public_key(),
                 &[42; 32],
-                GrantApprovalFormat::Grant,
+                GrantApprovalFormat::BareGrant,
             )
             .unwrap();
         let plaintext = decrypt(&payload, &[42; 32]).unwrap();

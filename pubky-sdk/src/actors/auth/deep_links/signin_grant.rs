@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(deep_link.params().client_pk.z32(), client_pk.z32());
         assert_eq!(
             deep_link.params().approval_format,
-            GrantApprovalFormat::Grant
+            GrantApprovalFormat::BareGrant
         );
     }
 
@@ -104,7 +104,7 @@ mod tests {
                 secret: [42; 32],
                 client_id,
                 client_pk,
-                approval_format: GrantApprovalFormat::Grant,
+                approval_format: GrantApprovalFormat::BareGrant,
             },
         );
         let parsed_again = SigninGrantDeepLink::parse_url(&deep_link.to_url()).unwrap();
@@ -124,13 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn versioned_approval_format_round_trips() {
+    fn signed_approval_format_round_trips() {
         let client_pk = Keypair::random().public_key();
         let link: SigninGrantDeepLink = format!(
             "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}&approval=v1",
             client_pk.z32()
         ).parse().unwrap();
-        assert_eq!(link.params().approval_format, GrantApprovalFormat::V1);
+        assert_eq!(
+            link.params().approval_format,
+            GrantApprovalFormat::SignedApprovalV1
+        );
         assert_eq!(
             SigninGrantDeepLink::parse_url(&link.to_url()).unwrap(),
             link

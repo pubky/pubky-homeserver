@@ -45,19 +45,25 @@ Postgres on port 5432 with the repository's `test_user` / `test_pass` credential
 
 ## Scoped encryption keys
 
-Set `approvalFormat: "v1"` and request `e` scopes. Storage permissions `r` and
-`w` alone deliver no keys. Signers may decline `e`; check
-`session.grant.encryptionScopes` before deriving keys.
+Set `approvalFormat: "signedApprovalV1"` and request `e` scopes. Storage
+permissions `r` and `w` alone deliver no keys. Signers may decline `e`; check
+`keys.scopes` before deriving keys.
 
 ```javascript
 const flow = await sdk.startGrantAuthFlow(
   "/pub/chat/:rwe",
   AuthFlowKind.signin(),
-  { clientId: "chat.example", approvalFormat: "v1" },
+  { clientId: "chat.example", approvalFormat: "signedApprovalV1" },
 );
 // Have the signer approve flow.authorizationUrl.
 const session = await flow.awaitApproval();
-const key = await session.grant.deriveEncryptionCryptoKey("/pub/chat/message");
+const keys = session.grant.encryptionKeys;
+let key;
+try {
+  key = await keys.deriveCryptoKeyForPath("/pub/chat/message");
+} finally {
+  keys.free(); // The WebCrypto key remains usable.
+}
 const iv = crypto.getRandomValues(new Uint8Array(12));
 const ciphertext = await crypto.subtle.encrypt(
   { name: "AES-GCM", iv }, key, new TextEncoder().encode("Hello"),
@@ -65,15 +71,32 @@ const ciphertext = await crypto.subtle.encrypt(
 // Store the IV with the ciphertext; use a fresh IV for each encryption.
 ```
 
-`deriveEncryptionCryptoKey(path)` returns a non-extractable AES-GCM-256 key for
+`deriveCryptoKeyForPath(path)` returns a non-extractable AES-GCM-256 key for
 encryption and decryption. It requires WebCrypto (a secure browser context) and
 clears temporary JS key bytes after import. Directory paths and paths outside
 the delivered scopes are rejected.
 
-For raw bytes, use `session.grant.deriveEncryptionKey(path)` or
-`keys.deriveForPath(path)` and clear the returned `Uint8Array` after use.
-Local signer sessions include keys; bare-grant sessions do not. See the
-[key guide](../../../docs/scoped-encryption-keys.md) for compatibility,
+Sessions and offline recovery return the same `EncryptionKeys` object:
+
+| API | Returns |
+| --- | --- |
+| `keys.scopes` | Approved scope paths as `string[]` |
+| `keys.deriveForPath(path)` | Raw key bytes as `Uint8Array` |
+| `await keys.deriveCryptoKeyForPath(path)` | Non-extractable AES-GCM `CryptoKey` |
+
+Both derivation methods require a canonical file path and reject directories
+and files outside the approved scopes. Raw bytes belong to the caller; clear
+the returned `Uint8Array` after use.
+
+Each `session.grant.encryptionKeys` access creates an owned copy. Keep the
+object for repeated use and call `keys.free()` when finished. It stays usable
+after freeing or signing out the session; freeing the keys does not affect
+the session. Bare grants return `undefined`; signed approvals without `e`
+scopes return an object with empty scopes.
+
+Ordinary `signer.signin()` grants root storage access (`/:rw`) without
+encryption keys. Request `e` explicitly through a signed approval flow to
+receive keys. See the [key guide](../../../docs/scoped-encryption-keys.md) for compatibility,
 encryption limitations, and relay limits.
 
 ### Persistence and offline recovery
@@ -91,15 +114,19 @@ const keys = EncryptionKeys.fromLocalSecret(savedToken);
 // For IndexedDB records instead:
 // const keys = await sdk.browserSessionStore.restoreEncryptionKeys(storedId);
 if (keys) {
-  const contentKey = await keys.deriveEncryptionCryptoKey("/pub/chat/message");
-  // Use contentKey with crypto.subtle.decrypt() and downloaded ciphertext.
-  keys.free();
+  try {
+    const contentKey = await keys.deriveCryptoKeyForPath("/pub/chat/message");
+    // Use contentKey with crypto.subtle.decrypt() and downloaded ciphertext.
+  } finally {
+    keys.free();
+  }
 }
 ```
 
 Both paths verify the approval signature and grant binding without network
-access. Records without keys return `undefined`. Recovery creates no session;
-authenticated restoration still checks expiry and the homeserver.
+access. Bare-grant records return `undefined`; signed approvals without `e`
+scopes return an empty bundle. Recovery creates no session; authenticated
+restoration still checks expiry and the homeserver.
 
 [persistence]:
   ../../../docs/scoped-encryption-keys.md#persistence-and-offline-recovery

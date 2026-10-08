@@ -19,7 +19,6 @@ use crate::{
     Capabilities, Capability, PubkySession, PublicKey, Result,
     actors::auth::{
         cookie::CookieCredential,
-        grant::approval::GrantApproval,
         grant::constants::DEFAULT_GRANT_LIFETIME_SECS,
         grant::grant_exchange::{credential_from_grant_exchange, signup_account_from_grant},
         grant::pop_signer::GrantPopSigner,
@@ -80,7 +79,8 @@ impl PubkySigner {
     /// Locally signs a root-capability grant and exchanges it for a
     /// session at the homeserver. If the user's PKDNS record is stale,
     /// it is republished **in the background** so this call returns fast.
-    /// The session retains root-scoped encryption keys derived from this identity.
+    /// Grants root storage access (`/:rw`) without encryption keys. To receive
+    /// keys, explicitly request `e` through [`crate::PubkyGrantAuthFlow`].
     ///
     /// # Arguments
     /// - `client_id` — a [`ClientId`] identifying your application (e.g.
@@ -133,13 +133,9 @@ impl PubkySigner {
         let user = self.keypair.public_key();
         let homeserver = self.pkdns().require_homeserver_of(&user).await?;
         let client_keypair = Keypair::random();
-        let GrantApproval {
-            jws: grant_jws,
-            claims: grant_claims,
-            approval_keys,
-        } = self.session_grant(client_id, &client_keypair)?;
+        let (grant_jws, grant_claims) = self.session_grant(client_id, &client_keypair);
         let client_signer = GrantPopSigner::local(client_keypair);
-        let mut credential = credential_from_grant_exchange(
+        let credential = credential_from_grant_exchange(
             &self.client,
             grant_jws,
             grant_claims,
@@ -147,7 +143,6 @@ impl PubkySigner {
             homeserver,
         )
         .await?;
-        credential.retain_approval_keys(approval_keys);
         let session = PubkySession::from_grant_credential(self.client.clone(), credential);
         cross_log!(
             info,
@@ -279,12 +274,7 @@ impl PubkySigner {
     fn signup_grant(&self, client_keypair: &Keypair) -> Result<(String, GrantClaims)> {
         let client_id = ClientId::new(SIGNUP_CLIENT_ID)
             .map_err(|e| crate::errors::AuthError::Validation(e.to_string()))?;
-        let claims = self.grant_claims(
-            client_id,
-            client_keypair,
-            SIGNUP_GRANT_LIFETIME_SECS,
-            vec![Capability::root()],
-        );
+        let claims = self.grant_claims(client_id, client_keypair, SIGNUP_GRANT_LIFETIME_SECS);
         let jws = claims.sign(&self.keypair, GRANT_JWS_TYP);
         Ok((jws, claims))
     }
@@ -293,21 +283,10 @@ impl PubkySigner {
         &self,
         client_id: ClientId,
         client_keypair: &Keypair,
-    ) -> Result<GrantApproval> {
-        // The identity holder explicitly grants its local session root content keys.
-        let capabilities = Capabilities::builder()
-            .cap(Capability::root())
-            .encryption_keys("/")
-            .expect("root is a canonical capability scope")
-            .finish()
-            .into();
-        let claims = self.grant_claims(
-            client_id,
-            client_keypair,
-            DEFAULT_GRANT_LIFETIME_SECS,
-            capabilities,
-        );
-        GrantApproval::sign(&self.keypair, claims)
+    ) -> (String, GrantClaims) {
+        let claims = self.grant_claims(client_id, client_keypair, DEFAULT_GRANT_LIFETIME_SECS);
+        let jws = claims.sign(&self.keypair, GRANT_JWS_TYP);
+        (jws, claims)
     }
 
     fn grant_claims(
@@ -315,7 +294,6 @@ impl PubkySigner {
         client_id: ClientId,
         client_keypair: &Keypair,
         lifetime_secs: u64,
-        capabilities: Vec<Capability>,
     ) -> GrantClaims {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
@@ -323,7 +301,10 @@ impl PubkySigner {
         GrantClaims {
             iss: self.keypair.public_key(),
             client_id,
-            caps: capabilities,
+            caps: Capabilities::builder()
+                .cap(Capability::root())
+                .finish()
+                .to_vec(),
             cnf: client_keypair.public_key(),
             jti: GrantId::generate(),
             iat: now,

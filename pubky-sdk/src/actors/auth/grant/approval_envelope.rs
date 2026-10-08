@@ -3,7 +3,7 @@
 use pubky_common::{
     auth::{
         grant::GrantClaims,
-        jws::{GRANT_JWS_TYP, sign_jws, sign_secret_jws},
+        jws::{GRANT_JWS_TYP, sign_jws},
     },
     capabilities::{Action, Capability},
     crypto::Keypair,
@@ -32,14 +32,6 @@ pub(crate) struct GrantApprovalEnvelope {
 impl GrantApprovalEnvelope {
     /// Sign a grant with keys only for scopes explicitly approved with `e`.
     pub(crate) fn sign(keypair: &Keypair, claims: &GrantClaims) -> Zeroizing<String> {
-        Self::sign_and_retain(keypair, claims).1
-    }
-
-    /// Retain the constructed grant and keys without decoding the signed payload.
-    pub(crate) fn sign_and_retain(
-        keypair: &Keypair,
-        claims: &GrantClaims,
-    ) -> (Self, Zeroizing<String>) {
         let identity_secret = Zeroizing::new(keypair.secret());
         let envelope = Self {
             version: ApprovalVersion::V1,
@@ -53,8 +45,7 @@ impl GrantApprovalEnvelope {
                     .map(Capability::scope),
             ),
         };
-        let signed = sign_secret_jws(keypair, APPROVAL_JWS_TYP, &envelope);
-        (envelope, signed)
+        Zeroizing::new(sign_jws(keypair, APPROVAL_JWS_TYP, &envelope))
     }
 }
 

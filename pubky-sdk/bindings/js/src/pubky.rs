@@ -135,7 +135,7 @@ impl Pubky {
     ///
     /// Grant auth uses a user-signed grant JWS plus Proof-of-Possession and
     /// returns a self-refreshing session.
-    /// Select `approvalFormat: "v1"` and include `e` on scopes that need content
+    /// Select `approvalFormat: "signedApprovalV1"` and include `e` on scopes that need content
     /// keys. Storage `r` and `w` alone do not deliver encryption keys.
     ///
     /// @param {string} capabilities Comma-separated caps, e.g. `"/pub/app/:rw,/pub/foo/file:r"`.

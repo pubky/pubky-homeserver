@@ -25,60 +25,6 @@ fn hex_bytes(hex: &str) -> [u8; 32] {
 }
 
 #[test]
-fn sha256_state_is_zeroized_on_drop() {
-    fn require_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-    require_zeroize_on_drop::<Sha256>();
-}
-
-#[test]
-fn fixed_key_hmac_matches_independent_vectors_across_block_boundaries() {
-    // Python hmac.new(bytes(range(32)), bytes(range(length)), hashlib.sha256).
-    let key = std::array::from_fn(|index| index as u8);
-    for (length, expected) in [
-        (
-            0,
-            "d38b42096d80f45f826b44a9d5607de72496a415d3f4a1a8c88e3bb9da8dc1cb",
-        ),
-        (
-            55,
-            "b478e4cbd63871759702a8a4c9828359869bc9e20d3df429ecd08f5a5d3d9340",
-        ),
-        (
-            56,
-            "e5d1f65e9e9359d05c577b6890044f08c9a1f7969b683f1237ef07db70e5f862",
-        ),
-        (
-            63,
-            "d37a8dadb82b15310342ceabf0de8cb8991ee9bd55dd3e4813e952081cb24bf1",
-        ),
-        (
-            64,
-            "173206781c3b828a0dc2a716fe0ddb5e6e56ec171170952ff6b3f4de44fa18d7",
-        ),
-        (
-            65,
-            "22084084cc171f63dfdd6ca4bcb0c29be8d4ff1cc6b1d0d21e10e2a2a0bfce9c",
-        ),
-        (
-            128,
-            "554663090ed09c789d3a10680ac0602215088ef4482d9149dd86d5e5d6dbf52a",
-        ),
-        (
-            255,
-            "f23ad1189be88a6d1461925e346baf8550737d2bf7c2103e6696502c343b685b",
-        ),
-    ] {
-        let message: Vec<u8> = (0..length).map(|index| index as u8).collect();
-        let (first, second) = message.split_at(length / 2);
-        assert_eq!(*hmac_sha256(&key, &[&message]), hex_bytes(expected));
-        assert_eq!(
-            *hmac_sha256(&key, &[first, &[], second]),
-            hex_bytes(expected)
-        );
-    }
-}
-
-#[test]
 fn v1_keys_match_shared_vectors() {
     #[derive(Deserialize)]
     struct Fixture {

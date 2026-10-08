@@ -48,16 +48,16 @@ impl GrantAuthFlowBuilder {
             client_id,
             client_signer: GrantPopSigner::local(Keypair::random()),
             x_callback: XCallbackParams::default(),
-            approval_format: GrantApprovalFormat::Grant,
+            approval_format: GrantApprovalFormat::BareGrant,
         }
     }
 
     /// Choose the relay approval format. Defaults to a bare grant for
     /// compatibility with signers that predate scoped encryption keys.
     ///
-    /// Select [`GrantApprovalFormat::V1`] and request `e` scopes for content keys.
+    /// Select [`GrantApprovalFormat::SignedApprovalV1`] and request `e` scopes for content keys.
     /// This requests `approval=v1` and rejects bare-grant responses without
-    /// retrying in legacy mode. It requires a signer that supports V1.
+    /// retrying with a bare grant. The signer must support signed approval V1.
     #[must_use]
     pub fn approval_format(mut self, format: GrantApprovalFormat) -> Self {
         self.approval_format = format;

@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{
     auth::grant::GrantClaims,
     capabilities::Action,
-    crypto::{Keypair, PublicKey, Signature},
+    crypto::{PublicKey, Signature},
     encryption_keys::ScopedEncryptionKeyBundle,
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -12,30 +12,31 @@ use super::approval_envelope::{APPROVAL_JWS_TYP, GrantApprovalEnvelope};
 use crate::actors::auth::{deep_links::GrantApprovalFormat, relay::AuthRelayMessage};
 use crate::errors::{AuthError, Result};
 
-/// Approved grant with optional keys and signed recovery material.
-/// Received envelopes authenticate the grant and keys together; local approvals
-/// retain them at construction. The homeserver verifies the grant itself.
+/// Decoded grant with an optional verified signed approval and its key bundle.
+/// Signed approval envelopes authenticate the grant and keys together.
+/// The homeserver verifies the inner grant itself.
 #[derive(Debug)]
 pub(crate) struct GrantApproval {
-    pub(crate) jws: String,
+    pub(crate) grant_jws: String,
     pub(crate) claims: GrantClaims,
-    pub(crate) approval_keys: Option<VerifiedApprovalKeys>,
+    pub(crate) verified_approval: Option<VerifiedApproval>,
 }
 
-/// Scoped keys and the signed approval that authenticates them for recovery.
-/// Retained from local signing or after imported signature and scope validation.
+/// Verified signed approval and its possibly empty scoped-key bundle.
+/// Retained after signature and scope validation.
 #[derive(Debug)]
-pub(crate) struct VerifiedApprovalKeys {
+pub(crate) struct VerifiedApproval {
     pub(crate) encryption_keys: ScopedEncryptionKeyBundle,
-    pub(crate) signed_approval: SecretApproval,
+    pub(crate) signed_approval: SignedApproval,
 }
 
-/// Confidential compact approval retained for authenticated key restoration.
-/// Storage and debug handling protect secrets; construction does not verify it.
+/// Confidential signed approval retained for authenticated key restoration.
+/// May contain raw scoped secrets. Debug output is redacted and the owned
+/// buffer is wiped on drop. Construction does not verify its signature.
 #[derive(Clone)]
-pub(crate) struct SecretApproval(Zeroizing<String>);
+pub(crate) struct SignedApproval(Zeroizing<String>);
 
-impl SecretApproval {
+impl SignedApproval {
     pub(crate) fn new(text: &str) -> Self {
         Self(Zeroizing::new(text.to_owned()))
     }
@@ -45,34 +46,15 @@ impl SecretApproval {
     }
 }
 
-impl std::fmt::Debug for SecretApproval {
+impl std::fmt::Debug for SignedApproval {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("<redacted>")
     }
 }
 
 impl GrantApproval {
-    /// Construct a local approval, retaining its keys and signed recovery material.
-    /// The signer must match the grant issuer; scopes come directly from its `e` actions.
-    pub(crate) fn sign(keypair: &Keypair, claims: GrantClaims) -> Result<Self> {
-        if claims.iss != keypair.public_key() {
-            return Err(invalid_approval(
-                "approval signer does not match the grant issuer",
-            ));
-        }
-        let (envelope, signed) = GrantApprovalEnvelope::sign_and_retain(keypair, &claims);
-        Ok(Self {
-            jws: envelope.grant,
-            claims,
-            approval_keys: Some(VerifiedApprovalKeys {
-                encryption_keys: envelope.encryption_keys,
-                signed_approval: SecretApproval(signed),
-            }),
-        })
-    }
-
     /// Decode the selected format, verifying the outer signature and key scopes
-    /// for V1 envelopes. Inner grant verification belongs to the homeserver;
+    /// for signed approval V1 envelopes. Inner grant verification belongs to the homeserver;
     /// the auth flow checks client binding and requested permissions.
     pub(crate) fn decode(message: &AuthRelayMessage, format: GrantApprovalFormat) -> Result<Self> {
         let text = std::str::from_utf8(message.as_bytes())
@@ -84,28 +66,36 @@ impl GrantApproval {
     /// Performs the same signature and scope checks as relay decoding.
     pub(crate) fn decode_text(text: &str, format: GrantApprovalFormat) -> Result<Self> {
         match format {
-            GrantApprovalFormat::Grant => {
+            GrantApprovalFormat::BareGrant => {
                 let claims = GrantClaims::decode(text).map_err(|err| {
                     AuthError::Validation(format!("invalid grant payload: {err}"))
                 })?;
                 Ok(Self {
-                    jws: text.to_owned(),
+                    grant_jws: text.to_owned(),
                     claims,
-                    approval_keys: None,
+                    verified_approval: None,
                 })
             }
-            GrantApprovalFormat::V1 => {
-                let envelope: GrantApprovalEnvelope = decode_payload(text)?;
+            GrantApprovalFormat::SignedApprovalV1 => {
+                // Skip the key bundle until its issuer has authenticated it.
+                // Serde ignores the other fields without decoding scoped keys.
+                #[derive(Deserialize)]
+                struct ApprovalGrant {
+                    grant: String,
+                }
+
+                let unverified: ApprovalGrant = decode_payload(text)?;
                 // The outer signature binds the issuer, exact grant, and keys.
-                let claims: GrantClaims = decode_payload(&envelope.grant)?;
+                let claims: GrantClaims = decode_payload(&unverified.grant)?;
                 verify_approval_signature(text, &claims.iss)?;
+                let envelope: GrantApprovalEnvelope = decode_payload(text)?;
                 validate_key_scopes_match_grant(&envelope.encryption_keys, &claims)?;
                 Ok(Self {
-                    jws: envelope.grant,
+                    grant_jws: envelope.grant,
                     claims,
-                    approval_keys: Some(VerifiedApprovalKeys {
+                    verified_approval: Some(VerifiedApproval {
                         encryption_keys: envelope.encryption_keys,
-                        signed_approval: SecretApproval::new(text),
+                        signed_approval: SignedApproval::new(text),
                     }),
                 })
             }
@@ -202,14 +192,13 @@ fn verify_approval_signature(compact: &str, issuer: &PublicKey) -> Result<()> {
 mod tests {
     use pubky_common::{
         StoragePath,
-        auth::jws::{
-            ClientId, GRANT_JWS_TYP, GrantId, decode_jws_payload, sign_jws, sign_secret_jws,
-        },
+        auth::jws::{ClientId, GRANT_JWS_TYP, GrantId, decode_jws_payload, sign_jws},
         capabilities::Capability,
     };
 
     use super::super::credential::now_unix;
     use super::*;
+    use pubky_common::crypto::Keypair;
 
     fn claims(user: &Keypair) -> GrantClaims {
         GrantClaims {
@@ -231,40 +220,35 @@ mod tests {
         )
     }
 
-    fn decode_v1(message: &AuthRelayMessage) -> Result<GrantApproval> {
-        GrantApproval::decode(message, GrantApprovalFormat::V1)
+    fn decode_signed_approval(message: &AuthRelayMessage) -> Result<GrantApproval> {
+        GrantApproval::decode(message, GrantApprovalFormat::SignedApprovalV1)
     }
 
     #[test]
-    fn locally_created_approvals_preserve_verified_recovery_material() {
+    fn received_approvals_preserve_verified_recovery_material() {
         let user = Keypair::random();
         for capability in ["/pub/app/:rwe", "/pub/app/:rw"] {
             let mut claims = claims(&user);
             claims.caps = vec![capability.parse().unwrap()];
-            let local = GrantApproval::sign(&user, claims).unwrap();
-            let retained = local.approval_keys.as_ref().unwrap();
+            let received = decode_signed_approval(&message(&user, &claims)).unwrap();
+            let retained = received.verified_approval.as_ref().unwrap();
             let restored = GrantApproval::decode_text(
                 retained.signed_approval.as_str(),
-                GrantApprovalFormat::V1,
+                GrantApprovalFormat::SignedApprovalV1,
             )
             .unwrap();
-            assert_eq!(local.jws, restored.jws);
-            assert_eq!(local.claims, restored.claims);
+            assert_eq!(received.grant_jws, restored.grant_jws);
+            assert_eq!(received.claims, restored.claims);
             let path = StoragePath::new("/pub/app/file").unwrap();
-            let local_key = retained.encryption_keys.derive_for_path(&path);
+            let received_key = retained.encryption_keys.derive_for_path(&path);
             let restored_key = restored
-                .approval_keys
+                .verified_approval
                 .unwrap()
                 .encryption_keys
                 .derive_for_path(&path);
-            assert_eq!(local_key, restored_key);
-            assert_eq!(local_key.is_ok(), capability.ends_with('e'));
+            assert_eq!(received_key, restored_key);
+            assert_eq!(received_key.is_ok(), capability.ends_with('e'));
         }
-    }
-
-    #[test]
-    fn local_approval_creation_rejects_a_different_issuer() {
-        GrantApproval::sign(&Keypair::random(), claims(&Keypair::random())).unwrap_err();
     }
 
     // Construct correctly signed but semantically invalid envelopes to ensure
@@ -277,7 +261,7 @@ mod tests {
         let mut payload: serde_json::Value = decode_jws_payload(&signed).unwrap();
         change(&mut payload);
         AuthRelayMessage::new(
-            sign_secret_jws(user, APPROVAL_JWS_TYP, &payload)
+            sign_jws(user, APPROVAL_JWS_TYP, &payload)
                 .as_bytes()
                 .to_vec(),
         )
@@ -291,8 +275,8 @@ mod tests {
             .parse::<pubky_common::capabilities::Capabilities>()
             .unwrap()
             .to_vec();
-        let approval = decode_v1(&message(&user, &claims)).unwrap();
-        let keys = approval.approval_keys.unwrap().encryption_keys;
+        let approval = decode_signed_approval(&message(&user, &claims)).unwrap();
+        let keys = approval.verified_approval.unwrap().encryption_keys;
         assert_eq!(
             keys.scopes().map(ToString::to_string).collect::<Vec<_>>(),
             ["/pub/chat/"]
@@ -308,10 +292,10 @@ mod tests {
         let user = Keypair::random();
         let mut storage_claims = claims(&user);
         storage_claims.caps = vec![Capability::read_write("/pub/app/").unwrap()];
-        let approval = decode_v1(&message(&user, &storage_claims)).unwrap();
+        let approval = decode_signed_approval(&message(&user, &storage_claims)).unwrap();
         assert_eq!(
             approval
-                .approval_keys
+                .verified_approval
                 .unwrap()
                 .encryption_keys
                 .scopes()
@@ -322,29 +306,29 @@ mod tests {
         let signed = GrantApprovalEnvelope::sign(&user, &claims(&user));
         let mut payload: serde_json::Value = decode_jws_payload(&signed).unwrap();
         payload["grant"] = serde_json::json!(sign_jws(&user, GRANT_JWS_TYP, &storage_claims));
-        let excessive = sign_secret_jws(&user, APPROVAL_JWS_TYP, &payload);
-        GrantApproval::decode_text(&excessive, GrantApprovalFormat::V1).unwrap_err();
+        let excessive = sign_jws(&user, APPROVAL_JWS_TYP, &payload);
+        GrantApproval::decode_text(&excessive, GrantApprovalFormat::SignedApprovalV1).unwrap_err();
     }
 
     #[test]
     fn verified_approval_retains_keys_and_only_the_inner_grant() {
         let user = Keypair::from_secret(&[7; 32]);
         let claims = claims(&user);
-        let approval = decode_v1(&message(&user, &claims)).unwrap();
+        let approval = decode_signed_approval(&message(&user, &claims)).unwrap();
         assert_eq!(approval.claims, claims);
-        assert_eq!(GrantClaims::decode(&approval.jws).unwrap(), claims);
+        assert_eq!(GrantClaims::decode(&approval.grant_jws).unwrap(), claims);
         let path = StoragePath::new("/pub/app/file").unwrap();
         let expected = ScopedEncryptionKeyBundle::from_identity_secret(&user.secret(), [&path]);
         assert_eq!(
             *approval
-                .approval_keys
+                .verified_approval
                 .unwrap()
                 .encryption_keys
                 .derive_for_path(&path)
                 .unwrap(),
             *expected.derive_for_path(&path).unwrap(),
         );
-        let payload: serde_json::Value = decode_jws_payload(&approval.jws).unwrap();
+        let payload: serde_json::Value = decode_jws_payload(&approval.grant_jws).unwrap();
         assert!(payload.get("encryption_keys").is_none());
     }
 
@@ -355,12 +339,12 @@ mod tests {
         let message = AuthRelayMessage::new(
             sign_jws(&Keypair::random(), GRANT_JWS_TYP, &claims).into_bytes(),
         );
-        let approval = GrantApproval::decode(&message, GrantApprovalFormat::Grant).unwrap();
+        let approval = GrantApproval::decode(&message, GrantApprovalFormat::BareGrant).unwrap();
         assert_eq!(approval.claims, claims);
-        assert!(approval.approval_keys.is_none());
+        assert!(approval.verified_approval.is_none());
         assert!(
-            decode_v1(&message).is_err(),
-            "V1 must reject a bare-grant downgrade"
+            decode_signed_approval(&message).is_err(),
+            "SignedApprovalV1 must reject a bare-grant downgrade"
         );
     }
 
@@ -372,7 +356,7 @@ mod tests {
                 payload["encryption_keys"]["keys"][0]["scope"] = serde_json::json!(scope);
             });
             assert!(
-                decode_v1(&changed)
+                decode_signed_approval(&changed)
                     .unwrap_err()
                     .to_string()
                     .contains("key scopes"),
@@ -382,7 +366,7 @@ mod tests {
         let missing = changed_envelope(&user, |payload| {
             payload["encryption_keys"]["keys"] = serde_json::json!([]);
         });
-        decode_v1(&missing).unwrap_err();
+        decode_signed_approval(&missing).unwrap_err();
         let extra = changed_envelope(&user, |payload| {
             let mut key = payload["encryption_keys"]["keys"][0].clone();
             key["scope"] = serde_json::json!("/pub/other/");
@@ -391,7 +375,7 @@ mod tests {
                 .unwrap()
                 .push(key);
         });
-        decode_v1(&extra).unwrap_err();
+        decode_signed_approval(&extra).unwrap_err();
     }
 
     #[test]
@@ -401,16 +385,54 @@ mod tests {
         let payload: serde_json::Value =
             decode_jws_payload(&GrantApprovalEnvelope::sign(&user, &claims(&user))).unwrap();
         let wrong_outer = AuthRelayMessage::new(
-            sign_secret_jws(&other, APPROVAL_JWS_TYP, &payload)
+            sign_jws(&other, APPROVAL_JWS_TYP, &payload)
                 .as_bytes()
                 .to_vec(),
         );
         assert!(
-            decode_v1(&wrong_outer)
+            decode_signed_approval(&wrong_outer)
                 .unwrap_err()
                 .to_string()
                 .contains("signature")
         );
+    }
+
+    #[test]
+    fn signature_is_verified_before_key_bundle_validation() {
+        let user = Keypair::random();
+        let other = Keypair::random();
+        let signed = GrantApprovalEnvelope::sign(&user, &claims(&user));
+        let original: serde_json::Value = decode_jws_payload(&signed).unwrap();
+
+        let mut malformed = original.clone();
+        malformed["encryption_keys"]["keys"][0]["secret"] = serde_json::json!("invalid-secret");
+
+        let mut conflicting = original;
+        let mut conflicting_key = conflicting["encryption_keys"]["keys"][0].clone();
+        conflicting_key["secret"] = serde_json::json!(URL_SAFE_NO_PAD.encode([0; 32]));
+        conflicting["encryption_keys"]["keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(conflicting_key);
+
+        for payload in [malformed, conflicting] {
+            let wrong_signature = sign_jws(&other, APPROVAL_JWS_TYP, &payload);
+            let error =
+                GrantApproval::decode_text(&wrong_signature, GrantApprovalFormat::SignedApprovalV1)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("invalid JWS signature"), "{error}");
+
+            // Authentication must not bypass the later bundle checks.
+            let correct_signature = sign_jws(&user, APPROVAL_JWS_TYP, &payload);
+            let error = GrantApproval::decode_text(
+                &correct_signature,
+                GrantApprovalFormat::SignedApprovalV1,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("invalid approval payload"), "{error}");
+        }
     }
 
     #[test]
@@ -423,8 +445,8 @@ mod tests {
             let message = changed_envelope(&user, |payload| {
                 payload["grant"] = serde_json::json!(grant);
             });
-            let approval = decode_v1(&message).unwrap();
-            assert_eq!(approval.jws, grant);
+            let approval = decode_signed_approval(&message).unwrap();
+            assert_eq!(approval.grant_jws, grant);
         }
     }
 
@@ -451,7 +473,7 @@ mod tests {
                 parts[2]
             );
             assert!(
-                decode_v1(&AuthRelayMessage::new(changed.into_bytes())).is_err(),
+                decode_signed_approval(&AuthRelayMessage::new(changed.into_bytes())).is_err(),
                 "{pointer}"
             );
         }
@@ -464,16 +486,13 @@ mod tests {
             let changed = changed_envelope(&user, |payload| {
                 *payload.pointer_mut(pointer).unwrap() = serde_json::json!("v999");
             });
-            assert!(decode_v1(&changed).is_err(), "{pointer}");
+            assert!(decode_signed_approval(&changed).is_err(), "{pointer}");
         }
         let payload: serde_json::Value =
             decode_jws_payload(&GrantApprovalEnvelope::sign(&user, &claims(&user))).unwrap();
-        let wrong_type = AuthRelayMessage::new(
-            sign_secret_jws(&user, GRANT_JWS_TYP, &payload)
-                .as_bytes()
-                .to_vec(),
-        );
-        decode_v1(&wrong_type).unwrap_err();
+        let wrong_type =
+            AuthRelayMessage::new(sign_jws(&user, GRANT_JWS_TYP, &payload).as_bytes().to_vec());
+        decode_signed_approval(&wrong_type).unwrap_err();
         for header in [
             serde_json::json!({"alg": "none", "typ": APPROVAL_JWS_TYP}),
             serde_json::json!({"alg": "EdDSA", "typ": APPROVAL_JWS_TYP, "crit": ["b64"], "b64": false}),
@@ -484,7 +503,7 @@ mod tests {
                 URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
             );
             let signature = URL_SAFE_NO_PAD.encode(user.sign(input.as_bytes()).to_bytes());
-            decode_v1(&AuthRelayMessage::new(
+            decode_signed_approval(&AuthRelayMessage::new(
                 format!("{input}.{signature}").into_bytes(),
             ))
             .unwrap_err();
@@ -497,7 +516,7 @@ mod tests {
         let changed = changed_envelope(&user, |payload| {
             payload["encryption_keys"]["keys"][0]["secret"] = serde_json::json!("sensitive-value");
         });
-        let error = decode_v1(&changed).unwrap_err().to_string();
+        let error = decode_signed_approval(&changed).unwrap_err().to_string();
         assert!(!error.contains("sensitive-value"));
         assert!(error.contains("invalid approval payload"));
     }
@@ -510,7 +529,7 @@ mod tests {
             b"a.b.c.d".to_vec(),
             b"a.b.".to_vec(),
         ] {
-            decode_v1(&AuthRelayMessage::new(bytes)).unwrap_err();
+            decode_signed_approval(&AuthRelayMessage::new(bytes)).unwrap_err();
         }
         let message = AuthRelayMessage::new(b"secret payload".to_vec());
         assert!(!format!("{message:?}").contains("secret payload"));

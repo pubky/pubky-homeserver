@@ -14,8 +14,8 @@ pub(super) fn parse_grant_approval_format(
         .filter(|(key, _)| key == "approval")
         .map(|(_, value)| value);
     match (values.next(), values.next()) {
-        (None, None) => Ok(GrantApprovalFormat::Grant),
-        (Some(value), None) if value == "v1" => Ok(GrantApprovalFormat::V1),
+        (None, None) => Ok(GrantApprovalFormat::BareGrant),
+        (Some(value), None) if value == "v1" => Ok(GrantApprovalFormat::SignedApprovalV1),
         _ => Err(DeepLinkParseError::InvalidQueryParameter(
             "approval",
             Box::new(io::Error::new(
@@ -27,7 +27,7 @@ pub(super) fn parse_grant_approval_format(
 }
 
 pub(super) fn append_grant_approval_format(url: &mut Url, format: GrantApprovalFormat) {
-    if format == GrantApprovalFormat::V1 {
+    if format == GrantApprovalFormat::SignedApprovalV1 {
         url.query_pairs_mut().append_pair("approval", "v1");
     }
 }

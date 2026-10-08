@@ -16,7 +16,7 @@ use super::{
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 
 const STORE_VERSION: &str = "pubky-session-v1";
-const STORE_KEYS_VERSION: &str = "pubky-session-v2";
+const STORE_APPROVAL_VERSION: &str = "pubky-session-v2";
 const MODE_DELEGATED: &str = "delegated";
 const MODE_LOCAL_SECRET: &str = "localSecret";
 
@@ -25,9 +25,9 @@ const PUBKY_SESSIONS_DB_NAME = "pubky-auth";
 const PUBKY_SESSIONS_DB_VERSION = 1;
 const PUBKY_SESSIONS_STORE_NAME = "storedSessions";
 const PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME = "delegatedGrantKeys";
-const KEYED_SESSION_PREFIX = "session:";
+const APPROVAL_SESSION_PREFIX = "session:";
 
-function keyedSessionId(id) { return `${KEYED_SESSION_PREFIX}${id}`; }
+function approvalSessionId(id) { return `${APPROVAL_SESSION_PREFIX}${id}`; }
 
 // Legacy SDKs reject an entire session list if it contains a V2 record. Keep
 // these records alongside their keys, where legacy session readers do not look.
@@ -38,7 +38,7 @@ function putSessionRecord(tx, record) {
   if (record.version === "pubky-session-v2") {
     sessions.delete(record.id);
     return tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME)
-      .put({ ...record, keyId: keyedSessionId(record.id) });
+      .put({ ...record, keyId: approvalSessionId(record.id) });
   } else {
     return sessions.put(record);
   }
@@ -132,20 +132,9 @@ export async function __pubkySessionStoreIsAvailable() {
   }
 }
 
-// Keep approval wrapping independent of the PoP key so offline recovery does
-// not require a signing key. The prefix cannot collide with random PoP key ids.
-function approvalKeyId(id) { return `approval:${id}`; }
-function approvalContext(record) {
-  return new TextEncoder().encode(JSON.stringify([
-    "pubky-stored-approval-v1", record.version, record.id, record.homeserver,
-    record.publicKey, record.grantId, record.clientId, record.credential,
-  ]));
-}
-
-/** Persist the ciphertext and its non-extractable key in one transaction. */
+/** Persist or replace a browser session record. */
 export async function __pubkySessionStorePut(record, lease) {
   requireIndexedDb();
-  let db;
   try {
     const previous = await __pubkySessionStoreGet(record.id);
     if (previous?.version === "pubky-session-v2" && record.version !== previous.version) {
@@ -153,76 +142,16 @@ export async function __pubkySessionStorePut(record, lease) {
     }
     const stored = { ...record };
     if (previous?.sharedSession) stored.sharedSession = previous.sharedSession;
-    let wrappingKey;
-    if (record.storageMode === "delegated" && record.secretApproval !== undefined) {
-      wrappingKey = await crypto.subtle.generateKey(
-        { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"],
-      );
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const plaintext = new TextEncoder().encode(record.secretApproval);
-      try {
-        const ciphertext = await crypto.subtle.encrypt(
-          { name: "AES-GCM", iv, additionalData: approvalContext(record) },
-          wrappingKey, plaintext,
-        );
-        stored.encryptedSecretApproval = { iv, ciphertext };
-      } finally { plaintext.fill(0); }
-      delete stored.secretApproval;
-    }
-    db = await openSessionStoreDb();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(
-        [PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME], "readwrite",
-      );
-      try {
-        const held = requireSessionLease(lease, true);
-        if (held.id !== record.id || held.homeserver !== record.homeserver) {
-          throw new Error("Session record does not match its browser lock.");
-        }
-        const keys = tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME);
-        if (wrappingKey) keys.put({ keyId: approvalKeyId(record.id), wrappingKey });
-        else keys.delete(approvalKeyId(record.id));
-        putSessionRecord(tx, stored);
-      } catch (error) { tx.abort(); reject(error); }
-      tx.oncomplete = resolve;
-      tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("Saving encrypted session failed."));
+    await withSessionStores("readwrite", tx => {
+      const held = requireSessionLease(lease, true);
+      if (held.id !== record.id || held.homeserver !== record.homeserver) {
+        throw new Error("Session record does not match its browser lock.");
+      }
+      return putSessionRecord(tx, stored);
     });
   } catch (error) {
     throw contextualSessionStoreError("Saving Pubky session failed.", error);
-  } finally { db?.close(); }
-}
-
-/** Read approval ciphertext and its key together, then decrypt in memory. */
-export async function __pubkySessionStoreLoad(id) {
-  const db = await openSessionStoreDb();
-  try {
-    const saved = await new Promise((resolve, reject) => {
-      const tx = db.transaction(
-        [PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME], "readonly",
-      );
-      const session = tx.objectStore(PUBKY_SESSIONS_STORE_NAME).get(id);
-      const keys = tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME);
-      const keyedSession = keys.get(keyedSessionId(id));
-      const key = keys.get(approvalKeyId(id));
-      tx.oncomplete = () => resolve({ record: keyedSession.result ?? session.result, key: key.result?.wrappingKey });
-      tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("Reading approval key failed."));
-    });
-    const record = saved.record;
-    if (!record?.encryptedSecretApproval) return record; // Legacy plaintext records.
-    if (record.storageMode !== "delegated" || record.secretApproval !== undefined) {
-      throw new Error("Invalid encrypted approval record.");
-    }
-    if (!saved.key) throw new Error("Stored approval wrapping key is missing.");
-    const { iv, ciphertext } = record.encryptedSecretApproval;
-    const plaintext = new Uint8Array(await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv, additionalData: approvalContext(record) }, saved.key, ciphertext,
-    ));
-    try {
-      return { ...record, secretApproval: new TextDecoder("utf-8", { fatal: true }).decode(plaintext) };
-    } finally { plaintext.fill(0); }
-  } catch (error) {
-    throw contextualSessionStoreError("Decrypting Pubky session approval failed.", error);
-  } finally { db.close(); }
+  }
 }
 
 function sessionMetadata(record) {
@@ -231,7 +160,7 @@ function sessionMetadata(record) {
     capabilities, grantExpiresAt, createdAt } = record;
   return { version, id, storageMode, publicKey, homeserver, grantId, clientId,
     capabilities, grantExpiresAt, createdAt,
-    hasStoredApproval: Boolean(record.encryptedSecretApproval || record.secretApproval !== undefined),
+    hasStoredApproval: record.signedApproval !== undefined,
   };
 }
 
@@ -244,12 +173,12 @@ export async function __pubkySessionStoreGet(id) {
   requireIndexedDb();
   try {
     let legacy;
-    const keyed = await withSessionStores("readonly", tx => {
+    const approvalSession = await withSessionStores("readonly", tx => {
       const request = tx.objectStore(PUBKY_SESSIONS_STORE_NAME).get(id);
       request.onsuccess = () => { legacy = request.result; };
-      return tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).get(keyedSessionId(id));
+      return tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).get(approvalSessionId(id));
     });
-    return keyed ?? legacy;
+    return approvalSession ?? legacy;
   } catch (error) {
     throw contextualSessionStoreError("Reading Pubky session failed.", error);
   }
@@ -260,13 +189,13 @@ export async function __pubkySessionStoreList() {
   if (!globalThis.indexedDB) return [];
   try {
     let legacy = [];
-    const keys = await withSessionStores("readonly", tx => {
+    const keyStoreRecords = await withSessionStores("readonly", tx => {
       const request = tx.objectStore(PUBKY_SESSIONS_STORE_NAME).getAll();
       request.onsuccess = () => { legacy = request.result; };
       return tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).getAll();
     });
-    const keyed = keys.filter(record => record.keyId.startsWith(KEYED_SESSION_PREFIX));
-    return [...legacy, ...keyed].map(sessionMetadata);
+    const approvalSessions = keyStoreRecords.filter(record => record.keyId.startsWith(APPROVAL_SESSION_PREFIX));
+    return [...legacy, ...approvalSessions].map(sessionMetadata);
   } catch (_error) {
     return [];
   }
@@ -290,10 +219,9 @@ async function clearSessionStore(allKeys = false) {
           if (allKeys) keys.clear();
           else for (const record of [
             ...records.result,
-            ...keyRecords.result.filter(record => record.keyId.startsWith(KEYED_SESSION_PREFIX)),
+            ...keyRecords.result.filter(record => record.keyId.startsWith(APPROVAL_SESSION_PREFIX)),
           ]) {
-            keys.delete(keyedSessionId(record.id));
-            keys.delete(approvalKeyId(record.id));
+            keys.delete(approvalSessionId(record.id));
             if (record.storageMode === "delegated") keys.delete(JSON.parse(record.credential).keyId);
           }
           sessions.clear();
@@ -385,8 +313,7 @@ export async function __pubkySharedSessionRemove(token) {
     await new Promise((resolve, reject) => {
       const tx = db.transaction([PUBKY_SESSIONS_STORE_NAME, PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME], "readwrite");
       tx.objectStore(PUBKY_SESSIONS_STORE_NAME).delete(lease.id);
-      tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).delete(keyedSessionId(lease.id));
-      tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).delete(approvalKeyId(lease.id));
+      tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).delete(approvalSessionId(lease.id));
       if (record.storageMode === "delegated") {
         const { keyId } = JSON.parse(record.credential);
         tx.objectStore(PUBKY_SESSIONS_DELEGATED_KEYS_STORE_NAME).delete(keyId);
@@ -430,7 +357,7 @@ extern "C" {
     #[wasm_bindgen(js_name = __pubkySessionStorePut)]
     fn js_store_put(record: JsValue, lease: u32) -> js_sys::Promise;
 
-    #[wasm_bindgen(js_name = __pubkySessionStoreLoad)]
+    #[wasm_bindgen(js_name = __pubkySessionStoreGet)]
     fn js_store_get(id: String) -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStoreMetadata)]
@@ -462,7 +389,7 @@ struct SessionMetadata {
     created_at: f64,
 }
 
-/// Listing/removal projection. Approval existence does not require decryption.
+/// Listing/removal projection that omits confidential restore material.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSessionMetadata {
@@ -472,7 +399,7 @@ struct StoredSessionMetadata {
     has_stored_approval: bool,
 }
 
-/// Restore material after decryption. V2 delegated records require the actual
+/// Confidential restore material. V2 delegated records require the actual
 /// signed approval; metadata's presence flag cannot substitute for its bytes.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -480,9 +407,8 @@ struct StoredSessionRecord {
     #[serde(flatten)]
     metadata: SessionMetadata,
     credential: String,
-    // IndexedDB persists an AES-GCM envelope; older records may be plaintext.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    secret_approval: Option<String>,
+    signed_approval: Option<String>,
 }
 
 impl Drop for StoredSessionRecord {
@@ -491,7 +417,7 @@ impl Drop for StoredSessionRecord {
 
         // JS/IndexedDB retain their own copies; clear the Rust-owned secrets.
         self.credential.zeroize();
-        self.secret_approval.zeroize();
+        self.signed_approval.zeroize();
     }
 }
 
@@ -571,9 +497,9 @@ impl BrowserSessionStore {
         Ok(value.as_bool().unwrap_or(false))
     }
 
-    /// Persist a completed grant session and its scoped keys in IndexedDB.
-    /// Key-bearing delegated sessions store a confidential signed approval
-    /// encrypted with a separate non-extractable browser AES-GCM key.
+    /// Persist a completed grant session and its optional signed approval.
+    /// Confidential restore material is stored as plaintext in IndexedDB.
+    /// Delegated signing keys remain non-extractable WebCrypto keys.
     /// Records are identified by user and grant ID. Reauthorizing the same
     /// client creates a separate record; use the returned ID to restore it.
     #[wasm_bindgen]
@@ -606,7 +532,7 @@ impl BrowserSessionStore {
 
         let metadata = SessionMetadata {
             version: if grant.encryption_keys().is_some() {
-                STORE_KEYS_VERSION
+                STORE_APPROVAL_VERSION
             } else {
                 STORE_VERSION
             }
@@ -626,8 +552,8 @@ impl BrowserSessionStore {
             created_at: js_sys::Date::now(),
         };
         let record = StoredSessionRecord {
-            secret_approval: if metadata.storage_mode == MODE_DELEGATED {
-                grant.secret_approval().map(str::to_owned)
+            signed_approval: if metadata.storage_mode == MODE_DELEGATED {
+                grant.signed_approval().map(str::to_owned)
             } else {
                 None // Local V2 tokens already include the signed approval.
             },
@@ -667,8 +593,9 @@ impl BrowserSessionStore {
     /// Recover a stored session's encryption keys without network access.
     /// Verifies the signed approval and exact grant binding. Works after grant
     /// expiry/revocation and without the delegated WebCrypto signing key.
-    /// Encrypted records require their persisted approval wrapping key.
-    /// Returns undefined for legacy records without keys; creates no session.
+    /// Restore material is stored as plaintext in IndexedDB.
+    /// Bare-grant records return undefined; signed approvals without `e` scopes
+    /// return an empty bundle. Creates no session.
     #[wasm_bindgen(js_name = "restoreEncryptionKeys")]
     pub async fn restore_encryption_keys(&self, id: String) -> JsResult<Option<EncryptionKeys>> {
         let record = self.load_record(id).await?;
@@ -677,7 +604,7 @@ impl BrowserSessionStore {
             let state = decode_delegated_grant_state(&record.credential)?;
             pubky::GrantCredential::restore_delegated_encryption_keys(
                 &state,
-                record.secret_approval.as_deref(),
+                record.signed_approval.as_deref(),
             )?
         } else {
             pubky::GrantCredential::restore_encryption_keys(&record.credential)?
@@ -712,7 +639,7 @@ impl BrowserSessionStore {
             pubky::GrantCredential::from_shared_delegated_state_with_approval(
                 state,
                 sign,
-                record.secret_approval.as_deref(),
+                record.signed_approval.as_deref(),
             )?
         } else {
             pubky::GrantCredential::from_shared_secret(&record.credential)?
@@ -832,7 +759,7 @@ fn decode_store_value<T: serde::de::DeserializeOwned>(value: JsValue, id: &str) 
 
 impl SessionMetadata {
     fn validate(&self) -> JsResult<()> {
-        if self.version != STORE_VERSION && self.version != STORE_KEYS_VERSION {
+        if self.version != STORE_VERSION && self.version != STORE_APPROVAL_VERSION {
             return Err(PubkyError::new(
                 PubkyErrorName::ClientStateError,
                 "Unsupported stored session version.",
@@ -848,14 +775,14 @@ impl SessionMetadata {
     }
 
     fn requires_separate_approval(&self) -> bool {
-        self.version == STORE_KEYS_VERSION && self.storage_mode == MODE_DELEGATED
+        self.version == STORE_APPROVAL_VERSION && self.storage_mode == MODE_DELEGATED
     }
 }
 
 fn missing_approval() -> PubkyError {
     PubkyError::new(
         PubkyErrorName::ClientStateError,
-        "Stored key-bearing session is missing its signed approval.",
+        "Stored session is missing its signed approval.",
     )
 }
 
@@ -869,7 +796,7 @@ fn validate_stored_metadata(record: StoredSessionMetadata) -> JsResult<SessionMe
 
 fn validate_record(record: StoredSessionRecord) -> JsResult<StoredSessionRecord> {
     record.metadata.validate()?;
-    if record.metadata.requires_separate_approval() && record.secret_approval.is_none() {
+    if record.metadata.requires_separate_approval() && record.signed_approval.is_none() {
         return Err(missing_approval());
     }
     Ok(record)
@@ -909,18 +836,10 @@ export async function inspectApprovalStore(id, action) {
       const keys = tx.objectStore("delegatedGrantKeys");
       const record = keys.get(`session:${id}`);
       const legacy = sessions.get(id);
-      const key = keys.get(`approval:${id}`);
       record.onsuccess = () => {
-        if (action === "tamper") keys.put({ ...record.result, clientId: "tampered" });
-        if (action === "delete-key") keys.delete(`approval:${id}`);
         if (action === "delete-pop") keys.delete("test-pop");
-        if (action === "tamper-ciphertext") {
-          const stored = record.result;
-          new Uint8Array(stored.encryptedSecretApproval.ciphertext)[0] ^= 1;
-          keys.put(stored);
-        }
       };
-      tx.oncomplete = () => resolve({ record: record.result, legacy: legacy.result, key: key.result?.wrappingKey });
+      tx.oncomplete = () => resolve({ record: record.result, legacy: legacy.result });
       tx.onerror = tx.onabort = () => reject(tx.error);
     });
   } finally { db.close(); }
@@ -940,7 +859,7 @@ export async function inspectApprovalStore(id, action) {
     }
 
     #[wasm_bindgen_test]
-    fn metadata_presence_does_not_replace_decrypted_restore_material() {
+    fn metadata_presence_does_not_replace_restore_material() {
         let value = js_sys::JSON::parse(
             r#"{"version":"pubky-session-v2","id":"test","storageMode":"delegated","credential":"saved-grant","homeserver":"home","publicKey":"user","grantId":"grant","clientId":"client","capabilities":[],"grantExpiresAt":0,"createdAt":0,"hasStoredApproval":true}"#,
         )
@@ -953,7 +872,7 @@ export async function inspectApprovalStore(id, action) {
         // Neither legacy delegated records nor local tokens need a separate approval.
         for (version, mode) in [
             (STORE_VERSION, MODE_DELEGATED),
-            (STORE_KEYS_VERSION, MODE_LOCAL_SECRET),
+            (STORE_APPROVAL_VERSION, MODE_LOCAL_SECRET),
         ] {
             Reflect::set(&value, &"version".into(), &version.into()).unwrap();
             Reflect::set(&value, &"storageMode".into(), &mode.into()).unwrap();
@@ -971,9 +890,9 @@ export async function inspectApprovalStore(id, action) {
     }
 
     #[wasm_bindgen_test]
-    fn decrypted_records_preserve_the_flat_browser_storage_format() {
+    fn records_preserve_the_flat_browser_storage_format() {
         let original = js_sys::JSON::parse(
-            r#"{"version":"pubky-session-v2","id":"test","storageMode":"delegated","credential":"saved-grant","homeserver":"home","publicKey":"user","grantId":"grant","clientId":"client","capabilities":["/pub/chat/:r"],"grantExpiresAt":123,"createdAt":456,"secretApproval":"signed-approval"}"#,
+            r#"{"version":"pubky-session-v2","id":"test","storageMode":"delegated","credential":"saved-grant","homeserver":"home","publicKey":"user","grantId":"grant","clientId":"client","capabilities":["/pub/chat/:r"],"grantExpiresAt":123,"createdAt":456,"signedApproval":"signed-approval"}"#,
         )
         .unwrap();
         let record = decode_store_value(original.clone(), "test").unwrap();
@@ -994,123 +913,97 @@ export async function inspectApprovalStore(id, action) {
     }
 
     #[wasm_bindgen_test]
-    async fn delegated_approvals_are_wrapped_and_recover_without_pop_keys() {
-        let id = "approval-wrapping-test";
-        let record = js_sys::JSON::parse(
-            r#"{"version":"pubky-session-v2","id":"approval-wrapping-test","storageMode":"delegated","credential":"{\"keyId\":\"test-pop\"}","homeserver":"test-home","publicKey":"test-user","grantId":"test-grant","clientId":"test-client","capabilities":[],"grantExpiresAt":0,"createdAt":0,"secretApproval":"confidential-approval"}"#,
-        )
-        .unwrap();
-        let lease = js_session_acquire(id, "test-home", true).unwrap();
-        JsFuture::from(js_session_wait(lease)).await.unwrap();
-        JsFuture::from(js_store_put(record.clone(), lease))
-            .await
-            .unwrap();
-
-        let saved = inspect(id, "read").await;
-        let stored = field(&saved, "record");
-        assert!(field(&stored, "secretApproval").is_undefined());
-        assert!(!field(&stored, "encryptedSecretApproval").is_undefined());
-        assert_eq!(field(&field(&saved, "key"), "extractable"), JsValue::FALSE);
-        assert_eq!(
-            field(&field(&field(&saved, "key"), "algorithm"), "name"),
-            JsValue::from_str("AES-GCM")
-        );
-        inspect(id, "delete-pop").await;
-        let loaded = JsFuture::from(js_store_get(id.into())).await.unwrap();
-        assert_eq!(
-            field(&loaded, "secretApproval"),
-            JsValue::from_str("confidential-approval")
-        );
-
-        let metadata = JsFuture::from(js_store_list()).await.unwrap();
-        for entry in js_sys::Array::from(&metadata).iter() {
-            assert!(field(&entry, "secretApproval").is_undefined());
-            assert!(field(&entry, "encryptedSecretApproval").is_undefined());
-            assert!(field(&entry, "credential").is_undefined());
-            assert!(field(&entry, "sharedSession").is_undefined());
-        }
-        let shared = js_sys::JSON::parse(r#"{"bearer":"test-bearer"}"#).unwrap();
-        JsFuture::from(js_shared_store(lease, shared))
-            .await
-            .unwrap();
-        assert!(
-            field(
-                &field(&inspect(id, "read").await, "record"),
-                "secretApproval"
+    async fn stored_approvals_survive_bearer_updates_and_signing_key_removal() {
+        for mode in [MODE_DELEGATED, MODE_LOCAL_SECRET] {
+            let id = format!("approval-storage-{mode}");
+            let record = js_sys::JSON::parse(
+                r#"{"version":"pubky-session-v2","id":"placeholder","storageMode":"delegated","credential":"{\"keyId\":\"test-pop\"}","homeserver":"test-home","publicKey":"test-user","grantId":"test-grant","clientId":"test-client","capabilities":[],"grantExpiresAt":0,"createdAt":0}"#,
             )
-            .is_undefined()
-        );
-        assert!(JsFuture::from(js_store_get(id.into())).await.is_ok());
-
-        let downgraded = js_sys::Object::assign(
-            &js_sys::Object::new(),
-            &js_sys::Object::from(record.clone()),
-        );
-        Reflect::set(
-            &downgraded,
-            &"version".into(),
-            &JsValue::from_str(STORE_VERSION),
-        )
-        .unwrap();
-        assert!(
-            JsFuture::from(js_store_put(downgraded.into(), lease))
+            .unwrap();
+            Reflect::set(&record, &"id".into(), &id.clone().into()).unwrap();
+            Reflect::set(&record, &"storageMode".into(), &mode.into()).unwrap();
+            let material_field = if mode == MODE_DELEGATED {
+                "signedApproval"
+            } else {
+                "credential"
+            };
+            Reflect::set(
+                &record,
+                &material_field.into(),
+                &"confidential-approval".into(),
+            )
+            .unwrap();
+            let lease = js_session_acquire(&id, "test-home", true).unwrap();
+            JsFuture::from(js_session_wait(lease)).await.unwrap();
+            JsFuture::from(js_store_put(record.clone(), lease))
                 .await
-                .is_err()
-        );
-        assert_eq!(
-            field(
-                &JsFuture::from(js_store_get(id.into())).await.unwrap(),
-                "secretApproval"
-            ),
-            JsValue::from_str("confidential-approval")
-        );
+                .unwrap();
 
-        // A second save must replace ciphertext and key together and retain the bearer.
-        JsFuture::from(js_store_put(record.clone(), lease))
-            .await
-            .unwrap();
-        let replaced = JsFuture::from(js_store_get(id.into())).await.unwrap();
-        assert_eq!(
-            field(&field(&replaced, "sharedSession"), "bearer"),
-            JsValue::from_str("test-bearer")
-        );
-        inspect(id, "tamper").await;
-        assert!(JsFuture::from(js_store_get(id.into())).await.is_err());
-        JsFuture::from(js_store_put(record.clone(), lease))
-            .await
-            .unwrap();
-        inspect(id, "tamper-ciphertext").await;
-        assert!(JsFuture::from(js_store_get(id.into())).await.is_err());
-        JsFuture::from(js_store_put(record.clone(), lease))
-            .await
-            .unwrap();
-        assert!(
-            JsFuture::from(js_store_put(record.clone(), 0))
+            let saved = inspect(&id, "read").await;
+            assert!(field(&saved, "legacy").is_undefined());
+            assert_eq!(
+                field(&field(&saved, "record"), material_field),
+                JsValue::from_str("confidential-approval")
+            );
+            inspect(&id, "delete-pop").await;
+            let loaded = JsFuture::from(js_store_get(id.clone())).await.unwrap();
+            assert_eq!(
+                field(&loaded, material_field),
+                JsValue::from_str("confidential-approval")
+            );
+
+            let metadata = JsFuture::from(js_store_list()).await.unwrap();
+            for entry in js_sys::Array::from(&metadata).iter() {
+                assert!(field(&entry, "signedApproval").is_undefined());
+                assert!(field(&entry, "credential").is_undefined());
+                assert!(field(&entry, "sharedSession").is_undefined());
+            }
+            let shared = js_sys::JSON::parse(r#"{"bearer":"test-bearer"}"#).unwrap();
+            JsFuture::from(js_shared_store(lease, shared))
                 .await
-                .is_err()
-        );
-        assert!(JsFuture::from(js_store_get(id.into())).await.is_ok());
-        inspect(id, "delete-key").await;
-        assert!(JsFuture::from(js_store_get(id.into())).await.is_err());
-        let metadata = JsFuture::from(js_store_metadata(id.into())).await.unwrap();
-        let decoded: StoredSessionMetadata = decode_store_value(metadata, id).unwrap();
-        assert!(decoded.has_stored_approval);
-        assert!(validate_stored_metadata(decoded).is_ok());
-        JsFuture::from(js_shared_remove(lease)).await.unwrap();
-        let removed = inspect(id, "read").await;
-        assert!(field(&removed, "record").is_undefined());
-        assert!(field(&removed, "key").is_undefined());
-        // Removal deletes an existing wrapping key, not just a missing one.
-        JsFuture::from(js_store_put(record.clone(), lease))
-            .await
-            .unwrap();
-        JsFuture::from(js_shared_remove(lease)).await.unwrap();
-        assert!(field(&inspect(id, "read").await, "key").is_undefined());
-        JsFuture::from(js_store_put(record, lease)).await.unwrap();
-        js_session_release(lease);
-        JsFuture::from(js_store_clear()).await.unwrap();
-        let cleared = inspect(id, "read").await;
-        assert!(field(&cleared, "record").is_undefined());
-        assert!(field(&cleared, "key").is_undefined());
+                .unwrap();
+            assert_eq!(
+                field(
+                    &JsFuture::from(js_store_get(id.clone())).await.unwrap(),
+                    material_field
+                ),
+                JsValue::from_str("confidential-approval")
+            );
+
+            let downgraded = js_sys::Object::assign(
+                &js_sys::Object::new(),
+                &js_sys::Object::from(record.clone()),
+            );
+            Reflect::set(&downgraded, &"version".into(), &STORE_VERSION.into()).unwrap();
+            assert!(
+                JsFuture::from(js_store_put(downgraded.into(), lease))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                JsFuture::from(js_store_put(record.clone(), 0))
+                    .await
+                    .is_err()
+            );
+
+            JsFuture::from(js_store_put(record.clone(), lease))
+                .await
+                .unwrap();
+            let replaced = JsFuture::from(js_store_get(id.clone())).await.unwrap();
+            assert_eq!(
+                field(&replaced, material_field),
+                JsValue::from_str("confidential-approval")
+            );
+            assert_eq!(
+                field(&field(&replaced, "sharedSession"), "bearer"),
+                JsValue::from_str("test-bearer")
+            );
+            JsFuture::from(js_shared_remove(lease)).await.unwrap();
+            assert!(field(&inspect(&id, "read").await, "record").is_undefined());
+            JsFuture::from(js_store_put(record, lease)).await.unwrap();
+            js_session_release(lease);
+            JsFuture::from(js_store_clear()).await.unwrap();
+            assert!(field(&inspect(&id, "read").await, "record").is_undefined());
+        }
     }
 }

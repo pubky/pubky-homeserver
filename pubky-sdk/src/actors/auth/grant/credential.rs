@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use super::{
-    approval::{GrantApproval, SecretApproval, VerifiedApprovalKeys},
+    approval::{GrantApproval, SignedApproval, VerifiedApproval},
     grant_exchange::{credential_from_grant_exchange, post_grant_session},
     pop_signer::{DelegatedSignFn, GrantPopSigner},
     shared_session::GrantSessionCoordinator,
@@ -46,7 +46,7 @@ pub(crate) const REFRESH_SLACK_SECS: u64 = 300;
 
 const GRANT_SESSION_PATH: &str = "/auth/grant/session";
 const STORED_GRANT_CREDENTIAL_PREFIX: &str = "pubky-grant-credential-v1";
-const STORED_GRANT_CREDENTIAL_KEYS_PREFIX: &str = "pubky-grant-credential-v2";
+const STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX: &str = "pubky-grant-credential-v2";
 const STORED_GRANT_CREDENTIAL_PREFIX_FAMILY: &str = "pubky-grant-credential-";
 
 /// Current Unix timestamp in seconds, cross-target.
@@ -95,7 +95,9 @@ impl GrantCredentialState {
 pub struct GrantCredential {
     pub(crate) state: Arc<Mutex<GrantCredentialState>>,
     pub(crate) info: SessionInfo,
-    approval_keys: Option<Arc<VerifiedApprovalKeys>>,
+    /// None for bare grants; Some for signed approvals, even with no `e` scopes.
+    /// Retaining an empty bundle preserves the approval format during export.
+    verified_approval: Option<Arc<VerifiedApproval>>,
 }
 
 /// Validated restore inputs, including keys verified against the stored grant.
@@ -105,7 +107,7 @@ struct GrantRestoreMaterial {
     grant_claims: GrantClaims,
     client_signer: GrantPopSigner,
     homeserver_pk: PublicKey,
-    approval_keys: Option<VerifiedApprovalKeys>,
+    verified_approval: Option<VerifiedApproval>,
 }
 
 /// Durable refresh material for restoring a grant-backed session.
@@ -125,7 +127,7 @@ struct StoredGrantCredential {
     client_key_secret: [u8; 32],
     /// Homeserver public key used as the `PoP` audience.
     homeserver_pk: PublicKey,
-    signed_approval: Option<SecretApproval>,
+    signed_approval: Option<SignedApproval>,
 }
 
 /// Non-secret durable metadata for browser delegated grant restore.
@@ -169,7 +171,7 @@ impl StoredGrantCredential {
         let secret = Zeroizing::new(URL_SAFE_NO_PAD.encode(self.client_key_secret));
         match &self.signed_approval {
             Some(approval) => format!(
-                "{STORED_GRANT_CREDENTIAL_KEYS_PREFIX}:{}:{}:{}:{}",
+                "{STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX}:{}:{}:{}:{}",
                 self.homeserver_pk.z32(),
                 secret.as_str(),
                 self.grant_jws,
@@ -193,7 +195,8 @@ impl StoredGrantCredential {
         // V1 remains authentication-only. V2 appends the confidential signed
         // approval; compact JWS values contain no colon separators.
         let (prefix, rest) = token.split_once(':').ok_or_else(invalid_stored_grant)?;
-        if prefix != STORED_GRANT_CREDENTIAL_PREFIX && prefix != STORED_GRANT_CREDENTIAL_KEYS_PREFIX
+        if prefix != STORED_GRANT_CREDENTIAL_PREFIX
+            && prefix != STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX
         {
             return Err(RequestError::Validation {
                 message: "unsupported grant credential token version".into(),
@@ -203,12 +206,12 @@ impl StoredGrantCredential {
 
         let (homeserver, rest) = rest.split_once(':').ok_or_else(invalid_stored_grant)?;
         let (secret, grant_jws) = rest.split_once(':').ok_or_else(invalid_stored_grant)?;
-        let (grant_jws, signed_approval) = if prefix == STORED_GRANT_CREDENTIAL_KEYS_PREFIX {
+        let (grant_jws, signed_approval) = if prefix == STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX {
             let (grant, approval) = grant_jws.split_once(':').ok_or_else(invalid_stored_grant)?;
             if approval.is_empty() {
                 return Err(invalid_stored_grant().into());
             }
-            (grant, Some(SecretApproval::new(approval)))
+            (grant, Some(SignedApproval::new(approval)))
         } else {
             (grant_jws, None)
         };
@@ -262,7 +265,7 @@ impl GrantCredential {
         Self {
             state: Arc::new(Mutex::new(state)),
             info,
-            approval_keys: None,
+            verified_approval: None,
         }
     }
 
@@ -289,23 +292,23 @@ impl GrantCredential {
     pub fn from_shared_delegated_state_with_approval(
         state: DelegatedGrantCredentialState,
         sign: DelegatedSignFn,
-        secret_approval: Option<&str>,
+        signed_approval: Option<&str>,
     ) -> Result<Self> {
         Ok(Self::from_shared_material(restore_delegated_material(
             state,
             sign,
             true,
-            secret_approval,
+            signed_approval,
         )?))
     }
 
     fn from_shared_material(material: GrantRestoreMaterial) -> Self {
         let GrantRestoreMaterial {
-            grant_jws: jws,
+            grant_jws,
             grant_claims: claims,
             client_signer: signer,
             homeserver_pk: homeserver,
-            approval_keys,
+            verified_approval,
         } = material;
         let response = GrantSessionResponse {
             token: String::new(),
@@ -320,8 +323,8 @@ impl GrantCredential {
                 created_at: 0,
             },
         };
-        let mut credential = Self::from_response(response, jws, claims, signer, homeserver);
-        credential.retain_approval_keys(approval_keys);
+        let mut credential = Self::from_response(response, grant_jws, claims, signer, homeserver);
+        credential.retain_verified_approval(verified_approval);
         credential
     }
 
@@ -337,23 +340,24 @@ impl GrantCredential {
             material.homeserver_pk,
         )
         .await?;
-        credential.retain_approval_keys(material.approval_keys);
+        credential.retain_verified_approval(material.verified_approval);
         Ok(credential)
     }
 
     /// Retain scoped keys and their signed recovery approval together.
-    pub(crate) fn retain_approval_keys(&mut self, keys: Option<VerifiedApprovalKeys>) {
-        self.approval_keys = keys.map(Arc::new);
+    pub(crate) fn retain_verified_approval(&mut self, approval: Option<VerifiedApproval>) {
+        self.verified_approval = approval.map(Arc::new);
     }
 
     /// Verified scoped keys received with this approval, if any.
     ///
-    /// Legacy bare grants and V1 exports have no bundle. V2 exports preserve
-    /// it. Clones share the same zeroizing key storage.
+    /// Bare grants return `None`. Signed approvals return `Some`, with an empty
+    /// bundle when no `e` scopes were approved. Storage V1 exports have no bundle;
+    /// storage V2 preserves it. Clones share the same zeroizing key storage.
     pub fn encryption_keys(&self) -> Option<&ScopedEncryptionKeyBundle> {
-        self.approval_keys
+        self.verified_approval
             .as_ref()
-            .map(|keys| &keys.encryption_keys)
+            .map(|approval| &approval.encryption_keys)
     }
 
     /// Snapshot of the current bearer token (released immediately).
@@ -378,9 +382,9 @@ impl GrantCredential {
                 client_key_secret,
                 homeserver_pk: state.homeserver_pk.clone(),
                 signed_approval: self
-                    .approval_keys
+                    .verified_approval
                     .as_ref()
-                    .map(|keys| keys.signed_approval.clone()),
+                    .map(|approval| approval.signed_approval.clone()),
             }
             .encode(),
         )
@@ -388,14 +392,14 @@ impl GrantCredential {
 
     /// Borrow the confidential signed approval for secure key persistence.
     ///
-    /// This contains raw scoped secrets and must stay outside public metadata.
+    /// This may contain raw scoped secrets and must stay outside public metadata.
     /// Persist it alongside delegated restore metadata and pass it to
     /// [`Self::import_delegated_state_with_approval`] to restore authentication
     /// too, or [`Self::restore_delegated_encryption_keys`] for offline recovery.
-    pub fn secret_approval(&self) -> Option<&str> {
-        self.approval_keys
+    pub fn signed_approval(&self) -> Option<&str> {
+        self.verified_approval
             .as_ref()
-            .map(|keys| keys.signed_approval.as_str())
+            .map(|approval| approval.signed_approval.as_str())
     }
 
     /// Export non-secret delegated restore metadata for browser-held keys.
@@ -420,19 +424,20 @@ impl GrantCredential {
     /// Recover scoped encryption keys from a local secret token entirely offline.
     ///
     /// Verifies the signed approval, its exact grant binding, and key scopes.
-    /// Returns `None` for legacy V1 tokens without keys. Grant expiry and
-    /// revocation do not invalidate previously delivered keys. This method
+    /// Bare-grant (storage V1) tokens return `None`. Signed approvals without
+    /// `e` scopes return `Some` with an empty bundle. Grant expiry and revocation
+    /// do not invalidate previously delivered keys. This method
     /// performs no network I/O and does not create an authenticated session.
     ///
     /// # Errors
     /// Rejects malformed tokens, invalid approvals, and mismatched grants.
     pub fn restore_encryption_keys(token: &str) -> Result<Option<ScopedEncryptionKeyBundle>> {
         let saved = StoredGrantCredential::decode(token)?;
-        let keys = restore_approval_keys(
-            saved.signed_approval.as_ref().map(SecretApproval::as_str),
+        let approval = restore_verified_approval(
+            saved.signed_approval.as_ref().map(SignedApproval::as_str),
             &saved.grant_jws,
         )?;
-        Ok(keys.map(|keys| keys.encryption_keys))
+        Ok(approval.map(|approval| approval.encryption_keys))
     }
 
     /// Recover delegated session keys entirely offline, without a `PoP` signer.
@@ -446,10 +451,10 @@ impl GrantCredential {
     /// Rejects invalid approvals, inconsistent scopes, and mismatched grants.
     pub fn restore_delegated_encryption_keys(
         state: &DelegatedGrantCredentialState,
-        secret_approval: Option<&str>,
+        signed_approval: Option<&str>,
     ) -> Result<Option<ScopedEncryptionKeyBundle>> {
-        let keys = restore_approval_keys(secret_approval, &state.grant_jws)?;
-        Ok(keys.map(|keys| keys.encryption_keys))
+        let approval = restore_verified_approval(signed_approval, &state.grant_jws)?;
+        Ok(approval.map(|approval| approval.encryption_keys))
     }
 
     /// Restore a grant credential from an exported secret token.
@@ -495,9 +500,9 @@ impl GrantCredential {
         state: DelegatedGrantCredentialState,
         client: &PubkyHttpClient,
         sign: DelegatedSignFn,
-        secret_approval: Option<&str>,
+        signed_approval: Option<&str>,
     ) -> Result<Self> {
-        let material = restore_delegated_material(state, sign, false, secret_approval)?;
+        let material = restore_delegated_material(state, sign, false, signed_approval)?;
         Self::exchange_restored_material(material, client).await
     }
 
@@ -720,8 +725,8 @@ fn restore_material(
     saved: StoredGrantCredential,
     allow_expired: bool,
 ) -> Result<GrantRestoreMaterial> {
-    let approval_keys = restore_approval_keys(
-        saved.signed_approval.as_ref().map(SecretApproval::as_str),
+    let verified_approval = restore_verified_approval(
+        saved.signed_approval.as_ref().map(SignedApproval::as_str),
         &saved.grant_jws,
     )?;
     let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
@@ -744,37 +749,37 @@ fn restore_material(
         grant_claims,
         client_signer: GrantPopSigner::local(client_keypair),
         homeserver_pk: saved.homeserver_pk,
-        approval_keys,
+        verified_approval,
     })
 }
 
-fn restore_approval_keys(
+fn restore_verified_approval(
     signed: Option<&str>,
     grant_jws: &str,
-) -> Result<Option<VerifiedApprovalKeys>> {
+) -> Result<Option<VerifiedApproval>> {
     let Some(signed) = signed else {
         return Ok(None);
     };
     let approval = GrantApproval::decode_text(
         signed,
-        crate::actors::auth::deep_links::GrantApprovalFormat::V1,
+        crate::actors::auth::deep_links::GrantApprovalFormat::SignedApprovalV1,
     )?;
-    if approval.jws != grant_jws {
+    if approval.grant_jws != grant_jws {
         return Err(AuthError::Validation(
             "stored approval does not match the stored grant".into(),
         )
         .into());
     }
-    Ok(approval.approval_keys)
+    Ok(approval.verified_approval)
 }
 
 fn restore_delegated_material(
     saved: DelegatedGrantCredentialState,
     sign: DelegatedSignFn,
     allow_expired: bool,
-    secret_approval: Option<&str>,
+    signed_approval: Option<&str>,
 ) -> Result<GrantRestoreMaterial> {
-    let approval_keys = restore_approval_keys(secret_approval, &saved.grant_jws)?;
+    let verified_approval = restore_verified_approval(signed_approval, &saved.grant_jws)?;
     let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
         AuthError::Validation(format!(
             "invalid delegated grant credential grant JWS: {err}"
@@ -796,7 +801,7 @@ fn restore_delegated_material(
         grant_claims,
         client_signer: GrantPopSigner::delegated(saved.key_id, saved.client_pk, sign),
         homeserver_pk: saved.homeserver_pk,
-        approval_keys,
+        verified_approval,
     })
 }
 
@@ -959,13 +964,13 @@ mod tests {
         stored.grant_jws = claims.sign(&identity, GRANT_JWS_TYP);
         let signed =
             super::super::approval_envelope::GrantApprovalEnvelope::sign(&identity, &claims);
-        stored.signed_approval = Some(SecretApproval::new(&signed));
+        stored.signed_approval = Some(SignedApproval::new(&signed));
 
         let encoded = Zeroizing::new(stored.encode());
-        assert!(encoded.starts_with(STORED_GRANT_CREDENTIAL_KEYS_PREFIX));
+        assert!(encoded.starts_with(STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX));
         let decoded = StoredGrantCredential::decode(&encoded).unwrap();
-        let keys = restore_approval_keys(
-            decoded.signed_approval.as_ref().map(SecretApproval::as_str),
+        let keys = restore_verified_approval(
+            decoded.signed_approval.as_ref().map(SignedApproval::as_str),
             &decoded.grant_jws,
         )
         .unwrap()
@@ -984,7 +989,7 @@ mod tests {
         assert!(!format!("{decoded:?}").contains(signed.as_str()));
 
         let (other, _) = stored_credential(now_unix() + 3600);
-        assert!(restore_approval_keys(Some(&signed), &other.grant_jws).is_err());
+        assert!(restore_verified_approval(Some(&signed), &other.grant_jws).is_err());
         let mut tampered = signed.as_bytes().to_vec();
         let signature_start = signed.rfind('.').unwrap() + 1;
         tampered[signature_start] = if tampered[signature_start] == b'A' {
@@ -993,7 +998,7 @@ mod tests {
             b'A'
         };
         assert!(
-            restore_approval_keys(
+            restore_verified_approval(
                 Some(std::str::from_utf8(&tampered).unwrap()),
                 &stored.grant_jws
             )
@@ -1014,7 +1019,7 @@ mod tests {
         saved.grant_jws = claims.sign(&identity, GRANT_JWS_TYP);
         let signed =
             super::super::approval_envelope::GrantApprovalEnvelope::sign(&identity, &claims);
-        saved.signed_approval = Some(SecretApproval::new(&signed));
+        saved.signed_approval = Some(SignedApproval::new(&signed));
         let delegated = DelegatedGrantCredentialState {
             grant_jws: saved.grant_jws.clone(),
             homeserver_pk: saved.homeserver_pk.clone(),
@@ -1033,7 +1038,7 @@ mod tests {
             .unwrap();
         let delegated_keys = GrantCredential::restore_delegated_encryption_keys(
             &delegated,
-            saved.signed_approval.as_ref().map(SecretApproval::as_str),
+            saved.signed_approval.as_ref().map(SignedApproval::as_str),
         )
         .unwrap()
         .unwrap();
@@ -1043,11 +1048,11 @@ mod tests {
         let shared_delegated = GrantCredential::from_shared_delegated_state_with_approval(
             delegated.clone(),
             test_delegated_signer(),
-            saved.signed_approval.as_ref().map(SecretApproval::as_str),
+            saved.signed_approval.as_ref().map(SignedApproval::as_str),
         )
         .unwrap();
-        assert!(shared_local.secret_approval().is_some());
-        assert!(shared_delegated.secret_approval().is_some());
+        assert!(shared_local.signed_approval().is_some());
+        assert!(shared_delegated.signed_approval().is_some());
         for keys in [
             &local_keys,
             &delegated_keys,
@@ -1104,7 +1109,7 @@ mod tests {
             b'A'
         };
         let tampered = Zeroizing::new(String::from_utf8(tampered).unwrap());
-        saved.signed_approval = Some(SecretApproval::new(&tampered));
+        saved.signed_approval = Some(SignedApproval::new(&tampered));
         assert!(GrantCredential::from_shared_secret(&saved.encode()).is_err());
         assert!(
             GrantCredential::from_shared_delegated_state_with_approval(
@@ -1143,7 +1148,7 @@ mod tests {
         let (stored, _) = stored_credential(now_unix() + 3600);
         let token = stored.encode().replacen(
             STORED_GRANT_CREDENTIAL_PREFIX,
-            STORED_GRANT_CREDENTIAL_KEYS_PREFIX,
+            STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX,
             1,
         );
         assert!(StoredGrantCredential::decode(&token).is_err());

@@ -95,12 +95,12 @@ impl SignupGrantDeepLink {
         PublicKey(self.0.params().client_pk.clone())
     }
 
-    /// Negotiated approval format: `grant` or `v1`.
+    /// Negotiated approval format: `bareGrant` or `signedApprovalV1`.
     #[wasm_bindgen(js_name = "approvalFormat", getter)]
     pub fn approval_format(&self) -> String {
         match self.0.params().approval_format {
-            pubky::deep_links::GrantApprovalFormat::Grant => "grant",
-            pubky::deep_links::GrantApprovalFormat::V1 => "v1",
+            pubky::deep_links::GrantApprovalFormat::BareGrant => "bareGrant",
+            pubky::deep_links::GrantApprovalFormat::SignedApprovalV1 => "signedApprovalV1",
         }
         .to_owned()
     }

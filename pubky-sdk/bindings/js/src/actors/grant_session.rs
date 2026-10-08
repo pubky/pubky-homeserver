@@ -1,5 +1,7 @@
 use wasm_bindgen::prelude::*;
 
+use super::encryption_keys::EncryptionKeys;
+
 use crate::custom_pop::{CustomPop, JsonValue};
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 use crate::wrappers::keys::PublicKey;
@@ -41,39 +43,19 @@ impl GrantSession {
         })
     }
 
-    /// Approved key scopes, or `undefined` for authentication-only sessions.
-    /// Directory scopes cover descendant files; exact files cover only themselves.
-    #[wasm_bindgen(js_name = "encryptionScopes", getter)]
-    pub fn encryption_scopes(&self) -> JsResult<Option<Vec<String>>> {
+    /// Return scoped keys using the same API as offline recovery.
+    /// Bare grants return `undefined`; signed approvals without `e` scopes
+    /// return an object with empty scopes.
+    /// Each access creates an owned copy. Keep it for repeated use and call
+    /// `free()` when finished. It remains usable after this view or its session
+    /// is freed, signed out, or revoked; freeing it does not affect the session.
+    #[wasm_bindgen(js_name = "encryptionKeys", getter)]
+    pub fn encryption_keys(&self) -> JsResult<Option<EncryptionKeys>> {
         Ok(self
             .as_grant()?
             .encryption_keys()
-            .map(|keys| keys.scopes().map(ToString::to_string).collect()))
-    }
-
-    /// Derive a 32-byte content key for a canonical decoded file path.
-    /// Directory paths, including `/`, are rejected.
-    /// The caller owns the JS byte copy and must avoid logging or publishing it.
-    /// Rejects authentication-only sessions and paths outside approved scopes.
-    #[wasm_bindgen(js_name = "deriveEncryptionKey")]
-    pub fn derive_encryption_key(&self, path: &str) -> JsResult<js_sys::Uint8Array> {
-        let grant = self.as_grant()?;
-        let keys = grant.encryption_keys().ok_or_else(|| {
-            PubkyError::new(
-                PubkyErrorName::ClientStateError,
-                "Session has no encryption keys.",
-            )
-        })?;
-        super::encryption_keys::derive_file_key(keys, path)
-    }
-
-    /// Derive a non-extractable AES-GCM-256 key for WebCrypto encryption/decryption.
-    /// Rejects authentication-only sessions, directories, and unapproved paths.
-    /// Requires WebCrypto; temporary JS key bytes are cleared after import.
-    #[wasm_bindgen(js_name = "deriveEncryptionCryptoKey")]
-    pub async fn derive_encryption_crypto_key(&self, path: &str) -> JsResult<web_sys::CryptoKey> {
-        super::encryption_keys::import_encryption_crypto_key(self.derive_encryption_key(path)?)
-            .await
+            .cloned()
+            .map(EncryptionKeys))
     }
 
     /// Full grant session metadata.
@@ -279,4 +261,128 @@ fn json_value_from_js(value: &JsValue) -> JsResult<serde_json::Value> {
         .ok_or_else(invalid)?;
     serde_json::from_str(&json)
         .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use pubky_common::{
+        auth::{
+            grant::GrantClaims,
+            jws::{ClientId, GRANT_JWS_TYP, GrantId, sign_jws},
+        },
+        capabilities::{Action, Capabilities},
+        crypto::Keypair,
+        encryption_keys::ScopedEncryptionKeyBundle,
+    };
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen(inline_js = r#"
+export function checkOwnedSessionKeys(grant, recovered) {
+    const path = "/pub/chat/message";
+    const first = grant.encryptionKeys;
+    const retained = grant.encryptionKeys;
+    first.free();
+    // Freeing one copy must not clear the session's keys or another copy.
+    const later = grant.encryptionKeys;
+    const expected = recovered.deriveForPath(path);
+    for (const keys of [retained, later]) {
+        const actual = keys.deriveForPath(path);
+        if (keys.scopes.join() !== "/pub/chat/" ||
+            !actual.every((byte, index) => byte === expected[index])) {
+            throw new Error("Session and recovery must expose the same scoped keys.");
+        }
+        actual.fill(0);
+    }
+    later.free();
+    grant.free();
+    const actual = retained.deriveForPath(path);
+    if (!actual.every((byte, index) => byte === expected[index])) {
+        throw new Error("Owned keys must survive freeing the grant session.");
+    }
+    actual.fill(0);
+    expected.fill(0);
+    retained.free();
+    recovered.free();
+}
+
+export function checkAbsentAndEmptySessionKeys(bare, signed) {
+    if (bare.encryptionKeys !== undefined) {
+        throw new Error("Bare grants must have no key object.");
+    }
+    const keys = signed.encryptionKeys;
+    if (keys === undefined || keys.scopes.length !== 0) {
+        throw new Error("Signed approvals without e must retain an empty object.");
+    }
+    keys.free();
+    bare.free();
+    signed.free();
+}
+"#)]
+    extern "C" {
+        #[wasm_bindgen(catch, js_name = checkOwnedSessionKeys)]
+        fn check_owned_keys(grant: JsValue, recovered: JsValue) -> Result<(), JsValue>;
+        #[wasm_bindgen(catch, js_name = checkAbsentAndEmptySessionKeys)]
+        fn check_absent_and_empty(bare: JsValue, signed: JsValue) -> Result<(), JsValue>;
+    }
+
+    /// Build valid restore material without a homeserver exchange.
+    fn grant_session(caps: &str, signed_approval: bool) -> (GrantSession, String) {
+        let identity = Keypair::random();
+        let client = Keypair::random();
+        let claims = GrantClaims {
+            iss: identity.public_key(),
+            client_id: ClientId::new("owned-keys.test").unwrap(),
+            caps: caps.parse::<Capabilities>().unwrap().into(),
+            cnf: client.public_key(),
+            jti: GrantId::generate(),
+            iat: 1,
+            exp: 4_000_000_000,
+        };
+        let grant = claims.sign(&identity, GRANT_JWS_TYP);
+        let mut token = format!(
+            "pubky-grant-credential-v{}:{}:{}:{grant}",
+            if signed_approval { 2 } else { 1 },
+            identity.public_key().z32(),
+            URL_SAFE_NO_PAD.encode(client.secret()),
+        );
+        if signed_approval {
+            let keys = ScopedEncryptionKeyBundle::from_identity_secret(
+                &identity.secret(),
+                claims
+                    .caps
+                    .iter()
+                    .filter(|cap| cap.actions().contains(&Action::EncryptionKeys))
+                    .map(|cap| cap.scope()),
+            );
+            let approval = sign_jws(
+                &identity,
+                "pubky-grant-approval",
+                &serde_json::json!({ "version": "v1", "grant": grant, "encryption_keys": keys }),
+            );
+            token.push(':');
+            token.push_str(&approval);
+        }
+        let credential = pubky::GrantCredential::from_shared_secret(&token).unwrap();
+        let session = pubky::PubkySession::from_grant_credential(
+            pubky::PubkyHttpClient::new().unwrap(),
+            credential,
+        );
+        (GrantSession(session), token)
+    }
+
+    #[wasm_bindgen_test]
+    fn session_keys_share_the_recovery_api_with_independent_lifetimes() {
+        let (grant, token) = grant_session("/pub/chat/:re", true);
+        let recovered = EncryptionKeys::from_local_secret(&token).unwrap().unwrap();
+        check_owned_keys(grant.into(), recovered.into()).unwrap();
+    }
+
+    #[wasm_bindgen_test]
+    fn session_keys_distinguish_bare_grants_from_empty_signed_approvals() {
+        let (bare, _) = grant_session("/pub/chat/:rw", false);
+        let (signed, _) = grant_session("/pub/chat/:rw", true);
+        check_absent_and_empty(bare.into(), signed.into()).unwrap();
+    }
 }
