@@ -4018,7 +4018,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sse-core",
- "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",

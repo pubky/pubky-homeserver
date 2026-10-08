@@ -472,14 +472,14 @@ await signer.pkdns.publishHomeserverForce(/* optional override homeserver*/);
 await signer.pkdns.getHomeserver();
 ```
 
-### ServiceAuthVerifier
+### Custom proofs
 
-Let users sign in to your API using an existing Pubky session. Use
-`ServiceAuthVerifier` on your server to check credentials created by the client,
-then apply your access rules and create your own service session.
+Use `session.grant.createCustomPop(data)` to sign JSON and return both the proof
+and its root-signed grant. Use `verifyCustomGrantPop(credentials)` to verify the bundle
+offline.
 
-See [Sign in to your service with Pubky](../../../../docs/SERVICE_AUTH.md#verify-credentials-in-nodejs-or-a-browser)
-for a JavaScript client and Node.js server example.
+See [Sign and verify custom data](../../../../docs/CUSTOM_POP.md) for Rust and
+JavaScript examples and the verification contract.
 
 ## Logging
 

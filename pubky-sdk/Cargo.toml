@@ -23,7 +23,6 @@ crate-type = ["rlib"]
 [features]
 default = []
 json = ["reqwest/json"]
-service-auth-verifier = []
 
 [dependencies]
 pubky-common.workspace = true
@@ -69,7 +68,6 @@ log.workspace = true
 wasm-bindgen-futures.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 pubky-testnet.workspace = true # used in docstring tests
 httpmock = "0.8"
 http-relay = { workspace = true, features = ["server", "link-compat"] }

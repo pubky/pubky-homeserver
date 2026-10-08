@@ -1,5 +1,5 @@
 import test from "tape";
-import { assertServiceAuthCredentials, decodeClaims } from "./service_auth_helpers.js";
+import { verifyCustomGrantPop } from "../index.js";
 
 import {
   AuthFlowKind,
@@ -333,14 +333,14 @@ test("BrowserSessionStore: stores and restores multiple accounts", async (t) => 
   t.end();
 });
 
-test("service auth: restored delegated grant signs concurrently with an expired bearer", async t => {
+test("custom PoP: restored delegated grant signs concurrently with an expired bearer", async t => {
   if (typeof indexedDB === "undefined") {
     t.comment("browser-only delegated signing test skipped without IndexedDB");
     t.end();
     return;
   }
   const sdk = Pubky.testnet();
-  const { session } = await grantSessionFor(sdk, "service-auth-expired-bearer.test", "/pub/app/:rw");
+  const { session } = await grantSessionFor(sdk, "custom-pop-expired-bearer.test", "/pub/app/:rw");
   const stored = await sdk.browserSessionStore.save(session);
   t.equal(stored.storageMode, "delegated", "uses a non-extractable browser key");
   const restored = await sdk.browserSessionStore.restore(stored.id);
@@ -353,14 +353,12 @@ test("service auth: restored delegated grant signs concurrently with an expired 
     throw new Error("proof generation must be network-free");
   };
   try {
-    const audience = " Inbox:é/生产 ";
+    const data = { audience: " Inbox:é/生产 ", challenge: "application-challenge" };
     const proofs = await Promise.all(
-      Array.from({ length: 8 }, () => restored.grant!.createServiceAuthProof(audience)),
+      Array.from({ length: 8 }, () => restored.grant!.createCustomPop(data)),
     );
-    const nonces = proofs.map(proof => decodeClaims<{ nonce: string }>(proof.pop).nonce);
-    t.equal(new Set(nonces).size, 8, "concurrent proofs have fresh nonces");
     for (const proof of proofs) {
-      await assertServiceAuthCredentials(t, proof, audience);
+      t.deepEqual(verifyCustomGrantPop(proof).data, data, "delegated proof verifies with its bundled grant");
     }
     t.equal(requests, 0, "expired bearer does not trigger a network request");
   } finally {
@@ -370,19 +368,19 @@ test("service auth: restored delegated grant signs concurrently with an expired 
   t.end();
 });
 
-test("service auth: missing delegated key reports an actionable error", async t => {
+test("custom PoP: missing delegated key reports an actionable error", async t => {
   if (typeof indexedDB === "undefined") {
     t.comment("browser-only missing-key test skipped without IndexedDB");
     t.end();
     return;
   }
   const sdk = Pubky.testnet();
-  const { session } = await grantSessionFor(sdk, "service-auth-missing-key.test", "/pub/app/:rw");
+  const { session } = await grantSessionFor(sdk, "custom-pop-missing-key.test", "/pub/app/:rw");
   const stored = await sdk.browserSessionStore.save(session);
   t.equal(stored.storageMode, "delegated", "uses a browser-held key");
   await removeDelegatedKey(stored.id);
   try {
-    await session.grant!.createServiceAuthProof("inbox");
+    await session.grant!.createCustomPop("inbox");
     t.fail("missing browser key must fail");
   } catch (error) {
     assertPubkyError(t, error);
@@ -394,20 +392,20 @@ test("service auth: missing delegated key reports an actionable error", async t 
   t.end();
 });
 
-test("service auth: inaccessible key storage preserves the IndexedDB diagnostic", async t => {
+test("custom PoP: inaccessible key storage preserves the IndexedDB diagnostic", async t => {
   if (typeof indexedDB === "undefined") {
     t.comment("browser-only key-storage failure test skipped without IndexedDB");
     t.end();
     return;
   }
   const sdk = Pubky.testnet();
-  const { session } = await grantSessionFor(sdk, "service-auth-key-storage.test", "/pub/app/:rw");
+  const { session } = await grantSessionFor(sdk, "custom-pop-key-storage.test", "/pub/app/:rw");
   const originalOpen = indexedDB.open;
   indexedDB.open = () => {
     throw new DOMException("Test storage access denied", "SecurityError");
   };
   try {
-    await session.grant!.createServiceAuthProof("inbox");
+    await session.grant!.createCustomPop("inbox");
     t.fail("inaccessible browser key storage must fail");
   } catch (error) {
     assertPubkyError(t, error);
@@ -419,19 +417,19 @@ test("service auth: inaccessible key storage preserves the IndexedDB diagnostic"
   t.end();
 });
 
-test("service auth: removed browser session rejects a stale handle", async t => {
+test("custom PoP: removed browser session rejects a stale handle", async t => {
   if (typeof indexedDB === "undefined") {
     t.comment("browser-only session removal test skipped without IndexedDB");
     t.end();
     return;
   }
   const sdk = Pubky.testnet();
-  const { session } = await grantSessionFor(sdk, "service-auth-removed.test", "/pub/app/:rw");
+  const { session } = await grantSessionFor(sdk, "custom-pop-removed.test", "/pub/app/:rw");
   const stored = await sdk.browserSessionStore.save(session);
   const restored = await sdk.browserSessionStore.restore(stored.id);
   await sdk.browserSessionStore.remove(stored.id);
   try {
-    await restored.grant!.createServiceAuthProof("inbox");
+    await restored.grant!.createCustomPop("inbox");
     t.fail("removed browser session must not create proofs");
   } catch (error) {
     assertPubkyError(t, error);

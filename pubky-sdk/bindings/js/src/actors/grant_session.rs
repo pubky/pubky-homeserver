@@ -1,19 +1,10 @@
 use wasm_bindgen::prelude::*;
 
+use crate::custom_pop::{CustomPop, JsonValue};
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 use crate::wrappers::keys::PublicKey;
 use serde::{Deserialize, Serialize};
-use tsify::{Ts, Tsify};
-
-/// Credentials to submit to an external service's authentication endpoint.
-#[derive(Serialize, Deserialize, Tsify)]
-#[serde(deny_unknown_fields)]
-pub struct ServiceAuthProof {
-    /// Original root-signed grant JWS.
-    pub grant: String,
-    /// Fresh audience-bound proof JWS.
-    pub pop: String,
-}
+use tsify::Ts;
 
 const DELEGATED_GRANT_CREDENTIAL_VERSION: &str = "pubky-delegated-grant-credential-v1";
 
@@ -36,24 +27,14 @@ pub struct GrantSession(pub(crate) pubky::PubkySession);
 
 #[wasm_bindgen]
 impl GrantSession {
-    /// Create credentials without network requests or bearer refresh.
-    ///
-    /// Audience is preserved exactly and must contain 1–1024 UTF-8 bytes.
-    /// Generate a fresh proof for every exchange attempt, including retries.
-    /// Homeserver revocation does not revoke external sessions. The accepting
-    /// service should bound its session lifetime by the grant's expiry.
-    /// Failures expose `InvalidServiceAudience`, `GrantExpired`, `InvalidGrant`,
-    /// `SigningKeyUnavailable`, or `SigningFailed` in `PubkyError.data.reason`.
-    #[wasm_bindgen(js_name = "createServiceAuthProof")]
-    pub async fn create_service_auth_proof(
-        &self,
-        audience: String,
-    ) -> JsResult<Ts<ServiceAuthProof>> {
-        let proof = self
-            .as_grant()?
-            .create_service_auth_proof(&audience)
-            .await?;
-        crate::js_error::serialize_ts(&ServiceAuthProof {
+    /// Sign JSON data and return both the custom proof and its root-signed grant.
+    /// Makes no network requests. Your applications handle freshness and replay protection.
+    #[wasm_bindgen(js_name = "createCustomPop")]
+    pub async fn create_custom_pop(&self, data: JsonValue) -> JsResult<Ts<CustomPop>> {
+        let data = serde_wasm_bindgen::from_value(data.into())
+            .map_err(|error| PubkyError::new(PubkyErrorName::InvalidInput, error))?;
+        let proof = self.as_grant()?.create_custom_pop(data).await?;
+        crate::js_error::serialize_ts(&CustomPop {
             grant: proof.grant,
             pop: proof.pop,
         })

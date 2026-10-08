@@ -211,84 +211,37 @@ impl From<pubky::Error> for PubkyError {
     }
 }
 
-/// Preserve the service-proof error contract independently of general auth errors.
-impl From<pubky::ServiceAuthProofError> for PubkyError {
-    fn from(error: pubky::ServiceAuthProofError) -> Self {
-        use pubky::ServiceAuthProofError;
+/// Preserve custom proof errors independently of general auth errors.
+impl From<pubky::CustomPopError> for PubkyError {
+    fn from(error: pubky::CustomPopError) -> Self {
+        use pubky::CustomPopError as Error;
         let reason = match error {
-            ServiceAuthProofError::InvalidAudience => "InvalidServiceAudience",
-            ServiceAuthProofError::GrantExpired => "GrantExpired",
-            ServiceAuthProofError::InvalidGrant(_) => "InvalidGrant",
-            ServiceAuthProofError::SigningKeyUnavailable(_) => "SigningKeyUnavailable",
-            ServiceAuthProofError::SigningFailed(_) => "SigningFailed",
-            ServiceAuthProofError::SessionState(source) => return Self::from(*source),
+            Error::GrantExpired => "GrantExpired",
+            Error::InvalidGrant(_) => "InvalidGrant",
+            Error::SigningKeyUnavailable(_) => "SigningKeyUnavailable",
+            Error::SigningFailed(_) => "SigningFailed",
+            Error::SessionState(source) => return Self::from(*source),
         };
-        let name = if matches!(error, ServiceAuthProofError::InvalidAudience) {
-            PubkyErrorName::InvalidInput
-        } else {
-            PubkyErrorName::AuthenticationError
-        };
-        Self::new(name, error).with_data(json!({ "reason": reason }))
+        Self::new(PubkyErrorName::AuthenticationError, error).with_data(json!({ "reason": reason }))
     }
 }
 
-/// Preserve verifier and storage failures as machine-readable authentication errors.
-impl From<pubky::service_auth::ServiceAuthVerificationError> for PubkyError {
-    fn from(error: pubky::service_auth::ServiceAuthVerificationError) -> Self {
-        use pubky::service_auth::ServiceAuthVerificationError as Error;
+/// Preserve verifier failures as machine-readable authentication errors.
+impl From<pubky::custom_pop::CustomPopVerificationError> for PubkyError {
+    fn from(error: pubky::custom_pop::CustomPopVerificationError) -> Self {
+        use pubky::custom_pop::CustomPopVerificationError as Error;
         let reason = match &error {
-            Error::InvalidAudience => "InvalidServiceAudience",
-            Error::InvalidPolicy => "InvalidPolicy",
-            Error::InputTooLarge => "InputTooLarge",
             Error::MalformedCredential => "MalformedCredential",
             Error::UnsupportedHeader => "UnsupportedHeader",
             Error::InvalidGrantSignature => "InvalidGrantSignature",
             Error::InvalidProofSignature => "InvalidProofSignature",
             Error::InvalidGrant => "InvalidGrant",
             Error::GrantExpired => "GrantExpired",
-            Error::InvalidTimestamp => "InvalidTimestamp",
-            Error::AudienceMismatch => "AudienceMismatch",
+            Error::GrantNotYetValid => "GrantNotYetValid",
+            Error::InvalidClock => "InvalidClock",
             Error::GrantMismatch => "GrantMismatch",
-            Error::InvalidNonce => "InvalidNonce",
-            Error::Replay => "Replay",
-            Error::Storage(_) => "Storage",
         };
-        let name = if matches!(error, Error::InvalidAudience | Error::InvalidPolicy) {
-            PubkyErrorName::InvalidInput
-        } else {
-            PubkyErrorName::AuthenticationError
-        };
-        let mut data = json!({ "reason": reason });
-        if let Error::Storage(source) = &error {
-            data["storageReason"] = json!(replay_store_reason(source));
-        }
-        Self::new(name, error).with_data(data)
-    }
-}
-
-impl From<pubky::service_auth::ReplayStoreError> for PubkyError {
-    fn from(error: pubky::service_auth::ReplayStoreError) -> Self {
-        Self::new(PubkyErrorName::ClientStateError, &error)
-            .with_data(json!({ "reason": replay_store_reason(&error) }))
-    }
-}
-
-fn replay_store_reason(error: &pubky::service_auth::ReplayStoreError) -> &'static str {
-    use pubky::service_auth::ReplayStoreError as Error;
-    match error {
-        Error::InvalidConfiguration(_) => "InvalidConfiguration",
-        Error::Capacity => "Capacity",
-        Error::AlreadyOpen => "AlreadyOpen",
-        Error::PolicyMismatch => "PolicyMismatch",
-        Error::ClockRollback => "ClockRollback",
-        Error::OutsideTimeWindow => "OutsideTimeWindow",
-        Error::Corrupt(_) => "Corrupt",
-        Error::Unavailable => "Unavailable",
-        Error::Io(_) => "Io",
-        #[cfg(not(target_arch = "wasm32"))]
-        Error::Task(_) => "Task",
-        Error::Backend(_) => "Backend",
-        Error::InvalidResponse(_) => "InvalidResponse",
+        Self::new(PubkyErrorName::AuthenticationError, error).with_data(json!({ "reason": reason }))
     }
 }
 
@@ -418,33 +371,28 @@ impl WasmDescribe for PubkyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky::ServiceAuthProofError;
+    use pubky::CustomPopError;
 
     #[test]
-    fn service_proof_errors_preserve_javascript_names_and_reasons() {
+    fn custom_proof_errors_preserve_javascript_names_and_reasons() {
         for (error, name, reason) in [
             (
-                ServiceAuthProofError::InvalidAudience,
-                "InvalidInput",
-                "InvalidServiceAudience",
-            ),
-            (
-                ServiceAuthProofError::GrantExpired,
+                CustomPopError::GrantExpired,
                 "AuthenticationError",
                 "GrantExpired",
             ),
             (
-                ServiceAuthProofError::InvalidGrant("binding mismatch".into()),
+                CustomPopError::InvalidGrant("binding mismatch".into()),
                 "AuthenticationError",
                 "InvalidGrant",
             ),
             (
-                ServiceAuthProofError::SigningKeyUnavailable("deleted".into()),
+                CustomPopError::SigningKeyUnavailable("deleted".into()),
                 "AuthenticationError",
                 "SigningKeyUnavailable",
             ),
             (
-                ServiceAuthProofError::SigningFailed("WebCrypto failure".into()),
+                CustomPopError::SigningFailed("WebCrypto failure".into()),
                 "AuthenticationError",
                 "SigningFailed",
             ),
@@ -458,9 +406,9 @@ mod tests {
     }
 
     #[test]
-    fn service_proof_session_state_preserves_the_original_error_shape() {
+    fn custom_proof_session_state_preserves_the_original_error_shape() {
         let source = pubky::errors::AuthError::Validation("Browser session was removed".into());
-        let actual = PubkyError::from(ServiceAuthProofError::SessionState(Box::new(source.into())));
+        let actual = PubkyError::from(CustomPopError::SessionState(Box::new(source.into())));
         assert_eq!(actual.name.as_str(), "AuthenticationError");
         assert_eq!(
             actual.message,
