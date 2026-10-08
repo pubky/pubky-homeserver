@@ -196,14 +196,33 @@ async function scenario() {
   // writing as the second user.
   const second = await callAgent(appWindow, origins.agent, "signin");
   assert.notEqual(second, user);
-  await until(async () => (await call(shop, "whoami")) === second);
-  assert.equal(await call(appWindow, "whoami"), second);
+  // Every frame adopts the saved session on its own, the signing one included.
+  await until(async () => (await call(shop, "whoami")) === second
+    && (await call(appWindow, "whoami")) === second);
   await assert.rejects(call(shop, "writeHeld", "as the first user"), /another user/);
 
   // Clearing the agent's store signs every app out.
   await callAgent(appWindow, origins.agent, "clearStore");
   await until(async () => (await state(appWindow)) === "signed-out" && (await state(shop)) === "signed-out");
   assert.equal(await callAgent(shop, origins.agent, "hasSession"), false);
+
+  // A grant revoked outside the agent (as from Ring) signs every app out at
+  // its next request instead of leaving them signed in with a dead grant,
+  // and the agent drops the stored session.
+  const third = await callAgent(appWindow, origins.agent, "signin");
+  await until(async () => (await call(shop, "whoami")) === third);
+  await call(shop, "write", "before revocation");
+  await callAgent(appWindow, origins.agent, "revokeGrant");
+  await assert.rejects(call(shop, "write", "after revocation"));
+  await until(async () => (await state(shop)) === "signed-out" && (await state(appWindow)) === "signed-out");
+  assert.equal(await call(shop, "frameVisible"), true);
+  assert.equal(await callAgent(appWindow, origins.agent, "hasSession"), false);
+  assert.equal(await callAgent(appWindow, origins.agent, "storedSessions"), 0);
+
+  // A fresh agent frame serves no session once the grant is gone.
+  appWindow.destroy();
+  appWindow = await open(appUrl(origins.app));
+  assert.deepEqual(await call(appWindow, "ready"), { status: { state: "signed-out" } });
 
   console.log("PASS: one in-frame sign-in signs in every allowlisted same-site origin");
 }

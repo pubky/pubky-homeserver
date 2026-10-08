@@ -89,7 +89,9 @@ pub trait BearerSource: fmt::Debug + Send + Sync {
     /// `rejected` is a bearer the homeserver just refused. The holder must
     /// exchange its grant when that is still its current bearer and otherwise
     /// return the newer one it already has, so one grant never produces two
-    /// competing exchanges.
+    /// competing exchanges. When the homeserver no longer accepts the grant
+    /// (revoked or expired), the holder should sign out before failing, so
+    /// [`BearerSource::status`] reports `None`.
     async fn bearer(&self, rejected: Option<&str>) -> Result<LentBearer>;
 
     /// Whether the holder still has a session: `Some(info)` while signed in,
@@ -236,7 +238,15 @@ impl SessionCredential for LentBearerCredential {
                 status: StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND,
                 ..
             })) => return Ok(None),
-            result => result?,
+            // A holder that finds its grant revoked or expired signs out
+            // before failing the bearer request, so check its status again.
+            Err(error) => {
+                return match self.source.status().await {
+                    Ok(None) => Ok(None),
+                    _ => Err(error),
+                };
+            }
+            Ok(response) => response,
         };
         if credential_session_missing(&response) {
             return Ok(None);
@@ -514,7 +524,19 @@ mod tests {
         impl BearerSource for LocalSource {
             async fn bearer(&self, rejected: Option<&str>) -> Result<LentBearer> {
                 self.asked.fetch_add(1, Ordering::SeqCst);
-                self.session.as_grant().unwrap().lend_bearer(rejected).await
+                match self.session.as_grant().unwrap().lend_bearer(rejected).await {
+                    Ok(lent) => Ok(lent),
+                    Err(error) => {
+                        // Like the browser agent: a grant the homeserver no
+                        // longer accepts signs the holder out, and the
+                        // borrower gets the agent's message without the
+                        // HTTP status.
+                        if matches!(self.session.revalidate().await, Ok(None)) {
+                            self.signed_out.store(true, Ordering::SeqCst);
+                        }
+                        Err(AuthError::Validation(format!("session agent: {error}")).into())
+                    }
+                }
             }
 
             async fn status(&self) -> Result<Option<SessionInfo>> {
@@ -647,6 +669,44 @@ mod tests {
                     .await
                     .is_err(),
                 "the grant is gone, not just the bearer"
+            );
+        }
+
+        #[tokio::test]
+        #[pubky_testnet::test]
+        async fn a_grant_revoked_elsewhere_signs_borrowers_out() {
+            let testnet = EphemeralTestnet::builder().build().await.unwrap();
+            let homeserver = testnet.homeserver_app().public_key();
+            let (sdk, source) = lender(&testnet).await;
+            let app = borrow(&sdk, &source, &homeserver);
+            app.storage()
+                .put("/pub/agent.test/before", "ok")
+                .await
+                .unwrap();
+
+            // Revoke the grant behind the holder's back, as Ring would.
+            source
+                .session
+                .clone()
+                .signout()
+                .await
+                .map_err(|(e, _)| e)
+                .unwrap();
+            assert!(
+                source.status().await.unwrap().is_some(),
+                "the holder has not noticed yet"
+            );
+
+            // Revalidating hits the dead grant: the holder signs out instead
+            // of staying signed in, and the borrower reports no session
+            // rather than an error.
+            assert_eq!(app.revalidate().await.unwrap(), None);
+            assert!(source.status().await.unwrap().is_none());
+            assert!(
+                app.storage()
+                    .put("/pub/agent.test/after", "nope")
+                    .await
+                    .is_err()
             );
         }
 

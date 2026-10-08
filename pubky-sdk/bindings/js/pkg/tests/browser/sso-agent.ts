@@ -50,20 +50,14 @@ async function markSharedBearerExpired(id: string) {
   }
 }
 
-/** The agent page: restores a stored session, then serves it to its parent. */
+/** The agent page: `listen` restores the stored session and serves it to its parent. */
 function agentRole() {
   const store = sdk.browserSessionStore;
   let signer: Signer | undefined;
   let session: Session | undefined;
-  const agent: Promise<SessionAgent> = (async () => {
-    const [record] = await store.list();
-    if (record) session = await store.restore(record.id);
-    const agent = await sdk.listenSessionAgent({
-      allowedOrigins: query.get("allow")!.split(","), capabilities: SHARED_SCOPE,
-    });
-    if (session) await agent.setSession(session);
-    return agent;
-  })();
+  const agent: Promise<SessionAgent> = sdk.listenSessionAgent({
+    allowedOrigins: query.get("allow")!.split(","), capabilities: SHARED_SCOPE,
+  });
   return {
     async ready() { await agent; },
     // In-frame sign-in. A throwaway account approves its own grant request,
@@ -109,6 +103,17 @@ function agentRole() {
       } finally { await scoped.signout(); }
     },
     async clearStore() { await store.clear(); },
+    // Revoke the shared grant outside the agent, as Ring would.
+    async revokeGrant() {
+      const root = await signer!.signin("revoke-check.test");
+      try {
+        const manager = new GrantManager(root);
+        for (const grant of await manager.list()) {
+          if (grant.clientId === CLIENT_ID) await manager.revoke(grant.grantId);
+        }
+      } finally { await root.signout(); }
+    },
+    async storedSessions() { return (await store.list()).length; },
     async grantCount() {
       const root = await signer!.signin("grant-audit.test");
       try {

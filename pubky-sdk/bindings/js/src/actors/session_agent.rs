@@ -254,10 +254,16 @@ impl HostState {
         }
     }
 
+    /// Whether a session holding `held` may be served: never root, and
+    /// within the shared scope.
+    fn fits(&self, held: &Capabilities) -> bool {
+        !held.iter().any(|cap| cap.is_root()) && self.scope.covers_all(held)
+    }
+
     /// Accept a session only if it stays within the shared scope.
     fn validate(&self, session: &PubkySession) -> JsResult<()> {
         let held = Capabilities::from(session.info().capabilities().to_vec());
-        if held.iter().any(|cap| cap.is_root()) || !self.scope.covers_all(&held) {
+        if !self.fits(&held) {
             return Err(PubkyError::new(
                 PubkyErrorName::InvalidInput,
                 format!(
@@ -296,11 +302,11 @@ impl HostCallbacks {
                 &serde_wasm_bindgen::to_value(&status).unwrap_or(JsValue::NULL),
             )
         });
-        let for_bearer = host.clone();
+        let (for_bearer, bearer_token) = (host.clone(), token.clone());
         let bearer = Closure::new(move |requested: String, rejected: JsValue| {
-            let host = for_bearer.clone();
+            let (host, token) = (for_bearer.clone(), bearer_token.get());
             wasm_bindgen_futures::future_to_promise(async move {
-                lend(host, &requested, rejected.as_string())
+                lend(host, token, &requested, rejected.as_string())
                     .await
                     .map_err(AgentFailure::into_js)
             })
@@ -349,8 +355,9 @@ impl SessionAgent {
     /// Prefer `pubky.listenSessionAgent()` to reuse a facade client.
     ///
     /// Probes the browser store first, so apps get `unavailable` where no
-    /// session can be persisted. Picks up sessions saved with
-    /// `browserSessionStore` in any tab on this origin.
+    /// session can be persisted. Before answering any app, serves the newest
+    /// stored session that fits the shared scope, then picks up sessions
+    /// saved later with `browserSessionStore` in any tab on this origin.
     ///
     /// @param {SessionAgentOptions} options `{ allowedOrigins, capabilities }`.
     /// @returns {Promise<SessionAgent>}
@@ -425,6 +432,11 @@ impl SessionAgent {
             unavailable,
             served: None,
         }));
+        // Every app page load embeds a fresh agent frame, so restore before
+        // the listener answers its first hello with `signed-out`.
+        if !unavailable {
+            adopt_stored(&host).await;
+        }
         let token_cell = Rc::new(Cell::new(0u32));
         let callbacks = HostCallbacks::new(&host, &token_cell);
         let origins = options.allowed_origins.iter().map(JsValue::from).collect();
@@ -487,6 +499,7 @@ async fn served(session: PubkySession) -> JsResult<Served> {
 /// Answer a bearer request from an app asking for `requested` capabilities.
 async fn lend(
     host: SharedHost,
+    token: u32,
     requested: &str,
     rejected: Option<String>,
 ) -> Result<JsValue, AgentFailure> {
@@ -495,9 +508,45 @@ async fn lend(
         .session
         .as_grant()
         .ok_or_else(|| AgentFailure::new("error", "Served session is not grant-backed."))?;
-    let lent: LentBearer = grant.lend_bearer(rejected.as_deref()).await?;
+    let lent: LentBearer = match grant.lend_bearer(rejected.as_deref()).await {
+        Ok(lent) => lent,
+        Err(error) => {
+            if drop_if_gone(&host, token, &served).await {
+                return Err(AgentFailure::signed_out());
+            }
+            return Err(error.into());
+        }
+    };
     serde_wasm_bindgen::to_value(&lent)
         .map_err(|error| AgentFailure::new("error", format!("Encoding the bearer failed: {error}")))
+}
+
+/// Stop serving a session whose grant the homeserver no longer accepts
+/// (revoked elsewhere, for example from Ring, or expired), so apps are told
+/// to sign in again instead of failing every request. Returns whether the
+/// grant is gone.
+///
+/// The `signed-out` status is sent before the caller's error reply, so an
+/// app sees the new state by the time its request fails.
+async fn drop_if_gone(host: &SharedHost, token: u32, served: &Served) -> bool {
+    if !matches!(served.session.revalidate().await, Ok(None)) {
+        return false;
+    }
+    let Some(grant) = served.session.as_grant() else {
+        return false;
+    };
+    let id = stored_session_id(&grant.session_info().await);
+    // Another event may already have replaced or dropped it.
+    if served_id(host).await.as_deref() == Some(id.as_str()) {
+        host.borrow_mut().served = None;
+        let _ = broadcast(token).await;
+    }
+    // Removing the dead record tells the agent frames in other tabs.
+    let client = host.borrow().client.clone();
+    let _ = BrowserSessionStore(pubky::Pubky::with_client(client))
+        .remove(id)
+        .await;
+    true
 }
 
 async fn sign_out(host: SharedHost) -> Result<(), AgentFailure> {
@@ -544,6 +593,27 @@ async fn served_id(host: &SharedHost) -> Option<String> {
     let served = host.borrow().served.clone()?;
     let grant = served.session.as_grant()?;
     Some(stored_session_id(&grant.session_info().await))
+}
+
+/// Serve the newest stored session that fits the shared scope, if any.
+async fn adopt_stored(host: &SharedHost) {
+    let client = host.borrow().client.clone();
+    let store = BrowserSessionStore(pubky::Pubky::with_client(client));
+    let Ok(mut records) = store.list().await else {
+        return;
+    };
+    records.sort_by(|a, b| b.created_at().total_cmp(&a.created_at()));
+    for record in records {
+        // Skip records outside the scope without restoring them.
+        let fits = record
+            .capabilities()
+            .join(",")
+            .parse::<Capabilities>()
+            .is_ok_and(|held| host.borrow().fits(&held));
+        if fits && adopt_saved(host, record.id()).await {
+            return;
+        }
+    }
 }
 
 /// Restore and serve a session another frame just saved, if it fits the scope.

@@ -15,10 +15,15 @@ A small page on a dedicated origin, the *agent*, holds the user's single grant s
 | The user is signed out | The handshake returns `signed-out` and the app shows the frame. The agent runs the grant flow for the shared scope, shows the QR code or the Ring link, saves the session with `browserSessionStore`, and sends `signed-in` to every connected app. The app hides the frame. |
 | The bearer rotated | A request gets a 401, so the client asks the agent again and names the rejected bearer. The agent exchanges the grant only if that bearer is still current, exactly as tabs do today. The client retries once if the request body can be cloned. |
 | The user signs out | Sign-out starts on the agent page or from an app's `session.signout()`, which forwards it. The agent revokes the grant and removes the stored session; every agent frame sees `pubky-session-changed` and sends `signed-out` to its app. |
+| The grant is revoked elsewhere or expires | For example, the user revokes it in Ring. The next bearer request that needs an exchange fails, so the agent checks the grant with the homeserver. It stops serving the session, removes the stored record and sends `signed-out` before replying, so every app shows the frame again. |
 
 ### Browser support
 
-Chrome, Firefox and Safari all leave a same-site frame unpartitioned, so first-party apps share the agent's store in each of them (WebKit's [tracking prevention](https://webkit.org/tracking-prevention/) partitions only frames with a cross-site context in the chain). A cross-site embedder gets a partitioned store in every browser, and Safari also makes that store ephemeral. Where the store cannot persist, the agent answers `unavailable` and the app runs its own grant flow.
+Chrome and Firefox key a frame's storage by the top-level *site*, so every agent frame under a `*.pubky.app` page shares one store, and a single sign-in reaches every allowlisted app.
+
+Safari, and every browser on iOS, key it by the top-level *origin*. In Safari 26, a same-site frame on a different origin did not see the store it uses at top level. An agent frame under `shop.pubky.app` then gets its own store, separate from the one under `pubky.app`, so users sign in once per app. Everything else works as described. Confirm this on your own subdomains before relying on either behaviour.
+
+A cross-site embedder gets a partitioned store in every browser, and Safari also makes that store ephemeral. Where the store cannot persist, the agent answers `unavailable` and the app runs its own grant flow.
 
 ## SDK API
 
@@ -29,11 +34,12 @@ const agent = await pubky.listenSessionAgent({
   allowedOrigins: ["https://pubky.app", "https://shop.pubky.app"],
   capabilities: "/pub/pubky.app/:rw",
 });
-// Sessions saved with browserSessionStore in any tab are picked up; or:
+// Already serving the newest stored session, if one fits. Sessions saved
+// later with browserSessionStore in any tab are picked up; or:
 await agent.setSession(session);
 ```
 
-`listen` probes the browser store and refuses to serve a session that is root or exceeds `capabilities`. `agent.returnUrl` is where the connected app wants Ring to return after a mobile approval; pass it as `xSuccess` when starting the grant flow.
+`listen` probes the browser store, then serves the newest stored session that fits `capabilities` before answering any app. It refuses to serve a session that is root or exceeds `capabilities`. `agent.returnUrl` is where the connected app wants Ring to return after a mobile approval; pass it as `xSuccess` when starting the grant flow.
 
 App origin:
 
@@ -102,4 +108,4 @@ To cut off an app, remove its origin from the allowlist and from `frame-ancestor
 
 ## Tests
 
-`npm run test-browser:sso` in `pubky-sdk/bindings/js/pkg` runs the Electron regression with five origins (ports stand in for hostnames: every `localhost:<port>` is one site, `127.0.0.1` another). It covers in-frame sign-in, silent second-origin sign-in, bearer rotation and retry, allowlist and sibling-frame refusal, `insufficient-scope`, cross-site partitioning, the raw protocol replies, a user switch, sign-out propagation and a cleared store. The `unavailable` state has no automated coverage: Electron offers no profile where IndexedDB and Web Locks are missing.
+`npm run test-browser:sso` in `pubky-sdk/bindings/js/pkg` runs the Electron regression with five origins (ports stand in for hostnames: every `localhost:<port>` is one site, `127.0.0.1` another). It covers in-frame sign-in, silent second-origin sign-in, bearer rotation and retry, allowlist and sibling-frame refusal, `insufficient-scope`, cross-site partitioning, the raw protocol replies, a user switch, sign-out propagation, a cleared store and a grant revoked outside the agent. Electron runs Chromium, so Safari's per-origin storage is not covered. The `unavailable` state has no automated coverage: Electron offers no profile where IndexedDB and Web Locks are missing.

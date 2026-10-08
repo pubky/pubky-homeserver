@@ -311,9 +311,11 @@ impl Pubky {
 
     /// Serve this page's grant session to apps on the listed origins.
     ///
-    /// Call on the agent origin. The agent picks up sessions saved with
-    /// `browserSessionStore` in any tab, or use `agent.setSession(session)`
-    /// for one already held. Apps connect with `connectSessionAgent`.
+    /// Call on the agent origin. Before answering any app, the agent serves
+    /// the newest stored session that fits `capabilities`, then picks up
+    /// sessions saved later with `browserSessionStore` in any tab. Use
+    /// `agent.setSession(session)` for a session that is not stored. Apps
+    /// connect with `connectSessionAgent`.
     /// See `docs/sso-agent.md` for the protocol and deployment headers.
     ///
     /// @param {SessionAgentOptions} options `{ allowedOrigins, capabilities }`.
