@@ -252,6 +252,16 @@ mod tests {
                 "{count} scopes need {} bytes",
                 wire.len()
             );
+
+            let (_, public_key) =
+                super::super::approval_encryption::ApprovalRecipientSecret::generate();
+            let hpke_wire =
+                super::super::approval_encryption::seal(&public_key, signed.as_bytes()).unwrap();
+            assert!(
+                hpke_wire.len() <= 2048,
+                "{count} HPKE scopes need {} bytes",
+                hpke_wire.len()
+            );
         }
     }
 }

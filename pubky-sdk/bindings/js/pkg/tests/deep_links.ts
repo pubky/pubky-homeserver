@@ -104,11 +104,13 @@ test("direct signup deep link with token", async (t) => {
 });
 
 test("signin grant deep link valid", async (t) => {
-  let url = `pubkyauth://signin_grant?caps=/pub/pubky.app/:rw&relay=http://localhost:15412/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=franky.pubky.app&cpk=${CLIENT_PUBLICKEY.z32()}`;
+  let url = `pubkyauth://signin_grant?caps=/pub/pubky.app/:rwe&relay=http://localhost:15412/inbox&cid=franky.pubky.app&cpk=${CLIENT_PUBLICKEY.z32()}&af=v1&epk=BAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiM`;
   const deepLink = SigninGrantDeepLink.parse(url);
-  t.equal(deepLink.capabilities, "/pub/pubky.app/:rw");
+  t.equal(deepLink.capabilities, "/pub/pubky.app/:rwe");
   t.equal(deepLink.baseRelayUrl, TESTNET_HTTP_RELAY);
-  t.deepEqual(deepLink.secret, new Uint8Array([146, 169, 220, 120, 67, 32, 172, 212, 12, 255, 24, 180, 234, 132, 23, 140, 13, 220, 36, 117, 255, 69, 9, 176, 212, 22, 58, 36, 77, 91, 177, 239]));
+  t.equal(deepLink.secret, undefined);
+  t.equal(deepLink.approvalFormat, "signedApprovalV1");
+  t.equal(deepLink.ephemeralPublicKey?.length, 32);
   t.equal(deepLink.clientId, "franky.pubky.app");
   t.equal(deepLink.clientPublicKey.z32(), CLIENT_PUBLICKEY.z32());
   t.equal(SigninGrantDeepLink.parse(deepLink.toString()).clientPublicKey.z32(), CLIENT_PUBLICKEY.z32());
@@ -132,12 +134,26 @@ test("signup grant deep link valid", async (t) => {
 });
 
 
-test("signed approval links keep the shared relay secret", (t) => {
-  const base = `pubkyauth://signin_grant?caps=/pub/chat/:rwe&relay=${TESTNET_HTTP_RELAY}&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=chat.example&cpk=${CLIENT_PUBLICKEY.z32()}`;
-  const link = SigninGrantDeepLink.parse(`${base}&af=v1`);
+test("signed approval links hash epk for the relay channel", (t) => {
+  const base = `pubkyauth://signin_grant?caps=/pub/chat/:rw&relay=${TESTNET_HTTP_RELAY}&cid=chat.example&cpk=${CLIENT_PUBLICKEY.z32()}`;
+  const publicKey = new Uint8Array(32).fill(7);
+  const encodedKey = btoa(String.fromCharCode(...publicKey))
+    .split("+").join("-")
+    .split("/").join("_")
+    .replace(/=+$/, "");
+  const link = SigninGrantDeepLink.parse(`${base}&af=v1&epk=${encodedKey}`);
   t.equal(link.approvalFormat, "signedApprovalV1");
-  t.equal(link.secret.length, 32);
+  t.equal(link.secret, undefined);
+  t.deepEqual(link.ephemeralPublicKey, publicKey);
   t.equal(SigninGrantDeepLink.parse(link.toString()).approvalFormat, "signedApprovalV1");
+  const hpkeLink = SigninGrantDeepLink.parse(`${base}&epk=${encodedKey}`);
+  t.deepEqual(hpkeLink.ephemeralPublicKey, publicKey);
+  t.deepEqual(
+    SigninGrantDeepLink.parse(hpkeLink.toString()).ephemeralPublicKey,
+    publicKey,
+  );
+  t.throws(() => SigninGrantDeepLink.parse(`${base}&af=v1`));
+  t.throws(() => SigninGrantDeepLink.parse(`${base}&af=v1&epk=${encodedKey}&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8`));
   for (const suffix of ["", "&af=v2", "&af=v1&af=v1"]) {
     t.throws(() => SigninGrantDeepLink.parse(`${base}${suffix}`));
   }

@@ -293,19 +293,31 @@ legacy `callback` parameter is accepted as an `xSuccess` fallback.
 
 #### Resume an auth flow after page refresh
 
-Grant auth flows are resumable by saving the pending flow state before refresh and restoring it afterwards:
+Save pending grant auth state before a refresh, then restore it afterwards.
+The browser example below uses a delegated signing key stored in IndexedDB.
+It requires a secure context with WebCrypto Ed25519 support and IndexedDB.
+
+For signed approvals, saved flow state includes a temporary HPKE private key
+that decrypts the signer's response. The authorization URL carries the matching
+public key in `epk`; a domain-separated hash of that key identifies the relay
+channel. Keep the saved state confidential and delete it when the flow
+completes or is abandoned.
 
 ```js
-const flow = pubky.startGrantAuthFlow(caps, AuthFlowKind.signin(), {
+import { GrantAuthFlow } from "@synonymdev/pubky";
+
+// Before refreshing:
+const flow = await GrantAuthFlow.startDelegated(caps, AuthFlowKind.signin(), {
   clientId: "my-cool-app.example",
   relay,
 });
-sessionStorage.setItem("pubky-grant-auth", flow.save());
+sessionStorage.setItem("pubky-grant-auth", flow.saveDelegated());
 
+// After reloading:
 const saved = sessionStorage.getItem("pubky-grant-auth");
 if (saved) {
   try {
-    const resumed = pubky.resumeGrantAuthFlow(saved);
+    const resumed = await pubky.resumeDelegatedGrantAuthFlow(saved);
     const session = await resumed.awaitApproval();
   } finally {
     sessionStorage.removeItem("pubky-grant-auth");
@@ -313,7 +325,13 @@ if (saved) {
 }
 ```
 
-Legacy cookie auth flows can be resumed with `pubky.resumeCookieAuthFlow(authorizationUrl)`. Store pending auth state in `sessionStorage`, not `localStorage`, and delete it once the flow completes or is abandoned.
+For local signing keys, use `GrantAuthFlow.start()`, `flow.saveLocal()`, and
+`pubky.resumeGrantAuthFlow(saved)`.
+
+Legacy cookie auth flows can be resumed with
+`pubky.resumeCookieAuthFlow(authorizationUrl)`. Store pending auth state in
+`sessionStorage`, not `localStorage`, and delete it once the flow completes or
+is abandoned.
 
 #### Request encryption keys
 

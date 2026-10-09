@@ -6,9 +6,11 @@ use url::Url;
 
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
 use super::{
-    AuthRelayMessage, http_relay_inbox_channel::EncryptedHttpRelayInboxChannel,
-    http_relay_link_channel::EncryptedHttpRelayLinkChannel,
+    AuthRelayMessage,
+    http_relay_inbox_channel::{EncryptedHttpRelayInboxChannel, HttpRelayInboxChannel},
+    http_relay_link_channel::{EncryptedHttpRelayLinkChannel, HttpRelayLinkChannel},
 };
+use crate::actors::auth::deep_links::GrantRelayChannel;
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
 use crate::{
     PubkyHttpClient,
@@ -20,20 +22,21 @@ use crate::{
 #[cfg(target_arch = "wasm32")]
 use futures_util::FutureExt; // for `.map(|_| ())` in WASM spawn
 
-/// Internal dispatch between inbox and link channel implementations.
+/// Dispatch between encrypted legacy channels and raw HPKE channels.
 ///
-/// The variant is chosen automatically based on the relay URL path:
-/// - Paths ending with `/link` or `/link/` → [`Link`](Self::Link)
-/// - Everything else (including `/inbox`) → [`Inbox`](Self::Inbox)
+/// The relay path chooses link versus inbox; the channel key chooses whether
+/// the relay body uses legacy shared-secret encryption.
 #[derive(Clone)]
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
-enum EncryptedAuthChannel {
-    Inbox(EncryptedHttpRelayInboxChannel),
-    Link(EncryptedHttpRelayLinkChannel),
+enum AuthRelayChannel {
+    EncryptedInbox(EncryptedHttpRelayInboxChannel),
+    EncryptedLink(EncryptedHttpRelayLinkChannel),
+    Inbox(HttpRelayInboxChannel),
+    Link(HttpRelayLinkChannel),
 }
 
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
-impl EncryptedAuthChannel {
+impl AuthRelayChannel {
     /// Poll the underlying channel for a message.
     async fn poll(
         &self,
@@ -41,25 +44,35 @@ impl EncryptedAuthChannel {
         timeout: Option<std::time::Duration>,
     ) -> Result<Option<Vec<u8>>> {
         match self {
-            Self::Inbox(ch) => Ok(ch.poll(client, timeout).await?),
-            Self::Link(ch) => Ok(ch.poll(client, timeout).await?),
+            Self::EncryptedInbox(ch) => Ok(ch.poll(client, timeout).await?),
+            Self::EncryptedLink(ch) => Ok(ch.poll(client, timeout).await?),
+            Self::Inbox(ch) => ch.poll(client, timeout).await,
+            Self::Link(ch) => ch.poll(client, timeout).await,
         }
     }
 
     /// Acknowledge receipt. Only meaningful for inbox channels (no-op for link).
     /// Errors are propagated for inbox so callers know if the ACK failed.
     async fn ack(&self, client: &PubkyHttpClient) -> Result<()> {
-        if let Self::Inbox(ch) = self {
-            ch.ack(client).await?;
+        match self {
+            Self::EncryptedInbox(ch) => {
+                ch.ack(client).await?;
+            }
+            Self::Inbox(ch) => {
+                ch.ack(client).await?;
+            }
+            Self::EncryptedLink(_) | Self::Link(_) => {}
         }
         Ok(())
     }
 }
 
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
-impl fmt::Display for EncryptedAuthChannel {
+impl fmt::Display for AuthRelayChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EncryptedInbox(ch) => write!(f, "{ch}"),
+            Self::EncryptedLink(ch) => write!(f, "{ch}"),
             Self::Inbox(ch) => write!(f, "{ch}"),
             Self::Link(ch) => write!(f, "{ch}"),
         }
@@ -67,9 +80,11 @@ impl fmt::Display for EncryptedAuthChannel {
 }
 
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
-impl fmt::Debug for EncryptedAuthChannel {
+impl fmt::Debug for AuthRelayChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EncryptedInbox(ch) => f.debug_tuple("EncryptedInbox").field(ch).finish(),
+            Self::EncryptedLink(ch) => f.debug_tuple("EncryptedLink").field(ch).finish(),
             Self::Inbox(ch) => f.debug_tuple("Inbox").field(ch).finish(),
             Self::Link(ch) => f.debug_tuple("Link").field(ch).finish(),
         }
@@ -88,7 +103,8 @@ fn is_link_url(url: &Url) -> bool {
 /// 1. Construct with the builder
 ///    [`AuthRelayListener::builder`] to override relay/client.
 /// 2. Receive the decrypted relay message with [`await_message`](Self::await_message)
-///    or [`try_message`](Self::try_message).
+///    or [`try_message`](Self::try_message). HPKE messages remain encrypted;
+///    the grant flow opens them after receipt.
 ///
 /// Background polling **starts immediately** at construction. Dropping this value cancels
 /// the background task; the relay channel itself expires server-side after its TTL.
@@ -101,7 +117,11 @@ pub struct AuthRelayListener {
 impl AuthRelayListener {
     /// Create a builder for [`AuthRelayListener`].
     pub fn builder(secret: [u8; 32]) -> AuthRelayListenerBuilder {
-        AuthRelayListenerBuilder::new(secret)
+        Self::builder_for_channel(GrantRelayChannel::SharedSecret(secret))
+    }
+
+    pub(crate) fn builder_for_channel(channel: GrantRelayChannel) -> AuthRelayListenerBuilder {
+        AuthRelayListenerBuilder::new(channel)
     }
 
     /// Block until the signer approves and the relay delivers the decrypted
@@ -133,21 +153,21 @@ impl AuthRelayListener {
     /// the background task.
     async fn poll_for_approval_loop(
         client: PubkyHttpClient,
-        encrypted_channel: EncryptedAuthChannel,
+        channel: AuthRelayChannel,
         tx: flume::Sender<Result<AuthRelayMessage>>,
     ) {
         cross_log!(
             info,
             "Starting auth flow polling for relay channel {}",
-            encrypted_channel
+            channel
         );
-        let result = Self::poll_for_message(&client, &encrypted_channel).await;
+        let result = Self::poll_for_message(&client, &channel).await;
 
         if result.is_ok() {
             cross_log!(
                 info,
                 "Auth flow successfully received approval for relay channel {}",
-                encrypted_channel
+                channel
             );
         }
 
@@ -156,16 +176,16 @@ impl AuthRelayListener {
 
     async fn poll_for_message(
         client: &PubkyHttpClient,
-        encrypted_channel: &EncryptedAuthChannel,
+        channel: &AuthRelayChannel,
     ) -> Result<AuthRelayMessage> {
-        let response = encrypted_channel
+        let response = channel
             .poll(client, None)
             .await?
             .ok_or(AuthError::RequestExpired)?;
 
         // ACK: confirms receipt for inbox channels, no-op for link.
         // Best-effort: a failed ACK should not invalidate a delivered payload.
-        if let Err(e) = encrypted_channel.ack(client).await {
+        if let Err(e) = channel.ack(client).await {
             cross_log!(warn, "Inbox ACK failed (non-fatal): {e}");
         }
 
@@ -186,7 +206,7 @@ impl Drop for AuthRelayListener {
 #[derive(Clone)]
 pub struct AuthRelayListenerBuilder {
     relay_base_url: Url,
-    secret: [u8; 32],
+    relay_channel: GrantRelayChannel,
     client: Option<PubkyHttpClient>,
 }
 
@@ -194,7 +214,7 @@ impl fmt::Debug for AuthRelayListenerBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthRelayListenerBuilder")
             .field("relay_base_url", &self.relay_base_url)
-            .field("secret", &"<redacted>")
+            .field("relay_channel", &self.relay_channel)
             .field("client", &self.client)
             .finish()
     }
@@ -202,10 +222,10 @@ impl fmt::Debug for AuthRelayListenerBuilder {
 
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
 impl AuthRelayListenerBuilder {
-    pub(crate) fn new(secret: [u8; 32]) -> Self {
+    pub(crate) fn new(relay_channel: GrantRelayChannel) -> Self {
         Self {
             relay_base_url: Url::parse(DEFAULT_HTTP_RELAY_INBOX).expect("Always valid"),
-            secret,
+            relay_channel,
             client: None,
         }
     }
@@ -224,7 +244,7 @@ impl AuthRelayListenerBuilder {
 
     // Spawn background polling (single-shot delivery)
     fn spawn_background_polling(
-        encrypted_channel: EncryptedAuthChannel,
+        channel: AuthRelayChannel,
         client: &PubkyHttpClient,
     ) -> AuthRelayListener {
         let (tx, rx) = flume::bounded(1);
@@ -233,8 +253,7 @@ impl AuthRelayListenerBuilder {
 
         let fut = async move {
             cross_log!(info, "Spawning auth flow polling task");
-            AuthRelayListener::poll_for_approval_loop(bg_client, encrypted_channel.clone(), tx)
-                .await;
+            AuthRelayListener::poll_for_approval_loop(bg_client, channel.clone(), tx).await;
         };
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -261,19 +280,24 @@ impl AuthRelayListenerBuilder {
             None => PubkyHttpClient::new()?,
         };
 
-        let encrypted_channel = if is_link_url(&self.relay_base_url) {
-            EncryptedAuthChannel::Link(EncryptedHttpRelayLinkChannel::new(
-                self.relay_base_url,
-                self.secret,
-            )?)
-        } else {
-            EncryptedAuthChannel::Inbox(EncryptedHttpRelayInboxChannel::new(
-                self.relay_base_url,
-                self.secret,
-            )?)
+        let channel_id = self.relay_channel.http_channel_id();
+        let link_channel = is_link_url(&self.relay_base_url);
+        let channel = match (self.relay_channel, link_channel) {
+            (GrantRelayChannel::SharedSecret(secret), true) => AuthRelayChannel::EncryptedLink(
+                EncryptedHttpRelayLinkChannel::new(self.relay_base_url, secret)?,
+            ),
+            (GrantRelayChannel::SharedSecret(secret), false) => AuthRelayChannel::EncryptedInbox(
+                EncryptedHttpRelayInboxChannel::new(self.relay_base_url, secret)?,
+            ),
+            (GrantRelayChannel::Hpke { .. }, true) => {
+                AuthRelayChannel::Link(HttpRelayLinkChannel::new(self.relay_base_url, channel_id)?)
+            }
+            (GrantRelayChannel::Hpke { .. }, false) => AuthRelayChannel::Inbox(
+                HttpRelayInboxChannel::new(self.relay_base_url, channel_id)?,
+            ),
         };
 
-        Ok(Self::spawn_background_polling(encrypted_channel, &client))
+        Ok(Self::spawn_background_polling(channel, &client))
     }
 }
 

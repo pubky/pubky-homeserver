@@ -222,8 +222,9 @@ impl Pubky {
 
     /// Resume a previously saved pending grant auth flow.
     ///
-    /// **Security:** `savedState` contains the relay secret and PoP client private key.
-    /// Delete it from storage as soon as the resumed flow completes.
+    /// **Security:** `savedState` contains the PoP client private key and either
+    /// a shared relay secret or a temporary HPKE private key. Delete it from
+    /// storage when the flow completes or is abandoned.
     ///
     /// @param {string} savedState A string produced by `grantFlow.saveLocal()`.
     /// @returns {GrantAuthFlow} A flow reconnected to the original relay channel.

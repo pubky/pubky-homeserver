@@ -208,7 +208,8 @@ impl GrantAuthFlow {
     /// Resume a previously saved pending grant auth flow (standalone).
     /// Prefer `pubky.resumeGrantAuthFlow()` to reuse a facade client.
     ///
-    /// **Security:** `savedState` contains the relay secret and PoP client private key.
+    /// **Security:** `savedState` contains the PoP client private key and either
+    /// a shared relay secret or a temporary HPKE recipient secret.
     /// Store it only temporarily and delete it once the flow completes or is abandoned.
     ///
     /// @param {string} savedState A string produced by `grantFlow.saveLocal()`.
@@ -302,9 +303,9 @@ impl GrantAuthFlow {
 
     /// Save sensitive state required to resume this delegated pending grant flow.
     ///
-    /// This does not export the delegated private key, but it includes the relay
-    /// secret in the authorization URL. Store it only temporarily and delete it
-    /// once the flow completes or is abandoned.
+    /// This includes either a shared relay secret or a temporary HPKE recipient
+    /// secret. Store it only temporarily and delete it once the flow completes
+    /// or is abandoned.
     #[wasm_bindgen(js_name = "saveDelegated")]
     pub fn save_delegated(&self) -> JsResult<String> {
         let flow = self.borrow_inner()?;

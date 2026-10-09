@@ -26,6 +26,7 @@ json = ["reqwest/json"]
 
 [dependencies]
 pubky-common.workspace = true
+hpke.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 # v0.2.0 has a bug where some cases bypass the payload size limit.

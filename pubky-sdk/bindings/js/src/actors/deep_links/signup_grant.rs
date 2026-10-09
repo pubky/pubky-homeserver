@@ -53,14 +53,18 @@ impl SignupGrantDeepLink {
         self.0.params().relay.to_string()
     }
 
-    /// Relay channel secret embedded in the deeplink.
+    /// Shared relay secret, or `undefined` for an HPKE link.
+    /// Keep this secret confidential until the flow completes or is abandoned.
     ///
-    /// Treat this as sensitive temporary auth-flow material.
-    ///
-    /// @returns {Uint8Array}
+    /// @returns {Uint8Array|undefined}
     #[wasm_bindgen(getter)]
-    pub fn secret(&self) -> Uint8Array {
-        Uint8Array::from(self.0.params().secret.as_ref())
+    pub fn secret(&self) -> Option<Uint8Array> {
+        match self.0.params().relay_channel {
+            pubky::deep_links::GrantRelayChannel::SharedSecret(secret) => {
+                Some(Uint8Array::from(secret.as_ref()))
+            }
+            pubky::deep_links::GrantRelayChannel::Hpke { .. } => None,
+        }
     }
 
     /// Homeserver public key requested for account creation.
@@ -103,6 +107,22 @@ impl SignupGrantDeepLink {
             pubky::deep_links::GrantApprovalFormat::SignedApprovalV1 => "signedApprovalV1",
         }
         .to_owned()
+    }
+
+    /// The 32-byte ephemeral HPKE public key from `epk`, or `undefined`
+    /// for a shared-secret link. The relay channel ID is the unpadded
+    /// base64url encoding of BLAKE3("pubky-grant-relay-channel-v1" || 0x00 || epk),
+    /// where `||` concatenates bytes and `epk` is the raw 32-byte public key.
+    ///
+    /// @returns {Uint8Array|undefined}
+    #[wasm_bindgen(js_name = "ephemeralPublicKey", getter)]
+    pub fn ephemeral_public_key(&self) -> Option<Uint8Array> {
+        match self.0.params().relay_channel {
+            pubky::deep_links::GrantRelayChannel::SharedSecret(_) => None,
+            pubky::deep_links::GrantRelayChannel::Hpke {
+                ephemeral_public_key,
+            } => Some(Uint8Array::from(ephemeral_public_key.as_slice())),
+        }
     }
 
     /// Optional x-callback-url metadata carried by this deep link.

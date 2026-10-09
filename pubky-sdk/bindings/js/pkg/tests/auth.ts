@@ -370,8 +370,13 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   } catch (_error) {
     savedState = originalFlow.saveLocal();
   }
-  t.notOk(new URL(savedUrl).searchParams.has("ek"), "link needs no recipient key");
-  t.ok(new URL(savedUrl).searchParams.has("secret"), "signed approval uses the shared relay secret");
+  t.ok(new URL(savedUrl).searchParams.has("epk"), "signed approval includes its HPKE recipient key");
+  t.equal(
+    SigninGrantDeepLink.parse(savedUrl).ephemeralPublicKey?.length,
+    32,
+    "parsed link exposes the 32-byte HPKE public key",
+  );
+  t.notOk(new URL(savedUrl).searchParams.has("secret"), "signed approval omits the shared relay secret");
   originalFlow.free();
 
   await signer.approveAuthRequest(savedUrl);
