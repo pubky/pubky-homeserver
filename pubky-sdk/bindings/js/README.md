@@ -45,9 +45,10 @@ Postgres on port 5432 with the repository's `test_user` / `test_pass` credential
 
 ## Scoped encryption keys
 
-Set `approvalFormat: "signedApprovalV1"` and request `e` scopes. Storage
-permissions `r` and `w` alone deliver no keys. Signers may decline `e`; check
-`keys.scopes` before deriving keys.
+Apps can ask the user's signer for encryption keys scoped to storage paths.
+Set `approvalFormat: "signedApprovalV1"` and add the `e` action to each scope
+that needs keys. Storage actions `r` and `w` don't deliver keys. The signer may
+narrow scopes or decline `e`, so check `keys.scopes` before deriving keys.
 
 ```javascript
 const flow = await sdk.startGrantAuthFlow(
@@ -60,6 +61,9 @@ const session = await flow.awaitApproval();
 const keys = session.grant.encryptionKeys;
 let key;
 try {
+  if (!keys.scopes.includes("/pub/chat/")) {
+    throw new Error("The signer didn't approve chat keys.");
+  }
   key = await keys.deriveCryptoKeyForPath("/pub/chat/message");
 } finally {
   keys.free(); // The WebCrypto key remains usable.
@@ -74,7 +78,7 @@ const ciphertext = await crypto.subtle.encrypt(
 `deriveCryptoKeyForPath(path)` returns a non-extractable AES-GCM-256 key for
 encryption and decryption. It requires WebCrypto (a secure browser context) and
 clears temporary JS key bytes after import. Directory paths and paths outside
-the delivered scopes are rejected.
+the approved scopes are rejected.
 
 Sessions and offline recovery return the same `EncryptionKeys` object:
 
@@ -85,27 +89,35 @@ Sessions and offline recovery return the same `EncryptionKeys` object:
 | `await keys.deriveCryptoKeyForPath(path)` | Non-extractable AES-GCM `CryptoKey` |
 
 Both derivation methods require a canonical file path and reject directories
-and files outside the approved scopes. Raw bytes belong to the caller; clear
-the returned `Uint8Array` after use.
+and files outside the approved scopes. You own the returned raw bytes; clear
+the `Uint8Array` after use.
 
-Each `session.grant.encryptionKeys` access creates an owned copy. Keep the
-object for repeated use and call `keys.free()` when finished. It stays usable
-after freeing or signing out the session; freeing the keys does not affect
-the session. Bare grants return `undefined`; signed approvals without `e`
+Each read of `session.grant.encryptionKeys` creates a separate copy. Keep the
+object for repeated use and call `keys.free()` when you're done. The keys stay
+usable after you free or sign out the session, and freeing the keys doesn't
+affect the session. Bare grants return `undefined`; signed approvals without `e`
 scopes return an object with empty scopes.
 
-Ordinary `signer.signin()` grants root storage access (`/:rw`) without
-encryption keys. Request `e` explicitly through a signed approval flow to
-receive keys. See the [key guide](../../../docs/scoped-encryption-keys.md) for compatibility,
-encryption limitations, and relay limits.
+`signer.signin()` grants root storage access (`/:rw`) without keys. To
+receive keys, request `e` through a signed approval flow.
+
+Before you use keys, read the
+[scoped encryption keys guide](../../../docs/scoped-encryption-keys.md). Keys
+stay usable after the grant expires or is revoked, and older homeservers reject
+any grant containing `e`. The guide also covers encryption limitations and
+relay limits.
 
 ### Persistence and offline recovery
 
-`exportLocalSecret()` retains keys in V2 tokens for local PoP sessions.
-`browserSessionStore.save()` and `restore()` retain keys for both local and
-WebCrypto delegated sessions. See [storage requirements][persistence].
+For signed approvals, `exportLocalSecret()` includes the signed approval, and
+with it the keys, in the exported token (`pubky-grant-credential-v2`).
+`browserSessionStore.save()` and `restore()` keep the keys for both local and
+delegated WebCrypto sessions. The browser store saves them as plaintext in
+IndexedDB, readable by any script on the same origin. See
+[persistence and offline recovery][persistence].
 
-Recover keys without authentication, even after expiry or revocation:
+You can recover keys without authenticating, even after the grant expires or is
+revoked:
 
 ```javascript
 import { EncryptionKeys } from "@synonymdev/pubky";
@@ -123,10 +135,11 @@ if (keys) {
 }
 ```
 
-Both paths verify the approval signature and grant binding without network
-access. Bare-grant records return `undefined`; signed approvals without `e`
-scopes return an empty bundle. Recovery creates no session; authenticated
-restoration still checks expiry and the homeserver.
+Both methods verify the approval signature and its binding to the grant
+without network access. Bare grants return `undefined`; signed approvals
+without `e` scopes return an object with empty scopes. Recovery creates no
+session. Restoring an authenticated session still checks grant expiry and
+contacts the homeserver.
 
 [persistence]:
   ../../../docs/scoped-encryption-keys.md#persistence-and-offline-recovery

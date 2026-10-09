@@ -4,8 +4,8 @@
 vectors and a dummy identity secret. Never use these keys in production.
 
 `identity_secret_hex` and `key_hex` are 32-byte lowercase hex values. Paths are
-canonical and decoded: `/` yields the root seed, trailing slashes mark directory
-seeds, and other paths yield file keys. `/priv/` tests derivation, not storage
+canonical and decoded: `/` yields the root seed, paths with a trailing slash
+yield directory seeds, and other paths yield file keys. `/priv/` tests derivation, not storage
 support.
 
 Outputs were calculated independently with Python `hashlib` and `hmac`:

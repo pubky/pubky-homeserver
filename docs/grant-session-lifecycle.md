@@ -13,11 +13,11 @@ shared browser session.
 
 - Tabs share one bearer for each stored grant. Opening, closing, duplicating or
   reloading tabs reuses the saved bearer while it is valid.
-- IndexedDB stores restore material and the bearer. Delegated signing keys
-  remain non-extractable. Confidential restore material is stored as plaintext;
-  IndexedDB is the trust boundary. See [persistence][key-persistence] for
-  recovery and protection limits.
-  Do not log or export browser records.
+- IndexedDB stores the restore material and the bearer. Delegated signing keys
+  remain non-extractable, but the rest of the restore material, including any
+  encryption keys, is stored as plaintext. IndexedDB is the trust boundary. Don't
+  log or export browser records. See [persistence and offline
+  recovery][key-persistence] for what the restore material contains.
 - Authenticated requests hold shared Web Locks until response headers arrive.
   Refresh takes an exclusive lock and saves its result before releasing it.
   Requests can run concurrently; a slow request can delay refresh. Response
@@ -61,24 +61,36 @@ grant once and saves a shared bearer in the existing record. Concurrent restores
 reuse that bearer. Reload older app tabs so they participate in the SDK's locks.
 The shared bearer remains saved when every tab closes.
 
-Bare grants use `pubky-session-v1`; signed approvals use `pubky-session-v2`,
-even without `e` scopes. Approval and storage versions are separate.
+### Records for signed approvals
 
-V2 records live under `session:<id>` in `delegatedGrantKeys`; the database
-version stays at 1. Older SDKs see only storage V1 records in `storedSessions`.
-The current SDK lists both formats, but older SDKs cannot read signed approvals
-or storage V2 secret tokens.
+Session records have their own version, separate from the approval format. See
+[versions][key-versions].
 
-Current `clear` and `clearAll` remove both formats. An older SDK's `clear`
-removes only storage V1 records; its `clearAll` deletes both formats and all
-keys.
+- Bare grants use `pubky-session-v1` records in the `storedSessions` object
+  store.
+- Signed approvals use `pubky-session-v2` records, even when the signer declined
+  `e`. They're stored under `session:<id>` in the `delegatedGrantKeys` object
+  store, so older SDKs don't see them. The database version stays at 1.
 
-To add keys, request a fresh signed approval with `e` and save the new record
-ID, even with the same `clientId`. The old grant keeps its original permissions.
-To replace it, sign it out after saving the new session; deleting its local
-record does not revoke it. A new bare grant does not inherit keys.
+The current SDK lists both record versions. Older SDKs list only
+`pubky-session-v1` records, and they can't read signed approvals or
+`pubky-grant-credential-v2` secret tokens.
+
+In the current SDK, `clear` and `clearAll` remove both record versions. In an
+older SDK, `clear` removes only `pubky-session-v1` records, and `clearAll`
+deletes both record versions and all keys.
+
+### Add encryption keys to an existing session
+
+1. Request a new signed approval with `e`, even for the same `clientId`. A new
+   bare grant doesn't carry keys.
+2. Save the new session and use its new record ID. The old grant keeps its
+   original permissions.
+3. To replace the old session, sign it out. Deleting its local record doesn't
+   revoke the grant.
 
 [key-persistence]: scoped-encryption-keys.md#persistence-and-offline-recovery
+[key-versions]: scoped-encryption-keys.md#versions
 
 ## Protocol and compatibility
 
