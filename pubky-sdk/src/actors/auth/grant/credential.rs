@@ -429,6 +429,22 @@ impl GrantCredential {
     /// do not invalidate previously delivered keys. This method
     /// performs no network I/O and does not create an authenticated session.
     ///
+    /// When you select saved tokens by account or grant, use
+    /// [`Self::restore_encryption_keys_with_claims`] instead and check
+    /// `claims.iss` and `claims.jti` against the user and grant you expect.
+    ///
+    /// ```no_run
+    /// use pubky::{GrantCredential, StoragePath};
+    ///
+    /// # fn recover(saved_token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(keys) = GrantCredential::restore_encryption_keys(saved_token)? {
+    ///     let path = StoragePath::new("/pub/chat/message")?;
+    ///     let key = keys.derive_for_path(&path)?; // Wiped on drop.
+    ///     // Use the key for locally downloaded ciphertext.
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// Rejects malformed tokens, invalid approvals, and mismatched grants.
     pub fn restore_encryption_keys(token: &str) -> Result<Option<ScopedEncryptionKeyBundle>> {

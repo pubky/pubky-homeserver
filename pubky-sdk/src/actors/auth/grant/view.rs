@@ -63,8 +63,28 @@ impl<'a> GrantSessionView<'a> {
     /// Verified scoped keys retained by this session's grant credential.
     ///
     /// Bare grants return `None`; signed approvals return `Some`, with an empty
-    /// bundle when no `e` scopes were approved. Storage V2 secret exports preserve
-    /// the bundle; storage V1 exports have no keys.
+    /// bundle when no `e` scopes were approved. Secret tokens of signed
+    /// approvals (`pubky-grant-credential-v2`) preserve the bundle; bare-grant
+    /// tokens have no keys.
+    ///
+    /// The signer may narrow the requested scopes or decline `e`, so check the
+    /// approved scopes before deriving keys. Keys stay usable after the grant
+    /// expires or is revoked; see the
+    /// [scoped encryption keys guide](https://github.com/pubky/pubky-homeserver/blob/main/docs/scoped-encryption-keys.md).
+    ///
+    /// ```no_run
+    /// # use pubky::{PubkySession, StoragePath};
+    /// # fn use_keys(session: &PubkySession) -> Result<(), Box<dyn std::error::Error>> {
+    /// let grant = session.as_grant().expect("grant-backed session");
+    /// let chat = StoragePath::new("/pub/chat/")?;
+    /// if let Some(keys) = grant.encryption_keys() {
+    ///     if keys.scopes().any(|scope| scope == &chat) {
+    ///         let path = StoragePath::new("/pub/chat/message")?;
+    ///         let key = keys.derive_for_path(&path)?; // 32 bytes, wiped on drop.
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub fn encryption_keys(&self) -> Option<&ScopedEncryptionKeyBundle> {
         self.credential.encryption_keys()
     }

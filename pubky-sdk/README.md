@@ -70,96 +70,6 @@ println!("Your current homeserver: {:?}", resolved);
 # Ok(()) }
 ```
 
-## Scoped encryption keys
-
-Apps can ask the user's signer for encryption keys scoped to storage paths.
-Select the signed approval format and add the `e` action to each scope that
-needs keys. Storage actions `r` and `w` don't deliver keys.
-
-```rust no_run
-use pubky::{
-    AuthFlowKind, Capabilities, ClientId, PubkyGrantAuthFlow, StoragePath,
-    deep_links::GrantApprovalFormat,
-};
-
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let caps = Capabilities::builder()
-    .read_write("/pub/chat/")?
-    .encryption_keys("/pub/chat/")?
-    .finish();
-let flow = PubkyGrantAuthFlow::builder(
-    &caps,
-    AuthFlowKind::signin(),
-    ClientId::new("chat.example").expect("static client ID is valid"),
-)
-.approval_format(GrantApprovalFormat::SignedApprovalV1)
-.start()?;
-println!("Approve in your signer: {}", flow.authorization_url());
-
-let session = flow.await_approval().await?;
-let grant = session.as_grant().expect("grant flows create grant sessions");
-let keys = grant
-    .encryption_keys()
-    .expect("signed approvals always include a key bundle");
-
-// The signer may narrow scopes or decline `e`; check before deriving keys.
-if keys.scopes().len() > 0 {
-    let path = StoragePath::new("/pub/chat/message")?;
-    let file_key = keys.derive_for_path(&path)?; // 32 bytes, wiped on drop.
-}
-# Ok(()) }
-```
-
-`derive_for_path()` takes a canonical file path. Directory scopes cover every
-file below them; file scopes cover only that file. Directory paths and paths
-outside the approved scopes return an error. `signer.signin()` grants root
-storage access (`/:rw`) without keys.
-
-Before you use keys, read the
-[scoped encryption keys guide](../docs/scoped-encryption-keys.md). In short:
-
-- Keys stay usable after the grant expires or is revoked. If you derive a key
-  per file, renaming the file changes its key.
-- Older homeservers reject any grant containing `e`. See
-  [compatibility and deployment](../docs/scoped-encryption-keys.md#compatibility-and-deployment).
-- Approvals larger than the relay's 2 KiB default limit never reach the app,
-  which keeps waiting until the flow expires or is cancelled. See
-  [relay limits](../docs/scoped-encryption-keys.md#relay-limits).
-
-## Offline encryption-key recovery
-
-You can recover keys from a saved secret token without a network connection
-or a valid grant. This works only for tokens of signed approvals
-(`pubky-grant-credential-v2`).
-
-```rust,no_run
-use pubky::{GrantCredential, StoragePath};
-
-# fn recover(saved_token: &str) -> pubky::Result<()> {
-if let Some(keys) = GrantCredential::restore_encryption_keys(saved_token)? {
-    let path = StoragePath::new("/pub/chat/message").unwrap();
-    let file_key = keys.derive_for_path(&path).unwrap();
-    // Use the key for locally downloaded ciphertext. It's wiped on drop.
-}
-# Ok(()) }
-```
-
-For delegated credentials, call
-`GrantCredential::restore_delegated_encryption_keys(&state, signed_approval)`
-and pass the saved signed approval as `Some(&str)`. You don't need a signing
-callback.
-
-Both methods verify the approval signature, its binding to the grant, and the
-key scopes. Bare grants return `None`; signed approvals without `e` scopes
-return an empty bundle. Recovery creates no session: authentication still
-requires an unexpired grant and a successful homeserver exchange.
-
-When you select saved material by account or grant, use
-`restore_encryption_keys_with_claims(token)` or
-`restore_encryption_keys_from_approval(grant_jws, signed_approval)`. They also
-return the grant claims. Check `claims.iss` and `claims.jti` against the user
-and grant you expect before using the keys.
-
 ## Error-body limits
 
 HTTP status checking leaves successful response bodies unread. For HTTP errors,
@@ -466,6 +376,44 @@ let auth_flow = PubkyGrantAuthFlow::builder(&caps, AuthFlowKind::signin(), clien
 
 > Tip: reuse `pubky.client()` when customising the relay so the flow shares
 > TLS and pkarr configuration with the rest of your application.
+
+#### Request encryption keys
+
+Apps can also ask the signer for encryption keys scoped to storage paths. Add
+the `e` action to each scope that needs keys and select the signed approval
+format. Storage actions `r` and `w` don't deliver keys.
+
+```rust no_run
+# use pubky::{AuthFlowKind, Capabilities, ClientId, PubkyGrantAuthFlow, StoragePath};
+# use pubky::deep_links::GrantApprovalFormat;
+# async fn keys() -> Result<(), Box<dyn std::error::Error>> {
+let caps = Capabilities::builder()
+    .read_write("/pub/chat/")?
+    .encryption_keys("/pub/chat/")?
+    .finish();
+let flow = PubkyGrantAuthFlow::builder(
+    &caps,
+    AuthFlowKind::signin(),
+    ClientId::new("chat.example").expect("static client id is valid"),
+)
+.approval_format(GrantApprovalFormat::SignedApprovalV1)
+.start()?;
+
+let session = flow.await_approval().await?;
+let grant = session.as_grant().expect("grant flows create grant sessions");
+if let Some(keys) = grant.encryption_keys() {
+    let key = keys.derive_for_path(&StoragePath::new("/pub/chat/message")?)?;
+}
+# Ok(()) }
+```
+
+Keys stay usable after the grant expires or is revoked, and older homeservers
+reject grants containing `e`. Read the
+[scoped encryption keys guide](../docs/scoped-encryption-keys.md) before you
+use them. For details and offline key recovery, see the rustdoc of
+`GrantSessionView::encryption_keys` and `GrantCredential::restore_encryption_keys`.
+When you recover keys from saved material, check that they belong to the user
+and grant you expect.
 
 ## Features
 

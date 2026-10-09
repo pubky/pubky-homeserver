@@ -31,8 +31,8 @@ operators.
    you. You can derive a key for each file, or derive one key from a single
    path and reuse it for many files.
 
-For complete examples, see the [Rust SDK README](../pubky-sdk/README.md#scoped-encryption-keys)
-and the [JS SDK README](../pubky-sdk/bindings/js/README.md#scoped-encryption-keys).
+For examples, see the [Rust SDK README](../pubky-sdk/README.md#request-encryption-keys)
+and the [JS SDK README](../pubky-sdk/bindings/js/pkg/README.md#request-encryption-keys).
 
 `signer.signin()` grants root storage access (`/:rw`) without keys. To receive
 keys, you must request `e` through a signed approval flow.
