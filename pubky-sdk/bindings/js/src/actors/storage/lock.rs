@@ -73,8 +73,16 @@ impl SessionStorage {
     ///
     /// The file need not exist; locking a free path reserves it. `timeoutSeconds` is
     /// the lifetime asked for; the homeserver caps it, and
-    /// {@link StorageLock.timeoutSeconds} tells what was granted. A write made under
-    /// the lock keeps it alive until the write ends, so it need not cover the upload itself.
+    /// {@link StorageLock.timeoutSeconds} tells what was granted. The lifetime is the
+    /// caller's to manage: a write made under the lock must fit inside it, so
+    /// {@link SessionStorage.refreshLock | refresh} the lock during a long upload. Once a
+    /// write comes to change the file the homeserver keeps the lock until the change has
+    /// landed, whatever the lifetime says.
+    ///
+    /// Nothing refreshes the lock on its own: an upload that outlives it is refused with
+    /// 412 when it ends. To cover one longer than the lifetime, call
+    /// {@link SessionStorage.refreshLock | refreshLock} from a timer while the write is
+    /// in flight; the two calls may overlap.
     ///
     /// @param {Path} path File path; must not end with `/`.
     /// @param {number} timeoutSeconds Lifetime to ask for, in seconds; rounded down to
@@ -123,7 +131,9 @@ impl SessionStorage {
     /// @param {StorageLock} lock A lock this client holds.
     /// @returns {Promise<void>}
     /// @throws {PubkyError} A lock that no longer exists rejects with `RequestError`
-    /// and status `409`. See {@link SessionStorage} for shared errors.
+    /// and status `409`; a lock under which a write is still being published rejects with
+    /// status `423` and a `Retry-After`, and the lock is still this client's, so unlock
+    /// again once the write has landed. See {@link SessionStorage} for shared errors.
     #[wasm_bindgen]
     pub async fn unlock(&self, lock: &StorageLock) -> JsResult<()> {
         self.0.unlock(&lock.inner()).await?;

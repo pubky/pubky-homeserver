@@ -14,4 +14,8 @@ pub enum LayerDomainError {
     PathCollision,
     #[error("lock_lost")]
     LockLost,
+    /// A change under the lock is still being published; retry after the
+    /// given number of seconds.
+    #[error("lock_busy")]
+    LockBusy { retry_after_secs: u64 },
 }

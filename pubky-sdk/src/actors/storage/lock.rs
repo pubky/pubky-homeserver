@@ -77,9 +77,16 @@ impl SessionStorage {
     ///
     /// The file need not exist; locking a free path reserves it. `timeout` is
     /// the lifetime asked for; the homeserver caps it, and
-    /// [`StorageLock::timeout`] tells what was granted. A write made under the
-    /// lock keeps it alive until the write ends, so it need not cover the
-    /// upload itself.
+    /// [`StorageLock::timeout`] tells what was granted. The lifetime is the
+    /// caller's to manage: a write made under the lock must fit inside it,
+    /// so [refresh](SessionStorage::refresh_lock) the lock during a long
+    /// upload. Once a write comes to change the file the homeserver keeps
+    /// the lock until the change has landed, whatever the lifetime says.
+    ///
+    /// Nothing refreshes the lock on its own: an upload that outlives it is
+    /// refused with 412 when it ends. To cover one longer than the lifetime,
+    /// clone the lock and refresh the clone from a task running alongside
+    /// the write.
     ///
     /// # Errors
     /// A path that is already locked returns 423. Directory targets return 400.
@@ -130,8 +137,10 @@ impl SessionStorage {
     /// Release a lock this client holds.
     ///
     /// # Errors
-    /// A lock that no longer exists returns 409. See [`SessionStorage`] for
-    /// shared errors.
+    /// A lock that no longer exists returns 409. A lock under which a write is
+    /// still being published returns 423 with a `Retry-After`; the lock is
+    /// still this client's, and the call succeeds once the write has landed.
+    /// See [`SessionStorage`] for shared errors.
     pub async fn unlock(&self, lock: &StorageLock) -> Result<()> {
         let rb = self
             .request(unlock_method(), &lock.path)
@@ -145,7 +154,9 @@ impl SessionStorage {
     ///
     /// # Errors
     /// A lock that has expired or was unlocked returns 412; take a new one and
-    /// read the file again. Otherwise as [`Self::put`](SessionStorage::put).
+    /// read the file again. A lock still reserved for an earlier write of this
+    /// client, one the homeserver could not confirm, returns 423 with a
+    /// `Retry-After`. Otherwise as [`Self::put`](SessionStorage::put).
     pub async fn put_locked<B: Into<reqwest::Body>>(
         &self,
         lock: &StorageLock,
@@ -162,8 +173,9 @@ impl SessionStorage {
     /// `DELETE` the path of a lock this client holds. The lock stays in place.
     ///
     /// # Errors
-    /// A lock that has expired or was unlocked returns 412; take a new one.
-    /// Otherwise as [`Self::delete`](SessionStorage::delete).
+    /// A lock that has expired or was unlocked returns 412; take a new one. A
+    /// lock still reserved for an earlier write of this client returns 423
+    /// with a `Retry-After`. Otherwise as [`Self::delete`](SessionStorage::delete).
     pub async fn delete_locked(&self, lock: &StorageLock) -> Result<Response> {
         let rb = self
             .request(Method::DELETE, &lock.path)

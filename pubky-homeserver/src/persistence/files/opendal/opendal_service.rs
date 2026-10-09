@@ -5,7 +5,8 @@ use crate::AppContext;
 use crate::{
     persistence::{
         files::{
-            events::EventsService, write_finalization_layer::WriteFinalizationLayer,
+            events::EventsService,
+            write_finalization_layer::{write_lock, WriteFinalizationLayer},
             write_path_layer::WritePathLayer,
         },
         sql::SqlDb,
@@ -28,6 +29,14 @@ use super::super::{FileIoError, FileStream, WriteStreamError};
 /// Both operators share the same underlying storage backend, which is
 /// important for backends like `InMemory` where separate instances would
 /// have independent data.
+///
+/// A remote backend's calls are bounded by [`write_lock::BACKEND_IO_TIMEOUT`]
+/// and its connections by [`write_lock::BACKEND_TCP_USER_TIMEOUT`]. A write
+/// under a lock reserves the lock for a window derived from the two, see
+/// [`write_lock`]; a remote backend without these bounds could publish after
+/// the window and land on the next holder. A local backend's calls are not
+/// bounded: abandoning a filesystem rename would not stop it, only lose track
+/// of it, so it is waited for and the reservation kept up meanwhile.
 pub fn build_storage_operators(
     storage_config: &StorageToml,
     data_directory: &Path,
@@ -62,7 +71,16 @@ pub fn build_storage_operators(
                 config.bucket_name
             );
             let builder = config.to_builder()?;
-            opendal::Operator::new(builder)?.finish()
+            opendal::Operator::new(builder)?
+                .layer(opendal::layers::HttpClientLayer::new(
+                    opendal::raw::HttpClient::with(backend_http_client()?),
+                ))
+                .finish()
+                .layer(
+                    opendal::layers::TimeoutLayer::new()
+                        .with_timeout(write_lock::BACKEND_IO_TIMEOUT)
+                        .with_io_timeout(write_lock::BACKEND_IO_TIMEOUT),
+                )
         }
         #[cfg(any(feature = "storage-memory", test))]
         StorageConfigToml::InMemory => {
@@ -91,6 +109,26 @@ pub fn build_storage_operators(
         ))
         .layer(WritePathLayer::new(user_service));
     Ok((operator, admin_operator))
+}
+
+/// The HTTP client for a remote backend. Its kernel-level timeout is what
+/// stops an abandoned request from being delivered long after the fact, see
+/// [`write_lock::BACKEND_TCP_USER_TIMEOUT`]. Only Linux exposes the setting;
+/// elsewhere the kernel's own retransmission limit applies instead.
+#[cfg(feature = "storage-gcs")]
+fn backend_http_client() -> Result<reqwest::Client, FileIoError> {
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "linux")]
+    let builder = builder.tcp_user_timeout(write_lock::BACKEND_TCP_USER_TIMEOUT);
+    builder.build().map_err(|error| {
+        FileIoError::OpenDAL(
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "Failed to build the storage backend HTTP client",
+            )
+            .set_source(error),
+        )
+    })
 }
 
 /// Build the storage operators from an `AppContext` (test-only convenience).

@@ -23,6 +23,8 @@ pub enum FileIoError {
     PathCollision,
     #[error("Lock lost before the file was changed")]
     LockLost,
+    #[error("A change under the lock is still being published; retry in {retry_after_secs}s")]
+    LockBusy { retry_after_secs: u64 },
 }
 
 impl From<opendal::Error> for FileIoError {
@@ -38,6 +40,9 @@ impl From<opendal::Error> for FileIoError {
                 LayerDomainError::DiskSpaceQuotaExceeded => FileIoError::DiskSpaceQuotaExceeded,
                 LayerDomainError::PathCollision => FileIoError::PathCollision,
                 LayerDomainError::LockLost => FileIoError::LockLost,
+                LayerDomainError::LockBusy { retry_after_secs } => FileIoError::LockBusy {
+                    retry_after_secs: *retry_after_secs,
+                },
             };
         }
         match e.kind() {

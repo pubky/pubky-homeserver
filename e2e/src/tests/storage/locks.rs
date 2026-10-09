@@ -132,7 +132,7 @@ async fn lock_refresh_unlock() {
     let mut lock = storage.lock(path, Duration::from_secs(9999)).await.unwrap();
     assert_eq!(lock.path().as_str(), path);
     assert!(lock.token().starts_with("opaquelocktoken:"));
-    assert_eq!(lock.timeout(), Duration::from_secs(60));
+    assert_eq!(lock.timeout(), Duration::from_secs(600));
 
     storage
         .refresh_lock(&mut lock, Duration::from_secs(10))

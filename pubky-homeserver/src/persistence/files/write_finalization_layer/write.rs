@@ -15,7 +15,8 @@ use opendal::Result;
 
 use super::{
     layer::{already_closed, check_no_path_collision, spawn_finalization, unexpected, Finalizer},
-    resolve_storage_max_bytes, would_exceed_limit, write_lock,
+    resolve_storage_max_bytes, would_exceed_limit,
+    write_lock::{self, BackendOutcome, FailedChange, PublishReservation},
 };
 
 struct PreparedWrite {
@@ -122,7 +123,9 @@ impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
                     abort_unpublished_upload(&mut inner, &entry_path, "rejected").await;
                     Err(error)
                 }
-                Err(WriteFailure::AfterPublication(error)) => Err(error),
+                Err(WriteFailure::Unconfirmed(error) | WriteFailure::AfterPublication(error)) => {
+                    Err(error)
+                }
             }
         })
         .await
@@ -158,12 +161,24 @@ async fn abort_unpublished_upload<R: oio::Write>(
 }
 
 /// Which side of publication a finalization failed on. Before it, the staged
-/// bytes are still the writer's to abort. After it, the backend has renamed
-/// them into place, or may have, so they are the live blob or a leftover that
-/// aborting could not reach anyway.
+/// bytes are still the writer's to abort, and nothing has reached the backend.
+/// Unconfirmed, the backend was told to publish and did not say it had: it
+/// may have, or may still, so the bytes are left alone and the lock stays
+/// reserved. After it, the backend has renamed them into place, so they are
+/// the live blob and only the database side failed.
 enum WriteFailure {
     BeforePublication(opendal::Error),
+    Unconfirmed(opendal::Error),
     AfterPublication(opendal::Error),
+}
+
+impl FailedChange for WriteFailure {
+    fn backend_outcome(&self) -> BackendOutcome {
+        match self {
+            Self::BeforePublication(_) | Self::AfterPublication(_) => BackendOutcome::Done,
+            Self::Unconfirmed(_) => BackendOutcome::Unconfirmed,
+        }
+    }
 }
 
 impl Finalizer {
@@ -172,6 +187,30 @@ impl Finalizer {
         backend_writer: &mut R,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
+    ) -> std::result::Result<opendal::Metadata, WriteFailure> {
+        // Before the transaction: the reservation must outlive it, and a
+        // finalization must never hold a connection while it waits for one.
+        let mut reservation = write_lock::reserve(entry_path, &self.sql_db)
+            .await
+            .map_err(WriteFailure::BeforePublication)?;
+        let result = self
+            .finalize_reserved_write(
+                backend_writer,
+                entry_path,
+                file_metadata,
+                reservation.as_mut(),
+            )
+            .await;
+        write_lock::settle(reservation, &result).await;
+        result
+    }
+
+    async fn finalize_reserved_write<R: oio::Write>(
+        &self,
+        backend_writer: &mut R,
+        entry_path: &EntryPath,
+        file_metadata: &FileMetadata,
+        reservation: Option<&mut PublishReservation>,
     ) -> std::result::Result<opendal::Metadata, WriteFailure> {
         let mut tx = self.sql_db.pool().begin().await.map_err(|error| {
             WriteFailure::BeforePublication(unexpected(
@@ -182,8 +221,14 @@ impl Finalizer {
 
         let result = {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            self.write_in_transaction(backend_writer, entry_path, file_metadata, &mut executor)
-                .await
+            self.write_in_transaction(
+                backend_writer,
+                entry_path,
+                file_metadata,
+                reservation,
+                &mut executor,
+            )
+            .await
         };
 
         let metadata = match result {
@@ -217,16 +262,16 @@ impl Finalizer {
         backend_writer: &mut R,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
+        reservation: Option<&mut PublishReservation>,
         executor: &mut UnifiedExecutor<'_>,
     ) -> std::result::Result<opendal::Metadata, WriteFailure> {
         let prepared = self
             .prepare_write(entry_path, file_metadata, executor)
             .await
             .map_err(WriteFailure::BeforePublication)?;
-        let backend_metadata = backend_writer
-            .close()
+        let backend_metadata = write_lock::keep_reserved(reservation, backend_writer.close())
             .await
-            .map_err(WriteFailure::AfterPublication)?;
+            .map_err(WriteFailure::Unconfirmed)?;
         self.apply_write_effects(prepared, entry_path, file_metadata, executor)
             .await
             .map_err(WriteFailure::AfterPublication)?;
@@ -250,7 +295,7 @@ impl Finalizer {
                 )
             })?;
 
-        write_lock::hold(entry_path, executor).await?;
+        write_lock::check_window(entry_path, executor).await?;
 
         if self.collision_policy.enforces_collisions() {
             check_no_path_collision(entry_path, executor).await?;
@@ -348,10 +393,14 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use pubky_common::crypto::Keypair;
-    use tokio::sync::Barrier;
+    use tokio::sync::{oneshot, Barrier};
 
     use crate::persistence::files::FileIoError;
-    use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
+    use crate::persistence::sql::{
+        entry::EntryRepository,
+        entry_lock::{EntryLockEntity, EntryLockRepository, ReleaseOutcome},
+        SqlDb,
+    };
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
 
@@ -518,9 +567,36 @@ mod tests {
         );
     }
 
-    /// A write under a lock whose keep-alive died with its client can reach
-    /// finalization after the lock expired. It must be refused before the
-    /// backend publishes, leaving the old bytes and no staged file.
+    async fn lock_on(db: &SqlDb, path: &EntryPath) -> Option<EntryLockEntity> {
+        EntryLockRepository::get_active(path, &mut db.pool().into())
+            .await
+            .unwrap()
+    }
+
+    async fn release(db: &SqlDb, path: &EntryPath, token: &str) -> ReleaseOutcome {
+        EntryLockRepository::release(path, token, &mut db.pool().into())
+            .await
+            .unwrap()
+    }
+
+    /// Poll until the write under `token` has reserved its lock.
+    async fn wait_for_reservation(db: &SqlDb, path: &EntryPath, token: &str) {
+        wait_until(
+            || async {
+                EntryLockRepository::publish_window_remaining(path, token, &mut db.pool().into())
+                    .await
+                    .unwrap()
+                    .is_some_and(|remaining| remaining > 0)
+            },
+            "the write never reserved its lock",
+        )
+        .await;
+    }
+
+    /// A write whose lock ran out while its upload was streaming, and was
+    /// taken by someone else, reaches finalization under a lock it no longer
+    /// holds. It must be refused before the backend publishes, leaving the old
+    /// bytes, no staged file, and the new holder's lock untouched.
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn write_under_a_lost_lock_is_refused_before_publication() {
@@ -562,20 +638,23 @@ mod tests {
             b"old"
         );
         assert_eq!(all_events(&db).await.len(), 1);
+        let holder = lock_on(&db, &entry_path).await.unwrap();
+        assert_eq!(holder.token, "token-b");
+        assert_eq!(holder.publishing_until, 0);
     }
 
     /// A finalization can wait a long time for its turn on the user row, and
-    /// the lock can run out meanwhile without anyone else taking it. The write
-    /// must be judged on the time it publishes at, not the time its
-    /// transaction began.
+    /// use up the window it reserved. It must not publish into what is left
+    /// of it: the backend request could outlive the lock. Nothing was sent,
+    /// so the reservation ends and the holder can retry at once.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn write_whose_lock_expires_while_its_finalization_waits_is_refused() {
+    async fn write_whose_window_runs_out_while_its_finalization_waits_is_refused() {
         let db = SqlDb::test().await;
         let (operator, tmp_dir) = test_fs_operator(&db);
         let pubkey = create_user(&db).await;
         let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
-        EntryLockRepository::acquire(&entry_path, "token-a", 1, &mut db.pool().into())
+        EntryLockRepository::acquire(&entry_path, "token-a", 60, &mut db.pool().into())
             .await
             .unwrap()
             .expect("the lock should be free");
@@ -593,19 +672,178 @@ mod tests {
             .unwrap();
 
         let close = write_lock::run_under(Some("token-a".to_string()), writer.close());
-        let outlast_the_lock = async {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+        let use_up_the_window = async {
+            // The lock is reserved before the wait for the row.
+            wait_for_reservation(&db, &entry_path, "token-a").await;
+            EntryLockRepository::set_publish_window(&entry_path, 1, &mut db.pool().into())
+                .await
+                .unwrap();
             other_finalization.commit().await.unwrap();
         };
-        let (closed, ()) = tokio::join!(close, outlast_the_lock);
+        let (closed, ()) = tokio::join!(close, use_up_the_window);
 
-        let rejection = closed.expect_err("the write should be refused once its lock ran out");
+        let rejection = closed.expect_err("the write should be refused with its window used up");
         assert!(matches!(
             FileIoError::from(rejection),
-            FileIoError::LockLost
+            FileIoError::LockBusy {
+                retry_after_secs: 1
+            }
         ));
         assert_eq!(staged_count(&tmp_dir), 0);
         assert!(!operator.exists(entry_path.as_str()).await.unwrap());
+        assert_eq!(
+            release(&db, &entry_path, "token-a").await,
+            ReleaseOutcome::Released
+        );
+    }
+
+    /// A backend writer whose close waits to be let go.
+    struct StalledWriter(Option<oneshot::Receiver<()>>);
+
+    impl oio::Write for StalledWriter {
+        async fn write(&mut self, _bs: opendal::Buffer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<opendal::Metadata> {
+            if let Some(unstall) = self.0.take() {
+                unstall.await.expect("the test lets the close go");
+            }
+            Ok(opendal::Metadata::default())
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The race this module exists for: a publish stalls at the backend, the
+    /// lock runs out meanwhile, another writer takes it and writes, and the
+    /// stalled publish lands on top when it finally goes through. The
+    /// reservation makes the lock outlast the stall, whatever its lifetime
+    /// was: nobody can take or release it until the backend has answered.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn stalled_publish_keeps_its_lock_until_the_backend_answers() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        // Two seconds: the shortest whole-second lifetime that surely outlives
+        // the reservation that follows.
+        EntryLockRepository::acquire(&entry_path, "token-a", 2, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+        let (unstall, stalled) = oneshot::channel();
+        let mut writer = WriteFinalizationWriter::new(
+            StalledWriter(Some(stalled)),
+            Arc::new(test_finalizer(&db)),
+            entry_path.clone(),
+        );
+        oio::Write::write(&mut writer, vec![1u8; 10].into())
+            .await
+            .unwrap();
+
+        let close = tokio::spawn(write_lock::run_under(
+            Some("token-a".to_string()),
+            async move { oio::Write::close(&mut writer).await },
+        ));
+        wait_for_reservation(&db, &entry_path, "token-a").await;
+        // The granted seconds have passed; the stalled publish holds on.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            EntryLockRepository::acquire(&entry_path, "token-b", 60, &mut db.pool().into())
+                .await
+                .unwrap()
+                .is_none(),
+            "a stalled publish must keep its lock"
+        );
+        assert!(matches!(
+            release(&db, &entry_path, "token-a").await,
+            ReleaseOutcome::Reserved { .. }
+        ));
+        assert!(!close.is_finished());
+
+        unstall.send(()).unwrap();
+        close
+            .await
+            .unwrap()
+            .expect("the write lands once the backend answers");
+        let entry = EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .unwrap();
+        assert_eq!(entry.content_length, 10);
+        // Published: the reservation is over and the lock is the holder's to end.
+        assert_eq!(
+            release(&db, &entry_path, "token-a").await,
+            ReleaseOutcome::Released
+        );
+    }
+
+    /// A publish the backend did not confirm may still land. Until its window
+    /// has passed, the lock can be neither released nor taken, and a second
+    /// change under it is refused rather than risk being overwritten by the
+    /// first.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn unconfirmed_publish_leaves_the_lock_reserved() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        EntryLockRepository::acquire(&entry_path, "token-a", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+        let close_under_lock = || async {
+            let mut writer = WriteFinalizationWriter::new(
+                ThrottledWriter,
+                Arc::new(test_finalizer(&db)),
+                entry_path.clone(),
+            );
+            oio::Write::write(&mut writer, vec![1u8; 10].into())
+                .await
+                .unwrap();
+            write_lock::run_under(Some("token-a".to_string()), async move {
+                oio::Write::close(&mut writer).await
+            })
+            .await
+        };
+
+        let unconfirmed = close_under_lock()
+            .await
+            .expect_err("the backend throttled the close");
+        assert!(matches!(
+            FileIoError::from(unconfirmed),
+            FileIoError::BackendRateLimited(_)
+        ));
+        assert!(matches!(
+            release(&db, &entry_path, "token-a").await,
+            ReleaseOutcome::Reserved { remaining_secs } if remaining_secs > 0
+        ));
+        assert!(
+            EntryLockRepository::acquire(&entry_path, "token-b", 60, &mut db.pool().into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let refused = close_under_lock()
+            .await
+            .expect_err("a second change must wait for the first's window");
+        assert!(matches!(
+            FileIoError::from(refused),
+            FileIoError::LockBusy {
+                retry_after_secs: 1
+            }
+        ));
+
+        // Once the window has passed the lock is the holder's again.
+        EntryLockRepository::set_publish_window(&entry_path, 0, &mut db.pool().into())
+            .await
+            .unwrap();
+        assert_eq!(
+            release(&db, &entry_path, "token-a").await,
+            ReleaseOutcome::Released
+        );
     }
 
     /// The transaction failing to begin happens before the backend publishes,
