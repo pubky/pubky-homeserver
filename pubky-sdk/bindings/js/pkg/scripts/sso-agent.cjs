@@ -78,7 +78,11 @@ async function scenario() {
     uninvited: await serve("localhost"),
     crossSite: await serve("127.0.0.1"),
   };
-  const allowed = [origins.app, origins.shop, origins.crossSite].join(",");
+  const port = (origin) => new URL(origin).port;
+  // Exact entries plus a wildcard: every host under `localhost` on the
+  // uninvited port, which does not cover `localhost` itself.
+  const wildcard = `http://*.localhost:${port(origins.uninvited)}`;
+  const allowed = [origins.app, origins.shop, origins.crossSite, wildcard].join(",");
   const appUrl = (origin, caps) => {
     const url = new URL("/app", origin);
     url.searchParams.set("agent", origins.agent);
@@ -86,7 +90,6 @@ async function scenario() {
     if (caps) url.searchParams.set("caps", caps);
     return url.href;
   };
-  const port = (origin) => new URL(origin).port;
   const state = async (window) => (await call(window, "status"))?.state;
 
   // Fresh profile: both apps connect and are told to show the sign-in frame,
@@ -152,9 +155,13 @@ async function scenario() {
   assert.deepEqual(await call(raw, "siblingHello"), { type: "error", code: "origin-not-allowed" });
   raw.destroy();
 
-  // A same-site origin that is not allowlisted is refused.
+  // A same-site origin that is not allowlisted is refused: the wildcard
+  // covers hosts under `localhost`, not the apex. A host under it connects
+  // (Chromium resolves `*.localhost` to loopback without DNS).
   const uninvited = await open(appUrl(origins.uninvited));
   assert.equal((await call(uninvited, "ready")).code, "origin-not-allowed");
+  const wild = await open(appUrl(origins.uninvited.replace("//localhost", "//wild.localhost")));
+  assert.ok((await call(wild, "ready")).status, "a host matched by the wildcard connects");
 
   // An app asking for more than the shared scope gets no session.
   const greedy = await open(appUrl(origins.app, "/pub/other.test/:rw"));

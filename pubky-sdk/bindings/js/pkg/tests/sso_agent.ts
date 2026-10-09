@@ -37,6 +37,15 @@ test("SessionAgent.listen: validates origins and scope before listening", async 
     "https://example.app/agent",
     "https://example.app:443",
     "null",
+    // Wildcards cover one domain, written like a CSP source.
+    "*.example.app",
+    "https://*",
+    "https://*.",
+    "https://*example.app",
+    "https://*.*.example.app",
+    "https://a.*.example.app",
+    "https://*.example.app/",
+    "https://*.example.app:443",
   ]) {
     try {
       await sdk.listenSessionAgent({ allowedOrigins: [origin], capabilities: "/pub/app/:rw" });
@@ -45,6 +54,14 @@ test("SessionAgent.listen: validates origins and scope before listening", async 
       assertPubkyError(t, error);
       t.equal(error.name, "InvalidInput", `rejects ${origin}`);
     }
+  }
+  if (hasWindow) {
+    const agent = await sdk.listenSessionAgent({
+      allowedOrigins: ["https://*.example.app", "http://*.localhost:8080"],
+      capabilities: "/pub/app/:rw",
+    });
+    agent.close();
+    t.pass("accepts wildcard patterns");
   }
   try {
     await sdk.listenSessionAgent({
@@ -80,6 +97,16 @@ test("SessionAgentClient.connect: fails cleanly when no agent answers", async (t
   if (frame instanceof Object && "src" in frame) {
     (frame as HTMLIFrameElement).src = "about:blank";
     document.body.append(frame as HTMLIFrameElement);
+  }
+  try {
+    await sdk.connectSessionAgent(frame as HTMLIFrameElement, {
+      agentOrigin: "https://*.example.app",
+      capabilities: "",
+    });
+    t.fail("accepted a wildcard agent origin");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(error.name, "InvalidInput", "the agent origin is exact");
   }
   try {
     await sdk.connectSessionAgent(frame as HTMLIFrameElement, {

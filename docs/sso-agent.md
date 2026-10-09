@@ -82,6 +82,7 @@ Error codes on a reply: `signed-out`, `insufficient-scope`, `unavailable`, `unsu
 ## Origin rules
 
 - Allowed origins are exact: scheme, host and port, no path and no default port. A sibling subdomain that is not listed is refused even though it is same-site.
+- An entry may instead be a wildcard such as `https://*.pubky.app`, which matches every host under `pubky.app` at any depth on that scheme and port, but not `pubky.app` itself; list the apex separately. Patterns follow the CSP `frame-ancestors` form, so the two lists can stay identical. A wildcard hands the shared bearer to every present and future host under the domain, including staging, preview and third-party-authored deployments, and there is no entry to remove when one of them is compromised. Prefer exact entries where the set of apps is known.
 - Only the frame's direct parent may connect: a popup, a sibling frame or a frame inside the agent is refused. An allowlisted app that is itself embedded by a same-site page still connects, since only its own origin is checked.
 - `returnUrl` in the hello is used only if it is on the connecting app's own origin; otherwise the agent ignores it.
 - Cross-site embedders get a partitioned, empty agent and see `signed-out`. Sharing with other sites is out of scope.
@@ -100,7 +101,7 @@ Every allowlisted app can read and write the shared scope with the borrowed bear
 | Other headers | `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` |
 | Scripts | No third-party scripts or analytics |
 
-To cut off an app, remove its origin from the allowlist and from `frame-ancestors`, then redeploy. Bearers it already holds expire within an hour; a forced refresh invalidates them immediately.
+To cut off an app, remove its origin from the allowlist and from `frame-ancestors`, then redeploy. Bearers it already holds expire within an hour; a forced refresh invalidates them immediately. An app admitted by a wildcard can only be cut off by replacing the wildcard with exact entries.
 
 ## Versioning
 

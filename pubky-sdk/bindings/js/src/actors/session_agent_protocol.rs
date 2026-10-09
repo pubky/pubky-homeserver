@@ -51,6 +51,13 @@ pub struct AgentStatus {
 /// Origins must match `event.origin` exactly, so accept nothing but the
 /// serialized origin form (no path, no trailing slash, no default port).
 pub(crate) fn validate_origin(origin: &str) -> JsResult<()> {
+    // The URL parser accepts `*` in a host, but no browser origin contains one.
+    if origin.contains('*') {
+        return Err(PubkyError::new(
+            PubkyErrorName::InvalidInput,
+            format!("Origin `{origin}` must not contain `*`."),
+        ));
+    }
     let serialized = url::Url::parse(origin)
         .map(|url| url.origin().ascii_serialization())
         .map_err(|error| {
@@ -63,6 +70,29 @@ pub(crate) fn validate_origin(origin: &str) -> JsResult<()> {
         return Err(PubkyError::new(
             PubkyErrorName::InvalidInput,
             format!("Origin `{origin}` must be written as `{serialized}`."),
+        ));
+    }
+    Ok(())
+}
+
+/// An agent allowlist entry: an exact origin, or a wildcard pattern such as
+/// `https://*.example.com` that matches every host under `example.com` on
+/// that scheme and port, at any depth, but not `example.com` itself. The
+/// pattern is checked by validating it with a stand-in label.
+pub(crate) fn validate_allowed_origin(entry: &str) -> JsResult<()> {
+    let Some((scheme, rest)) = entry.split_once("://*.") else {
+        return validate_origin(entry);
+    };
+    let host = rest.split(':').next().unwrap_or_default();
+    if host.is_empty()
+        || rest.contains('*')
+        || validate_origin(&format!("{scheme}://x.{rest}")).is_err()
+    {
+        return Err(PubkyError::new(
+            PubkyErrorName::InvalidInput,
+            format!(
+                "Invalid origin pattern `{entry}`: write it as `https://*.example.com`, with a port only if the apps use one."
+            ),
         ));
     }
     Ok(())

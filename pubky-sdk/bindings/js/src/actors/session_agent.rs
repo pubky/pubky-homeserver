@@ -26,7 +26,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::session::Session;
 use super::session_agent_protocol::{
-    AgentSessionInfo, AgentState, AgentStatus, PROTOCOL_VERSION, validate_origin,
+    AgentSessionInfo, AgentState, AgentStatus, PROTOCOL_VERSION, validate_allowed_origin,
 };
 use super::session_store::{BrowserSessionStore, js_store_is_available, stored_session_id};
 use crate::client::constructor::Client;
@@ -37,6 +37,22 @@ const PUBKY_AGENT_HOST_HELLO = "pubky-agent/hello";
 
 function pubkyAgentOriginOf(url) {
   try { return new URL(url).origin; } catch { return null; }
+}
+/**
+ * Build the allowlist check. `https://*.example.com` matches every origin
+ * whose host ends in `.example.com` on that scheme and port; the apex is
+ * listed separately if wanted.
+ */
+function pubkyAgentAllowlist(entries) {
+  const exact = new Set();
+  const patterns = [];
+  for (const entry of entries) {
+    const at = entry.indexOf("://*.");
+    if (at === -1) exact.add(entry);
+    else patterns.push({ scheme: entry.slice(0, at + 3), suffix: entry.slice(at + 4) });
+  }
+  return (origin) => exact.has(origin) || patterns.some(({ scheme, suffix }) =>
+    origin.startsWith(scheme) && origin.endsWith(suffix) && origin.length > scheme.length + suffix.length);
 }
 const pubkyAgentHosts = new Map();
 let nextPubkyAgentHost = 0;
@@ -52,7 +68,7 @@ export function __pubkyAgentListen(version, allowedOrigins, status, bearer, sign
   if (typeof globalThis.addEventListener !== "function") {
     throw new Error("Session agents require a browser window.");
   }
-  const allowed = new Set(allowedOrigins);
+  const allowed = pubkyAgentAllowlist(allowedOrigins);
   let connection = null;
 
   async function sendStatus(connection) {
@@ -81,7 +97,7 @@ export function __pubkyAgentListen(version, allowedOrigins, status, bearer, sign
     if (!data || data.type !== PUBKY_AGENT_HOST_HELLO) return;
     const port = event.ports?.[0];
     if (!port) return;
-    if (event.source !== window.parent || !allowed.has(event.origin)) {
+    if (event.source !== window.parent || !allowed(event.origin)) {
       port.postMessage({ type: "error", code: "origin-not-allowed" });
       port.close();
       return;
@@ -154,7 +170,9 @@ extern "C" {
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionAgentOptions {
-    /// Exact origins that may use this agent, e.g. `["https://pubky.app"]`.
+    /// Origins that may use this agent: exact, e.g. `"https://pubky.app"`, or
+    /// a wildcard for every host under a domain, e.g. `"https://*.pubky.app"`
+    /// (any depth, same scheme and port, not the apex).
     pub(crate) allowed_origins: Vec<String>,
     /// The shared scope: a served session must stay within it and never be root.
     #[tsify(type = "Capabilities")]
@@ -414,7 +432,7 @@ impl SessionAgent {
         client: Option<PubkyHttpClient>,
     ) -> JsResult<SessionAgent> {
         for origin in &options.allowed_origins {
-            validate_origin(origin)?;
+            validate_allowed_origin(origin)?;
         }
         let scope = crate::wrappers::capabilities::parse_capabilities(&options.capabilities)?;
         let client = match client {
