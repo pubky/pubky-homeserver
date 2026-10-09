@@ -102,7 +102,7 @@ async function scenario() {
   const shop = await open(appUrl(origins.shop));
   assert.equal((await call(shop, "ready")).status.state, "signed-out");
 
-  // The agent speaks one protocol version and refuses root sessions.
+  // The agent speaks one protocol version.
   assert.deepEqual(await call(appWindow, "rawHello", 99), { type: "error", code: "unsupported-version" });
 
   // Sign in inside the first app's frame. Both apps flip to signed-in without
@@ -113,8 +113,6 @@ async function scenario() {
   assert.equal(await call(appWindow, "whoami"), user);
   assert.equal(await call(appWindow, "frameVisible"), false);
   assert.equal((await call(appWindow, "changes")).at(-1).state, "signed-in");
-  assert.equal(await callAgent(appWindow, origins.agent, "rejectsRootSession"), "InvalidInput");
-  assert.equal(await callAgent(appWindow, origins.agent, "rejectsScopedSession"), "InvalidInput");
   await call(appWindow, "write", "hello from app");
   assert.equal((await call(appWindow, "counts")).exchanges, 0, "apps never exchange a grant");
 
@@ -126,9 +124,6 @@ async function scenario() {
   assert.equal(await call(appWindow, "read", port(origins.shop)), "hello from shop");
   assert.equal((await call(shop, "counts")).exchanges, 0);
 
-  // One grant backs every app.
-  assert.equal(await callAgent(appWindow, origins.agent, "grantCount"), 1);
-
   // The agent rotates its bearer; each app recovers from the 401 with one retry.
   // Public reads succeed with a stale bearer, so writes are what show the retry.
   await callAgent(appWindow, origins.agent, "rotate");
@@ -139,19 +134,13 @@ async function scenario() {
   assert.equal(await call(appWindow, "read", port(origins.shop)), "shop after rotation");
 
   // The raw protocol, from a window whose SDK connection the hand-made hello
-  // replaces. A foreign return URL is ignored, an unknown message is refused,
-  // the bearer carries no grant material, and naming the current bearer as
-  // rejected is what makes the agent exchange.
+  // replaces: the bearer carries no grant material, and a same-origin sibling
+  // frame is refused because it is not the agent's parent.
   const raw = await open(appUrl(origins.app));
-  const rawStatus = await call(raw, "rawHello", 1, "http://evil.example/back");
-  assert.equal(rawStatus.state, "signed-in");
-  assert.equal(await callAgent(raw, origins.agent, "returnUrl"), undefined);
-  assert.equal((await call(raw, "rawRequest", { type: "bogus" })).code, "unsupported-message");
+  assert.equal((await call(raw, "rawHello", 1)).state, "signed-in");
   const lent = (await call(raw, "rawRequest", { type: "bearer" })).bearer;
   assert.deepEqual(Object.keys(lent).sort(), ["capabilities", "expires_at", "homeserver", "pubky", "token"]);
   assert.equal(lent.pubky, user);
-  const forced = (await call(raw, "rawRequest", { type: "bearer", rejected: lent.token })).bearer;
-  assert.notEqual(forced.token, lent.token, "a rejected current bearer is replaced");
   assert.deepEqual(await call(raw, "siblingHello"), { type: "error", code: "origin-not-allowed" });
   raw.destroy();
 

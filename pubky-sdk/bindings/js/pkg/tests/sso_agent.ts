@@ -29,49 +29,21 @@ const hasWindow = typeof globalThis.addEventListener === "function";
 // The multi-origin flow runs in `npm run test-browser:sso`. These cover the
 // single-runtime edges.
 
-test("SessionAgent.listen: validates origins and scope before listening", async (t) => {
+test("SessionAgent.listen: validates options, then needs a window", async (t) => {
   const sdk = Pubky.testnet();
-  for (const origin of [
-    "not an origin",
-    "https://example.app/",
-    "https://example.app/agent",
-    "https://example.app:443",
-    "null",
-    // Wildcards cover one domain, written like a CSP source.
-    "*.example.app",
-    "https://*",
-    "https://*.",
-    "https://*example.app",
-    "https://*.*.example.app",
-    "https://a.*.example.app",
-    "https://*.example.app/",
-    "https://*.example.app:443",
+  // Origin and wildcard forms are covered by the Rust unit tests; one of each
+  // kind of bad option shows that the JS entry point reports them as InvalidInput.
+  for (const options of [
+    { allowedOrigins: ["https://example.app/"], capabilities: "/pub/app/:rw" as Capabilities },
+    { allowedOrigins: ["https://example.app"], capabilities: "oops" as Capabilities },
   ]) {
     try {
-      await sdk.listenSessionAgent({ allowedOrigins: [origin], capabilities: "/pub/app/:rw" });
-      t.fail(`accepted ${origin}`);
+      await sdk.listenSessionAgent(options);
+      t.fail(`accepted ${JSON.stringify(options)}`);
     } catch (error) {
       assertPubkyError(t, error);
-      t.equal(error.name, "InvalidInput", `rejects ${origin}`);
+      t.equal(error.name, "InvalidInput", `rejects ${JSON.stringify(options)}`);
     }
-  }
-  if (hasWindow) {
-    const agent = await sdk.listenSessionAgent({
-      allowedOrigins: ["https://*.example.app", "http://*.localhost:8080"],
-      capabilities: "/pub/app/:rw",
-    });
-    agent.close();
-    t.pass("accepts wildcard patterns");
-  }
-  try {
-    await sdk.listenSessionAgent({
-      allowedOrigins: ["https://example.app"],
-      capabilities: "oops" as Capabilities,
-    });
-    t.fail("accepted malformed scope");
-  } catch (error) {
-    assertPubkyError(t, error);
-    t.equal(error.name, "InvalidInput", "rejects a malformed scope");
   }
 
   try {
@@ -97,16 +69,6 @@ test("SessionAgentClient.connect: fails cleanly when no agent answers", async (t
   if (frame instanceof Object && "src" in frame) {
     (frame as HTMLIFrameElement).src = "about:blank";
     document.body.append(frame as HTMLIFrameElement);
-  }
-  try {
-    await sdk.connectSessionAgent(frame as HTMLIFrameElement, {
-      agentOrigin: "https://*.example.app",
-      capabilities: "",
-    });
-    t.fail("accepted a wildcard agent origin");
-  } catch (error) {
-    assertPubkyError(t, error);
-    t.equal(error.name, "InvalidInput", "the agent origin is exact");
   }
   try {
     await sdk.connectSessionAgent(frame as HTMLIFrameElement, {

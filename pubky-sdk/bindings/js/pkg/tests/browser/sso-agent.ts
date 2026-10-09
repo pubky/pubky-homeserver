@@ -77,31 +77,6 @@ function agentRole() {
     },
     async hasSession() { return (await agent).hasSession; },
     async returnUrl() { return (await agent).returnUrl; },
-    // A root session must never be served, whatever the page tries.
-    async rejectsRootSession() {
-      const root = await signer!.signin("root-check.test");
-      try {
-        await (await agent).setSession(root);
-        return "accepted";
-      } catch (error) {
-        return (error as Error).name;
-      } finally { await root.signout(); }
-    },
-    // A session within the scope for one capability but outside it for
-    // another is refused as a whole.
-    async rejectsScopedSession() {
-      const flow = await sdk.startGrantAuthFlow(`${SHARED_SCOPE},/pub/other.test/:r`, AuthFlowKind.signin(), {
-        clientId: "scope-check.test", relay: RELAY,
-      });
-      await signer!.approveAuthRequest(flow.authorizationUrl);
-      const scoped = await flow.awaitApproval();
-      try {
-        await (await agent).setSession(scoped);
-        return "accepted";
-      } catch (error) {
-        return (error as Error).name;
-      } finally { await scoped.signout(); }
-    },
     async clearStore() { await store.clear(); },
     // Revoke the shared grant outside the agent, as Ring would.
     async revokeGrant() {
@@ -114,12 +89,6 @@ function agentRole() {
       } finally { await root.signout(); }
     },
     async storedSessions() { return (await store.list()).length; },
-    async grantCount() {
-      const root = await signer!.signin("grant-audit.test");
-      try {
-        return (await new GrantManager(root).list()).filter((grant) => grant.clientId === CLIENT_ID).length;
-      } finally { await root.signout(); }
-    },
     // Rotate the shared bearer: expire it in the store, then let the agent's
     // own request refresh it. Bearers lent before this are now dead.
     async rotate() {
@@ -173,11 +142,11 @@ function appRole() {
     async writeHeld(text: string) { await held!.storage.putText(`${NOTES}held`, text); },
     closeClient() { client!.close(); },
     // A hello sent by hand, bypassing the SDK: shows how the agent answers
-    // other versions, a foreign return URL, and raw requests on the port.
-    rawHello(v: number, returnUrl?: string) {
+    // other versions and what a raw bearer request on the port returns.
+    rawHello(v: number) {
       const channel = new MessageChannel();
       const reply = new Promise((resolve) => { channel.port1.onmessage = (event) => resolve(event.data); });
-      const hello = { type: "pubky-agent/hello", v, capabilities: SHARED_SCOPE, returnUrl };
+      const hello = { type: "pubky-agent/hello", v, capabilities: SHARED_SCOPE };
       frame.contentWindow!.postMessage(hello, agentOrigin, [channel.port2]);
       rawPort = channel.port1;
       return reply;

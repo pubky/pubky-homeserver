@@ -353,25 +353,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cached_bearer_is_reused_until_near_expiry() {
+    async fn bearer_is_cached_shared_by_clones_and_replaced_only_when_rejected() {
         let source = FakeSource::new(3_600);
         let credential = credential(&source);
+        let clone = credential.clone();
         assert_eq!(credential.bearer().await.unwrap(), "bearer-0");
-        assert_eq!(credential.bearer().await.unwrap(), "bearer-0");
-        assert_eq!(source.asks(), 1, "a valid bearer is borrowed once");
-
-        let near_expiry = FakeSource::new(REFRESH_SLACK_SECS - 1);
-        let credential = super::tests::credential(&near_expiry);
-        assert_eq!(credential.bearer().await.unwrap(), "bearer-0");
-        assert_eq!(credential.bearer().await.unwrap(), "bearer-1");
-        assert_eq!(*near_expiry.rejections.lock().unwrap(), vec![None, None]);
-    }
-
-    #[tokio::test]
-    async fn recover_asks_only_when_the_rejected_bearer_is_still_current() {
-        let source = FakeSource::new(3_600);
-        let credential = credential(&source);
-        assert_eq!(credential.bearer().await.unwrap(), "bearer-0");
+        assert_eq!(clone.bearer().await.unwrap(), "bearer-0");
+        assert_eq!(
+            source.asks(),
+            1,
+            "a valid bearer is borrowed once for all clones"
+        );
 
         // Another clone already replaced the bearer: reuse it, do not ask.
         assert_eq!(credential.recover("older").await.unwrap(), "bearer-0");
@@ -383,17 +375,14 @@ mod tests {
             source.rejections.lock().unwrap().last().unwrap().as_deref(),
             Some("bearer-0")
         );
-        assert_eq!(credential.bearer().await.unwrap(), "bearer-1");
-    }
+        assert_eq!(clone.bearer().await.unwrap(), "bearer-1");
 
-    #[tokio::test]
-    async fn clones_share_the_cached_bearer() {
-        let source = FakeSource::new(3_600);
-        let credential = credential(&source);
-        let clone = credential.clone();
+        // Near expiry the bearer is borrowed again without naming a rejection.
+        let near_expiry = FakeSource::new(REFRESH_SLACK_SECS - 1);
+        let credential = super::tests::credential(&near_expiry);
         assert_eq!(credential.bearer().await.unwrap(), "bearer-0");
-        assert_eq!(clone.bearer().await.unwrap(), "bearer-0");
-        assert_eq!(source.asks(), 1);
+        assert_eq!(credential.bearer().await.unwrap(), "bearer-1");
+        assert_eq!(*near_expiry.rejections.lock().unwrap(), vec![None, None]);
     }
 
     #[tokio::test]
@@ -657,6 +646,17 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
+            // The holder exchanges only for a rejected bearer that is still
+            // current; an already-replaced one and no rejection keep the newest.
+            let grant = source.session.as_grant().unwrap();
+            let fresh = grant.lend_bearer(Some(&rotated)).await.unwrap();
+            assert_ne!(fresh.token, rotated);
+            assert_eq!(
+                grant.lend_bearer(Some(&rotated)).await.unwrap().token,
+                fresh.token
+            );
+            assert_eq!(grant.lend_bearer(None).await.unwrap().token, fresh.token);
+
             // Signing out through one app revokes the grant for every app.
             app_b.signout().await.map_err(|(e, _)| e).unwrap();
             assert_eq!(app_a.revalidate().await.unwrap(), None);
@@ -708,24 +708,6 @@ mod tests {
                     .await
                     .is_err()
             );
-        }
-
-        #[tokio::test]
-        #[pubky_testnet::test]
-        async fn lend_bearer_exchanges_only_for_a_rejected_current_bearer() {
-            let testnet = EphemeralTestnet::builder().build().await.unwrap();
-            let (_sdk, source) = lender(&testnet).await;
-            let grant = source.session.as_grant().unwrap();
-            let current = grant.lend_bearer(None).await.unwrap();
-            // The "server said 401" signal mints a new bearer.
-            let fresh = grant.lend_bearer(Some(&current.token)).await.unwrap();
-            assert_ne!(fresh.token, current.token);
-            // An already-replaced bearer and no rejection both keep it.
-            assert_eq!(
-                grant.lend_bearer(Some(&current.token)).await.unwrap().token,
-                fresh.token
-            );
-            assert_eq!(grant.lend_bearer(None).await.unwrap().token, fresh.token);
         }
     }
 }

@@ -97,3 +97,51 @@ pub(crate) fn validate_allowed_origin(entry: &str) -> JsResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_origins_only() {
+        for origin in ["https://example.app", "http://localhost:8080"] {
+            assert!(validate_origin(origin).is_ok(), "{origin}");
+        }
+        for origin in [
+            "not an origin",
+            "https://example.app/",
+            "https://example.app/agent",
+            "https://example.app:443",
+            "HTTPS://example.app",
+            "null",
+            // No browser origin carries a wildcard; the client's agent origin is exact.
+            "https://*.example.app",
+        ] {
+            assert!(validate_origin(origin).is_err(), "{origin}");
+        }
+    }
+
+    #[test]
+    fn allowlist_entries_may_be_wildcards_in_csp_form() {
+        for entry in [
+            "https://example.app",
+            "https://*.example.app",
+            "http://*.localhost:8080",
+        ] {
+            assert!(validate_allowed_origin(entry).is_ok(), "{entry}");
+        }
+        for entry in [
+            "*.example.app",
+            "https://*",
+            "https://*.",
+            "https://*example.app",
+            "https://*.*.example.app",
+            "https://a.*.example.app",
+            "https://*.example.app/",
+            "https://*.example.app:443",
+            "https://example.app/",
+        ] {
+            assert!(validate_allowed_origin(entry).is_err(), "{entry}");
+        }
+    }
+}
