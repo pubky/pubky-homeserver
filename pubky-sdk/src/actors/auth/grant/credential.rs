@@ -352,21 +352,29 @@ impl GrantCredential {
 
     /// Refresh the credential by exchanging the stored grant for a new bearer.
     ///
+    /// Exchanges when the bearer is near expiry, or when `rejected_bearer` is
+    /// still the current one because the homeserver already refused it.
     /// Holds the credential mutex for the entire refresh so concurrent
     /// refreshes serialize on the same `Arc<Mutex<…>>`.
-    pub(crate) async fn refresh(&self, client: &PubkyHttpClient) -> Result<()> {
+    pub(crate) async fn refresh(
+        &self,
+        client: &PubkyHttpClient,
+        rejected_bearer: Option<&str>,
+    ) -> Result<()> {
         if let Some(coordinator) = self.coordinator().await {
             return self
-                .refresh_shared(client, coordinator.as_ref(), None)
+                .refresh_shared(client, coordinator.as_ref(), rejected_bearer)
                 .await;
         }
-        cross_log!(info, "Refreshing grant credential");
         let mut state = self.state.lock().await;
 
         // Another caller may have refreshed while we waited for the lock.
-        if !state.needs_refresh(now_unix(), REFRESH_SLACK_SECS / 2) {
+        if rejected_bearer != Some(state.bearer.as_str())
+            && !state.needs_refresh(now_unix(), REFRESH_SLACK_SECS / 2)
+        {
             return Ok(());
         }
+        cross_log!(info, "Refreshing grant credential");
 
         let parsed = post_grant_session(
             client,
@@ -477,7 +485,7 @@ impl SessionCredential for GrantCredential {
             grant_state.needs_refresh(now_unix(), REFRESH_SLACK_SECS)
         };
         if needs_refresh {
-            self.refresh(client).await?;
+            self.refresh(client, None).await?;
         }
         let bearer = self.state.lock().await.bearer.clone();
         Ok(rb.bearer_auth(bearer))
@@ -702,7 +710,7 @@ mod tests {
         assert_eq!(response.session.token_expires_at, grant.exp);
         let credential = GrantCredential::from_response(response, jws, grant, signer, homeserver);
         for _ in 0..3 {
-            credential.refresh(&client).await.unwrap();
+            credential.refresh(&client, None).await.unwrap();
             let request = credential
                 .grant_session_request(&client, Method::GET)
                 .await

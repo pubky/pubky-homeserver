@@ -362,6 +362,26 @@ impl Capabilities {
         self.0.contains(capability)
     }
 
+    /// Whether every capability in `other` is covered by one in this list.
+    ///
+    /// A capability is covered when some entry here has an equal or broader
+    /// scope and includes each of its actions. An empty `other` is always
+    /// covered.
+    ///
+    /// # Examples
+    /// ```
+    /// use pubky_common::capabilities::Capabilities;
+    ///
+    /// let granted: Capabilities = "/pub/app/:rw".parse().unwrap();
+    /// assert!(granted.covers_all(&"/pub/app/notes/:r".parse().unwrap()));
+    /// assert!(!granted.covers_all(&"/pub/:r".parse().unwrap()));
+    /// ```
+    pub fn covers_all(&self, other: &Capabilities) -> bool {
+        other
+            .iter()
+            .all(|wanted| self.iter().any(|held| held.covers(wanted)))
+    }
+
     /// Returns `true` if the list is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -925,5 +945,39 @@ mod tests {
         assert!(root.scope_covers_path(&path("/")));
         assert!(root.scope_covers_path(&path("/pub/anything")));
         assert!(root.scope_covers_path(&path("/dav/some/file.txt")));
+    }
+
+    fn parse_caps(value: &str) -> Capabilities {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn covers_all_broader_scope_covers_nested_scopes_and_fewer_actions() {
+        let held = parse_caps("/pub/app/:rw");
+        assert!(held.covers_all(&parse_caps("/pub/app/:rw")));
+        assert!(held.covers_all(&parse_caps("/pub/app/notes/:rw")));
+        assert!(held.covers_all(&parse_caps("/pub/app/notes/:r,/pub/app/file:w")));
+        assert!(held.covers_all(&parse_caps("")));
+    }
+
+    #[test]
+    fn covers_all_read_does_not_cover_write() {
+        assert!(!parse_caps("/pub/app/:r").covers_all(&parse_caps("/pub/app/:rw")));
+        assert!(parse_caps("/pub/app/:rw").covers_all(&parse_caps("/pub/app/:r")));
+    }
+
+    #[test]
+    fn covers_all_sibling_and_parent_scopes_are_not_covered() {
+        let held = parse_caps("/pub/app/:rw");
+        assert!(!held.covers_all(&parse_caps("/pub/app-evil/:r")));
+        assert!(!held.covers_all(&parse_caps("/pub/:r")));
+        assert!(!held.covers_all(&parse_caps("/pub/app/:rw,/priv/app/:r")));
+    }
+
+    #[test]
+    fn covers_all_root_covers_everything_and_only_root_covers_root() {
+        assert!(parse_caps("/:rw").covers_all(&parse_caps("/pub/app/:rw,/priv/:r")));
+        assert!(parse_caps("/:rw").covers_all(&parse_caps("/:rw")));
+        assert!(!parse_caps("/pub/:rw").covers_all(&parse_caps("/:r")));
     }
 }

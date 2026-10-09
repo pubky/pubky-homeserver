@@ -29,5 +29,6 @@ pub use event_stream::{Event, EventCursor, EventStreamBuilder, EventType};
 pub use pkdns::Pkdns;
 pub use session::SessionInfo;
 pub use session::core::PubkySession;
+pub use session::lent::{BearerSource, LentBearer};
 pub use signer::PubkySigner;
 pub use storage::core::{PublicStorage, SessionStorage};

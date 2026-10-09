@@ -2,7 +2,6 @@ use super::browser_session::BrowserSessionCoordinator;
 use pubky::GrantSessionCoordinator;
 use std::sync::Arc;
 
-use js_sys::Reflect;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -12,7 +11,7 @@ use super::{
     grant_session::{decode_delegated_grant_state, encode_delegated_grant_state},
     session::Session,
 };
-use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
+use crate::js_error::{JsResult, PubkyError, PubkyErrorName, js_error_message};
 
 const STORE_VERSION: &str = "pubky-session-v1";
 const MODE_DELEGATED: &str = "delegated";
@@ -123,6 +122,7 @@ export async function __pubkySessionStorePut(record, lease) {
   } catch (error) {
     throw contextualSessionStoreError("Saving Pubky session failed.", error);
   }
+  sessionChanged(record.id, "saved");
 }
 
 /** Load a browser session record by id. */
@@ -290,7 +290,7 @@ extern "C" {
     pub(crate) fn js_shared_remove(token: u32) -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStoreIsAvailable)]
-    fn js_store_is_available() -> js_sys::Promise;
+    pub(crate) fn js_store_is_available() -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStorePut)]
     fn js_store_put(record: JsValue, lease: u32) -> js_sys::Promise;
@@ -431,7 +431,7 @@ impl BrowserSessionStore {
 
         let record = StoredSessionRecord {
             version: STORE_VERSION.to_string(),
-            id: format!("{public_key}:{grant_id}"),
+            id: stored_session_id(&session_info),
             storage_mode,
             credential,
             public_key,
@@ -508,9 +508,7 @@ impl BrowserSessionStore {
             pubky::PubkySession::from_grant_credential(self.0.client().clone(), credential);
         let grant = session.as_grant().expect("grant credential");
         let info = grant.session_info().await;
-        if record.id != format!("{}:{}", info.pubky.z32(), info.grant_id)
-            || record.homeserver != info.homeserver.z32()
-        {
+        if record.id != stored_session_id(&info) || record.homeserver != info.homeserver.z32() {
             return Err(PubkyError::new(
                 PubkyErrorName::ClientStateError,
                 "Stored session identity does not match its grant.",
@@ -612,6 +610,13 @@ impl BrowserSessionStore {
     }
 }
 
+/// Identifier of a stored session record: one per user and grant.
+pub(crate) fn stored_session_id(
+    info: &pubky_common::auth::grant_session_responses::GrantSessionInfo,
+) -> String {
+    format!("{}:{}", info.pubky.z32(), info.grant_id)
+}
+
 fn validate_record(record: StoredSessionRecord) -> JsResult<StoredSessionInfo> {
     if record.version != STORE_VERSION {
         return Err(PubkyError::new(
@@ -629,16 +634,8 @@ fn validate_record(record: StoredSessionRecord) -> JsResult<StoredSessionInfo> {
 }
 
 pub(crate) fn store_error(value: JsValue) -> PubkyError {
-    PubkyError::new(PubkyErrorName::ClientStateError, js_error_message(value))
-}
-
-fn js_error_message(value: JsValue) -> String {
-    value
-        .as_string()
-        .or_else(|| {
-            Reflect::get(&value, &JsValue::from_str("message"))
-                .ok()
-                .and_then(|value| value.as_string())
-        })
-        .unwrap_or_else(|| "Pubky session store operation failed.".to_string())
+    PubkyError::new(
+        PubkyErrorName::ClientStateError,
+        js_error_message(&value, "Pubky session store operation failed."),
+    )
 }

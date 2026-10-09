@@ -37,9 +37,22 @@ shared browser session.
 The SDK dispatches `pubky-session-changed` on `window` after local removal or
 successful signout, and forwards the notification to other tabs with
 BroadcastChannel when available. `event.detail` contains `{ id, action }`:
-`action` is `removed` for one record or `cleared` for all records (`id: null`).
+`action` is `saved` or `removed` for one record, or `cleared` for all records
+(`id: null`).
 Applications decide how to update their UI. Requests always check persisted
 state, so missed notifications cannot restore removed credentials.
+
+## Sharing one session across first-party origins
+
+Browser storage is per origin, so `pubky.app` and `shop.pubky.app` cannot
+read each other's saved sessions. A *session agent* on a dedicated same-site
+origin owns the grant through the browser store and lends its bearer to apps
+over `postMessage`; only the agent exchanges. See [sso-agent.md](sso-agent.md)
+for the protocol, the SDK API and the deployment requirements.
+
+The store now also dispatches `pubky-session-changed` with `action: "saved"`
+after `browserSessionStore.save`, so agent frames in other tabs pick up a new
+sign-in without a reload.
 
 ## Other applications and generic restore
 

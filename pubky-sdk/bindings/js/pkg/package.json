@@ -18,7 +18,8 @@
     "build": "cargo run --bin bundle_npm",
     "docs": "typedoc",
     "prepublishOnly": "npm run build",
-    "test-browser:tabs": "npm run build:test && browserify dist/tests/browser/session-tabs.js -p esmify -o dist/session-tabs.bundle.js && electron scripts/session-tabs.cjs"
+    "test-browser:tabs": "npm run build:test && browserify dist/tests/browser/session-tabs.js -p esmify -o dist/session-tabs.bundle.js && electron scripts/session-tabs.cjs",
+    "test-browser:sso": "npm run build:test && browserify dist/tests/browser/sso-agent.js -p esmify -o dist/sso-agent.bundle.js && electron scripts/sso-agent.cjs"
   },
   "files": [
     "index.cjs",

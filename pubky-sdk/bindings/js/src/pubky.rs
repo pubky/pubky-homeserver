@@ -13,6 +13,8 @@ use crate::actors::{
     event_stream::EventStreamBuilder,
     grant_auth_flow::{GrantAuthFlow, GrantAuthFlowOptions},
     session::Session,
+    session_agent::{SessionAgent, SessionAgentOptions},
+    session_agent_client::{SessionAgentClient, SessionAgentClientOptions},
     session_store::BrowserSessionStore,
     signer::Signer,
     storage::PublicStorage,
@@ -280,6 +282,51 @@ impl Pubky {
     #[wasm_bindgen(js_name = "browserSessionStore", getter)]
     pub fn browser_session_store(&self) -> BrowserSessionStore {
         BrowserSessionStore(self.0.clone())
+    }
+
+    /// Connect to a same-site session agent through an iframe the app owns.
+    ///
+    /// Resolves once the agent answered the handshake. `client.status` tells
+    /// whether the user is signed in; `client.session` is a `Session` that
+    /// borrows the agent's bearer while signed in. Show `frame` while the
+    /// status is `signed-out` so the user can sign in there, and listen for
+    /// `change` events. See `docs/sso-agent.md`.
+    ///
+    /// @param {HTMLIFrameElement} frame An iframe whose `src` is the agent page.
+    /// @param {SessionAgentClientOptions} options `{ agentOrigin, capabilities, returnUrl?, timeoutMs? }`.
+    /// @returns {Promise<SessionAgentClient>}
+    ///
+    /// @throws {PubkyError}
+    /// - `{ name: "ClientStateError" }` when the agent refuses this origin, speaks another
+    ///   protocol version, or does not answer. `error.data.code` carries the agent's code.
+    #[wasm_bindgen(js_name = "connectSessionAgent")]
+    pub async fn connect_session_agent(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "HTMLIFrameElement")] frame: JsValue,
+        options: Ts<SessionAgentClientOptions>,
+    ) -> JsResult<SessionAgentClient> {
+        let options = deserialize_ts(&options)?;
+        SessionAgentClient::connect_with_client(frame, options, Some(self.0.client().clone())).await
+    }
+
+    /// Serve this page's grant session to apps on the listed origins.
+    ///
+    /// Call on the agent origin. Before answering any app, the agent serves
+    /// the newest stored session that fits `capabilities`, then picks up
+    /// sessions saved later with `browserSessionStore` in any tab. Use
+    /// `agent.setSession(session)` for a session that is not stored. Apps
+    /// connect with `connectSessionAgent`.
+    /// See `docs/sso-agent.md` for the protocol and deployment headers.
+    ///
+    /// @param {SessionAgentOptions} options `{ allowedOrigins, capabilities }`.
+    /// @returns {Promise<SessionAgent>}
+    #[wasm_bindgen(js_name = "listenSessionAgent")]
+    pub async fn listen_session_agent(
+        &self,
+        options: Ts<SessionAgentOptions>,
+    ) -> JsResult<SessionAgent> {
+        let options = deserialize_ts(&options)?;
+        SessionAgent::listen_with_client(options, Some(self.0.client().clone())).await
     }
 
     /// Resolve the homeserver for a given public key (read-only).

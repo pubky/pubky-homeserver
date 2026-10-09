@@ -6,11 +6,14 @@
 //! the grant-only API impossible to misuse against a cookie session.
 
 use pubky_common::auth::{grant_session_responses::GrantSessionInfo, jws::GrantId};
+use reqwest::StatusCode;
 
+use super::credential::{REFRESH_SLACK_SECS, now_unix};
 use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
+use crate::actors::session::lent::LentBearer;
 use crate::custom_pop::CustomPop;
-use crate::errors::Result;
+use crate::errors::{Error, RequestError, Result};
 
 /// grant-only operations on a [`PubkySession`].
 #[derive(Debug)]
@@ -102,7 +105,7 @@ impl<'a> GrantSessionView<'a> {
     /// Propagates grant exchange errors.
     #[doc(hidden)]
     pub async fn refresh_if_needed(&self) -> Result<()> {
-        self.credential.refresh(self.session.client()).await
+        self.credential.refresh(self.session.client(), None).await
     }
 
     /// Attach browser coordination to this session and its existing clones.
@@ -115,28 +118,114 @@ impl<'a> GrantSessionView<'a> {
         self.credential.coordinate(coordinator, lease).await
     }
 
+    /// Lend the current bearer to a client on another origin.
+    ///
+    /// Session agents call this to answer an app's bearer request. The grant
+    /// is exchanged when `rejected` is still the current bearer (the
+    /// homeserver refused it) or when less than the refresh slack remains;
+    /// otherwise the bearer already held is returned. Shared browser sessions
+    /// do this under the tab lock, so concurrent asks and the agent's own
+    /// requests cannot produce competing exchanges. The result carries no
+    /// grant JWS, grant id or key.
+    ///
+    /// # Errors
+    /// Propagates grant exchange errors.
+    #[doc(hidden)]
+    pub async fn lend_bearer(&self, rejected: Option<&str>) -> Result<LentBearer> {
+        let near_expiry = {
+            let state = self.credential.state.lock().await;
+            state
+                .needs_refresh(now_unix(), REFRESH_SLACK_SECS)
+                .then(|| state.bearer.clone())
+        };
+        // A near-expiry bearer is treated like a rejected one: exchanged if
+        // it is still current, otherwise the newer shared bearer is adopted.
+        let rejected = rejected.map(str::to_owned).or(near_expiry);
+        self.credential
+            .refresh(self.session.client(), rejected.as_deref())
+            .await?;
+        let state = self.credential.state.lock().await;
+        Ok(LentBearer {
+            token: state.bearer.clone(),
+            expires_at: state.session.token_expires_at,
+            pubky: state.session.pubky.clone(),
+            capabilities: state.session.capabilities.clone(),
+            homeserver: state.session.homeserver.clone(),
+        })
+    }
+
     /// Test/debug helper: force a refresh of the credential right now.
     ///
     /// Used by integration tests to verify that a refresh yields a new
     /// bearer. Returns the new bearer for assertions.
     ///
-    /// Bypasses the proactive-refresh time check so the refresh always runs.
-    ///
     /// # Errors
     /// - Propagates HTTP errors from the refresh exchange.
     #[doc(hidden)]
     pub async fn force_refresh(&self) -> Result<String> {
-        if let Some(coordinator) = self.credential.coordinator().await {
-            let bearer = self.credential.current_bearer().await;
-            self.credential
-                .refresh_shared(self.session.client(), coordinator.as_ref(), Some(&bearer))
-                .await?;
-            return Ok(self.credential.current_bearer().await);
+        // Treating the current bearer as rejected bypasses the time check.
+        let bearer = self.credential.current_bearer().await;
+        self.credential
+            .refresh(self.session.client(), Some(&bearer))
+            .await?;
+        Ok(self.credential.current_bearer().await)
+    }
+}
+
+/// Whether a grant exchange failed because the homeserver no longer accepts
+/// the grant itself: unknown user or grant (404), or a revoked, expired or
+/// invalid grant (401).
+///
+/// Proof rejections, for example `Invalid PoP proof: PoP timestamp out of
+/// range` from a skewed clock or `PoP nonce already used`, are also 401 but
+/// say nothing about the grant, so they return `false`. The messages come from
+/// the homeserver's grant error mapping. The local clock is not consulted.
+#[doc(hidden)]
+#[must_use]
+pub fn grant_rejected(error: &Error) -> bool {
+    let Error::Request(RequestError::Server { status, message }) = error else {
+        return false;
+    };
+    *status == StatusCode::NOT_FOUND
+        || (*status == StatusCode::UNAUTHORIZED
+            && (message.starts_with("Grant has") || message.starts_with("Invalid grant")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(status: StatusCode, message: &str) -> Error {
+        RequestError::Server {
+            status,
+            message: message.into(),
         }
-        // Bypass the proactive-refresh time check by setting the expiry
-        // to 0; the refresh helper then always hits the network.
-        self.credential.state.lock().await.session.token_expires_at = 0;
-        self.credential.refresh(self.session.client()).await?;
-        Ok(self.credential.state.lock().await.bearer.clone())
+        .into()
+    }
+
+    #[test]
+    fn grant_rejected_only_for_a_dead_grant() {
+        for gone in [
+            server(StatusCode::UNAUTHORIZED, "Grant has been revoked"),
+            server(StatusCode::UNAUTHORIZED, "Grant has expired"),
+            server(StatusCode::UNAUTHORIZED, "Invalid grant: grant has expired"),
+            server(StatusCode::NOT_FOUND, "Not Found"),
+        ] {
+            assert!(grant_rejected(&gone), "{gone}");
+        }
+        for kept in [
+            // Clock skew: the proof is rejected, not the grant.
+            server(
+                StatusCode::UNAUTHORIZED,
+                "Invalid PoP proof: PoP timestamp out of range",
+            ),
+            server(StatusCode::UNAUTHORIZED, "PoP nonce already used"),
+            // No body (the error-body limit is 0): ambiguous, keep it.
+            server(StatusCode::UNAUTHORIZED, "Unauthorized"),
+            server(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable"),
+            crate::errors::AuthError::Validation("Browser session was removed".into()).into(),
+        ] {
+            assert!(!grant_rejected(&kept), "{kept}");
+        }
     }
 }

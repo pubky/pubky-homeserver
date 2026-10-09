@@ -37,6 +37,14 @@ bearer per grant, with requests and refreshes coordinated by Web Locks. See the
 [browser session lifecycle](../../../docs/grant-session-lifecycle.md) for logout,
 storage requirements and upgrades from older stored records.
 
+To share one signed-in session across several first-party origins (for
+example `pubky.app` and `shop.pubky.app`), serve it from a dedicated origin
+with `pubky.listenSessionAgent(options)` and connect from each app with
+`pubky.connectSessionAgent(frame, options)`. See
+[docs/sso-agent.md](../../../docs/sso-agent.md). Its multi-origin regression
+runs with `npm run test-browser:sso` against the same testnet as the
+multi-window one below.
+
 To run the multi-window regression, start a fresh testnet with
 `cargo run -p pubky-testnet -- --homeserver-config pubky-sdk/bindings/js/pkg/scripts/session-tabs.toml`
 from the repository root. Then run `npm run build && npm run test-browser:tabs`
