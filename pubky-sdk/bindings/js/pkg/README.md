@@ -299,8 +299,9 @@ It requires a secure context with WebCrypto Ed25519 support and IndexedDB.
 
 For signed approvals, saved flow state includes a temporary HPKE private key
 that decrypts the signer's response. The authorization URL carries the matching
-public key in `epk`, which also identifies the relay channel. Keep the saved
-state confidential and delete it when the flow completes or is abandoned.
+public key in `epk`; a domain-separated hash of that key identifies the relay
+channel. Keep the saved state confidential and delete it when the flow
+completes or is abandoned.
 
 ```js
 import { GrantAuthFlow } from "@synonymdev/pubky";

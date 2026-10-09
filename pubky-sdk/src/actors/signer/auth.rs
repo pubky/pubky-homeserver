@@ -27,9 +27,9 @@ use super::PubkySigner;
 impl PubkySigner {
     /// Approve an auth request from another app (wallet / signer side).
     ///
-    /// Signed approval links use their `epk` as the relay channel ID and
-    /// encrypt the approval directly with HPKE. Legacy links keep shared-secret
-    /// relay encryption.
+    /// Signed approval links use a domain-separated hash of `epk` as the relay
+    /// channel ID and encrypt the approval directly with HPKE. Legacy links
+    /// keep shared-secret relay encryption.
     /// Grant requests with `af=v1` receive a signed envelope with the grant
     /// and keys only for approved `e` scopes. Requests without that opt-in
     /// retain the bare grant format. Only legacy links contain a relay secret.

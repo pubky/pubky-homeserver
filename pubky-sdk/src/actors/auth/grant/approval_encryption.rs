@@ -122,4 +122,22 @@ mod tests {
         );
         assert!(recipient.open(plaintext).is_err());
     }
+
+    #[test]
+    fn relay_cannot_encrypt_approval_with_its_channel_id() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let (recipient, public_key) = ApprovalRecipientSecret::generate();
+        let channel = crate::actors::auth::deep_links::GrantRelayChannel::Hpke {
+            ephemeral_public_key: public_key,
+        };
+        let channel_id = channel.http_channel_id();
+        let mut relay_visible_key = [0; 32];
+        URL_SAFE_NO_PAD
+            .decode_slice(channel_id, &mut relay_visible_key)
+            .unwrap();
+        let forged_message = seal(&relay_visible_key, b"forged approval").unwrap();
+
+        assert!(recipient.open(&forged_message).is_err());
+    }
 }

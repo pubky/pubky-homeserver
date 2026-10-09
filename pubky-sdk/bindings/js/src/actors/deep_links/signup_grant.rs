@@ -110,8 +110,9 @@ impl SignupGrantDeepLink {
     }
 
     /// The 32-byte ephemeral HPKE public key from `epk`, or `undefined`
-    /// for a shared-secret link. Its unpadded base64url encoding identifies
-    /// the relay channel.
+    /// for a shared-secret link. The relay channel ID is the unpadded
+    /// base64url encoding of BLAKE3("pubky-grant-relay-channel-v1" || 0x00 || epk),
+    /// where `||` concatenates bytes and `epk` is the raw 32-byte public key.
     ///
     /// @returns {Uint8Array|undefined}
     #[wasm_bindgen(js_name = "ephemeralPublicKey", getter)]

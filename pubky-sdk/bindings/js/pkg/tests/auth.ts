@@ -370,7 +370,7 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   } catch (_error) {
     savedState = originalFlow.saveLocal();
   }
-  t.ok(new URL(savedUrl).searchParams.has("epk"), "signed approval includes its HPKE channel key");
+  t.ok(new URL(savedUrl).searchParams.has("epk"), "signed approval includes its HPKE recipient key");
   t.equal(
     SigninGrantDeepLink.parse(savedUrl).ephemeralPublicKey?.length,
     32,

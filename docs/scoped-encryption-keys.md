@@ -69,7 +69,7 @@ independently.
 | What | Where it appears | Values |
 | --- | --- | --- |
 | Approval format | `af` link parameter; `GrantApprovalFormat` in Rust; `approvalFormat` in JS | Bare grant (default): no parameter, `BareGrant`, `bareGrant`. Signed approval: `af=v1`, `SignedApprovalV1`, `signedApprovalV1`. |
-| Approval encryption | `epk` link parameter | 32-byte X25519 public key, base64url without padding. Required for `af=v1`; also identifies the HTTP relay channel. |
+| Approval encryption | `epk` link parameter | 32-byte X25519 public key, base64url without padding. Required for `af=v1`; `base64url(BLAKE3("pubky-grant-relay-channel-v1" || 0x00 || epk))` identifies the HTTP relay channel. |
 | Key derivation | `version` field of the key bundle | `v1` |
 | Exported secret token | Token prefix | `pubky-grant-credential-v1` for bare grants; `pubky-grant-credential-v2` for signed approvals |
 | Browser session record | `version` field in IndexedDB | `pubky-session-v1` for bare grants; `pubky-session-v2` for signed approvals |
@@ -244,11 +244,14 @@ purposes, use separate HKDF context labels.
 
 Legacy grant links carry a shared `secret` that encrypts the relay body. Its hash,
 encoded as unpadded base64url, identifies the relay channel. With `af=v1`, the
-link instead carries an ephemeral HPKE public key in `epk`. The SDK uses its
-base64url encoding as the HTTP relay channel ID. The signer encrypts the approval
-to that key and posts the HPKE ciphertext directly to the relay. No shared relay
-secret is sent to the signer. The signer sends a signed approval even when it
-declines `e`.
+link instead carries an ephemeral HPKE public key in `epk`. The SDK uses a
+unpadded base64url encoding of BLAKE3 over
+`pubky-grant-relay-channel-v1 || 0x00 || epk` as the HTTP relay channel ID. This
+keeps the recipient key out of relay requests so a relay
+that sees only its channel ID cannot encrypt a response for the app. The signer
+encrypts the approval to `epk` and posts the HPKE ciphertext directly to the
+relay. No shared relay secret is sent to the signer. The signer sends a signed
+approval even when it declines `e`.
 
 The HPKE private key stays in the app's temporary flow state so a pending flow
 can be restored. Treat that state as sensitive and delete it when the flow

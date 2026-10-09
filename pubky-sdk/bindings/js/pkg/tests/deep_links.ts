@@ -134,7 +134,7 @@ test("signup grant deep link valid", async (t) => {
 });
 
 
-test("signed approval links use epk as the relay channel", (t) => {
+test("signed approval links hash epk for the relay channel", (t) => {
   const base = `pubkyauth://signin_grant?caps=/pub/chat/:rw&relay=${TESTNET_HTTP_RELAY}&cid=chat.example&cpk=${CLIENT_PUBLICKEY.z32()}`;
   const publicKey = new Uint8Array(32).fill(7);
   const encodedKey = btoa(String.fromCharCode(...publicKey))
