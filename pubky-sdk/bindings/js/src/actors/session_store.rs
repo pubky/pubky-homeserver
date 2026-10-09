@@ -1,5 +1,6 @@
 use super::browser_session::BrowserSessionCoordinator;
 use pubky::GrantSessionCoordinator;
+use pubky_common::{auth::jws::GrantId, crypto::PublicKey};
 use std::sync::Arc;
 
 use js_sys::Reflect;
@@ -591,25 +592,32 @@ impl BrowserSessionStore {
     }
 
     /// Recover a stored session's encryption keys without network access.
-    /// Verifies the signed approval and exact grant binding. Works after grant
-    /// expiry/revocation and without the delegated WebCrypto signing key.
+    /// Verifies the signed approval, exact grant binding, and requested session
+    /// identity. Works after grant expiry/revocation and without the delegated
+    /// WebCrypto signing key.
     /// Restore material is stored as plaintext in IndexedDB.
     /// Bare-grant records return undefined; signed approvals without `e` scopes
     /// return an empty bundle. Creates no session.
     #[wasm_bindgen(js_name = "restoreEncryptionKeys")]
     pub async fn restore_encryption_keys(&self, id: String) -> JsResult<Option<EncryptionKeys>> {
-        let record = self.load_record(id).await?;
+        let record = self.load_record(&id).await?;
         // load_record validates that the mode is delegated or localSecret.
-        let keys = if record.metadata.storage_mode == MODE_DELEGATED {
+        let recovered = if record.metadata.storage_mode == MODE_DELEGATED {
             let state = decode_delegated_grant_state(&record.credential)?;
-            pubky::GrantCredential::restore_delegated_encryption_keys(
-                &state,
+            pubky::GrantCredential::restore_encryption_keys_from_approval(
+                &state.grant_jws,
                 record.signed_approval.as_deref(),
             )?
         } else {
-            pubky::GrantCredential::restore_encryption_keys(&record.credential)?
+            pubky::GrantCredential::restore_encryption_keys_with_claims(&record.credential)?
         };
-        Ok(keys.map(EncryptionKeys))
+        let Some((claims, keys)) = recovered else {
+            return Ok(None);
+        };
+        record
+            .metadata
+            .validate_grant_identity(&id, &claims.iss, &claims.jti)?;
+        Ok(Some(EncryptionKeys(keys)))
     }
 
     /// Restore a specific stored session by id.
@@ -618,7 +626,7 @@ impl BrowserSessionStore {
     /// Web Locks in a secure browser context.
     #[wasm_bindgen]
     pub async fn restore(&self, id: String) -> JsResult<Session> {
-        let record = self.load_record(id.clone()).await?;
+        let record = self.load_record(&id).await?;
         let coordinator = Arc::new(BrowserSessionCoordinator::new(
             &id,
             &record.metadata.homeserver,
@@ -648,9 +656,10 @@ impl BrowserSessionStore {
             pubky::PubkySession::from_grant_credential(self.0.client().clone(), credential);
         let grant = session.as_grant().expect("grant credential");
         let info = grant.session_info().await;
-        if record.metadata.id != format!("{}:{}", info.pubky.z32(), info.grant_id)
-            || record.metadata.homeserver != info.homeserver.z32()
-        {
+        record
+            .metadata
+            .validate_grant_identity(&id, &info.pubky, &info.grant_id)?;
+        if record.metadata.homeserver != info.homeserver.z32() {
             return Err(PubkyError::new(
                 PubkyErrorName::ClientStateError,
                 "Stored session identity does not match its grant.",
@@ -723,11 +732,11 @@ impl BrowserSessionStore {
         records.into_iter().map(validate_stored_metadata).collect()
     }
 
-    async fn load_record(&self, id: String) -> JsResult<StoredSessionRecord> {
-        let value = JsFuture::from(js_store_get(id.clone()))
+    async fn load_record(&self, id: &str) -> JsResult<StoredSessionRecord> {
+        let value = JsFuture::from(js_store_get(id.to_owned()))
             .await
             .map_err(store_error)?;
-        let record = decode_store_value(value, &id)?;
+        let record = decode_store_value(value, id)?;
         validate_record(record)
     }
 
@@ -758,6 +767,22 @@ fn decode_store_value<T: serde::de::DeserializeOwned>(value: JsValue, id: &str) 
 }
 
 impl SessionMetadata {
+    fn validate_grant_identity(
+        &self,
+        requested_id: &str,
+        public_key: &PublicKey,
+        grant_id: &GrantId,
+    ) -> JsResult<()> {
+        let grant_session_id = format!("{}:{grant_id}", public_key.z32());
+        if requested_id != grant_session_id || self.id != grant_session_id {
+            return Err(PubkyError::new(
+                PubkyErrorName::ClientStateError,
+                "Stored session identity does not match its grant.",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> JsResult<()> {
         if self.version != STORE_VERSION && self.version != STORE_APPROVAL_VERSION {
             return Err(PubkyError::new(

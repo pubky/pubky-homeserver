@@ -133,6 +133,13 @@ with the saved confidential approval as `Some(&str)`. No signing callback is
 needed. Both methods verify the signature, grant binding, and scopes. Bare-grant
 records return `None`; signed approvals without `e` scopes return an empty bundle.
 
+When selecting saved material by account or grant, use
+`restore_encryption_keys_with_claims(token)` or
+`restore_encryption_keys_from_approval(grant_jws, signed_approval)`.
+These return `(claims, keys)`;
+check the authenticated `claims.iss` and `claims.jti` against the expected user
+and grant before using the keys.
+
 Recovery creates no session. Authentication still requires an unexpired grant
 and a successful homeserver exchange.
 

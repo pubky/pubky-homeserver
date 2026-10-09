@@ -91,6 +91,9 @@ scopes without network access or a valid grant. It creates no session. Bare-gran
 records return no bundle; signed approvals without `e` scopes return an empty
 bundle. Authentication still checks expiry and the homeserver. Browser recovery
 needs the saved record, but not the signing key.
+Browser recovery also checks that the authenticated issuer and grant ID match
+both the requested session ID and the stored record ID, rejecting swapped
+restore material.
 Deleting the record removes its saved restore material.
 
 To add keys to an existing session, request a fresh signed approval with `e`

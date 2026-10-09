@@ -432,12 +432,24 @@ impl GrantCredential {
     /// # Errors
     /// Rejects malformed tokens, invalid approvals, and mismatched grants.
     pub fn restore_encryption_keys(token: &str) -> Result<Option<ScopedEncryptionKeyBundle>> {
+        Ok(Self::restore_encryption_keys_with_claims(token)?.map(|(_, keys)| keys))
+    }
+
+    /// Recover keys together with the grant claims authenticated by the approval.
+    ///
+    /// Like [`Self::restore_encryption_keys`], but also returns authenticated
+    /// claims so callers can check `iss` and `jti` against the expected record.
+    ///
+    /// # Errors
+    /// Rejects malformed tokens, invalid approvals, and mismatched grants.
+    pub fn restore_encryption_keys_with_claims(
+        token: &str,
+    ) -> Result<Option<(GrantClaims, ScopedEncryptionKeyBundle)>> {
         let saved = StoredGrantCredential::decode(token)?;
-        let approval = restore_verified_approval(
-            saved.signed_approval.as_ref().map(SignedApproval::as_str),
+        Self::restore_encryption_keys_from_approval(
             &saved.grant_jws,
-        )?;
-        Ok(approval.map(|approval| approval.encryption_keys))
+            saved.signed_approval.as_ref().map(SignedApproval::as_str),
+        )
     }
 
     /// Recover delegated session keys entirely offline, without a `PoP` signer.
@@ -453,8 +465,25 @@ impl GrantCredential {
         state: &DelegatedGrantCredentialState,
         signed_approval: Option<&str>,
     ) -> Result<Option<ScopedEncryptionKeyBundle>> {
-        let approval = restore_verified_approval(signed_approval, &state.grant_jws)?;
-        Ok(approval.map(|approval| approval.encryption_keys))
+        let recovered =
+            Self::restore_encryption_keys_from_approval(&state.grant_jws, signed_approval)?;
+        Ok(recovered.map(|(_, keys)| keys))
+    }
+
+    /// Recover keys and authenticated claims from an approval bound to `grant_jws`.
+    ///
+    /// Works offline, without a signing key or valid grant. No approval returns
+    /// `None`. Check `claims.iss` and `claims.jti` against the expected record
+    /// before using the returned `(claims, keys)`.
+    ///
+    /// # Errors
+    /// Rejects invalid approvals, inconsistent scopes, and mismatched grants.
+    pub fn restore_encryption_keys_from_approval(
+        grant_jws: &str,
+        signed_approval: Option<&str>,
+    ) -> Result<Option<(GrantClaims, ScopedEncryptionKeyBundle)>> {
+        let approval = restore_verified_approval(signed_approval, grant_jws)?;
+        Ok(approval.map(|(claims, verified)| (claims, verified.encryption_keys)))
     }
 
     /// Restore a grant credential from an exported secret token.
@@ -728,7 +757,8 @@ fn restore_material(
     let verified_approval = restore_verified_approval(
         saved.signed_approval.as_ref().map(SignedApproval::as_str),
         &saved.grant_jws,
-    )?;
+    )?
+    .map(|(_, approval)| approval);
     let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
         AuthError::Validation(format!("invalid stored grant credential grant JWS: {err}"))
     })?;
@@ -756,7 +786,7 @@ fn restore_material(
 fn restore_verified_approval(
     signed: Option<&str>,
     grant_jws: &str,
-) -> Result<Option<VerifiedApproval>> {
+) -> Result<Option<(GrantClaims, VerifiedApproval)>> {
     let Some(signed) = signed else {
         return Ok(None);
     };
@@ -770,7 +800,9 @@ fn restore_verified_approval(
         )
         .into());
     }
-    Ok(approval.verified_approval)
+    Ok(approval
+        .verified_approval
+        .map(|verified| (approval.claims, verified)))
 }
 
 fn restore_delegated_material(
@@ -779,7 +811,8 @@ fn restore_delegated_material(
     allow_expired: bool,
     signed_approval: Option<&str>,
 ) -> Result<GrantRestoreMaterial> {
-    let verified_approval = restore_verified_approval(signed_approval, &saved.grant_jws)?;
+    let verified_approval =
+        restore_verified_approval(signed_approval, &saved.grant_jws)?.map(|(_, approval)| approval);
     let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
         AuthError::Validation(format!(
             "invalid delegated grant credential grant JWS: {err}"
@@ -969,13 +1002,13 @@ mod tests {
         let encoded = Zeroizing::new(stored.encode());
         assert!(encoded.starts_with(STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX));
         let decoded = StoredGrantCredential::decode(&encoded).unwrap();
-        let keys = restore_verified_approval(
+        let (_, approval) = restore_verified_approval(
             decoded.signed_approval.as_ref().map(SignedApproval::as_str),
             &decoded.grant_jws,
         )
         .unwrap()
-        .unwrap()
-        .encryption_keys;
+        .unwrap();
+        let keys = approval.encryption_keys;
         let path = pubky_common::StoragePath::new("/pub/chat/message").unwrap();
         let expected = ScopedEncryptionKeyBundle::from_identity_secret(&identity.secret(), [&path]);
         assert_eq!(
