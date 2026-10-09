@@ -210,11 +210,21 @@ impl FromStr for HttpRelayLinkChannel {
 /// A encrypted HTTP relay channel that can produce and consume an encrypted message.
 /// Deprecated, use `EncryptedHttpRelayInboxChannel` instead.
 #[deprecated(note = "Use `EncryptedHttpRelayInboxChannel` instead")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
 pub struct EncryptedHttpRelayLinkChannel {
     channel: HttpRelayLinkChannel,
     secret: [u8; 32],
+}
+
+#[allow(deprecated, reason = "Internal use of deprecated public API")]
+impl std::fmt::Debug for EncryptedHttpRelayLinkChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedHttpRelayLinkChannel")
+            .field("channel", &self.channel)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 #[allow(dead_code, deprecated, reason = "Internal use only")]

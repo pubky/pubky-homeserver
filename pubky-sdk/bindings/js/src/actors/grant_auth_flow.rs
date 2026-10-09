@@ -31,6 +31,31 @@ pub struct GrantAuthFlowOptions {
     /// Optional return destinations for success, error, and cancellation.
     #[tsify(optional, type = "XCallbackParams | null")]
     pub(crate) x_callback: Option<XCallbackParams>,
+    /// Relay approval format. `signedApprovalV1` delivers keys for approved `e` scopes
+    /// and rejects bare-grant downgrades.
+    /// Omitted or `bareGrant` selects a grant without an approval envelope.
+    /// `signedApprovalV1` sets `af=v1` in the authorization link.
+    #[tsify(optional)]
+    pub(crate) approval_format: Option<GrantApprovalFormat>,
+}
+
+/// Relay payload format understood by the requesting app.
+#[derive(Tsify, Serialize, Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum GrantApprovalFormat {
+    /// A signed grant without an approval envelope or encryption-key bundle.
+    BareGrant,
+    /// A V1 signed approval with a grant and a possibly empty key bundle.
+    SignedApprovalV1,
+}
+
+impl From<GrantApprovalFormat> for pubky::deep_links::GrantApprovalFormat {
+    fn from(format: GrantApprovalFormat) -> Self {
+        match format {
+            GrantApprovalFormat::BareGrant => Self::BareGrant,
+            GrantApprovalFormat::SignedApprovalV1 => Self::SignedApprovalV1,
+        }
+    }
 }
 
 /// Start and control a grant-backed pubkyauth authorization flow.
@@ -96,12 +121,16 @@ impl GrantAuthFlow {
             client_id,
             relay,
             x_callback,
+            approval_format,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;
 
         let mut builder = PubkyGrantAuthFlow::builder(&caps, kind.0, client_id);
+        if let Some(format) = approval_format {
+            builder = builder.approval_format(format.into());
+        }
         if let Some(c) = client {
             builder = builder.client(c);
         }
@@ -147,6 +176,7 @@ impl GrantAuthFlow {
             client_id,
             relay,
             x_callback,
+            approval_format,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
@@ -156,6 +186,9 @@ impl GrantAuthFlow {
 
         let mut builder = PubkyGrantAuthFlow::builder(&caps, kind.0, client_id)
             .delegated_client_signer(key_id, public_key, sign);
+        if let Some(format) = approval_format {
+            builder = builder.approval_format(format.into());
+        }
         if let Some(c) = client {
             builder = builder.client(c);
         }

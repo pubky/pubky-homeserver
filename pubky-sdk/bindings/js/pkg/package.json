@@ -10,7 +10,7 @@
   },
   "scripts": {
     "testnet": "cargo run -p pubky-testnet",
-    "build:test": "tsc --project tsconfig.json && mkdir -p dist && cp index.js dist/index.js",
+    "build:test": "rm -rf dist/tests && tsc --project tsconfig.json && mkdir -p dist && cp index.js dist/index.js",
     "test": "npm run test-nodejs && npm run test-browser",
     "test-nodejs": "npm run build:test && node --require ./node-header.cjs node_modules/tape/bin/tape dist/tests/*.js -cov",
     "test-browser": "npm run build:test && browserify dist/tests/setup.js dist/tests/*.js -p esmify | npx tape-run",

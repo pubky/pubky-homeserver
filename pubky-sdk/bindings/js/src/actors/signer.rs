@@ -63,7 +63,8 @@ impl Signer {
 
     /// Fast sign-in for a returning user. Publishes PKDNS in the background.
     ///
-    /// Creates a valid grant-backed homeserver Session with root capabilities.
+    /// Creates a grant-backed homeserver session with root storage access (`/:rw`).
+    /// Encryption keys require an explicit `e` request through a signed approval flow.
     /// `clientId` is shown in the user's grant/session list.
     /// @param {string} clientId App identifier, typically a domain.
     ///
@@ -78,7 +79,8 @@ impl Signer {
 
     /// Blocking sign-in. Waits for PKDNS publish to complete (slower; safer).
     ///
-    /// Creates a valid grant-backed homeserver Session with root capabilities.
+    /// Creates a grant-backed homeserver session with root storage access (`/:rw`).
+    /// Encryption keys require an explicit `e` request through a signed approval flow.
     /// `clientId` is shown in the user's grant/session list.
     /// @param {string} clientId App identifier, typically a domain.
     ///

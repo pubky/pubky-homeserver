@@ -377,6 +377,44 @@ let auth_flow = PubkyGrantAuthFlow::builder(&caps, AuthFlowKind::signin(), clien
 > Tip: reuse `pubky.client()` when customising the relay so the flow shares
 > TLS and pkarr configuration with the rest of your application.
 
+#### Request encryption keys
+
+Apps can also ask the signer for encryption keys scoped to storage paths. Add
+the `e` action to each scope that needs keys and select the signed approval
+format. Storage actions `r` and `w` don't deliver keys.
+
+```rust no_run
+# use pubky::{AuthFlowKind, Capabilities, ClientId, PubkyGrantAuthFlow, StoragePath};
+# use pubky::deep_links::GrantApprovalFormat;
+# async fn keys() -> Result<(), Box<dyn std::error::Error>> {
+let caps = Capabilities::builder()
+    .read_write("/pub/chat/")?
+    .encryption_keys("/pub/chat/")?
+    .finish();
+let flow = PubkyGrantAuthFlow::builder(
+    &caps,
+    AuthFlowKind::signin(),
+    ClientId::new("chat.example").expect("static client id is valid"),
+)
+.approval_format(GrantApprovalFormat::SignedApprovalV1)
+.start()?;
+
+let session = flow.await_approval().await?;
+let grant = session.as_grant().expect("grant flows create grant sessions");
+if let Some(keys) = grant.encryption_keys() {
+    let key = keys.derive_for_path(&StoragePath::new("/pub/chat/message")?)?;
+}
+# Ok(()) }
+```
+
+Keys stay usable after the grant expires or is revoked, and older homeservers
+reject grants containing `e`. Read the
+[scoped encryption keys guide](../docs/scoped-encryption-keys.md) before you
+use them. For details and offline key recovery, see the rustdoc of
+`GrantSessionView::encryption_keys` and `GrantCredential::restore_encryption_keys`.
+When you recover keys from saved material, check that they belong to the user
+and grant you expect.
+
 ## Features
 
 - `json`: enable `Storage` helpers (`.get_json()` / `.put_json()`) and serde on certain types.
@@ -455,7 +493,11 @@ let restored = pubky.restore_session(&secret).await?;
 The deprecated `.sess` helpers are cookie-only; [`write_secret_file`](PubkySession::write_secret_file)
 panics on grant sessions.
 
-> Security: the exported secret is unencrypted and contains the grant and its private proof-of-possession key. Anyone holding it can act within the granted capabilities until the grant expires or is revoked. Store it securely and never log it.
+> Security: the exported secret is unencrypted and contains the grant, its
+> private proof-of-possession key, and, for signed approvals, the approval with
+> its encryption keys. Anyone holding it can authenticate within the granted
+> capabilities until the grant expires or is revoked. The encryption keys stay
+> usable after that. Store it securely and never log it.
 
 ## Example code
 

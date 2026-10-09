@@ -26,6 +26,10 @@ info:
 
     Private reads and all writes are capability-gated. Capabilities use
     `<scope>:<actions>`, for example `/priv/app/:rw`; `/:rw` covers both roots.
+    `r` authorizes storage reads and `w` authorizes writes. The `e` action
+    authorizes scoped content key delivery by the signer in approval V1; it
+    grants no HTTP storage access. For example `/priv/app/:rwe` includes keys,
+    while a V1 backup app can request `/:rw` without receiving any keys.
 
     ## Write Path Restriction
 

@@ -8,6 +8,10 @@
 //! - `actions` contains at least one action letter, currently:
 //!   - `r` => read (GET)
 //!   - `w` => write (PUT/POST/DELETE)
+//!   - `e` => receive scoped content keys (encryption and decryption)
+//!
+//! `e` does not grant storage access. Grant flows must request `af=v1`
+//! to receive keys; `r` and `w` alone do not deliver keys.
 //!
 //! Examples:
 //!
@@ -64,7 +68,7 @@ impl Capability {
     /// ```
     pub fn root() -> Self {
         Capability {
-            scope: StoragePath::new("/").expect("root is a canonical path"),
+            scope: StoragePath::root(),
             actions: vec![Action::Read, Action::Write],
         }
     }
@@ -104,6 +108,12 @@ impl Capability {
         Self::with_actions(scope.as_ref(), vec![Action::Read, Action::Write])
     }
 
+    /// Request scoped content keys without granting storage read or write access.
+    /// Symmetric keys permit both encryption and decryption. Requires approval V1.
+    pub fn encryption_keys(scope: impl AsRef<str>) -> Result<Self, CapabilityParseError> {
+        Self::with_actions(scope.as_ref(), vec![Action::EncryptionKeys])
+    }
+
     fn with_actions(scope: &str, actions: Vec<Action>) -> Result<Self, CapabilityParseError> {
         Ok(Self {
             scope: parse_scope(scope)?,
@@ -116,14 +126,23 @@ impl Capability {
         &self.scope
     }
 
+    /// Whether this capability grants scoped encryption and decryption keys.
+    /// Read and write permissions alone do not grant keys.
+    #[must_use]
+    pub fn grants_encryption_keys(&self) -> bool {
+        self.actions.contains(&Action::EncryptionKeys)
+    }
+
     /// Return the actions allowed by this capability.
     pub fn actions(&self) -> &[Action] {
         &self.actions
     }
 
-    /// Whether this is the root capability (`/:rw`).
+    /// Whether this grants root storage read/write access (`/:rw` or `/:rwe`).
     pub fn is_root(&self) -> bool {
-        *self == Self::root()
+        self.scope.is_root()
+            && self.actions.contains(&Action::Read)
+            && self.actions.contains(&Action::Write)
     }
 
     /// Whether this capability's scope covers the given path.
@@ -139,16 +158,11 @@ impl Capability {
     ///   (that's inside the *directory* `/pub/app/`, a different resource)
     ///   and not `/pub/app-evil` (no prefix-as-string matching).
     pub fn scope_covers_path(&self, path: &StoragePath) -> bool {
-        if self.scope == *path {
-            return true;
-        }
-        // Only directory scopes (trailing `/`) cover descendant paths.
-        // For a file scope, only exact-match (handled above) is allowed.
-        self.scope.is_directory() && path.as_str().starts_with(self.scope.as_str())
+        self.scope.covers_path(path)
     }
 
     /// Whether this capability fully covers `other` — i.e. the scope is equal or
-    /// broader, and every action (read/write) in `other` is also present in `self`.
+    /// broader, and every action in `other` is also present in `self`.
     fn covers(&self, other: &Capability) -> bool {
         if !self.scope_covers_path(other.scope()) {
             return false;
@@ -163,13 +177,15 @@ impl Capability {
 
 /// Actions allowed on a given scope.
 ///
-/// Display/serialization encodes these as single characters (`r`, `w`).
+/// Display/serialization encodes these as single characters (`r`, `w`, `e`).
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
     /// Can read the scope at the specified path (GET requests).
     Read,
     /// Can write to the scope at the specified path (PUT/POST/DELETE requests).
     Write,
+    /// Receive scoped content keys for encryption and decryption, without storage access.
+    EncryptionKeys,
     /// Unknown ability
     Unknown(char),
 }
@@ -179,7 +195,8 @@ impl From<&Action> for char {
         match value {
             Action::Read => 'r',
             Action::Write => 'w',
-            Action::Unknown(char) => char.to_owned(),
+            Action::EncryptionKeys => 'e',
+            Action::Unknown(character) => *character,
         }
     }
 }
@@ -191,6 +208,7 @@ impl TryFrom<char> for Action {
         match value {
             'r' => Ok(Self::Read),
             'w' => Ok(Self::Write),
+            'e' => Ok(Self::EncryptionKeys),
             _ => Err(CapabilityParseError::InvalidAction(value)),
         }
     }
@@ -198,12 +216,11 @@ impl TryFrom<char> for Action {
 
 impl Display for Capability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}",
-            self.scope,
-            self.actions.iter().map(char::from).collect::<String>()
-        )
+        write!(f, "{}:", self.scope)?;
+        for action in &self.actions {
+            write!(f, "{}", char::from(action))?;
+        }
+        Ok(())
     }
 }
 
@@ -475,6 +492,12 @@ impl CapsBuilder {
         Ok(self)
     }
 
+    /// Request scoped content keys without storage access. Requires approval V1.
+    pub fn encryption_keys(mut self, scope: impl AsRef<str>) -> Result<Self, CapabilityParseError> {
+        self.caps.push(Capability::encryption_keys(scope)?);
+        Ok(self)
+    }
+
     /// Extend with an iterator of capabilities.
     pub fn extend<I: IntoIterator<Item = Capability>>(mut self, iter: I) -> Self {
         self.caps.extend(iter);
@@ -600,9 +623,9 @@ fn normalize(caps: Vec<Capability>) -> Vec<Capability> {
 
     let mut sanitized: Vec<Capability> = Vec::new();
 
-    'outer: for cap in merged.into_iter() {
+    for cap in merged {
         if sanitized.iter().any(|existing| existing.covers(&cap)) {
-            continue 'outer;
+            continue;
         }
 
         sanitized.retain(|existing| !cap.covers(existing));
@@ -616,6 +639,33 @@ fn normalize(caps: Vec<Capability>) -> Vec<Capability> {
 mod tests {
     use super::*;
     use url::Url;
+
+    #[test]
+    fn encryption_permission_round_trips_and_does_not_imply_storage_access() {
+        for actions in ["e", "re", "we", "rwe"] {
+            let wire = format!("/pub/chat/:{actions}");
+            let cap: Capability = wire.parse().unwrap();
+            assert_eq!(cap.to_string(), wire);
+            assert!(cap.grants_encryption_keys());
+        }
+        for actions in ["r", "w", "rw"] {
+            let cap: Capability = format!("/pub/chat/:{actions}").parse().unwrap();
+            assert!(!cap.grants_encryption_keys());
+        }
+        let key_only = Capability::encryption_keys("/").unwrap();
+        assert_eq!(key_only.actions(), &[Action::EncryptionKeys]);
+        assert!(!key_only.is_root());
+        assert!("/:rwe".parse::<Capability>().unwrap().is_root());
+
+        let mixed = Capabilities::builder()
+            .read_write("/")
+            .unwrap()
+            .encryption_keys("/pub/chat/")
+            .unwrap()
+            .finish();
+        assert_eq!(mixed.to_string(), "/:rw,/pub/chat/:e");
+        assert!(!Capability::root().covers(&key_only));
+    }
 
     #[test]
     fn root_capability_helper() {
@@ -922,7 +972,7 @@ mod tests {
     #[test]
     fn root_scope_covers_any_path() {
         let root = Capability::root();
-        assert!(root.scope_covers_path(&path("/")));
+        assert!(root.scope_covers_path(&StoragePath::root()));
         assert!(root.scope_covers_path(&path("/pub/anything")));
         assert!(root.scope_covers_path(&path("/dav/some/file.txt")));
     }

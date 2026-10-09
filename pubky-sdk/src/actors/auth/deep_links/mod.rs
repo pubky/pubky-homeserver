@@ -12,10 +12,35 @@
 //!
 //! A deep link is used either on a phone directly or in the browser as a QR code
 //! to communicate with a Pubky Signer like Pubky Ring.
+//!
+//! # Construct grant links
+//!
+//! Grant parameter structs are non-exhaustive. Replace external struct literals
+//! with their constructors, then customize public fields as needed. Parsing
+//! links and using [`crate::PubkyGrantAuthFlow`] are unchanged.
+//!
+//! ```
+//! use pubky::{Capabilities, ClientId, Keypair};
+//! use pubky::deep_links::{GrantApprovalFormat, SigninGrantParams};
+//! use url::Url;
+//!
+//! # let secret = pubky_common::crypto::random_bytes::<32>();
+//! let mut params = SigninGrantParams::new(
+//!     Capabilities::builder().read_write("/")?.finish(),
+//!     Url::parse("https://httprelay.pubky.app/inbox/")?,
+//!     secret, // A fresh random 32-byte relay secret.
+//!     ClientId::new("example.app")?,
+//!     Keypair::random().public_key(),
+//! );
+//! params.approval_format = GrantApprovalFormat::SignedApprovalV1;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//! For signup, use [`SignupGrantParams::new`] and set `signup_token` if needed.
 
 mod deep_link;
 mod direct_signup;
 mod error;
+mod grant_approval_format;
 mod query_params;
 mod schemes;
 mod seed_export;
@@ -32,6 +57,7 @@ pub const DEEP_LINK_SCHEMES: [&str; 2] = ["pubkyauth", "pubkyring"];
 pub use deep_link::DeepLink;
 pub use direct_signup::{DirectSignupDeepLink, DirectSignupIntent, DirectSignupParams};
 pub use error::DeepLinkParseError;
+pub use grant_approval_format::GrantApprovalFormat;
 pub use schemes::DeepLinkScheme;
 pub use seed_export::{SecretExportIntent, SeedExportDeepLink, SeedExportParams};
 pub use signin::{SigninDeepLink, SigninIntent, SigninParams};

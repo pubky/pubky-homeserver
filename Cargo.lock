@@ -571,6 +571,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1361,6 +1362,7 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -2272,6 +2274,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
  "hmac 0.12.1",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac 0.13.0",
 ]
 
 [[package]]
@@ -4026,6 +4037,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-time",
  "webpki-roots 1.0.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -4037,6 +4049,7 @@ dependencies = [
  "blake3",
  "crypto_secretbox",
  "ed25519-dalek",
+ "hkdf 0.13.0",
  "percent-encoding",
  "pkarr",
  "postcard",
@@ -4044,8 +4057,11 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "subtle",
  "thiserror 2.0.20",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -4196,6 +4212,7 @@ dependencies = [
  "wasm-bindgen-test",
  "wasm-streams 0.7.0",
  "web-sys",
+ "zeroize",
 ]
 
 [[package]]
@@ -5581,7 +5598,7 @@ dependencies = [
  "futures-util",
  "generic-array",
  "hex",
- "hkdf",
+ "hkdf 0.12.4",
  "hmac 0.12.1",
  "itoa",
  "log",
@@ -5620,7 +5637,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
- "hkdf",
+ "hkdf 0.12.4",
  "hmac 0.12.1",
  "home",
  "itoa",
@@ -7123,6 +7140,9 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "zerotrie"

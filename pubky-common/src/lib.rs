@@ -10,6 +10,7 @@ pub mod auth;
 pub mod capabilities;
 pub mod constants;
 pub mod crypto;
+pub mod encryption_keys;
 pub mod events;
 mod keys;
 pub mod namespaces;

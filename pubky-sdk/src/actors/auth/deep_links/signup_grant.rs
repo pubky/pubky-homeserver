@@ -2,10 +2,11 @@ use pubky_common::{auth::jws::ClientId, capabilities::Capabilities, crypto::Publ
 use url::Url;
 
 use super::{
-    DeepLinkParseError,
+    DeepLinkParseError, GrantApprovalFormat,
     query_params::{
-        append_grant_params, append_signup_params, optional_query, parse_capabilities,
-        parse_client_id, parse_client_pk, parse_homeserver, parse_relay, parse_secret,
+        append_grant_approval_format, append_grant_params, append_signup_params, optional_query,
+        parse_capabilities, parse_client_id, parse_client_pk, parse_grant_approval_format,
+        parse_homeserver, parse_relay, parse_secret,
     },
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
 };
@@ -19,7 +20,11 @@ impl DeepLinkIntent for SignupGrantIntent {
 }
 
 /// Typed parameters for grant-mode signup deep links.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Construct with [`Self::new`] or obtain from a parsed link. Public fields
+/// remain available for customization; future fields may be added.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SignupGrantParams {
     /// Capabilities requested by the app.
     pub capabilities: Capabilities,
@@ -35,18 +40,69 @@ pub struct SignupGrantParams {
     pub client_id: ClientId,
     /// Client public key bound by the grant's `cnf` claim.
     pub client_pk: PublicKey,
+    /// Relay payload format understood by the requesting client.
+    pub approval_format: GrantApprovalFormat,
+}
+
+impl SignupGrantParams {
+    /// Create parameters for a bare-grant deep link, without a signup token.
+    ///
+    /// Set `approval_format` to [`GrantApprovalFormat::SignedApprovalV1`] when
+    /// requesting encryption keys. Set `signup_token` when the homeserver
+    /// requires one.
+    #[must_use]
+    pub fn new(
+        capabilities: Capabilities,
+        relay: Url,
+        secret: [u8; 32],
+        homeserver: PublicKey,
+        client_id: ClientId,
+        client_pk: PublicKey,
+    ) -> Self {
+        Self {
+            capabilities,
+            relay,
+            secret,
+            homeserver,
+            signup_token: None,
+            client_id,
+            client_pk,
+            approval_format: GrantApprovalFormat::BareGrant,
+        }
+    }
+}
+
+impl std::fmt::Debug for SignupGrantParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignupGrantParams")
+            .field("capabilities", &self.capabilities)
+            .field("relay", &self.relay)
+            .field("secret", &"<redacted>")
+            .field("homeserver", &self.homeserver)
+            .field("signup_token", &"<redacted>")
+            .field("client_id", &self.client_id)
+            .field("client_pk", &self.client_pk)
+            .field("approval_format", &self.approval_format)
+            .finish()
+    }
 }
 
 impl DeepLinkParams for SignupGrantParams {
     fn parse(url: &Url) -> Result<Self, DeepLinkParseError> {
+        let approval_format = parse_grant_approval_format(url)?;
+        let capabilities = parse_capabilities(url)?;
+        approval_format
+            .validate_capabilities(&capabilities)
+            .map_err(|error| DeepLinkParseError::InvalidQueryParameter("caps", Box::new(error)))?;
         Ok(Self {
-            capabilities: parse_capabilities(url)?,
+            capabilities,
             relay: parse_relay(url)?,
             secret: parse_secret(url)?,
             homeserver: parse_homeserver(url)?,
             signup_token: optional_query(url, "st"),
             client_id: parse_client_id(url)?,
             client_pk: parse_client_pk(url)?,
+            approval_format,
         })
     }
 
@@ -60,6 +116,7 @@ impl DeepLinkParams for SignupGrantParams {
             self.signup_token.as_deref(),
         );
         append_grant_params(url, &self.client_id, &self.client_pk);
+        append_grant_approval_format(url, self.approval_format);
     }
 }
 
@@ -91,6 +148,10 @@ mod tests {
         assert_eq!(deep_link.intent(), "signup_grant");
         assert_eq!(deep_link.params().signup_token, None);
         assert_eq!(deep_link.params().client_pk.z32(), client_pk.z32());
+        assert_eq!(
+            deep_link.params().approval_format,
+            GrantApprovalFormat::BareGrant
+        );
     }
 
     #[test]
@@ -113,18 +174,18 @@ mod tests {
         let homeserver = PublicKey::from_str(HOMESERVER).unwrap();
         let client_id = ClientId::new("franky.pubky.app").unwrap();
         let client_pk = Keypair::random().public_key();
-        let deep_link = SignupGrantDeepLink::new(
-            DeepLinkScheme::PubkyAuth,
-            SignupGrantParams {
-                capabilities,
-                relay,
-                secret: [42; 32],
-                homeserver,
-                signup_token: Some("123".into()),
-                client_id,
-                client_pk,
-            },
+        let mut params = SignupGrantParams::new(
+            capabilities,
+            relay,
+            [42; 32],
+            homeserver,
+            client_id,
+            client_pk,
         );
+        assert_eq!(params.approval_format, GrantApprovalFormat::BareGrant);
+        assert!(params.signup_token.is_none());
+        params.signup_token = Some("1234567890".into());
+        let deep_link = SignupGrantDeepLink::new(DeepLinkScheme::PubkyAuth, params);
         let parsed_again = SignupGrantDeepLink::parse_url(&deep_link.to_url()).unwrap();
 
         assert_eq!(parsed_again, deep_link);
@@ -143,5 +204,22 @@ mod tests {
             err,
             DeepLinkParseError::MissingQueryParameter("cid")
         ));
+    }
+
+    #[test]
+    fn signed_approval_format_round_trips() {
+        let client_pk = Keypair::random().public_key();
+        let link: SignupGrantDeepLink = format!(
+            "pubkyauth://signup_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&hs={HOMESERVER}&cid=test.app&cpk={}&af=v1",
+            client_pk.z32()
+        ).parse().unwrap();
+        assert_eq!(
+            link.params().approval_format,
+            GrantApprovalFormat::SignedApprovalV1
+        );
+        assert_eq!(
+            SignupGrantDeepLink::parse_url(&link.to_url()).unwrap(),
+            link
+        );
     }
 }

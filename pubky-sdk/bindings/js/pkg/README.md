@@ -315,6 +315,89 @@ if (saved) {
 
 Legacy cookie auth flows can be resumed with `pubky.resumeCookieAuthFlow(authorizationUrl)`. Store pending auth state in `sessionStorage`, not `localStorage`, and delete it once the flow completes or is abandoned.
 
+#### Request encryption keys
+
+Apps can also ask the signer for encryption keys scoped to storage paths. Set
+`approvalFormat: "signedApprovalV1"` and add the `e` action to each scope that
+needs keys. Storage actions `r` and `w` don't deliver keys.
+
+Keys stay usable after the grant expires or is revoked, and older homeservers
+reject grants containing `e`. Read the
+[scoped encryption keys guide](../../../../docs/scoped-encryption-keys.md)
+before you use them.
+
+```js
+const flow = await pubky.startGrantAuthFlow("/pub/chat/:rwe", AuthFlowKind.signin(), {
+  clientId: "chat.example",
+  approvalFormat: "signedApprovalV1",
+});
+renderQr(flow.authorizationUrl);
+const session = await flow.awaitApproval();
+
+const keys = session.grant.encryptionKeys; // undefined for bare grants
+let key;
+try {
+  // The signer may narrow scopes or decline `e`.
+  if (!keys.scopes.includes("/pub/chat/")) {
+    throw new Error("The signer didn't approve chat keys.");
+  }
+  key = await keys.deriveCryptoKeyForPath("/pub/chat/message");
+} finally {
+  keys.free(); // The CryptoKey stays usable.
+}
+
+const iv = crypto.getRandomValues(new Uint8Array(12)); // Fresh IV every time.
+const ciphertext = await crypto.subtle.encrypt(
+  { name: "AES-GCM", iv }, key, new TextEncoder().encode("Hello"),
+);
+```
+
+`EncryptionKeys` has these members:
+
+| API | Returns |
+| --- | --- |
+| `keys.scopes` | Approved scope paths as `string[]` |
+| `keys.deriveForPath(path)` | Raw key bytes as `Uint8Array`. Clear them after use. |
+| `await keys.deriveCryptoKeyForPath(path)` | Non-extractable AES-GCM-256 `CryptoKey`. Requires WebCrypto in a secure context. |
+
+Both derivation methods take a canonical file path and reject directories and
+paths outside the approved scopes. Each read of `session.grant.encryptionKeys`
+returns a separate copy; call `free()` when you're done with it. Signed
+approvals without `e` scopes return an object with empty scopes.
+
+`exportLocalSecret()` and `browserSessionStore.save()` keep the keys. The
+browser store saves them as plaintext in IndexedDB, readable by any script on
+the same origin. You can recover keys offline, even after the grant expires or
+is revoked. Recovery creates no session:
+
+```js
+import { EncryptionKeys } from "@synonymdev/pubky";
+
+const recovered = EncryptionKeys.fromLocalSecret(savedToken);
+if (recovered) {
+  try {
+    if (recovered.publicKey !== expectedUser.z32() ||
+        recovered.grantId !== expectedGrantId) {
+      throw new Error("This backup belongs to a different account or grant");
+    }
+    const key = await recovered.keys.deriveCryptoKeyForPath("/pub/chat/message");
+    // Use key with WebCrypto for locally saved ciphertext.
+  } finally {
+    recovered.keys.free();
+  }
+}
+```
+
+`fromLocalSecret()` returns `{ publicKey, grantId, keys }`, or `undefined` for
+bare-grant tokens. `publicKey` is the authenticated account's z-base-32 key.
+Compare it with the account you expect; also check `grantId` when restoring a
+specific grant. Callers that previously received keys directly must now read
+`recovered.keys` after checking the identity.
+
+For a browser record, use
+`await pubky.browserSessionStore.restoreEncryptionKeys(storedId)`. It checks
+the account and grant against the record ID and returns the keys directly.
+
 #### Validate and normalize capabilities
 
 If you accept capability strings from user input (forms, CLI arguments, etc.),

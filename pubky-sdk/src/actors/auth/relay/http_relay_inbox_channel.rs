@@ -321,10 +321,19 @@ impl FromStr for HttpRelayInboxChannel {
 
 /// An encrypted HTTP relay inbox channel that encrypts/decrypts messages
 /// using a shared secret, with store-and-forward semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncryptedHttpRelayInboxChannel {
     channel: HttpRelayInboxChannel,
     secret: [u8; 32],
+}
+
+impl std::fmt::Debug for EncryptedHttpRelayInboxChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedHttpRelayInboxChannel")
+            .field("channel", &self.channel)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl EncryptedHttpRelayInboxChannel {
