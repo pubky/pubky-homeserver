@@ -13,8 +13,8 @@ pub enum GrantApprovalFormat {
     /// A V1 signed approval containing a grant and an encryption-key bundle.
     /// The bundle contains keys only for approved `e` scopes and may be empty.
     ///
-    /// Encoded as `af=v1` in the deep link. Both formats use the
-    /// existing shared-secret relay encryption.
+    /// Encoded as `af=v1` in the deep link. Requires an `epk` value, which
+    /// also identifies the HPKE-encrypted relay channel.
     SignedApprovalV1,
 }
 

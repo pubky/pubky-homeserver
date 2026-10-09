@@ -9,9 +9,10 @@ use pubky_common::{
 
 use crate::actors::DEFAULT_HTTP_RELAY_INBOX;
 use crate::actors::auth::deep_links::{
-    DeepLink, DeepLinkScheme, GrantApprovalFormat, SigninGrantDeepLink, SigninGrantParams,
-    SignupGrantDeepLink, SignupGrantParams, XCallbackParams,
+    DeepLink, DeepLinkScheme, GrantApprovalFormat, GrantRelayChannel, SigninGrantDeepLink,
+    SigninGrantParams, SignupGrantDeepLink, SignupGrantParams, XCallbackParams,
 };
+use crate::actors::auth::grant::approval_encryption::ApprovalRecipientSecret;
 use crate::actors::auth::grant::flow::PubkyGrantAuthFlow;
 use crate::actors::auth::grant::pop_signer::{DelegatedSignFn, GrantPopSigner};
 use crate::actors::auth::kind::AuthFlowKind;
@@ -96,7 +97,8 @@ impl GrantAuthFlowBuilder {
         self
     }
 
-    /// Override the random `client_secret`. By default, a fresh 32-byte secret is generated.
+    /// Override the random relay secret used by bare-grant flows. Signed
+    /// approvals use an HPKE public key as the relay channel ID instead.
     #[must_use]
     pub fn client_secret(mut self, client_secret: [u8; 32]) -> Self {
         self.client_secret = client_secret;
@@ -158,6 +160,18 @@ impl GrantAuthFlowBuilder {
         };
 
         let client_pk = client_signer.public_key();
+        let (approval_key_secret, relay_channel) =
+            if approval_format == GrantApprovalFormat::SignedApprovalV1 {
+                let (secret, public_key) = ApprovalRecipientSecret::generate();
+                (
+                    Some(secret),
+                    GrantRelayChannel::Hpke {
+                        ephemeral_public_key: public_key,
+                    },
+                )
+            } else {
+                (None, GrantRelayChannel::SharedSecret(client_secret))
+            };
 
         let auth_url = match auth_kind {
             AuthFlowKind::SignIn => DeepLink::SigninGrant(SigninGrantDeepLink::new(
@@ -165,7 +179,7 @@ impl GrantAuthFlowBuilder {
                 SigninGrantParams {
                     capabilities: caps,
                     relay: base_relay.clone(),
-                    secret: client_secret,
+                    relay_channel,
                     client_id,
                     client_pk,
                     approval_format,
@@ -181,7 +195,7 @@ impl GrantAuthFlowBuilder {
                     SignupGrantParams {
                         capabilities: caps,
                         relay: base_relay.clone(),
-                        secret: client_secret,
+                        relay_channel,
                         homeserver: hs_pk,
                         signup_token: signup_token.clone(),
                         client_id,
@@ -193,7 +207,7 @@ impl GrantAuthFlowBuilder {
         }
         .with_x_callback(x_callback);
 
-        let relay_listener = AuthRelayListener::builder(client_secret)
+        let relay_listener = AuthRelayListener::builder_for_channel(relay_channel)
             .relay_base_url(base_relay)
             .client(client.clone())
             .start()?;
@@ -203,6 +217,7 @@ impl GrantAuthFlowBuilder {
             client,
             auth_url.into(),
             client_signer,
+            approval_key_secret,
         ))
     }
 }

@@ -2,11 +2,12 @@ use pubky_common::{auth::jws::ClientId, capabilities::Capabilities, crypto::Publ
 use url::Url;
 
 use super::{
-    DeepLinkParseError, GrantApprovalFormat,
+    DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel,
     query_params::{
-        append_grant_approval_format, append_grant_params, append_signup_params, optional_query,
-        parse_capabilities, parse_client_id, parse_client_pk, parse_grant_approval_format,
-        parse_homeserver, parse_relay, parse_secret,
+        append_grant_approval_format, append_grant_params, append_grant_relay_channel,
+        append_relay_params, append_signup_details, optional_query, parse_capabilities,
+        parse_client_id, parse_client_pk, parse_grant_approval_format, parse_grant_relay_channel,
+        parse_homeserver, parse_relay,
     },
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
 };
@@ -30,8 +31,9 @@ pub struct SignupGrantParams {
     pub capabilities: Capabilities,
     /// Base HTTP relay URL.
     pub relay: Url,
-    /// Secret used to derive the encrypted relay channel.
-    pub secret: [u8; 32],
+    /// Relay channel key. Signed approvals use an HPKE public key as the
+    /// channel ID; legacy grants use a shared secret.
+    pub relay_channel: GrantRelayChannel,
     /// Homeserver public key.
     pub homeserver: PublicKey,
     /// Optional signup token.
@@ -47,9 +49,10 @@ pub struct SignupGrantParams {
 impl SignupGrantParams {
     /// Create parameters for a bare-grant deep link, without a signup token.
     ///
-    /// Set `approval_format` to [`GrantApprovalFormat::SignedApprovalV1`] when
-    /// requesting encryption keys. Set `signup_token` when the homeserver
-    /// requires one.
+    /// For encryption keys, set `approval_format` to
+    /// [`GrantApprovalFormat::SignedApprovalV1`] and `relay_channel` to
+    /// [`GrantRelayChannel::Hpke`] with the app's temporary recipient public key.
+    /// Set `signup_token` when the homeserver requires one.
     #[must_use]
     pub fn new(
         capabilities: Capabilities,
@@ -62,7 +65,7 @@ impl SignupGrantParams {
         Self {
             capabilities,
             relay,
-            secret,
+            relay_channel: GrantRelayChannel::SharedSecret(secret),
             homeserver,
             signup_token: None,
             client_id,
@@ -77,7 +80,7 @@ impl std::fmt::Debug for SignupGrantParams {
         f.debug_struct("SignupGrantParams")
             .field("capabilities", &self.capabilities)
             .field("relay", &self.relay)
-            .field("secret", &"<redacted>")
+            .field("relay_channel", &self.relay_channel)
             .field("homeserver", &self.homeserver)
             .field("signup_token", &"<redacted>")
             .field("client_id", &self.client_id)
@@ -97,7 +100,7 @@ impl DeepLinkParams for SignupGrantParams {
         Ok(Self {
             capabilities,
             relay: parse_relay(url)?,
-            secret: parse_secret(url)?,
+            relay_channel: parse_grant_relay_channel(url, approval_format)?,
             homeserver: parse_homeserver(url)?,
             signup_token: optional_query(url, "st"),
             client_id: parse_client_id(url)?,
@@ -107,16 +110,11 @@ impl DeepLinkParams for SignupGrantParams {
     }
 
     fn append_query_pairs(&self, url: &mut Url) {
-        append_signup_params(
-            url,
-            &self.capabilities,
-            &self.relay,
-            &self.secret,
-            &self.homeserver,
-            self.signup_token.as_deref(),
-        );
+        append_relay_params(url, &self.capabilities, &self.relay);
+        append_signup_details(url, &self.homeserver, self.signup_token.as_deref());
         append_grant_params(url, &self.client_id, &self.client_pk);
         append_grant_approval_format(url, self.approval_format);
+        append_grant_relay_channel(url, self.relay_channel);
     }
 }
 
@@ -209,9 +207,11 @@ mod tests {
     #[test]
     fn signed_approval_format_round_trips() {
         let client_pk = Keypair::random().public_key();
+        let epk =
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, [7; 32]);
         let link: SignupGrantDeepLink = format!(
-            "pubkyauth://signup_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&hs={HOMESERVER}&cid=test.app&cpk={}&af=v1",
-            client_pk.z32()
+            "pubkyauth://signup_grant?caps=/:rw&relay=http://localhost/inbox&hs={HOMESERVER}&cid=test.app&cpk={}&af=v1&epk={epk}",
+            client_pk.z32(),
         ).parse().unwrap();
         assert_eq!(
             link.params().approval_format,

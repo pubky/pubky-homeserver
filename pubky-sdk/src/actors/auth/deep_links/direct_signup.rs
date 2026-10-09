@@ -3,7 +3,7 @@ use url::Url;
 
 use super::{
     DeepLinkParseError,
-    query_params::{append_direct_signup_params, optional_query, parse_homeserver},
+    query_params::{append_signup_details, optional_query, parse_homeserver},
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
 };
 
@@ -33,7 +33,7 @@ impl DeepLinkParams for DirectSignupParams {
     }
 
     fn append_query_pairs(&self, url: &mut Url) {
-        append_direct_signup_params(url, &self.homeserver, self.signup_token.as_deref());
+        append_signup_details(url, &self.homeserver, self.signup_token.as_deref());
     }
 }
 

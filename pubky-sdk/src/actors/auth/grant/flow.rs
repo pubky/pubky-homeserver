@@ -57,8 +57,9 @@ use pubky_common::{
 use url::Url;
 
 use crate::actors::Pkdns;
-use crate::actors::auth::deep_links::DeepLink;
+use crate::actors::auth::deep_links::{DeepLink, GrantRelayChannel};
 use crate::actors::auth::grant::approval::GrantApproval;
+use crate::actors::auth::grant::approval_encryption::ApprovalRecipientSecret;
 use crate::actors::auth::grant::builder::GrantAuthFlowBuilder;
 use crate::actors::auth::grant::credential::GrantCredential;
 use crate::actors::auth::grant::grant_exchange::credential_from_grant_exchange;
@@ -73,8 +74,10 @@ use crate::{Capabilities, PubkyHttpClient, PubkySession};
 /// This is not a session credential. It only preserves enough local state to
 /// continue polling an unapproved grant auth flow after the original
 /// [`PubkyGrantAuthFlow`] handle was dropped. Treat it as sensitive temporary
-/// data: it contains the relay secret in [`Self::authorization_url`] and the
-/// `PoP` client private key in [`Self::client_key_secret`].
+/// data: it contains the `PoP` client private key and, for legacy relay
+/// channels, the shared secret in [`Self::authorization_url`]. Signed
+/// approval flows instead include the public `epk` in the URL and keep its
+/// matching private key here.
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
 pub struct GrantAuthFlowState {
@@ -82,6 +85,9 @@ pub struct GrantAuthFlowState {
     pub authorization_url: String,
     /// Secret bytes for the `PoP` client keypair bound by the deep link `cpk`.
     pub client_key_secret: [u8; 32],
+    /// Temporary HPKE recipient secret for a signed approval flow, when used.
+    #[cfg_attr(feature = "json", serde(default))]
+    pub approval_key_secret: Option<[u8; 32]>,
 }
 
 /// Serializable state for resuming a pending delegated browser grant auth flow.
@@ -94,6 +100,9 @@ pub struct DelegatedGrantAuthFlowState {
     pub key_id: String,
     /// Public key for the delegated `PoP` signer bound by the deep link `cpk`.
     pub client_pk: PublicKey,
+    /// Temporary HPKE recipient secret for a signed approval flow, when used.
+    #[cfg_attr(feature = "json", serde(default))]
+    pub approval_key_secret: Option<[u8; 32]>,
 }
 
 impl fmt::Debug for DelegatedGrantAuthFlowState {
@@ -102,6 +111,7 @@ impl fmt::Debug for DelegatedGrantAuthFlowState {
             .field("authorization_url", &"<redacted>")
             .field("key_id", &self.key_id)
             .field("client_pk", &self.client_pk)
+            .field("approval_key_secret", &"<redacted>")
             .finish()
     }
 }
@@ -111,6 +121,7 @@ impl fmt::Debug for GrantAuthFlowState {
         f.debug_struct("GrantAuthFlowState")
             .field("authorization_url", &"<redacted>")
             .field("client_key_secret", &"<redacted>")
+            .field("approval_key_secret", &"<redacted>")
             .finish()
     }
 }
@@ -135,6 +146,7 @@ pub struct PubkyGrantAuthFlow {
     client: PubkyHttpClient,
     auth_url: Url,
     client_signer: GrantPopSigner,
+    approval_key_secret: Option<ApprovalRecipientSecret>,
 }
 
 impl fmt::Debug for PubkyGrantAuthFlow {
@@ -144,6 +156,7 @@ impl fmt::Debug for PubkyGrantAuthFlow {
             .field("client", &self.client)
             .field("auth_url", &"<redacted>")
             .field("client_signer", &self.client_signer)
+            .field("approval_key_secret", &self.approval_key_secret)
             .finish()
     }
 }
@@ -154,12 +167,14 @@ impl PubkyGrantAuthFlow {
         client: PubkyHttpClient,
         auth_url: Url,
         client_signer: GrantPopSigner,
+        approval_key_secret: Option<ApprovalRecipientSecret>,
     ) -> Self {
         Self {
             relay_listener,
             client,
             auth_url,
             client_signer,
+            approval_key_secret,
         }
     }
 
@@ -206,6 +221,10 @@ impl PubkyGrantAuthFlow {
         Some(GrantAuthFlowState {
             authorization_url: self.authorization_url().to_string(),
             client_key_secret: self.client_signer.local_secret()?,
+            approval_key_secret: self
+                .approval_key_secret
+                .as_ref()
+                .map(ApprovalRecipientSecret::to_bytes),
         })
     }
 
@@ -221,6 +240,10 @@ impl PubkyGrantAuthFlow {
             authorization_url: self.authorization_url().to_string(),
             key_id: signer.key_id,
             client_pk: signer.public_key,
+            approval_key_secret: self
+                .approval_key_secret
+                .as_ref()
+                .map(ApprovalRecipientSecret::to_bytes),
         })
     }
 
@@ -238,11 +261,13 @@ impl PubkyGrantAuthFlow {
         let GrantAuthFlowState {
             authorization_url,
             client_key_secret,
+            approval_key_secret,
         } = state;
         let auth_url = DeepLink::from_str(&authorization_url).map_err(|e| {
             AuthError::Validation(format!("failed to parse grant auth flow state URL: {e}"))
         })?;
-        let (relay, secret, client_pk) = grant_deep_link_parts(&auth_url)?;
+        let (relay, relay_channel, client_pk) = grant_deep_link_parts(&auth_url)?;
+        let approval_key_secret = restore_approval_key_secret(relay_channel, approval_key_secret)?;
         let client_keypair = Keypair::from_secret(&client_key_secret);
 
         if &client_keypair.public_key() != client_pk {
@@ -253,7 +278,7 @@ impl PubkyGrantAuthFlow {
             .into());
         }
 
-        let relay_listener = AuthRelayListener::builder(*secret)
+        let relay_listener = AuthRelayListener::builder_for_channel(relay_channel)
             .relay_base_url(relay.clone())
             .client(client.clone())
             .start()?;
@@ -263,6 +288,7 @@ impl PubkyGrantAuthFlow {
             client,
             auth_url.into(),
             GrantPopSigner::local(client_keypair),
+            approval_key_secret,
         ))
     }
 
@@ -277,11 +303,13 @@ impl PubkyGrantAuthFlow {
             authorization_url,
             key_id,
             client_pk,
+            approval_key_secret,
         } = state;
         let auth_url = DeepLink::from_str(&authorization_url).map_err(|e| {
             AuthError::Validation(format!("failed to parse grant auth flow state URL: {e}"))
         })?;
-        let (relay, secret, expected_client_pk) = grant_deep_link_parts(&auth_url)?;
+        let (relay, relay_channel, expected_client_pk) = grant_deep_link_parts(&auth_url)?;
+        let approval_key_secret = restore_approval_key_secret(relay_channel, approval_key_secret)?;
 
         if &client_pk != expected_client_pk {
             return Err(AuthError::Validation(
@@ -291,7 +319,7 @@ impl PubkyGrantAuthFlow {
             .into());
         }
 
-        let relay_listener = AuthRelayListener::builder(*secret)
+        let relay_listener = AuthRelayListener::builder_for_channel(relay_channel)
             .relay_base_url(relay.clone())
             .client(client.clone())
             .start()?;
@@ -301,6 +329,7 @@ impl PubkyGrantAuthFlow {
             client,
             auth_url.into(),
             GrantPopSigner::delegated(key_id, client_pk, sign),
+            approval_key_secret,
         ))
     }
 
@@ -339,8 +368,11 @@ impl PubkyGrantAuthFlow {
             client,
             client_signer,
             auth_url,
+            approval_key_secret,
         } = self;
-        let approval = Self::await_decoded_approval(relay_listener, &auth_url).await?;
+        let approval =
+            Self::await_decoded_approval(relay_listener, &auth_url, approval_key_secret.as_ref())
+                .await?;
         Self::exchange_for_credential(&client, approval, client_signer).await
     }
 
@@ -405,31 +437,41 @@ impl PubkyGrantAuthFlow {
     async fn await_decoded_approval(
         relay_listener: AuthRelayListener,
         auth_url: &Url,
+        approval_key_secret: Option<&ApprovalRecipientSecret>,
     ) -> Result<GrantApproval> {
         let message = relay_listener.await_message().await?;
-        decode_relay_approval(&message, auth_url)
+        decode_relay_approval(&message, auth_url, approval_key_secret)
     }
 
     fn try_decoded_approval(&self) -> Result<Option<GrantApproval>> {
         let Some(message) = self.relay_listener.try_message() else {
             return Ok(None);
         };
-        Ok(Some(decode_relay_approval(&message?, &self.auth_url)?))
+        Ok(Some(decode_relay_approval(
+            &message?,
+            &self.auth_url,
+            self.approval_key_secret.as_ref(),
+        )?))
     }
 }
 
-fn decode_relay_approval(message: &AuthRelayMessage, auth_url: &Url) -> Result<GrantApproval> {
+fn decode_relay_approval(
+    message: &AuthRelayMessage,
+    auth_url: &Url,
+    approval_key_secret: Option<&ApprovalRecipientSecret>,
+) -> Result<GrantApproval> {
     let request = DeepLink::from_str(auth_url.as_str())
         .map_err(|_err| AuthError::Validation("invalid grant request URL".into()))?;
-    decode_and_validate_approval(message, &request)
+    decode_and_validate_approval(message, &request, approval_key_secret)
 }
 
 /// Authenticate a received approval, then bind it to the pending app request.
 fn decode_and_validate_approval(
     message: &AuthRelayMessage,
     request: &DeepLink,
+    approval_key_secret: Option<&ApprovalRecipientSecret>,
 ) -> Result<GrantApproval> {
-    let (client_id, client_pk, capabilities, format) = match request {
+    let (client_id, client_pk, capabilities, format, relay_channel) = match request {
         DeepLink::SigninGrant(link) => {
             let params = link.params();
             (
@@ -437,6 +479,7 @@ fn decode_and_validate_approval(
                 &params.client_pk,
                 &params.capabilities,
                 params.approval_format,
+                params.relay_channel,
             )
         }
         DeepLink::SignupGrant(link) => {
@@ -446,6 +489,7 @@ fn decode_and_validate_approval(
                 &params.client_pk,
                 &params.capabilities,
                 params.approval_format,
+                params.relay_channel,
             )
         }
         _ => {
@@ -453,6 +497,14 @@ fn decode_and_validate_approval(
                 AuthError::Validation("approval requires a grant auth deep link".into()).into(),
             );
         }
+    };
+    validate_approval_key(relay_channel, approval_key_secret)?;
+    let decrypted;
+    let message = if let Some(secret) = approval_key_secret {
+        decrypted = AuthRelayMessage::from_zeroizing(secret.open(message.as_bytes())?);
+        &decrypted
+    } else {
+        message
     };
     let approval = GrantApproval::decode(message, format)?;
     if &approval.claims.cnf != client_pk || &approval.claims.client_id != client_id {
@@ -484,16 +536,16 @@ fn decode_and_validate_approval(
     Ok(approval)
 }
 
-fn grant_deep_link_parts(deep_link: &DeepLink) -> Result<(&Url, &[u8; 32], &PublicKey)> {
+fn grant_deep_link_parts(deep_link: &DeepLink) -> Result<(&Url, GrantRelayChannel, &PublicKey)> {
     match deep_link {
         DeepLink::SigninGrant(link) => Ok((
             &link.params().relay,
-            &link.params().secret,
+            link.params().relay_channel,
             &link.params().client_pk,
         )),
         DeepLink::SignupGrant(link) => Ok((
             &link.params().relay,
-            &link.params().secret,
+            link.params().relay_channel,
             &link.params().client_pk,
         )),
         _ => Err(AuthError::Validation(
@@ -503,6 +555,42 @@ fn grant_deep_link_parts(deep_link: &DeepLink) -> Result<(&Url, &[u8; 32], &Publ
     }
 }
 
+fn restore_approval_key_secret(
+    channel: GrantRelayChannel,
+    secret: Option<[u8; 32]>,
+) -> Result<Option<ApprovalRecipientSecret>> {
+    let secret = secret.map(ApprovalRecipientSecret::from_bytes);
+    validate_approval_key(channel, secret.as_ref())?;
+    Ok(secret)
+}
+
+/// The recipient secret must exist exactly when the request uses HPKE,
+/// and must belong to the public key in that request.
+fn validate_approval_key(
+    channel: GrantRelayChannel,
+    secret: Option<&ApprovalRecipientSecret>,
+) -> Result<()> {
+    let error = match (channel, secret) {
+        (GrantRelayChannel::SharedSecret(_), None) => return Ok(()),
+        (GrantRelayChannel::SharedSecret(_), Some(_)) => {
+            "saved HPKE key has no matching grant request"
+        }
+        (GrantRelayChannel::Hpke { .. }, None) => "saved grant auth flow is missing its HPKE key",
+        (
+            GrantRelayChannel::Hpke {
+                ephemeral_public_key,
+            },
+            Some(secret),
+        ) => {
+            if secret.matches_public_key(&ephemeral_public_key) {
+                return Ok(());
+            }
+            "saved HPKE key does not match the grant request"
+        }
+    };
+    Err(AuthError::Validation(error.into()).into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +598,7 @@ mod tests {
         DeepLinkScheme, GrantApprovalFormat, SigninDeepLink, SigninGrantDeepLink,
         SigninGrantParams, SigninParams, XCallbackParams,
     };
+    use crate::actors::auth::grant::approval_encryption;
 
     use super::super::{approval_envelope::GrantApprovalEnvelope, credential::now_unix};
     use pubky_common::{
@@ -518,6 +607,12 @@ mod tests {
     };
 
     fn request(format: GrantApprovalFormat) -> SigninGrantParams {
+        let relay_channel = match format {
+            GrantApprovalFormat::BareGrant => GrantRelayChannel::SharedSecret([9; 32]),
+            GrantApprovalFormat::SignedApprovalV1 => GrantRelayChannel::Hpke {
+                ephemeral_public_key: ApprovalRecipientSecret::from_bytes([9; 32]).public_key(),
+            },
+        };
         SigninGrantParams {
             client_id: ClientId::new("test.app").unwrap(),
             client_pk: Keypair::from_secret(&[8; 32]).public_key(),
@@ -527,7 +622,7 @@ mod tests {
                 "/pub/app/:rw".parse().unwrap()
             },
             relay: Url::parse("http://localhost/inbox").unwrap(),
-            secret: [9; 32],
+            relay_channel,
             approval_format: format,
         }
     }
@@ -557,11 +652,22 @@ mod tests {
         message: &AuthRelayMessage,
         request: &SigninGrantParams,
     ) -> Result<GrantApproval> {
-        let request = DeepLink::SigninGrant(SigninGrantDeepLink::new(
+        let deep_link = DeepLink::SigninGrant(SigninGrantDeepLink::new(
             DeepLinkScheme::PubkyAuth,
             request.clone(),
         ));
-        decode_and_validate_approval(message, &request)
+        match request.relay_channel {
+            GrantRelayChannel::SharedSecret(_) => {
+                decode_and_validate_approval(message, &deep_link, None)
+            }
+            GrantRelayChannel::Hpke { .. } => {
+                let recipient = ApprovalRecipientSecret::from_bytes([9; 32]);
+                let ciphertext =
+                    approval_encryption::seal(&recipient.public_key(), message.as_bytes())?;
+                let encrypted = AuthRelayMessage::new(ciphertext);
+                decode_and_validate_approval(&encrypted, &deep_link, Some(&recipient))
+            }
+        }
     }
 
     fn decode_signed_approval(message: &AuthRelayMessage) -> Result<GrantApproval> {
@@ -737,12 +843,16 @@ mod tests {
                 .start()
                 .unwrap();
             let url = flow.authorization_url();
-            assert!(url.query_pairs().any(|(name, _)| name == "secret"));
+            assert!(!url.query_pairs().any(|(name, _)| name == "secret"));
             assert!(
                 url.query_pairs()
                     .any(|(name, value)| name == "af" && value == "v1")
             );
-            assert!(!url.query_pairs().any(|(name, _)| name == "ek"));
+            assert!(
+                url.query_pairs()
+                    .any(|(name, value)| name == "epk" && !value.is_empty())
+            );
+            assert!(flow.save_local().unwrap().approval_key_secret.is_some());
         }
     }
 
@@ -841,13 +951,34 @@ mod tests {
             iat: super::super::credential::now_unix(),
             exp: super::super::credential::now_unix() + 3600,
         };
-        let message = crate::actors::auth::relay::AuthRelayMessage::new(
-            super::super::approval_envelope::GrantApprovalEnvelope::sign(&user, &claims)
-                .as_bytes()
-                .to_vec(),
-        );
+        let signed_approval =
+            super::super::approval_envelope::GrantApprovalEnvelope::sign(&user, &claims);
         let request = DeepLink::from_str(restored.authorization_url().as_str()).unwrap();
-        decode_and_validate_approval(&message, &request).unwrap();
+        let public_key = match &request {
+            DeepLink::SigninGrant(link) => match link.params().relay_channel {
+                GrantRelayChannel::Hpke {
+                    ephemeral_public_key,
+                } => ephemeral_public_key,
+                GrantRelayChannel::SharedSecret(_) => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let encrypted_approval =
+            super::super::approval_encryption::seal(&public_key, signed_approval.as_bytes())
+                .unwrap();
+        let message = crate::actors::auth::relay::AuthRelayMessage::new(encrypted_approval);
+        decode_and_validate_approval(&message, &request, restored.approval_key_secret.as_ref())
+            .unwrap();
+        let legacy_message =
+            crate::actors::auth::relay::AuthRelayMessage::new(signed_approval.as_bytes().to_vec());
+        assert!(
+            decode_and_validate_approval(
+                &legacy_message,
+                &request,
+                restored.approval_key_secret.as_ref(),
+            )
+            .is_err()
+        );
         assert_eq!(
             DeepLink::from_str(restored.authorization_url().as_str())
                 .unwrap()
@@ -978,6 +1109,7 @@ mod tests {
         let state = GrantAuthFlowState {
             authorization_url: auth_url,
             client_key_secret: Keypair::random().secret(),
+            approval_key_secret: None,
         };
 
         let error = PubkyGrantAuthFlow::restore(state, PubkyHttpClient::new().unwrap())
@@ -996,7 +1128,7 @@ mod tests {
             SigninGrantParams {
                 capabilities: Capabilities::default(),
                 relay: Url::parse("http://localhost/inbox").unwrap(),
-                secret: [7; 32],
+                relay_channel: GrantRelayChannel::SharedSecret([7; 32]),
                 client_id: ClientId::new("mismatch.test").unwrap(),
                 client_pk: expected_client.public_key(),
                 approval_format: GrantApprovalFormat::BareGrant,
@@ -1006,6 +1138,7 @@ mod tests {
         let state = GrantAuthFlowState {
             authorization_url: auth_url,
             client_key_secret: actual_client.secret(),
+            approval_key_secret: None,
         };
 
         let error = PubkyGrantAuthFlow::restore(state, PubkyHttpClient::new().unwrap())
@@ -1021,6 +1154,7 @@ mod tests {
         let state = GrantAuthFlowState {
             authorization_url: "pubkyauth://signin?caps=&relay=http://localhost/inbox".into(),
             client_key_secret: [42; 32],
+            approval_key_secret: None,
         };
 
         let json = serde_json::to_string(&state).unwrap();

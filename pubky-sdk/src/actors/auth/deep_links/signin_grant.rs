@@ -2,11 +2,11 @@ use pubky_common::{auth::jws::ClientId, capabilities::Capabilities, crypto::Publ
 use url::Url;
 
 use super::{
-    DeepLinkParseError, GrantApprovalFormat,
+    DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel,
     query_params::{
-        append_grant_approval_format, append_grant_params, append_signin_params,
-        parse_capabilities, parse_client_id, parse_client_pk, parse_grant_approval_format,
-        parse_relay, parse_secret,
+        append_grant_approval_format, append_grant_params, append_grant_relay_channel,
+        append_relay_params, parse_capabilities, parse_client_id, parse_client_pk,
+        parse_grant_approval_format, parse_grant_relay_channel, parse_relay,
     },
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
 };
@@ -30,8 +30,9 @@ pub struct SigninGrantParams {
     pub capabilities: Capabilities,
     /// Base HTTP relay URL.
     pub relay: Url,
-    /// Secret used to derive the encrypted relay channel.
-    pub secret: [u8; 32],
+    /// Relay channel key. Signed approvals use an HPKE public key as the
+    /// channel ID; legacy grants use a shared secret.
+    pub relay_channel: GrantRelayChannel,
     /// Application identifier carried by this deep link.
     pub client_id: ClientId,
     /// Client public key bound by the grant's `cnf` claim.
@@ -43,8 +44,9 @@ pub struct SigninGrantParams {
 impl SigninGrantParams {
     /// Create parameters for a bare-grant deep link.
     ///
-    /// Set `approval_format` to [`GrantApprovalFormat::SignedApprovalV1`] when
-    /// requesting encryption keys.
+    /// For encryption keys, set `approval_format` to
+    /// [`GrantApprovalFormat::SignedApprovalV1`] and `relay_channel` to
+    /// [`GrantRelayChannel::Hpke`] with the app's temporary recipient public key.
     #[must_use]
     pub fn new(
         capabilities: Capabilities,
@@ -56,7 +58,7 @@ impl SigninGrantParams {
         Self {
             capabilities,
             relay,
-            secret,
+            relay_channel: GrantRelayChannel::SharedSecret(secret),
             client_id,
             client_pk,
             approval_format: GrantApprovalFormat::BareGrant,
@@ -69,7 +71,7 @@ impl std::fmt::Debug for SigninGrantParams {
         f.debug_struct("SigninGrantParams")
             .field("capabilities", &self.capabilities)
             .field("relay", &self.relay)
-            .field("secret", &"<redacted>")
+            .field("relay_channel", &self.relay_channel)
             .field("client_id", &self.client_id)
             .field("client_pk", &self.client_pk)
             .field("approval_format", &self.approval_format)
@@ -87,7 +89,7 @@ impl DeepLinkParams for SigninGrantParams {
         Ok(Self {
             capabilities,
             relay: parse_relay(url)?,
-            secret: parse_secret(url)?,
+            relay_channel: parse_grant_relay_channel(url, approval_format)?,
             client_id: parse_client_id(url)?,
             client_pk: parse_client_pk(url)?,
             approval_format,
@@ -95,9 +97,10 @@ impl DeepLinkParams for SigninGrantParams {
     }
 
     fn append_query_pairs(&self, url: &mut Url) {
-        append_signin_params(url, &self.capabilities, &self.relay, &self.secret);
+        append_relay_params(url, &self.capabilities, &self.relay);
         append_grant_params(url, &self.client_id, &self.client_pk);
         append_grant_approval_format(url, self.approval_format);
+        append_grant_relay_channel(url, self.relay_channel);
     }
 }
 
@@ -164,9 +167,11 @@ mod tests {
     #[test]
     fn signed_approval_format_round_trips() {
         let client_pk = Keypair::random().public_key();
+        let epk =
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, [7; 32]);
         let link: SigninGrantDeepLink = format!(
-            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}&af=v1",
-            client_pk.z32()
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&cid=test.app&cpk={}&af=v1&epk={epk}",
+            client_pk.z32(),
         ).parse().unwrap();
         assert_eq!(
             link.params().approval_format,
@@ -176,6 +181,53 @@ mod tests {
             SigninGrantDeepLink::parse_url(&link.to_url()).unwrap(),
             link
         );
+    }
+
+    #[test]
+    fn ephemeral_public_key_round_trips() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let public_key = [7; 32];
+        let client_pk = Keypair::random().public_key();
+        let url = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&cid=test.app&cpk={}&epk={}",
+            client_pk.z32(),
+            URL_SAFE_NO_PAD.encode(public_key),
+        );
+        let link = url.parse::<SigninGrantDeepLink>().unwrap();
+        assert_eq!(
+            link.params().relay_channel,
+            GrantRelayChannel::Hpke {
+                ephemeral_public_key: public_key
+            }
+        );
+        assert_eq!(
+            SigninGrantDeepLink::parse_url(&link.to_url()).unwrap(),
+            link
+        );
+    }
+
+    #[test]
+    fn signed_approval_requires_epk_and_does_not_include_a_shared_secret() {
+        let client_pk = Keypair::random().public_key();
+        let without_epk = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}&af=v1",
+            client_pk.z32()
+        );
+        assert!(matches!(
+            without_epk.parse::<SigninGrantDeepLink>(),
+            Err(DeepLinkParseError::InvalidQueryParameter("epk", _))
+        ));
+
+        let with_both = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}&af=v1&epk={}",
+            client_pk.z32(),
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, [7; 32])
+        );
+        assert!(matches!(
+            with_both.parse::<SigninGrantDeepLink>(),
+            Err(DeepLinkParseError::InvalidQueryParameter("secret", _))
+        ));
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Method;
 use url::Url;
 use zeroize::Zeroizing;
@@ -9,13 +8,14 @@ use pubky_common::{
         grant::GrantClaims,
         jws::{ClientId, GRANT_JWS_TYP, GrantId},
     },
-    crypto::{PublicKey, encrypt, hash},
+    crypto::{PublicKey, encrypt},
 };
 
 use crate::{
     Capabilities,
     actors::auth::{
-        deep_links::{DeepLink, DeepLinkParseError, GrantApprovalFormat},
+        deep_links::{DeepLink, DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel},
+        grant::approval_encryption,
         grant::{approval_envelope::GrantApprovalEnvelope, constants::DEFAULT_GRANT_LIFETIME_SECS},
     },
     cross_log,
@@ -27,10 +27,12 @@ use super::PubkySigner;
 impl PubkySigner {
     /// Approve an auth request from another app (wallet / signer side).
     ///
-    /// Sends the signed approval using the existing encrypted relay channel.
+    /// Signed approval links use their `epk` as the relay channel ID and
+    /// encrypt the approval directly with HPKE. Legacy links keep shared-secret
+    /// relay encryption.
     /// Grant requests with `af=v1` receive a signed envelope with the grant
     /// and keys only for approved `e` scopes. Requests without that opt-in
-    /// retain the bare grant format. Both links contain the relay secret.
+    /// retain the bare grant format. Only legacy links contain a relay secret.
     ///
     /// # Typical usage
     ///
@@ -88,7 +90,7 @@ impl PubkySigner {
     }
 
     async fn approve_auth_deeplink(&self, deep_link: DeepLink) -> Result<()> {
-        let (relay, client_secret, encrypted_payload) =
+        let (relay, relay_channel, encrypted_payload) =
             match &deep_link {
                 DeepLink::Signin(d) => {
                     let params = d.params();
@@ -100,7 +102,11 @@ impl PubkySigner {
                     );
                     let payload =
                         self.build_encrypted_token(params.capabilities.clone(), &params.secret);
-                    (params.relay.clone(), params.secret, payload)
+                    (
+                        params.relay.clone(),
+                        GrantRelayChannel::SharedSecret(params.secret),
+                        payload,
+                    )
                 }
                 DeepLink::Signup(d) => {
                     let params = d.params();
@@ -112,7 +118,11 @@ impl PubkySigner {
                     );
                     let payload =
                         self.build_encrypted_token(params.capabilities.clone(), &params.secret);
-                    (params.relay.clone(), params.secret, payload)
+                    (
+                        params.relay.clone(),
+                        GrantRelayChannel::SharedSecret(params.secret),
+                        payload,
+                    )
                 }
                 DeepLink::DirectSignup(_) => return Err(AuthError::Validation(
                     "direct_signup links create an account; use handle_deeplink or signup instead"
@@ -132,10 +142,10 @@ impl PubkySigner {
                         &params.capabilities,
                         params.client_id.clone(),
                         params.client_pk.clone(),
-                        &params.secret,
                         params.approval_format,
+                        params.relay_channel,
                     )?;
-                    (params.relay.clone(), params.secret, payload)
+                    (params.relay.clone(), params.relay_channel, payload)
                 }
                 DeepLink::SignupGrant(d) => {
                     let params = d.params();
@@ -150,10 +160,10 @@ impl PubkySigner {
                         &params.capabilities,
                         params.client_id.clone(),
                         params.client_pk.clone(),
-                        &params.secret,
                         params.approval_format,
+                        params.relay_channel,
                     )?;
-                    (params.relay.clone(), params.secret, payload)
+                    (params.relay.clone(), params.relay_channel, payload)
                 }
                 DeepLink::SeedExport(_) => {
                     return Err(AuthError::Validation(
@@ -163,7 +173,7 @@ impl PubkySigner {
                 }
             };
 
-        let callback_url = Self::derive_callback_url(&relay, &client_secret)?;
+        let callback_url = Self::derive_callback_url(&relay, &relay_channel.http_channel_id())?;
         cross_log!(
             info,
             "Posting encrypted auth payload to relay channel {}",
@@ -188,8 +198,8 @@ impl PubkySigner {
         capabilities: &Capabilities,
         client_id: ClientId,
         client_pk: PublicKey,
-        client_secret: &[u8; 32],
         format: GrantApprovalFormat,
+        relay_channel: GrantRelayChannel,
     ) -> Result<Vec<u8>> {
         format.validate_capabilities(capabilities)?;
         let now = web_time::SystemTime::now()
@@ -213,7 +223,12 @@ impl PubkySigner {
                     GrantApprovalEnvelope::sign(&self.keypair, &claims)
                 }
             };
-        Ok(encrypt(payload.as_bytes(), client_secret))
+        match relay_channel {
+            GrantRelayChannel::SharedSecret(secret) => Ok(encrypt(payload.as_bytes(), &secret)),
+            GrantRelayChannel::Hpke {
+                ephemeral_public_key,
+            } => approval_encryption::seal(&ephemeral_public_key, payload.as_bytes()),
+        }
     }
 
     fn build_encrypted_token(
@@ -225,14 +240,13 @@ impl PubkySigner {
         encrypt(&token.serialize(), client_secret)
     }
 
-    fn derive_callback_url(relay: &Url, client_secret: &[u8; 32]) -> Result<Url> {
+    fn derive_callback_url(relay: &Url, channel_id: &str) -> Result<Url> {
         let mut callback_url = relay.clone();
         let mut path_segments = callback_url
             .path_segments_mut()
             .map_err(|()| url::ParseError::RelativeUrlWithCannotBeABaseBase)?;
         path_segments.pop_if_empty();
-        let channel_id = URL_SAFE_NO_PAD.encode(hash(client_secret).as_bytes());
-        path_segments.push(&channel_id);
+        path_segments.push(channel_id);
         drop(path_segments);
         Ok(callback_url)
     }
@@ -244,6 +258,7 @@ mod tests {
         DeepLinkScheme, SigninGrantDeepLink, SigninGrantParams, SignupGrantDeepLink,
         SignupGrantParams,
     };
+    use crate::actors::auth::grant::approval_encryption::ApprovalRecipientSecret;
     use crate::{Capability, Error, Keypair, Pubky, PubkyHttpClient};
     use httpmock::{Method::POST, MockServer};
     use pubky_common::auth::jws::decode_jws_payload;
@@ -264,6 +279,18 @@ mod tests {
             GrantApprovalFormat::BareGrant,
             GrantApprovalFormat::SignedApprovalV1,
         ] {
+            let (approval_recipient, relay_channel) =
+                if approval_format == GrantApprovalFormat::SignedApprovalV1 {
+                    let (secret, public_key) = ApprovalRecipientSecret::generate();
+                    (
+                        Some(secret),
+                        GrantRelayChannel::Hpke {
+                            ephemeral_public_key: public_key,
+                        },
+                    )
+                } else {
+                    (None, GrantRelayChannel::SharedSecret(secret))
+                };
             let caps = if approval_format == GrantApprovalFormat::SignedApprovalV1 {
                 Capabilities::builder()
                     .extend(caps.to_vec())
@@ -275,85 +302,103 @@ mod tests {
             } else {
                 caps.clone()
             };
-            for signup in [false, true] {
-                let server = MockServer::start_async().await;
-                let relay = Url::parse(&server.url("/inbox/")).unwrap();
-                let callback = PubkySigner::derive_callback_url(&relay, &secret).unwrap();
-                let link = if signup {
-                    SignupGrantDeepLink::new(
-                        DeepLinkScheme::PubkyAuth,
-                        SignupGrantParams {
-                            capabilities: caps.clone(),
-                            relay,
-                            secret,
-                            homeserver: Keypair::random().public_key(),
-                            signup_token: None,
-                            client_id: ClientId::new("test.app").unwrap(),
-                            client_pk: client_pk.clone(),
-                            approval_format,
-                        },
-                    )
-                    .to_string()
-                } else {
-                    SigninGrantDeepLink::new(
-                        DeepLinkScheme::PubkyAuth,
-                        SigninGrantParams {
-                            capabilities: caps.clone(),
-                            relay,
-                            secret,
-                            client_id: ClientId::new("test.app").unwrap(),
-                            client_pk: client_pk.clone(),
-                            approval_format,
-                        },
-                    )
-                    .to_string()
-                };
-                let issuer = signer.public_key();
-                let expected_client = client_pk.clone();
-                let expected_caps = caps.clone();
-                let delivery = server
-                    .mock_async(move |when, then| {
-                        when.method(POST)
-                            .path(callback.path())
-                            .is_true(move |request| {
-                                let Ok(plaintext) = decrypt(request.body_ref(), &secret) else {
-                                    return false;
-                                };
-                                let Ok(text) = std::str::from_utf8(&plaintext) else {
-                                    return false;
-                                };
-                                let claims = match approval_format {
-                                    GrantApprovalFormat::BareGrant => GrantClaims::decode(text),
-                                    GrantApprovalFormat::SignedApprovalV1 => {
-                                        let Ok(envelope) =
-                                            decode_jws_payload::<GrantApprovalEnvelope>(text)
-                                        else {
-                                            return false;
-                                        };
-                                        if envelope.encryption_keys.scopes().collect::<Vec<_>>()
-                                            != expected_caps
-                                                .iter()
-                                                .filter(|cap| cap.grants_encryption_keys())
-                                                .map(Capability::scope)
-                                                .collect::<Vec<_>>()
-                                        {
-                                            return false;
+            for relay_path in ["inbox", "link"] {
+                for signup in [false, true] {
+                    let server = MockServer::start_async().await;
+                    let relay = Url::parse(&server.url(&format!("/{relay_path}/"))).unwrap();
+                    let channel_id = relay_channel.http_channel_id();
+                    let callback = PubkySigner::derive_callback_url(&relay, &channel_id).unwrap();
+                    let link = if signup {
+                        SignupGrantDeepLink::new(
+                            DeepLinkScheme::PubkyAuth,
+                            SignupGrantParams {
+                                capabilities: caps.clone(),
+                                relay,
+                                relay_channel,
+                                homeserver: Keypair::random().public_key(),
+                                signup_token: None,
+                                client_id: ClientId::new("test.app").unwrap(),
+                                client_pk: client_pk.clone(),
+                                approval_format,
+                            },
+                        )
+                        .to_string()
+                    } else {
+                        SigninGrantDeepLink::new(
+                            DeepLinkScheme::PubkyAuth,
+                            SigninGrantParams {
+                                capabilities: caps.clone(),
+                                relay,
+                                relay_channel,
+                                client_id: ClientId::new("test.app").unwrap(),
+                                client_pk: client_pk.clone(),
+                                approval_format,
+                            },
+                        )
+                        .to_string()
+                    };
+                    let issuer = signer.public_key();
+                    let expected_client = client_pk.clone();
+                    let expected_caps = caps.clone();
+                    let approval_recipient = approval_recipient.clone();
+                    let delivery = server
+                        .mock_async(move |when, then| {
+                            when.method(POST)
+                                .path(callback.path())
+                                .is_true(move |request| {
+                                    let plaintext = match &approval_recipient {
+                                        Some(recipient) => {
+                                            let Ok(plaintext) = recipient.open(request.body_ref())
+                                            else {
+                                                return false;
+                                            };
+                                            plaintext
                                         }
-                                        GrantClaims::decode(&envelope.grant)
-                                    }
-                                };
-                                claims.is_ok_and(|claims| {
-                                    claims.iss == issuer
-                                        && claims.cnf == expected_client
-                                        && claims.client_id.as_str() == "test.app"
-                                        && claims.caps == expected_caps.to_vec()
-                                })
-                            });
-                        then.status(200);
-                    })
-                    .await;
-                signer.approve_auth(link).await.unwrap();
-                delivery.assert_async().await;
+                                        None => {
+                                            let Ok(plaintext) =
+                                                decrypt(request.body_ref(), &secret)
+                                            else {
+                                                return false;
+                                            };
+                                            zeroize::Zeroizing::new(plaintext)
+                                        }
+                                    };
+                                    let Ok(text) = std::str::from_utf8(&plaintext) else {
+                                        return false;
+                                    };
+                                    let claims = match approval_format {
+                                        GrantApprovalFormat::BareGrant => GrantClaims::decode(text),
+                                        GrantApprovalFormat::SignedApprovalV1 => {
+                                            let Ok(envelope) =
+                                                decode_jws_payload::<GrantApprovalEnvelope>(text)
+                                            else {
+                                                return false;
+                                            };
+                                            if envelope.encryption_keys.scopes().collect::<Vec<_>>()
+                                                != expected_caps
+                                                    .iter()
+                                                    .filter(|cap| cap.grants_encryption_keys())
+                                                    .map(Capability::scope)
+                                                    .collect::<Vec<_>>()
+                                            {
+                                                return false;
+                                            }
+                                            GrantClaims::decode(&envelope.grant)
+                                        }
+                                    };
+                                    claims.is_ok_and(|claims| {
+                                        claims.iss == issuer
+                                            && claims.cnf == expected_client
+                                            && claims.client_id.as_str() == "test.app"
+                                            && claims.caps == expected_caps.to_vec()
+                                    })
+                                });
+                            then.status(200);
+                        })
+                        .await;
+                    signer.approve_auth(link).await.unwrap();
+                    delivery.assert_async().await;
+                }
             }
         }
     }
@@ -366,8 +411,8 @@ mod tests {
                 &Capabilities::default(),
                 ClientId::new("test.app").unwrap(),
                 Keypair::random().public_key(),
-                &[42; 32],
                 GrantApprovalFormat::BareGrant,
+                GrantRelayChannel::SharedSecret([42; 32]),
             )
             .unwrap();
         let plaintext = decrypt(&payload, &[42; 32]).unwrap();

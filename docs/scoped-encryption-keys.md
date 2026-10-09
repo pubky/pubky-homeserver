@@ -69,6 +69,7 @@ independently.
 | What | Where it appears | Values |
 | --- | --- | --- |
 | Approval format | `af` link parameter; `GrantApprovalFormat` in Rust; `approvalFormat` in JS | Bare grant (default): no parameter, `BareGrant`, `bareGrant`. Signed approval: `af=v1`, `SignedApprovalV1`, `signedApprovalV1`. |
+| Approval encryption | `epk` link parameter | 32-byte X25519 public key, base64url without padding. Required for `af=v1`; also identifies the HTTP relay channel. |
 | Key derivation | `version` field of the key bundle | `v1` |
 | Exported secret token | Token prefix | `pubky-grant-credential-v1` for bare grants; `pubky-grant-credential-v2` for signed approvals |
 | Browser session record | `version` field in IndexedDB | `pubky-session-v1` for bare grants; `pubky-session-v2` for signed approvals |
@@ -78,13 +79,15 @@ signer declined `e` and the key bundle is empty.
 
 ## Compatibility and deployment
 
-Signed approvals with `e` intentionally break compatibility. Each component
-must support them:
+Signed approvals require Hybrid Public Key Encryption (HPKE) support in signers
+and apps. Requests containing `e` also require homeserver support:
 
 - **Homeserver:** older homeservers reject any grant containing `e`. The app
   can't remove `e` from the grant to work around this: the signer signed the
   grant, and changing it invalidates the signature.
-- **Signer:** older signers can't parse links that contain `e`.
+- **Signer:** every `af=v1` request requires HPKE support, including requests
+  without `e`. Older signers expect a shared relay secret, which these links
+  omit. Requests containing `e` also require support for that action.
 - **App:** an app that requests a signed approval rejects a bare grant
   response. The SDK doesn't fall back to a bare grant.
 
@@ -97,16 +100,25 @@ Roll out support in this order:
 Requests that use only `r` and `w` remain compatible with older homeservers,
 including signed approvals without `e`.
 
+After upgrading the SDK, restart pending signed-approval flows whose saved
+authorization URL contains `secret` without `epk`. The updated SDK cannot resume
+those flows.
+
 ## Troubleshooting
 
 **The grant exchange fails after the user approved a request with `e`.**
 The user's homeserver probably predates `e` and rejected the grant. Ask the
 homeserver operator to upgrade. Until then, request storage access without `e`.
 
+**The signer cannot open a signed-approval request.**
+The signer may not support HPKE. Older signers expect a shared relay secret,
+which signed-approval links omit. Update the signer, or start a bare grant flow
+without `e`.
+
 **The app rejects the signer's response as an invalid approval.**
-The signer may not support signed approvals. An older signer can ignore
-`af=v1` and return a bare grant, which the app rejects. Update the signer,
-or start a bare grant flow without `e`.
+Check that the signer uses the requested approval format and encrypts the
+response to the request's `epk`. The app rejects bare grants for `af=v1` and
+responses it cannot decrypt with the pending HPKE private key.
 
 **The app keeps waiting after the user approved.**
 The approval may exceed the relay's body limit. The relay rejects it with HTTP
@@ -230,18 +242,34 @@ purposes, use separate HKDF context labels.
 
 ### Approval delivery
 
-The authorization link carries a shared `secret`. Its hash identifies the relay
-channel. The signer encrypts the signed approval with that secret, and the app
-decrypts it before validating it. With `af=v1`, the signer sends a signed
-approval even when it declines `e`.
+Legacy grant links carry a shared `secret` that encrypts the relay body. Its hash,
+encoded as unpadded base64url, identifies the relay channel. With `af=v1`, the
+link instead carries an ephemeral HPKE public key in `epk`. The SDK uses its
+base64url encoding as the HTTP relay channel ID. The signer encrypts the approval
+to that key and posts the HPKE ciphertext directly to the relay. No shared relay
+secret is sent to the signer. The signer sends a signed approval even when it
+declines `e`.
 
-Anyone with both the link and the relay payload can recover the keys. Keep
-authorization links and pending flow state confidential, and delete pending
-state when the flow finishes or is abandoned.
+The HPKE private key stays in the app's temporary flow state so a pending flow
+can be restored. Treat that state as sensitive and delete it when the flow
+finishes or is abandoned. A link with `epk` uses HPKE for any approval format;
+the SDK adds `epk` automatically for `af=v1`.
+
+HPKE protects approval contents if the link and relay payload are exposed
+together; link metadata remains visible. Apps that requested HPKE reject
+responses that cannot be decrypted with the pending recipient key.
 
 The signed approval is a JWS of type `pubky-grant-approval`. It binds
 `version`, `grant`, and `encryption_keys`. Each secret is 32 bytes, encoded in
 JSON as unpadded base64url.
+
+HPKE (Hybrid Public Key Encryption) uses RFC 9180 base mode with
+DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and ChaCha20Poly1305. The `info` value is
+the UTF-8 bytes of `pubky-grant-approval-hpke-v1`; associated data is empty.
+
+The HPKE message starts with the ASCII bytes of `pubky-hpke-v1` and one null byte
+(`0x00`), followed by the 32-byte encapsulated key and ciphertext. For `af=v1`,
+this message is the relay body without another encryption layer.
 
 The app checks:
 
