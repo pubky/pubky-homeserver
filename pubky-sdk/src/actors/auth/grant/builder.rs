@@ -1,3 +1,5 @@
+use std::fmt;
+
 use url::Url;
 
 use pubky_common::{
@@ -23,7 +25,7 @@ use crate::{Capabilities, PubkyHttpClient};
 /// - The signer signs a `pubky-grant` JWS instead of a legacy `AuthToken`.
 /// - The resulting [`PubkyGrantAuthFlow`] yields a grant-backed session that
 ///   self-refreshes.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GrantAuthFlowBuilder {
     caps: Capabilities,
     base_relay: Url,
@@ -34,6 +36,22 @@ pub struct GrantAuthFlowBuilder {
     client_signer: GrantPopSigner,
     x_callback: XCallbackParams,
     approval_format: GrantApprovalFormat,
+}
+
+impl fmt::Debug for GrantAuthFlowBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GrantAuthFlowBuilder")
+            .field("caps", &self.caps)
+            .field("base_relay", &self.base_relay)
+            .field("client", &self.client)
+            .field("auth_kind", &self.auth_kind)
+            .field("client_secret", &"<redacted>")
+            .field("client_id", &self.client_id)
+            .field("client_signer", &self.client_signer)
+            .field("x_callback", &self.x_callback)
+            .field("approval_format", &self.approval_format)
+            .finish()
+    }
 }
 
 impl GrantAuthFlowBuilder {

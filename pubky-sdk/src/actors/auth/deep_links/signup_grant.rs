@@ -20,7 +20,7 @@ impl DeepLinkIntent for SignupGrantIntent {
 }
 
 /// Typed parameters for grant-mode signup deep links.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignupGrantParams {
     /// Capabilities requested by the app.
     pub capabilities: Capabilities,
@@ -38,6 +38,21 @@ pub struct SignupGrantParams {
     pub client_pk: PublicKey,
     /// Relay payload format understood by the requesting client.
     pub approval_format: GrantApprovalFormat,
+}
+
+impl std::fmt::Debug for SignupGrantParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignupGrantParams")
+            .field("capabilities", &self.capabilities)
+            .field("relay", &self.relay)
+            .field("secret", &"<redacted>")
+            .field("homeserver", &self.homeserver)
+            .field("signup_token", &"<redacted>")
+            .field("client_id", &self.client_id)
+            .field("client_pk", &self.client_pk)
+            .field("approval_format", &self.approval_format)
+            .finish()
+    }
 }
 
 impl DeepLinkParams for SignupGrantParams {

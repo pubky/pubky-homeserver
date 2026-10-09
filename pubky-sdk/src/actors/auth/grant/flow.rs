@@ -85,7 +85,7 @@ pub struct GrantAuthFlowState {
 }
 
 /// Serializable state for resuming a pending delegated browser grant auth flow.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
 pub struct DelegatedGrantAuthFlowState {
     /// Original grant authorization URL shown to the signer.
@@ -96,10 +96,20 @@ pub struct DelegatedGrantAuthFlowState {
     pub client_pk: PublicKey,
 }
 
+impl fmt::Debug for DelegatedGrantAuthFlowState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DelegatedGrantAuthFlowState")
+            .field("authorization_url", &"<redacted>")
+            .field("key_id", &self.key_id)
+            .field("client_pk", &self.client_pk)
+            .finish()
+    }
+}
+
 impl fmt::Debug for GrantAuthFlowState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrantAuthFlowState")
-            .field("authorization_url", &self.authorization_url)
+            .field("authorization_url", &"<redacted>")
             .field("client_key_secret", &"<redacted>")
             .finish()
     }
@@ -132,7 +142,7 @@ impl fmt::Debug for PubkyGrantAuthFlow {
         f.debug_struct("PubkyGrantAuthFlow")
             .field("relay_listener", &self.relay_listener)
             .field("client", &self.client)
-            .field("auth_url", &self.auth_url)
+            .field("auth_url", &"<redacted>")
             .field("client_signer", &self.client_signer)
             .finish()
     }
