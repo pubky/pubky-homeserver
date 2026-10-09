@@ -11,6 +11,7 @@ mod m20260609_add_signup_code_used_at;
 mod m20260723_sanitize_capabilities;
 mod m20260921_create_entry_locks;
 mod m20261002_entry_path_c_collation;
+mod m20261008_add_entry_lock_publishing_until;
 
 pub(crate) use m20250806_create_user::M20250806CreateUserMigration;
 pub(crate) use m20250812_create_signup_code::M20250812CreateSignupCodeMigration;
@@ -25,3 +26,4 @@ pub(crate) use m20260609_add_signup_code_used_at::M20260609AddSignupCodeUsedAtMi
 pub(crate) use m20260723_sanitize_capabilities::M20260723SanitizeCapabilitiesMigration;
 pub(crate) use m20260921_create_entry_locks::M20260921CreateEntryLocksMigration;
 pub(crate) use m20261002_entry_path_c_collation::M20261002EntryPathCCollationMigration;
+pub(crate) use m20261008_add_entry_lock_publishing_until::M20261008AddEntryLockPublishingUntilMigration;

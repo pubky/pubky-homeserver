@@ -28,10 +28,11 @@
 //! the operator, cannot stop it halfway. A writer dropped before it closes, as
 //! a disconnect mid-upload does, discards its staged bytes the same way.
 //!
-//! A disconnect also drops the request's lock keep-alive, so a lock can expire
-//! before its write is finalized. The finalization then refuses the write
-//! rather than let it land on top of the next holder, see
-//! [`write_finalization_layer::write_lock`].
+//! A write under a lock reserves the lock for as long as its publish can
+//! still reach the backend, so the lock cannot change hands under it and a
+//! stalled publish can never land on top of the next holder. A write whose
+//! lock is gone, or still reserved for an earlier change, is refused before
+//! it publishes. See [`write_finalization_layer::write_lock`].
 //!
 //! One limit of that task: a runtime shutdown that cancels it leaves the
 //! staged upload neither published nor aborted.
