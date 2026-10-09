@@ -1,11 +1,14 @@
 use super::*;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use pubky_testnet::pubky::deep_links::GrantApprovalFormat;
 use pubky_testnet::pubky_common::{
     auth::{
         grant::GrantClaims,
         jws::{GrantId, GRANT_JWS_TYP},
     },
     crypto::PublicKey,
+    encryption_keys::ScopedEncryptionKeyBundle,
+    StoragePath,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 // =====================================================================
@@ -16,6 +19,80 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // (Ring) signs a `pubky-grant` JWS, the homeserver mints an opaque bearer, and
 // the SDK transparently attaches `Authorization: Bearer ...` on every
 // subsequent request.
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn signed_approval_storage_and_encryption_permissions_are_independent() {
+    let testnet = build_full_testnet().await;
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer
+        .signup(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let path = StoragePath::new("/priv/chat/keys/message").unwrap();
+
+    for (requested, key_scope, storage_allowed) in [
+        ("/:rw", None, true),
+        ("/:rw,/priv/chat/keys/:e", Some("/priv/chat/keys/"), true),
+        ("/priv/chat/keys/:e", Some("/priv/chat/keys/"), false),
+        ("/:rwe", Some("/"), true),
+    ] {
+        let caps = requested.parse().unwrap();
+        let flow = PubkyGrantAuthFlow::builder(
+            &caps,
+            AuthFlowKind::signin(),
+            ClientId::new("backup.test").unwrap(),
+        )
+        .approval_format(GrantApprovalFormat::SignedApprovalV1)
+        .relay(testnet.http_relay().local_link_url())
+        .client(pubky.client().clone())
+        .start()
+        .unwrap();
+        signer.approve_auth(flow.authorization_url()).await.unwrap();
+        let credential = flow.await_credential().await.unwrap();
+        let keys = credential.encryption_keys().unwrap();
+        assert_eq!(
+            keys.scopes().map(ToString::to_string).collect::<Vec<_>>(),
+            key_scope.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(keys.derive_for_path(&path).is_ok(), key_scope.is_some());
+        if key_scope == Some("/priv/chat/keys/") {
+            assert!(keys
+                .derive_for_path(&StoragePath::new("/priv/chat/archive").unwrap())
+                .is_err());
+        }
+        let exported = credential.export_local_secret().await.unwrap();
+        let session = PubkySession::from_grant_credential(pubky.client().clone(), credential);
+        let write = session
+            .storage()
+            .put(path.as_str(), b"opaque ciphertext".to_vec())
+            .await;
+        let read = session.storage().get(path.as_str()).await;
+        if storage_allowed {
+            write.unwrap();
+            assert_eq!(
+                read.unwrap().bytes().await.unwrap().as_ref(),
+                b"opaque ciphertext"
+            );
+        } else {
+            for error in [write.unwrap_err(), read.unwrap_err()] {
+                assert!(
+                    matches!(error, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::FORBIDDEN)
+                );
+            }
+        }
+        session.signout().await.unwrap();
+        let (_, recovered) =
+            pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&exported)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            recovered.derive_for_path(&path).is_ok(),
+            key_scope.is_some()
+        );
+    }
+}
 
 #[tokio::test]
 #[pubky_testnet::test]
@@ -33,7 +110,11 @@ async fn signer_signup_signin_write_file() {
     let session = signer.signin(client_id).await.unwrap();
 
     assert_eq!(session.info().public_key(), &signer.public_key());
-    assert!(session.info().capabilities().contains(&Capability::root()));
+    assert!(session
+        .info()
+        .capabilities()
+        .iter()
+        .any(Capability::is_root));
 
     // Write sample file to verify the session works.
     let response = session
@@ -57,7 +138,8 @@ async fn auth_flow() {
     let http_relay_url = testnet.http_relay().local_link_url();
 
     // 1. Signer (Ring) creates the user.
-    let signer = pubky.signer(Keypair::random());
+    let identity = Keypair::random();
+    let signer = pubky.signer(identity.clone());
     signer.signup(&server.public_key(), None).await.unwrap();
 
     // 2. Third-party app starts an auth flow with a `client_id` — this
@@ -66,7 +148,11 @@ async fn auth_flow() {
     let caps = Capabilities::builder()
         .read_write("/pub/pubky.app/")
         .unwrap()
+        .encryption_keys("/pub/pubky.app/")
+        .unwrap()
         .read("/pub/foo.bar/file")
+        .unwrap()
+        .encryption_keys("/pub/foo.bar/file")
         .unwrap()
         .finish();
     let app_kp = Keypair::random();
@@ -75,6 +161,7 @@ async fn auth_flow() {
         AuthFlowKind::signin(),
         ClientId::new("test.app").unwrap(),
     )
+    .approval_format(GrantApprovalFormat::SignedApprovalV1)
     .relay(http_relay_url)
     .client(pubky.client().clone())
     .client_keypair(app_kp.clone())
@@ -93,17 +180,219 @@ async fn auth_flow() {
         "deep link must contain cpk: {query_string}"
     );
 
-    // 3. Signer approves — produces a `pubky-grant` JWS.
+    let state = auth.save_local().unwrap();
+    drop(auth);
+    let auth = PubkyGrantAuthFlow::restore(state, pubky.client().clone()).unwrap();
+
+    // 3. Signer approves — delivers a signed envelope with the grant and keys.
     signer
         .approve_auth(&auth.authorization_url())
         .await
         .unwrap();
 
-    // 4. App receives the grant and exchanges it for a grant session.
-    let session = auth.await_approval().await.unwrap();
+    // 4. App verifies the envelope, retains keys, and exchanges only the grant.
+    let credential = auth.await_credential().await.unwrap();
+    let path = StoragePath::new("/pub/pubky.app/message").unwrap();
+    let expected = ScopedEncryptionKeyBundle::from_identity_secret(&identity.secret(), [&path]);
+    let derived = credential
+        .encryption_keys()
+        .unwrap()
+        .derive_for_path(&path)
+        .unwrap();
+    assert_eq!(*derived, *expected.derive_for_path(&path).unwrap());
+    let session = PubkySession::from_grant_credential(pubky.client().clone(), credential);
     assert_eq!(session.info().public_key(), &signer.public_key());
 
-    assert_scoped_write_access(&session).await;
+    let cloned = session.clone();
+    session.as_grant().unwrap().force_refresh().await.unwrap();
+    assert_eq!(
+        *cloned
+            .as_grant()
+            .unwrap()
+            .encryption_keys()
+            .unwrap()
+            .derive_for_path(&path)
+            .unwrap(),
+        *derived,
+        "session cloning and bearer refresh must retain the approved keys",
+    );
+    assert!(cloned
+        .as_grant()
+        .unwrap()
+        .encryption_keys()
+        .unwrap()
+        .derive_for_path(&StoragePath::root())
+        .is_err());
+    let exported = session
+        .as_grant()
+        .unwrap()
+        .export_local_secret()
+        .await
+        .unwrap();
+    let restored = pubky.restore_session(&exported).await.unwrap();
+    assert_eq!(
+        *restored
+            .as_grant()
+            .unwrap()
+            .encryption_keys()
+            .unwrap()
+            .derive_for_path(&path)
+            .unwrap(),
+        *derived,
+    );
+    assert!(restored
+        .as_grant()
+        .unwrap()
+        .encryption_keys()
+        .unwrap()
+        .derive_for_path(&StoragePath::root())
+        .is_err());
+    assert_scoped_write_access(&restored).await;
+    restored.signout().await.unwrap();
+    let (_, recovered) = pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&exported)
+        .unwrap()
+        .unwrap();
+    assert_eq!(*recovered.derive_for_path(&path).unwrap(), *derived);
+    let error = pubky.restore_session(&exported).await.unwrap_err();
+    assert!(
+        matches!(error, Error::Request(RequestError::Server { status, .. })
+        if status == StatusCode::UNAUTHORIZED)
+    );
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn multi_scope_key_approvals_use_the_default_relay_limit() {
+    let testnet = build_full_testnet().await;
+    let pubky = testnet.sdk().unwrap();
+    let identity = Keypair::random();
+    let signer = pubky.signer(identity.clone());
+    signer
+        .signup(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let mut capabilities = Capabilities::builder();
+    for index in 0..5 {
+        capabilities = capabilities
+            .read_write(format!("/pub/app{index}.example/"))
+            .unwrap()
+            .encryption_keys(format!("/pub/app{index}.example/"))
+            .unwrap();
+    }
+    let capabilities = capabilities.finish();
+    for relay_path in ["/link", "/inbox"] {
+        let mut relay = testnet.http_relay().local_link_url();
+        relay.set_path(relay_path);
+        let flow = PubkyGrantAuthFlow::builder(
+            &capabilities,
+            AuthFlowKind::signin(),
+            ClientId::new("shop.example").unwrap(),
+        )
+        .approval_format(GrantApprovalFormat::SignedApprovalV1)
+        .relay(relay)
+        .client(pubky.client().clone())
+        .start()
+        .unwrap();
+        signer
+            .approve_auth(&flow.authorization_url())
+            .await
+            .unwrap();
+        let credential = flow.await_credential().await.unwrap();
+        let keys = credential.encryption_keys().unwrap();
+        assert_eq!(keys.scopes().len(), 5);
+        for index in 0..5 {
+            let path = StoragePath::new(&format!("/pub/app{index}.example/file")).unwrap();
+            let expected =
+                ScopedEncryptionKeyBundle::from_identity_secret(&identity.secret(), [&path]);
+            assert_eq!(
+                *keys.derive_for_path(&path).unwrap(),
+                *expected.derive_for_path(&path).unwrap(),
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn delegated_restore_keeps_keys_separate_from_public_metadata() {
+    let testnet = build_full_testnet().await;
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer
+        .signup(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let client_key = Keypair::random();
+    let client_pk = client_key.public_key();
+    let sign = pubky_testnet::pubky::delegated_sign_callback(move |input| {
+        let key = client_key.clone();
+        async move { Ok(key.sign(input.as_bytes()).to_bytes().to_vec()) }
+    });
+    let caps = Capabilities::builder()
+        .read("/pub/chat/")
+        .unwrap()
+        .encryption_keys("/pub/chat/")
+        .unwrap()
+        .finish();
+    let auth = PubkyGrantAuthFlow::builder(
+        &caps,
+        AuthFlowKind::signin(),
+        ClientId::new("delegated-keys.test").unwrap(),
+    )
+    .approval_format(GrantApprovalFormat::SignedApprovalV1)
+    .delegated_client_signer("test-key".into(), client_pk, sign.clone())
+    .client(pubky.client().clone())
+    .relay(testnet.http_relay().local_link_url())
+    .start()
+    .unwrap();
+    let saved = auth.save_delegated().unwrap();
+    drop(auth);
+    let auth =
+        PubkyGrantAuthFlow::restore_delegated(saved, pubky.client().clone(), sign.clone()).unwrap();
+    signer
+        .approve_auth(&auth.authorization_url())
+        .await
+        .unwrap();
+    let credential = auth.await_credential().await.unwrap();
+    assert!(credential.export_local_secret().await.is_none());
+    let state = credential.export_delegated_restore_state().await.unwrap();
+    let path = StoragePath::new("/pub/chat/message").unwrap();
+    let key = credential
+        .encryption_keys()
+        .unwrap()
+        .derive_for_path(&path)
+        .unwrap();
+    let approval = credential.signed_approval().unwrap();
+    let restored = pubky_testnet::pubky::GrantCredential::import_delegated_state(
+        state.clone(),
+        pubky.client(),
+        sign.clone(),
+        Some(approval),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *restored
+            .encryption_keys()
+            .unwrap()
+            .derive_for_path(&path)
+            .unwrap(),
+        *key
+    );
+    assert!(restored
+        .encryption_keys()
+        .unwrap()
+        .derive_for_path(&StoragePath::root())
+        .is_err());
+    let legacy = pubky_testnet::pubky::GrantCredential::import_delegated_state(
+        state,
+        pubky.client(),
+        sign,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(legacy.encryption_keys().is_none());
 }
 
 #[tokio::test]
@@ -113,10 +402,11 @@ async fn grant_secret_restore_mints_fresh_bearer() {
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
 
-    let signer = pubky.signer(Keypair::random());
+    let identity = Keypair::random();
+    let signer = pubky.signer(identity.clone());
     signer.signup(&server.public_key(), None).await.unwrap();
     let session = signer
-        .signin(ClientId::new("restore-bearer.test").unwrap())
+        .signin_blocking(ClientId::new("restore-bearer.test").unwrap())
         .await
         .unwrap();
 
@@ -130,6 +420,21 @@ async fn grant_secret_restore_mints_fresh_bearer() {
 
     let restored = pubky.restore_session(&secret_token).await.unwrap();
     let restored_bearer = restored.as_grant().unwrap().current_bearer().await;
+    assert!(secret_token.starts_with("pubky-grant-credential-v1:"));
+    for candidate in [&session, &restored] {
+        let grant = candidate.as_grant().unwrap();
+        assert!(grant.encryption_keys().is_none());
+        assert!(grant.signed_approval().is_none());
+        assert_eq!(
+            candidate.info().capabilities(),
+            &[pubky_testnet::pubky::Capability::root()]
+        );
+    }
+    assert!(
+        pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&secret_token)
+            .unwrap()
+            .is_none()
+    );
 
     assert_ne!(
         original_bearer, restored_bearer,
@@ -166,7 +471,18 @@ async fn grant_secret_restore_rejects_revoked_grant() {
         .export_local_secret()
         .await
         .unwrap();
+    assert!(secret_token.starts_with("pubky-grant-credential-v1:"));
+    assert!(session.as_grant().unwrap().encryption_keys().is_none());
+    assert_eq!(
+        session.info().capabilities(),
+        &[pubky_testnet::pubky::Capability::root()]
+    );
     session.signout().await.unwrap();
+    assert!(
+        pubky_testnet::pubky::GrantCredential::restore_encryption_keys(&secret_token)
+            .unwrap()
+            .is_none()
+    );
 
     let err = pubky.restore_session(&secret_token).await.unwrap_err();
 
@@ -273,6 +589,7 @@ async fn auth_flow_survives_long_poll_timeout() {
 
     let session = auth.await_approval().await.unwrap();
     assert_eq!(session.info().public_key(), &signer_pubky);
+    assert!(session.as_grant().unwrap().encryption_keys().is_none());
 
     assert_scoped_write_access(&session).await;
 }
@@ -672,12 +989,15 @@ async fn auth_flow_signup_creates_scoped_session() {
     let caps = Capabilities::builder()
         .read_write("/pub/signup.app/")
         .unwrap()
+        .encryption_keys("/pub/signup.app/")
+        .unwrap()
         .finish();
     let auth = PubkyGrantAuthFlow::builder(
         &caps,
         AuthFlowKind::signup(server.public_key(), None),
         ClientId::new("signup.app").unwrap(),
     )
+    .approval_format(GrantApprovalFormat::SignedApprovalV1)
     .relay(http_relay_url)
     .client(pubky.client().clone())
     .start()
@@ -693,6 +1013,7 @@ async fn auth_flow_signup_creates_scoped_session() {
 
     let session = auth.await_approval().await.unwrap();
     assert_eq!(session.info().public_key(), &signer.public_key());
+    assert!(session.as_grant().unwrap().encryption_keys().is_some());
 
     // The freshly created user can write inside the grant's scope.
     session

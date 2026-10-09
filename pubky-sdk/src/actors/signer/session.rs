@@ -79,6 +79,8 @@ impl PubkySigner {
     /// Locally signs a root-capability grant and exchanges it for a
     /// session at the homeserver. If the user's PKDNS record is stale,
     /// it is republished **in the background** so this call returns fast.
+    /// Grants root storage access (`/:rw`) without encryption keys. To receive
+    /// keys, explicitly request `e` through [`crate::PubkyGrantAuthFlow`].
     ///
     /// # Arguments
     /// - `client_id` — a [`ClientId`] identifying your application (e.g.

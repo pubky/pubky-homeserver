@@ -183,11 +183,21 @@ impl Drop for AuthRelayListener {
 /// Builder for [`AuthRelayListener`].
 ///
 /// Use to override the HTTP relay and/or the `PubkyHttpClient`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthRelayListenerBuilder {
     relay_base_url: Url,
     secret: [u8; 32],
     client: Option<PubkyHttpClient>,
+}
+
+impl fmt::Debug for AuthRelayListenerBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthRelayListenerBuilder")
+            .field("relay_base_url", &self.relay_base_url)
+            .field("secret", &"<redacted>")
+            .field("client", &self.client)
+            .finish()
+    }
 }
 
 #[allow(deprecated, reason = "Internal use of deprecated public API")]

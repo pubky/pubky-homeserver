@@ -130,3 +130,16 @@ test("signup grant deep link valid", async (t) => {
 
   t.end();
 });
+
+
+test("signed approval links keep the shared relay secret", (t) => {
+  const base = `pubkyauth://signin_grant?caps=/pub/chat/:rwe&relay=${TESTNET_HTTP_RELAY}&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=chat.example&cpk=${CLIENT_PUBLICKEY.z32()}`;
+  const link = SigninGrantDeepLink.parse(`${base}&af=v1`);
+  t.equal(link.approvalFormat, "signedApprovalV1");
+  t.equal(link.secret.length, 32);
+  t.equal(SigninGrantDeepLink.parse(link.toString()).approvalFormat, "signedApprovalV1");
+  for (const suffix of ["", "&af=v2", "&af=v1&af=v1"]) {
+    t.throws(() => SigninGrantDeepLink.parse(`${base}${suffix}`));
+  }
+  t.end();
+});

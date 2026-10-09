@@ -355,11 +355,11 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   const signupToken = await createSignupToken();
   await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
 
-  const capabilities = "/pub/pubky.app/:rw";
+  const capabilities = "/pub/pubky.app/:rwe";
   const originalFlow = await sdk.startGrantAuthFlow(
     capabilities,
     AuthFlowKind.signin(),
-    { clientId: "grant-resume-js.test", relay: TESTNET_HTTP_RELAY },
+    { clientId: "grant-resume-js.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "signedApprovalV1" },
   );
   const savedUrl = originalFlow.authorizationUrl;
   let savedState: string;
@@ -370,6 +370,8 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   } catch (_error) {
     savedState = originalFlow.saveLocal();
   }
+  t.notOk(new URL(savedUrl).searchParams.has("ek"), "link needs no recipient key");
+  t.ok(new URL(savedUrl).searchParams.has("secret"), "signed approval uses the shared relay secret");
   originalFlow.free();
 
   await signer.approveAuthRequest(savedUrl);
@@ -394,6 +396,9 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
     capabilities.split(","),
     "resumed grant session capabilities match",
   );
+  const keys = session.grant!.encryptionKeys!;
+  t.deepEqual(keys.scopes, ["/pub/pubky.app/"], "resumed signed approval flow decrypts scoped keys");
+  keys.free();
 
   t.end();
 });

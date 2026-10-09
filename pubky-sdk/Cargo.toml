@@ -44,6 +44,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 httpdate.workspace = true
 web-time = "1"
+zeroize = "1"
 # Cross-target async sync primitives. The `sync` feature is portable to
 # `wasm32-unknown-unknown` (see tokio's platform support docs); the native
 # target adds the full feature set in its own section below.
@@ -102,6 +103,9 @@ perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
 # nursery = { level = "warn", priority = -1 }
+
+# Reserve must_use for builders and results whose omission can cause mistakes.
+must_use_candidate = "allow"
 
 # Select restriction-group lints for consistency and safety
 allow_attributes_without_reason = "warn"

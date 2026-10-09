@@ -95,6 +95,16 @@ impl SignupGrantDeepLink {
         PublicKey(self.0.params().client_pk.clone())
     }
 
+    /// Negotiated approval format: `bareGrant` or `signedApprovalV1`.
+    #[wasm_bindgen(js_name = "approvalFormat", getter)]
+    pub fn approval_format(&self) -> String {
+        match self.0.params().approval_format {
+            pubky::deep_links::GrantApprovalFormat::BareGrant => "bareGrant",
+            pubky::deep_links::GrantApprovalFormat::SignedApprovalV1 => "signedApprovalV1",
+        }
+        .to_owned()
+    }
+
     /// Optional x-callback-url metadata carried by this deep link.
     #[wasm_bindgen(js_name = "xCallback", getter)]
     pub fn x_callback(&self) -> JsResult<Ts<XCallbackParams>> {

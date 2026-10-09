@@ -140,6 +140,7 @@ mod tests {
                 let signature = signing_key.sign(input.as_bytes()).to_bytes().to_vec();
                 async move { Ok(signature) }
             }),
+            None,
         )
         .unwrap();
         (credential, key)

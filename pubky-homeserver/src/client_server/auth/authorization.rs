@@ -126,6 +126,7 @@ fn session_has_action(
     let what = match action {
         Action::Read => "read access",
         Action::Write => "write access",
+        Action::EncryptionKeys => "encryption key access",
         Action::Unknown(_) => "access",
     };
     Err(HttpError::forbidden_with_message(format!(
@@ -187,6 +188,21 @@ mod tests {
             .expect_err("expected the read to be rejected")
             .into_response()
             .status()
+    }
+
+    #[test]
+    fn encryption_key_permission_does_not_grant_private_storage_access() {
+        let caps = Capabilities::builder()
+            .encryption_keys("/priv/app/")
+            .unwrap()
+            .finish();
+        let (session, pubky) = session_with_caps(caps);
+        let path = web_path("/priv/app/file");
+        assert!(has_write_permission(&session, &pubky, &path).is_err());
+        assert_eq!(
+            read_rejection_status(has_read_permission(Some(&session), Some(&pubky), &path)),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
