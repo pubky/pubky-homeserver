@@ -531,6 +531,22 @@ mod tests {
     use pkarr::{Cache, InMemoryCache, dns::rdata::TXT};
 
     #[tokio::test]
+    #[ignore = "requires access to the public Pkarr network"]
+    async fn get_homeserver_of_resolves_known_user() {
+        let user = PublicKey::try_from_z32("w79nsmujodq6up1heoh6y3mxk4k7xa6e94ma15fbdhopffy8nhgy")
+            .expect("valid user public key");
+        let pkdns = Pkdns::new().expect("Pkdns client");
+
+        let homeserver = pkdns
+            .get_homeserver_of(&user)
+            .await
+            .expect("homeserver lookup should succeed")
+            .expect("user should have a homeserver record");
+
+        eprintln!("resolved homeserver: {homeserver}");
+    }
+
+    #[tokio::test]
     async fn require_homeserver_of_returns_validation_when_packet_has_no_pubky_record() {
         let user = Keypair::random();
         let mut dnslink_txt = TXT::new();
