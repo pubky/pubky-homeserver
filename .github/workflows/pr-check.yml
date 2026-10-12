@@ -43,14 +43,14 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Lint (host targets)
-        run: cargo clippy --workspace --all-features --all-targets --exclude pubky-wasm -- -D warnings
+      - name: Lint host crates and all Cargo targets
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-      - name: Add wasm target
+      - name: Install WASM compilation target
         run: rustup target add wasm32-unknown-unknown
 
-      - name: Lint wasm crate (wasm32)
-        run: cargo clippy -p pubky-wasm --target wasm32-unknown-unknown -- -D warnings
+      - name: Lint WASM bindings and tests
+        run: cargo clippy -p pubky-wasm --lib --tests --target wasm32-unknown-unknown -- -D warnings
 
   helper-crates:
     runs-on: ubuntu-latest
