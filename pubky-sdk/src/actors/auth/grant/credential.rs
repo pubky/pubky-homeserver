@@ -984,14 +984,12 @@ mod tests {
             *keys.derive_for_path(&path).unwrap(),
             *expected.derive_for_path(&path).unwrap()
         );
-        assert!(
-            keys.derive_for_path(&pubky_common::StoragePath::new("/pub/other/file").unwrap())
-                .is_err()
-        );
+        keys.derive_for_path(&pubky_common::StoragePath::new("/pub/other/file").unwrap())
+            .unwrap_err();
         assert!(!format!("{decoded:?}").contains(signed.as_str()));
 
         let (other, _) = stored_credential(now_unix() + 3600);
-        assert!(restore_verified_approval(Some(&signed), &other.grant_jws).is_err());
+        restore_verified_approval(Some(&signed), &other.grant_jws).unwrap_err();
         let mut tampered = signed.as_bytes().to_vec();
         let signature_start = signed.rfind('.').unwrap() + 1;
         tampered[signature_start] = if tampered[signature_start] == b'A' {
@@ -999,13 +997,11 @@ mod tests {
         } else {
             b'A'
         };
-        assert!(
-            restore_verified_approval(
-                Some(std::str::from_utf8(&tampered).unwrap()),
-                &stored.grant_jws
-            )
-            .is_err()
-        );
+        restore_verified_approval(
+            Some(std::str::from_utf8(&tampered).unwrap()),
+            &stored.grant_jws,
+        )
+        .unwrap_err();
     }
 
     fn expired_key_credential() -> (
@@ -1069,14 +1065,10 @@ mod tests {
                 *keys.derive_for_path(&path).unwrap(),
                 *expected.derive_for_path(&path).unwrap()
             );
-            assert!(
-                keys.derive_for_path(&pubky_common::StoragePath::new("/pub/other/file").unwrap())
-                    .is_err()
-            );
-            assert!(
-                keys.derive_for_path(&pubky_common::StoragePath::new("/pub/chat/").unwrap())
-                    .is_err()
-            );
+            keys.derive_for_path(&pubky_common::StoragePath::new("/pub/other/file").unwrap())
+                .unwrap_err();
+            keys.derive_for_path(&pubky_common::StoragePath::new("/pub/chat/").unwrap())
+                .unwrap_err();
         }
         assert!(
             restore_material(saved, false)
@@ -1098,15 +1090,13 @@ mod tests {
         let signed = saved.signed_approval.clone().unwrap();
         let (other, _) = stored_credential(now_unix() + 3600);
         delegated.grant_jws = other.grant_jws.clone();
-        assert!(
-            GrantCredential::restore_encryption_keys_from_approval(
-                &delegated.grant_jws,
-                Some(signed.as_str())
-            )
-            .is_err()
-        );
+        GrantCredential::restore_encryption_keys_from_approval(
+            &delegated.grant_jws,
+            Some(signed.as_str()),
+        )
+        .unwrap_err();
         let original_grant = std::mem::replace(&mut saved.grant_jws, other.grant_jws);
-        assert!(GrantCredential::restore_encryption_keys(&saved.encode()).is_err());
+        GrantCredential::restore_encryption_keys(&saved.encode()).unwrap_err();
         saved.grant_jws = original_grant;
         delegated.grant_jws = saved.grant_jws.clone();
 
@@ -1119,24 +1109,20 @@ mod tests {
         };
         let tampered = Zeroizing::new(String::from_utf8(tampered).unwrap());
         saved.signed_approval = Some(SignedApproval::new(&tampered));
-        assert!(GrantCredential::from_shared_secret(&saved.encode()).is_err());
-        assert!(
-            GrantCredential::from_shared_delegated_state(
-                delegated.clone(),
-                test_delegated_signer(),
-                Some(&tampered),
-            )
-            .is_err()
-        );
-        assert!(GrantCredential::restore_encryption_keys(&saved.encode()).is_err());
-        assert!(
-            GrantCredential::restore_encryption_keys_from_approval(
-                &delegated.grant_jws,
-                Some(&tampered)
-            )
-            .is_err()
-        );
-        assert!(GrantCredential::restore_encryption_keys("malformed").is_err());
+        GrantCredential::from_shared_secret(&saved.encode()).unwrap_err();
+        GrantCredential::from_shared_delegated_state(
+            delegated.clone(),
+            test_delegated_signer(),
+            Some(&tampered),
+        )
+        .unwrap_err();
+        GrantCredential::restore_encryption_keys(&saved.encode()).unwrap_err();
+        GrantCredential::restore_encryption_keys_from_approval(
+            &delegated.grant_jws,
+            Some(&tampered),
+        )
+        .unwrap_err();
+        GrantCredential::restore_encryption_keys("malformed").unwrap_err();
     }
 
     #[test]
@@ -1163,8 +1149,8 @@ mod tests {
             STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX,
             1,
         );
-        assert!(StoredGrantCredential::decode(&token).is_err());
-        assert!(StoredGrantCredential::decode(&format!("{token}:")).is_err());
+        StoredGrantCredential::decode(&token).unwrap_err();
+        StoredGrantCredential::decode(&format!("{token}:")).unwrap_err();
     }
 
     #[test]

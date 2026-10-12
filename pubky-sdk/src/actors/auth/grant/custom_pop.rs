@@ -207,7 +207,7 @@ mod tests {
 
         let (credential, _) = credential_with_issue_offset(20);
         let proof = credential.create_custom_pop(json!(null)).await.unwrap();
-        assert!(verify_custom_grant_pop(&proof, DEFAULT_CUSTOM_POP_CLOCK_SKEW).is_ok());
+        verify_custom_grant_pop(&proof, DEFAULT_CUSTOM_POP_CLOCK_SKEW).unwrap();
         assert!(matches!(
             verify_custom_grant_pop(&proof, Duration::ZERO),
             Err(CustomPopVerificationError::GrantNotYetValid)
@@ -219,7 +219,7 @@ mod tests {
             verify_custom_grant_pop(&proof, DEFAULT_CUSTOM_POP_CLOCK_SKEW),
             Err(CustomPopVerificationError::GrantNotYetValid)
         ));
-        assert!(verify_custom_grant_pop(&proof, Duration::from_secs(120)).is_ok());
+        verify_custom_grant_pop(&proof, Duration::from_secs(120)).unwrap();
     }
 
     #[tokio::test]
@@ -257,7 +257,7 @@ mod tests {
             state.grant_jws.clone_from(&replacement.grant_jws);
             state.grant_claims.clone_from(&replacement.grant_claims);
             state.client_signer = replacement.client_signer.clone();
-        }
+        };
         resume.notify_one();
         let proof = task.await.unwrap().unwrap();
         assert_eq!(proof.grant, original);

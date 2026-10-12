@@ -267,6 +267,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The test covers both formats, relay paths, and signup modes."
+    )]
     async fn grant_signin_and_signup_deliver_the_negotiated_format_to_the_relay() {
         let signer = Pubky::with_client(PubkyHttpClient::new().unwrap()).signer(Keypair::random());
         let client_pk = Keypair::random().public_key();
@@ -305,7 +309,7 @@ mod tests {
             for relay_path in ["inbox", "link"] {
                 for signup in [false, true] {
                     let server = MockServer::start_async().await;
-                    let relay = Url::parse(&server.url(&format!("/{relay_path}/"))).unwrap();
+                    let relay = Url::parse(&server.url(format!("/{relay_path}/"))).unwrap();
                     let channel_id = relay_channel.http_channel_id();
                     let callback = PubkySigner::derive_callback_url(&relay, &channel_id).unwrap();
                     let link = if signup {
@@ -346,22 +350,18 @@ mod tests {
                             when.method(POST)
                                 .path(callback.path())
                                 .is_true(move |request| {
-                                    let plaintext = match &approval_recipient {
-                                        Some(recipient) => {
-                                            let Ok(plaintext) = recipient.open(request.body_ref())
-                                            else {
-                                                return false;
-                                            };
-                                            plaintext
-                                        }
-                                        None => {
-                                            let Ok(plaintext) =
-                                                decrypt(request.body_ref(), &secret)
-                                            else {
-                                                return false;
-                                            };
-                                            zeroize::Zeroizing::new(plaintext)
-                                        }
+                                    let plaintext = if let Some(recipient) = &approval_recipient {
+                                        let Ok(plaintext) = recipient.open(request.body_ref())
+                                        else {
+                                            return false;
+                                        };
+                                        plaintext
+                                    } else {
+                                        let Ok(plaintext) = decrypt(request.body_ref(), &secret)
+                                        else {
+                                            return false;
+                                        };
+                                        zeroize::Zeroizing::new(plaintext)
                                     };
                                     let Ok(text) = std::str::from_utf8(&plaintext) else {
                                         return false;

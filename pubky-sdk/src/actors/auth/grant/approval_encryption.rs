@@ -114,13 +114,11 @@ mod tests {
         let ciphertext = seal(&public_key, plaintext).unwrap();
 
         assert_eq!(&*recipient.open(&ciphertext).unwrap(), plaintext);
-        assert!(
-            ApprovalRecipientSecret::generate()
-                .0
-                .open(&ciphertext)
-                .is_err()
-        );
-        assert!(recipient.open(plaintext).is_err());
+        ApprovalRecipientSecret::generate()
+            .0
+            .open(&ciphertext)
+            .unwrap_err();
+        recipient.open(plaintext).unwrap_err();
     }
 
     #[test]
@@ -138,6 +136,6 @@ mod tests {
             .unwrap();
         let forged_message = seal(&relay_visible_key, b"forged approval").unwrap();
 
-        assert!(recipient.open(&forged_message).is_err());
+        recipient.open(&forged_message).unwrap_err();
     }
 }

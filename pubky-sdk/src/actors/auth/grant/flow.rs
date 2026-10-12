@@ -683,7 +683,7 @@ mod tests {
                 .sign(&user, pubky_common::auth::jws::GRANT_JWS_TYP)
                 .into_bytes(),
         );
-        assert!(decode_signed_approval(&bare).is_err());
+        decode_signed_approval(&bare).unwrap_err();
     }
 
     #[test]
@@ -971,14 +971,12 @@ mod tests {
             .unwrap();
         let legacy_message =
             crate::actors::auth::relay::AuthRelayMessage::new(signed_approval.as_bytes().to_vec());
-        assert!(
-            decode_and_validate_approval(
-                &legacy_message,
-                &request,
-                restored.approval_key_secret.as_ref(),
-            )
-            .is_err()
-        );
+        decode_and_validate_approval(
+            &legacy_message,
+            &request,
+            restored.approval_key_secret.as_ref(),
+        )
+        .unwrap_err();
         assert_eq!(
             DeepLink::from_str(restored.authorization_url().as_str())
                 .unwrap()
