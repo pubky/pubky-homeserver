@@ -160,8 +160,9 @@ impl SessionStorage {
     /// @param {string} body
     /// @returns {Promise<void>}
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
-    /// `RequestError` and status `412`; take a new one and read the file again.
-    /// Otherwise as {@link SessionStorage.putText}.
+    /// `RequestError` and status `412`; take a new one and read the file again. A file
+    /// the storage backend found changed since the write was prepared rejects with status
+    /// `409`; read it again and retry. Otherwise as {@link SessionStorage.putText}.
     #[wasm_bindgen(js_name = "putTextLocked")]
     pub async fn put_text_locked(&self, lock: &StorageLock, body: &str) -> JsResult<()> {
         self.0
@@ -175,7 +176,8 @@ impl SessionStorage {
     /// @param {StorageLock} lock A lock this client holds.
     /// @returns {Promise<void>}
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
-    /// `RequestError` and status `412`; take a new one.
+    /// `RequestError` and status `412`; take a new one. A file the storage backend found
+    /// changed since the delete was prepared rejects with status `409`.
     /// Otherwise as {@link SessionStorage.delete}.
     #[wasm_bindgen(js_name = "deleteLocked")]
     pub async fn delete_locked(&self, lock: &StorageLock) -> JsResult<()> {

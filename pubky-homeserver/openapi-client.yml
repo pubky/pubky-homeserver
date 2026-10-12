@@ -616,7 +616,7 @@ paths:
             capability for the path, the path is outside `pub/` and `priv/`,
             or the user account is disabled.
         '409':
-          description: File/folder path collision.
+          description: File/folder path collision, or the storage backend found the file changed since the write was prepared (see Locking); read it again and retry.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
         '423':
@@ -652,6 +652,8 @@ paths:
           description: Insufficient permissions or path outside `pub/` and `priv/`.
         '404':
           description: File or storage owner not found.
+        '409':
+          description: The storage backend found the file changed since the delete was prepared (see Locking); read it again and retry.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
         '423':
@@ -899,7 +901,7 @@ paths:
             Session user does not match target tenant, path is outside `/pub/` and
             `/priv/`, session lacks write capability for path, or user account is disabled.
         '409':
-          description: File/folder path collision
+          description: File/folder path collision, or the storage backend found the file changed since the write was prepared (see Locking)
         '412':
           description: The `If` header names a token that is not the live lock on this path
         '423':
@@ -931,6 +933,8 @@ paths:
           description: Insufficient permissions or path outside `/pub/` and `/priv/`
         '404':
           description: File not found
+        '409':
+          description: The storage backend found the file changed since the delete was prepared (see Locking)
         '412':
           description: The `If` header names a token that is not the live lock on this path
         '423':

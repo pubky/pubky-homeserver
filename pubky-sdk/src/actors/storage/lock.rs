@@ -156,7 +156,9 @@ impl SessionStorage {
     /// A lock that has expired or was unlocked returns 412; take a new one and
     /// read the file again. A lock still reserved for an earlier write of this
     /// client, one the homeserver could not confirm, returns 423 with a
-    /// `Retry-After`. Otherwise as [`Self::put`](SessionStorage::put).
+    /// `Retry-After`. A file the storage backend found changed since the
+    /// write was prepared returns 409; read it again and retry. Otherwise as
+    /// [`Self::put`](SessionStorage::put).
     pub async fn put_locked<B: Into<reqwest::Body>>(
         &self,
         lock: &StorageLock,
@@ -175,7 +177,9 @@ impl SessionStorage {
     /// # Errors
     /// A lock that has expired or was unlocked returns 412; take a new one. A
     /// lock still reserved for an earlier write of this client returns 423
-    /// with a `Retry-After`. Otherwise as [`Self::delete`](SessionStorage::delete).
+    /// with a `Retry-After`. A file the storage backend found changed since
+    /// the delete was prepared returns 409. Otherwise as
+    /// [`Self::delete`](SessionStorage::delete).
     pub async fn delete_locked(&self, lock: &StorageLock) -> Result<Response> {
         let rb = self
             .request(Method::DELETE, &lock.path)

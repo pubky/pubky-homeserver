@@ -94,7 +94,7 @@ impl OpendalTestOperators {
 /// Important: This requires the tokio::test(flavor = "multi_thread") attribute,
 /// Otherwise the test will panic when the gcp cleaner is dropped
 #[derive(Default)]
-struct OpendalGcpCleaner {
+pub(crate) struct OpendalGcpCleaner {
     pub gcs_operator: Option<Operator>,
 }
 

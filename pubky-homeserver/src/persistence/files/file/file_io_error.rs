@@ -25,25 +25,28 @@ pub enum FileIoError {
     LockLost,
     #[error("A change under the lock is still being published; retry in {retry_after_secs}s")]
     LockBusy { retry_after_secs: u64 },
+    #[error("The file is not the one the change was made against")]
+    PublishConflict,
 }
 
 impl From<opendal::Error> for FileIoError {
     fn from(e: opendal::Error) -> Self {
-        use std::error::Error as _;
         // Recover domain-specific errors embedded by our custom OpenDAL layers.
-        if let Some(domain) = e
-            .source()
-            .and_then(|s| s.downcast_ref::<LayerDomainError>())
-        {
-            return match domain {
-                LayerDomainError::WritePathForbidden => FileIoError::WritePathForbidden,
-                LayerDomainError::DiskSpaceQuotaExceeded => FileIoError::DiskSpaceQuotaExceeded,
-                LayerDomainError::PathCollision => FileIoError::PathCollision,
-                LayerDomainError::LockLost => FileIoError::LockLost,
-                LayerDomainError::LockBusy { retry_after_secs } => FileIoError::LockBusy {
+        match LayerDomainError::of(&e) {
+            Some(LayerDomainError::WritePathForbidden) => return FileIoError::WritePathForbidden,
+            Some(LayerDomainError::DiskSpaceQuotaExceeded) => {
+                return FileIoError::DiskSpaceQuotaExceeded
+            }
+            Some(LayerDomainError::PathCollision) => return FileIoError::PathCollision,
+            Some(LayerDomainError::LockLost) => return FileIoError::LockLost,
+            Some(LayerDomainError::LockBusy { retry_after_secs }) => {
+                return FileIoError::LockBusy {
                     retry_after_secs: *retry_after_secs,
-                },
-            };
+                }
+            }
+            Some(LayerDomainError::PublishConflict) => return FileIoError::PublishConflict,
+            // Only says nothing was published; the kind says what went wrong.
+            Some(LayerDomainError::NotPublished) | None => {}
         }
         match e.kind() {
             opendal::ErrorKind::NotFound => FileIoError::NotFound,

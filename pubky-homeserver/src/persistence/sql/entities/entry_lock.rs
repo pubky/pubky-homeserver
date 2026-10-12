@@ -7,17 +7,21 @@
 //!
 //! A write or delete under a lock reserves it for the time its change may still
 //! reach the storage backend, see [`EntryLockRepository::reserve_publish`].
-//! `publishing_until` records that time. Until it has passed the lock can
-//! neither be released nor reserved again, and it cannot run out either: the
-//! reservation extends the lock to outlast it, and a refresh never shortens a
-//! reserved lock. Nothing else can hand the path to another writer, so a
-//! reserved change can never land on top of a later holder's.
+//! `publishing_until` records that time and `publishing_id` names the
+//! reservation, so a change extends and ends its own and no other. Until the
+//! time has passed the lock can neither be released nor reserved again, and it
+//! cannot run out either: the reservation extends the lock to outlast it, and
+//! a refresh never shortens a reserved lock. Nothing else can hand the path to
+//! another writer, so a reserved change can never land on top of a later
+//! holder's.
 //!
 //! Every lifetime is measured on the database clock, inside the statement that
 //! sets or checks it, so all instances behind one database agree on which locks
 //! are live whatever their own clocks say.
 
-use sea_query::{Expr, ExprTrait, Func, Iden, OnConflict, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query::{
+    Alias, Expr, ExprTrait, Func, Iden, OnConflict, PostgresQueryBuilder, Query, SimpleExpr,
+};
 use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
@@ -37,6 +41,9 @@ pub enum EntryLockIden {
     /// storage backend. Zero when nothing is reserved. Never later than
     /// `expires_at`.
     PublishingUntil,
+    /// Names the reservation, so that only the change that took it can
+    /// extend or end it. Empty when nothing is reserved.
+    PublishingId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +52,7 @@ pub struct EntryLockEntity {
     pub token: String,
     pub expires_at: i64,
     pub publishing_until: i64,
+    pub publishing_id: String,
 }
 
 impl FromRow<'_, PgRow> for EntryLockEntity {
@@ -54,6 +62,7 @@ impl FromRow<'_, PgRow> for EntryLockEntity {
             token: row.try_get(EntryLockIden::Token.to_string().as_str())?,
             expires_at: row.try_get(EntryLockIden::ExpiresAt.to_string().as_str())?,
             publishing_until: row.try_get(EntryLockIden::PublishingUntil.to_string().as_str())?,
+            publishing_id: row.try_get(EntryLockIden::PublishingId.to_string().as_str())?,
         })
     }
 }
@@ -62,13 +71,29 @@ impl FromRow<'_, PgRow> for EntryLockEntity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseOutcome {
     Released,
-    /// A change under the lock may still reach the backend for this many
-    /// more seconds, at least one; the lock stays until then.
-    Reserved {
-        remaining_secs: i64,
-    },
+    /// A change under the lock may still reach the backend; the lock stays
+    /// until its reservation has passed.
+    Reserved,
     /// No lock with that token on the path.
     NotHeld,
+}
+
+/// The reservation on a live lock, as the database sees it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishWindow {
+    /// Which reservation; empty when nothing is reserved.
+    pub id: String,
+    /// Seconds until it ends. Zero or less when nothing is reserved.
+    pub remaining_secs: i64,
+}
+
+impl FromRow<'_, PgRow> for PublishWindow {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            remaining_secs: row.try_get("remaining_secs")?,
+        })
+    }
 }
 
 /// Unix seconds on the database clock. Fixed for the statement, so one
@@ -84,12 +109,13 @@ fn db_now_plus(seconds: i64) -> SimpleExpr {
     db_now().add(seconds)
 }
 
-fn all_columns() -> [EntryLockIden; 4] {
+fn all_columns() -> [EntryLockIden; 5] {
     [
         EntryLockIden::Path,
         EntryLockIden::Token,
         EntryLockIden::ExpiresAt,
         EntryLockIden::PublishingUntil,
+        EntryLockIden::PublishingId,
     ]
 }
 
@@ -115,6 +141,7 @@ impl EntryLockRepository {
                 SimpleExpr::Value(token.into()),
                 db_now_plus(lifetime_secs),
                 SimpleExpr::Value(0i64.into()),
+                SimpleExpr::Value("".into()),
             ])
             .expect("invariant: values count matches columns count")
             .on_conflict(
@@ -123,6 +150,7 @@ impl EntryLockRepository {
                         EntryLockIden::Token,
                         EntryLockIden::ExpiresAt,
                         EntryLockIden::PublishingUntil,
+                        EntryLockIden::PublishingId,
                     ])
                     .action_and_where(
                         Expr::col((ENTRY_LOCK_TABLE, EntryLockIden::ExpiresAt)).lte(db_now()),
@@ -157,17 +185,18 @@ impl EntryLockRepository {
     }
 
     /// Reserve the live lock held with `token` for a change to the file that
-    /// may reach the backend during the next `window_secs`. The lock is
-    /// extended to last at least that long, and until the window has passed
-    /// it can be neither released nor reserved again. Returns `None` when
-    /// `token` holds no live lock on `path`, or when an earlier reservation
-    /// is still running.
+    /// may reach the backend during the next `window_secs`, as the
+    /// reservation named `id`. The lock is extended to last at least that
+    /// long, and until the window has passed it can be neither released nor
+    /// reserved again. Returns `None` when `token` holds no live lock on
+    /// `path`, or when an earlier reservation is still running.
     ///
     /// One statement, outside any transaction of the caller: the reservation
     /// must survive whatever happens to the change's own transaction.
     pub async fn reserve_publish<'a>(
         path: &EntryPath,
         token: &str,
+        id: &str,
         window_secs: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
@@ -179,6 +208,7 @@ impl EntryLockRepository {
             .table(ENTRY_LOCK_TABLE)
             .value(EntryLockIden::ExpiresAt, outlasts_window)
             .value(EntryLockIden::PublishingUntil, db_now_plus(window_secs))
+            .value(EntryLockIden::PublishingId, id)
             .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
             .and_where(Expr::col(EntryLockIden::Token).eq(token))
             .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(db_now()))
@@ -192,42 +222,39 @@ impl EntryLockRepository {
             .await
     }
 
-    /// Seconds the reservation on the live lock held with `token` still has.
-    /// Zero or less when nothing is reserved. `None` when `token` holds no
-    /// live lock on `path`.
-    pub async fn publish_window_remaining<'a>(
+    /// The reservation on the live lock held with `token`. `None` when
+    /// `token` holds no live lock on `path`.
+    pub async fn publish_window<'a>(
         path: &EntryPath,
         token: &str,
         executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<Option<i64>, sqlx::Error> {
+    ) -> Result<Option<PublishWindow>, sqlx::Error> {
         let statement = Query::select()
             .from(ENTRY_LOCK_TABLE)
-            .expr(Expr::col(EntryLockIden::PublishingUntil).sub(db_now()))
+            .expr_as(Expr::col(EntryLockIden::PublishingId), Alias::new("id"))
+            .expr_as(
+                Expr::col(EntryLockIden::PublishingUntil).sub(db_now()),
+                Alias::new("remaining_secs"),
+            )
             .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
             .and_where(Expr::col(EntryLockIden::Token).eq(token))
             .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(db_now()))
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
-        sqlx::query_scalar_with::<_, i64, _>(&query, values)
+        sqlx::query_as_with(&query, values)
             .fetch_optional(con)
             .await
     }
 
-    /// Push the reservation that ends at `publishing_until` on the lock held
-    /// with `token` out to a full `window_secs` from now, while the change's
-    /// backend request is still being waited for. Returns `None` when that
-    /// reservation is no longer there: it ran out and another change took
-    /// one, or the lock is gone.
-    ///
-    /// A reservation is told from a later one by when it ends: every
-    /// reservation is taken after the one before it ran out, and extended
-    /// only forward, so a later change's always ends later. One that ends
-    /// no later than `publishing_until` is this change's.
+    /// Push the reservation `id` on the lock held with `token` out to a full
+    /// `window_secs` from now, while the change's backend request is still
+    /// being waited for. Returns `None` when that reservation is no longer
+    /// there: it ran out and another change took one, or the lock is gone.
     pub async fn extend_publish<'a>(
         path: &EntryPath,
         token: &str,
-        publishing_until: i64,
+        id: &str,
         window_secs: i64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Option<EntryLockEntity>, sqlx::Error> {
@@ -241,7 +268,7 @@ impl EntryLockRepository {
             .value(EntryLockIden::PublishingUntil, db_now_plus(window_secs))
             .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
             .and_where(Expr::col(EntryLockIden::Token).eq(token))
-            .and_where(Expr::col(EntryLockIden::PublishingUntil).lte(publishing_until))
+            .and_where(Expr::col(EntryLockIden::PublishingId).eq(id))
             .and_where(Expr::col(EntryLockIden::ExpiresAt).gt(db_now()))
             .returning_all()
             .to_owned();
@@ -252,27 +279,26 @@ impl EntryLockRepository {
             .await
     }
 
-    /// End the reservation that ends at `publishing_until` on the lock held
-    /// with `token`. Only for a change that can no longer reach the backend:
-    /// one that was published, or was refused before anything was sent. A
-    /// change whose request is still out there leaves its reservation to run
-    /// out on its own.
+    /// End the reservation `id` on the lock held with `token`. Only for a
+    /// change that can no longer reach the backend: one that was published,
+    /// or was refused before anything was sent. A change whose request is
+    /// still out there leaves its reservation to run out on its own.
     ///
-    /// Only that reservation, told from a later one as in
-    /// [`Self::extend_publish`]: a change that outran its window must not end
+    /// Only that reservation: a change that outran its window must not end
     /// the reservation a later change has taken since.
     pub async fn end_publish<'a>(
         path: &EntryPath,
         token: &str,
-        publishing_until: i64,
+        id: &str,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<(), sqlx::Error> {
         let statement = Query::update()
             .table(ENTRY_LOCK_TABLE)
             .value(EntryLockIden::PublishingUntil, 0i64)
+            .value(EntryLockIden::PublishingId, "")
             .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
             .and_where(Expr::col(EntryLockIden::Token).eq(token))
-            .and_where(Expr::col(EntryLockIden::PublishingUntil).lte(publishing_until))
+            .and_where(Expr::col(EntryLockIden::PublishingId).eq(id))
             .to_owned();
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
@@ -348,12 +374,33 @@ impl EntryLockRepository {
     /// change under it is still reserved.
     ///
     /// The reservation check is part of the `DELETE` itself, so it cannot be
-    /// interleaved with a reservation being taken.
+    /// interleaved with a reservation being taken. A reservation that ended
+    /// between the `DELETE` and the look at why it removed nothing is told
+    /// from a lock that is not there by one more `DELETE`.
     pub async fn release<'a>(
         path: &EntryPath,
         token: &str,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<ReleaseOutcome, sqlx::Error> {
+        if Self::delete_unreserved(path, token, executor).await? {
+            return Ok(ReleaseOutcome::Released);
+        }
+        match Self::publish_window(path, token, executor).await? {
+            Some(window) if window.remaining_secs > 0 => Ok(ReleaseOutcome::Reserved),
+            Some(_) if Self::delete_unreserved(path, token, executor).await? => {
+                Ok(ReleaseOutcome::Released)
+            }
+            _ => Ok(ReleaseOutcome::NotHeld),
+        }
+    }
+
+    /// Remove the lock held with `token` on `path` if nothing under it is
+    /// reserved. Whether a row was removed.
+    async fn delete_unreserved<'a>(
+        path: &EntryPath,
+        token: &str,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<bool, sqlx::Error> {
         let statement = Query::delete()
             .from_table(ENTRY_LOCK_TABLE)
             .and_where(Expr::col(EntryLockIden::Path).eq(path.as_str()))
@@ -363,17 +410,7 @@ impl EntryLockRepository {
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
         let result = sqlx::query_with(&query, values).execute(con).await?;
-        if result.rows_affected() > 0 {
-            return Ok(ReleaseOutcome::Released);
-        }
-        Ok(
-            match Self::publish_window_remaining(path, token, executor).await? {
-                Some(remaining_secs) if remaining_secs > 0 => {
-                    ReleaseOutcome::Reserved { remaining_secs }
-                }
-                _ => ReleaseOutcome::NotHeld,
-            },
-        )
+        Ok(result.rows_affected() > 0)
     }
 
     /// Sweep every expired lock.
@@ -432,13 +469,26 @@ mod tests {
     }
 
     async fn remaining(db: &SqlDb, path: &EntryPath, token: &str) -> Option<i64> {
-        EntryLockRepository::publish_window_remaining(path, token, &mut db.pool().into())
+        EntryLockRepository::publish_window(path, token, &mut db.pool().into())
+            .await
+            .unwrap()
+            .map(|window| window.remaining_secs)
+    }
+
+    async fn reserve(
+        db: &SqlDb,
+        path: &EntryPath,
+        token: &str,
+        id: &str,
+        window_secs: i64,
+    ) -> Option<EntryLockEntity> {
+        EntryLockRepository::reserve_publish(path, token, id, window_secs, &mut db.pool().into())
             .await
             .unwrap()
     }
 
-    async fn end_publish(db: &SqlDb, path: &EntryPath, token: &str, publishing_until: i64) {
-        EntryLockRepository::end_publish(path, token, publishing_until, &mut db.pool().into())
+    async fn end_publish(db: &SqlDb, path: &EntryPath, token: &str, id: &str) {
+        EntryLockRepository::end_publish(path, token, id, &mut db.pool().into())
             .await
             .unwrap();
     }
@@ -489,9 +539,8 @@ mod tests {
             .expect("the lock should be free");
         assert!(remaining(&db, &path, "t1").await.unwrap() <= 0);
 
-        let reserved = EntryLockRepository::reserve_publish(&path, "t1", 60, &mut db.pool().into())
+        let reserved = reserve(&db, &path, "t1", "r1", 60)
             .await
-            .unwrap()
             .expect("the live lock can be reserved");
         assert!(reserved.expires_at >= granted.expires_at + 58);
         assert_eq!(reserved.expires_at, reserved.publishing_until);
@@ -508,15 +557,9 @@ mod tests {
                 .is_none(),
             "a reserved lock must not be replaced"
         );
-        assert!(matches!(
-            release(&db, &path, "t1").await,
-            ReleaseOutcome::Reserved { remaining_secs } if (1..=60).contains(&remaining_secs)
-        ));
+        assert_eq!(release(&db, &path, "t1").await, ReleaseOutcome::Reserved);
         assert!(
-            EntryLockRepository::reserve_publish(&path, "t1", 60, &mut db.pool().into())
-                .await
-                .unwrap()
-                .is_none(),
+            reserve(&db, &path, "t1", "r2", 60).await.is_none(),
             "a reserved lock must not be reserved again"
         );
         let refreshed =
@@ -527,13 +570,12 @@ mod tests {
         assert_eq!(refreshed.expires_at, reserved.publishing_until);
 
         // Over: the lock is back to the holder's, and ends when told to.
-        end_publish(&db, &path, "t1", reserved.publishing_until).await;
+        end_publish(&db, &path, "t1", "r1").await;
         assert!(remaining(&db, &path, "t1").await.unwrap() <= 0);
-        let again = EntryLockRepository::reserve_publish(&path, "t1", 60, &mut db.pool().into())
+        reserve(&db, &path, "t1", "r2", 60)
             .await
-            .unwrap()
             .expect("an ended reservation can be taken again");
-        end_publish(&db, &path, "t1", again.publishing_until).await;
+        end_publish(&db, &path, "t1", "r2").await;
         assert_eq!(release(&db, &path, "t1").await, ReleaseOutcome::Released);
         assert_eq!(remaining(&db, &path, "t1").await, None);
     }
@@ -545,14 +587,7 @@ mod tests {
     async fn reservation_needs_the_live_lock_and_refresh_can_still_lengthen_it() {
         let db = SqlDb::test().await;
         let path = path("/pub/a.txt");
-        let reserve = |token: &'static str| {
-            let (db, path) = (db.clone(), path.clone());
-            async move {
-                EntryLockRepository::reserve_publish(&path, token, 60, &mut db.pool().into())
-                    .await
-                    .unwrap()
-            }
-        };
+        let reserve = |token: &'static str| reserve(&db, &path, token, "r", 60);
 
         assert!(reserve("t1").await.is_none(), "no lock, nothing to reserve");
         EntryLockRepository::acquire(&path, "t1", 60, &mut db.pool().into())
@@ -577,66 +612,53 @@ mod tests {
         assert_eq!(remaining(&db, &path, "t1").await, None);
     }
 
-    /// A reservation is extended, and ended, by when it ends. A change that
+    /// A reservation is extended, and ended, by its id only. A change that
     /// outran its window neither prolongs nor ends the reservation a later
-    /// change has taken since, which ends later.
+    /// change has taken since.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn reservation_is_extended_and_ended_by_its_own_value_only() {
+    async fn reservation_is_extended_and_ended_by_its_own_id_only() {
         let db = SqlDb::test().await;
         let path = path("/pub/a.txt");
         EntryLockRepository::acquire(&path, "t1", 60, &mut db.pool().into())
             .await
             .unwrap()
             .unwrap();
-        let first = EntryLockRepository::reserve_publish(&path, "t1", 60, &mut db.pool().into())
-            .await
-            .unwrap()
-            .unwrap();
+        let first = reserve(&db, &path, "t1", "first", 60).await.unwrap();
+        assert_eq!(first.publishing_id, "first");
 
-        let extended = EntryLockRepository::extend_publish(
-            &path,
-            "t1",
-            first.publishing_until,
-            600,
-            &mut db.pool().into(),
-        )
-        .await
-        .unwrap()
-        .expect("the running reservation can be extended");
+        let extend = |id: &'static str| {
+            let (db, path) = (db.clone(), path.clone());
+            async move {
+                EntryLockRepository::extend_publish(&path, "t1", id, 600, &mut db.pool().into())
+                    .await
+                    .unwrap()
+            }
+        };
+        let extended = extend("first")
+            .await
+            .expect("the running reservation can be extended");
         assert!(extended.publishing_until >= first.publishing_until + 539);
         assert_eq!(extended.expires_at, extended.publishing_until);
         assert!(
-            EntryLockRepository::extend_publish(
-                &path,
-                "t1",
-                first.publishing_until,
-                600,
-                &mut db.pool().into()
-            )
-            .await
-            .unwrap()
-            .is_none(),
-            "a stale value extends nothing"
+            extend("other").await.is_none(),
+            "another id extends nothing"
         );
 
         // The first change's window runs out and a second change reserves.
         EntryLockRepository::set_publish_window(&path, 0, &mut db.pool().into())
             .await
             .unwrap();
-        let second = EntryLockRepository::reserve_publish(&path, "t1", 900, &mut db.pool().into())
+        let second = reserve(&db, &path, "t1", "second", 60)
             .await
-            .unwrap()
             .expect("a used-up reservation can be replaced");
-        assert!(second.publishing_until > extended.publishing_until);
+        assert_eq!(second.publishing_id, "second");
+        assert!(extend("first").await.is_none());
 
         // The first change, settling late, must leave the second's alone.
-        end_publish(&db, &path, "t1", extended.publishing_until).await;
-        assert!(matches!(
-            release(&db, &path, "t1").await,
-            ReleaseOutcome::Reserved { .. }
-        ));
-        end_publish(&db, &path, "t1", second.publishing_until).await;
+        end_publish(&db, &path, "t1", "first").await;
+        assert_eq!(release(&db, &path, "t1").await, ReleaseOutcome::Reserved);
+        end_publish(&db, &path, "t1", "second").await;
         assert_eq!(release(&db, &path, "t1").await, ReleaseOutcome::Released);
     }
 

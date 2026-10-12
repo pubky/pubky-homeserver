@@ -188,6 +188,12 @@ impl From<FileIoError> for HttpError {
             // its lock is gone rather than seeing its write silently land.
             FileIoError::LockLost => Self::lock_token_mismatch(),
             FileIoError::LockBusy { retry_after_secs } => Self::lock_busy(retry_after_secs),
+            // The backend found another object than the change was made
+            // against. Nothing landed; the client reads again and retries.
+            FileIoError::PublishConflict => Self::new_with_message(
+                StatusCode::CONFLICT,
+                "The file changed before the change was published; read it again and retry",
+            ),
             e => Self::internal_server_and_log(format!("FileIoError: {}", e)),
         }
     }

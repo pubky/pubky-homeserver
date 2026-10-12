@@ -27,10 +27,9 @@
 //!
 //! The reservation ends with [`settle`]: at once when the backend confirmed
 //! the change or nothing was ever sent to it, otherwise it is left to run
-//! out, since the request may still reach the backend. A reservation is
-//! extended and ended by when it ends, which a later change's always does
-//! later, so a change that outran its window cannot touch the reservation a
-//! later change has taken since.
+//! out, since the request may still reach the backend. A reservation has an
+//! id of its own, and is extended and ended by it, so a change that outran
+//! its window cannot touch the reservation a later change has taken since.
 //!
 //! The reservation is taken outside the finalization transaction. That
 //! transaction can die at any moment, a dropped connection or a failover, and
@@ -44,8 +43,13 @@
 //!
 //! A write that does not go through [`run_under`] runs under no lock and is
 //! never refused.
+//!
+//! On an object store the window is the second line of defence: the publish
+//! and the delete also carry the generation of the object they were made
+//! against, and the backend refuses one that finds another, however late it
+//! runs. See [`staged_publish_layer`](crate::persistence::files::staged_publish_layer).
 
-use std::{future::Future, pin::pin, time::Duration};
+use std::{future::Future, time::Duration};
 
 use opendal::Result;
 
@@ -72,9 +76,16 @@ pub(crate) const BACKEND_TCP_USER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Time the backend may take to act on a request it has received in full.
 const BACKEND_EXECUTION_MARGIN_SECS: i64 = 30;
 
+/// Bounded backend calls a publish makes before its publish request is sent.
+/// The staged publish of an object store finishes the upload and reads the
+/// object's generation together, one call's time, before the copy that
+/// publishes; see [`staged_publish_layer`](crate::persistence::files::staged_publish_layer).
+const BACKEND_CALLS_BEFORE_PUBLISH: i64 = 1;
+
 /// Window a publish must still have when it starts. By the time it has
 /// passed, the backend has acted on the request or can never receive it.
-const MIN_PUBLISH_WINDOW_SECS: i64 = BACKEND_IO_TIMEOUT.as_secs() as i64
+const MIN_PUBLISH_WINDOW_SECS: i64 = (1 + BACKEND_CALLS_BEFORE_PUBLISH)
+    * BACKEND_IO_TIMEOUT.as_secs() as i64
     + BACKEND_TCP_USER_TIMEOUT.as_secs() as i64
     + BACKEND_EXECUTION_MARGIN_SECS;
 
@@ -116,16 +127,15 @@ pub(super) fn carry<F: Future>(task: F) -> impl Future<Output = F::Output> {
 /// for. Only an earlier change the backend never confirmed keeps refusing,
 /// until its window has passed; a hint of the whole window would make
 /// every client wait that long for the common case.
-const RETRY_AT_ONCE_SECS: i64 = 1;
+pub(crate) const RETRY_AT_ONCE_SECS: u64 = 1;
 
 /// A lock reserved for one change, until [`settle`].
 pub(super) struct PublishReservation {
     sql_db: SqlDb,
     entry_path: EntryPath,
     token: String,
-    /// When the reservation ends, as last set here. Tells it from a later
-    /// change's reservation, which ends later.
-    publishing_until: i64,
+    /// Names the reservation, so this change extends and ends its own only.
+    id: String,
 }
 
 /// How a change's backend request ended, for [`settle`].
@@ -135,6 +145,24 @@ pub(super) enum BackendOutcome {
     Done,
     /// Sent, and not confirmed: the backend may still act on it.
     Unconfirmed,
+}
+
+impl BackendOutcome {
+    /// How a failed backend request ended, from its error. A refusal is an
+    /// answer, so nothing landed; an error the backend never answered, a
+    /// timeout, a lost connection or a server error, leaves it unknown. A
+    /// change its layer marked as never sent to the real path is done too.
+    pub(super) fn of_error(error: &opendal::Error) -> Self {
+        let not_sent = matches!(
+            LayerDomainError::of(error),
+            Some(LayerDomainError::NotPublished)
+        );
+        if not_sent || error.kind() != opendal::ErrorKind::Unexpected {
+            Self::Done
+        } else {
+            Self::Unconfirmed
+        }
+    }
 }
 
 /// A failed change that knows how its backend request ended.
@@ -153,41 +181,41 @@ pub(super) async fn reserve(
         return Ok(None);
     };
     let mut executor: UnifiedExecutor = sql_db.pool().into();
+    let id = uuid::Uuid::new_v4().to_string();
     let reserved = EntryLockRepository::reserve_publish(
         entry_path,
         &token,
+        &id,
         PUBLISH_WINDOW_SECS,
         &mut executor,
     )
     .await
     .map_err(|error| unexpected(format!("Failed to reserve lock on {entry_path}"), error))?;
     let Some(reserved) = reserved else {
-        let remaining =
-            EntryLockRepository::publish_window_remaining(entry_path, &token, &mut executor)
-                .await
-                .map_err(|error| {
-                    unexpected(format!("Failed to read lock on {entry_path}"), error)
-                })?;
-        return Err(match remaining {
+        let window = EntryLockRepository::publish_window(entry_path, &token, &mut executor)
+            .await
+            .map_err(|error| unexpected(format!("Failed to read lock on {entry_path}"), error))?;
+        return Err(match window {
             None => {
                 tracing::warn!(path = %entry_path, "Refusing a change whose lock was lost");
                 lock_lost_error(entry_path)
             }
-            Some(remaining) => {
+            Some(window) => {
                 tracing::warn!(
                     path = %entry_path,
-                    remaining,
+                    remaining = window.remaining_secs,
                     "Refusing a change whose lock is reserved for an earlier one"
                 );
                 lock_busy_error(entry_path, RETRY_AT_ONCE_SECS)
             }
         });
     };
+    debug_assert_eq!(reserved.publishing_id, id);
     Ok(Some(PublishReservation {
         sql_db: sql_db.clone(),
         entry_path: entry_path.clone(),
         token,
-        publishing_until: reserved.publishing_until,
+        id,
     }))
 }
 
@@ -197,7 +225,7 @@ pub(super) async fn reserve(
 /// covered for as long as it takes; one abandoned at the timeout has at
 /// least the window [`check_window`] saw, less one interval, left to land in.
 pub(super) async fn keep_reserved<T>(
-    reservation: Option<&mut PublishReservation>,
+    reservation: Option<&PublishReservation>,
     request: impl Future<Output = T>,
 ) -> T {
     keep_reserved_every(HEARTBEAT_INTERVAL, reservation, request).await
@@ -205,18 +233,23 @@ pub(super) async fn keep_reserved<T>(
 
 async fn keep_reserved_every<T>(
     interval: Duration,
-    reservation: Option<&mut PublishReservation>,
+    reservation: Option<&PublishReservation>,
     request: impl Future<Output = T>,
 ) -> T {
     let Some(reservation) = reservation else {
         return request.await;
     };
-    let mut request = pin!(request);
-    loop {
-        tokio::select! {
-            output = &mut request => return output,
-            () = tokio::time::sleep(interval) => reservation.extend().await,
+    // Both are polled together: a heartbeat that waits on the database must
+    // not hold up the request, or the timeout bounding it.
+    let heartbeat = async {
+        loop {
+            tokio::time::sleep(interval).await;
+            reservation.extend().await;
         }
+    };
+    tokio::select! {
+        output = request => output,
+        () = heartbeat => unreachable!("the heartbeat never ends on its own"),
     }
 }
 
@@ -239,22 +272,23 @@ pub(super) async fn settle<T, E: FailedChange>(
 impl PublishReservation {
     /// Push the reservation out to a full window from now. A failure is only
     /// logged: the window [`check_window`] saw still stands, and the next
-    /// heartbeat tries again.
-    async fn extend(&mut self) {
-        let mut executor: UnifiedExecutor = self.sql_db.pool().into();
+    /// heartbeat tries again. A heartbeat the request's end cuts short may
+    /// still land; that is harmless, since the id, not the time, is what
+    /// the reservation is ended by.
+    async fn extend(&self) {
         let extended = EntryLockRepository::extend_publish(
             &self.entry_path,
             &self.token,
-            self.publishing_until,
+            &self.id,
             PUBLISH_WINDOW_SECS,
-            &mut executor,
+            &mut self.sql_db.pool().into(),
         )
         .await;
         match extended {
-            Ok(Some(lock)) => self.publishing_until = lock.publishing_until,
-            // Cannot happen while the reservation is live: nothing else ends
-            // or replaces it. Left to run out, like a failed heartbeat.
-            Ok(None) => tracing::error!(
+            Ok(Some(_)) => {}
+            // The reservation ran out while the request waited, and the
+            // holder has taken one for a later change. Nothing to extend.
+            Ok(None) => tracing::warn!(
                 path = %self.entry_path,
                 "Lock reservation is no longer this change's to extend"
             ),
@@ -273,13 +307,9 @@ impl PublishReservation {
             return;
         }
         let mut executor: UnifiedExecutor = self.sql_db.pool().into();
-        if let Err(error) = EntryLockRepository::end_publish(
-            &self.entry_path,
-            &self.token,
-            self.publishing_until,
-            &mut executor,
-        )
-        .await
+        if let Err(error) =
+            EntryLockRepository::end_publish(&self.entry_path, &self.token, &self.id, &mut executor)
+                .await
         {
             // The reservation runs out on its own; only the holder waits.
             tracing::warn!(path = %self.entry_path, %error, "Failed to end a lock reservation");
@@ -287,29 +317,39 @@ impl PublishReservation {
     }
 }
 
-/// Check, right before the backend is told to publish, that the reservation
-/// of the current task's lock still covers the request whatever happens to
-/// it. Fails otherwise; nothing has been sent, so the caller's reservation
-/// settles as [`BackendOutcome::Done`].
+/// Check, right before the backend is told to publish, that `reservation`
+/// still covers the request whatever happens to it: the lock's reservation
+/// is this change's own, not a later change's taken after this one ran out
+/// waiting, and enough of it remains. Fails otherwise; nothing has been
+/// sent, so the reservation settles as [`BackendOutcome::Done`]. `None`
+/// under no lock.
 pub(super) async fn check_window(
-    entry_path: &EntryPath,
+    reservation: Option<&PublishReservation>,
     executor: &mut UnifiedExecutor<'_>,
 ) -> Result<()> {
-    let Some(token) = current_token() else {
+    let Some(reservation) = reservation else {
         return Ok(());
     };
-    let remaining = EntryLockRepository::publish_window_remaining(entry_path, &token, executor)
+    let entry_path = &reservation.entry_path;
+    let window = EntryLockRepository::publish_window(entry_path, &reservation.token, executor)
         .await
         .map_err(|error| unexpected(format!("Failed to read lock on {entry_path}"), error))?;
-    match remaining {
+    match window {
         None => {
             tracing::warn!(path = %entry_path, "Refusing a change whose lock was lost");
             Err(lock_lost_error(entry_path))
         }
-        Some(remaining) if remaining < MIN_PUBLISH_WINDOW_SECS => {
+        Some(window) if window.id != reservation.id => {
             tracing::warn!(
                 path = %entry_path,
-                remaining,
+                "Refusing a change whose reservation ran out and went to a later change"
+            );
+            Err(lock_busy_error(entry_path, RETRY_AT_ONCE_SECS))
+        }
+        Some(window) if window.remaining_secs < MIN_PUBLISH_WINDOW_SECS => {
+            tracing::warn!(
+                path = %entry_path,
+                remaining = window.remaining_secs,
                 "Refusing a change with too little of its publish window left"
             );
             Err(lock_busy_error(entry_path, RETRY_AT_ONCE_SECS))
@@ -326,14 +366,12 @@ fn lock_lost_error(entry_path: &EntryPath) -> opendal::Error {
     .set_source(LayerDomainError::LockLost)
 }
 
-fn lock_busy_error(entry_path: &EntryPath, retry_after_secs: i64) -> opendal::Error {
+fn lock_busy_error(entry_path: &EntryPath, retry_after_secs: u64) -> opendal::Error {
     opendal::Error::new(
         opendal::ErrorKind::ConditionNotMatch,
         format!("Lock on {entry_path} is reserved for an earlier change"),
     )
-    .set_source(LayerDomainError::LockBusy {
-        retry_after_secs: retry_after_secs as u64,
-    })
+    .set_source(LayerDomainError::LockBusy { retry_after_secs })
 }
 
 #[cfg(test)]
@@ -362,25 +400,20 @@ mod tests {
         let reservation = run_under(Some("t".to_string()), reserve(&entry_path, &db))
             .await
             .unwrap();
-        let mut reservation = reservation.expect("the write runs under a lock");
+        let reservation = reservation.expect("the write runs under a lock");
         // The window is almost gone when the request starts.
         EntryLockRepository::set_publish_window(&entry_path, 2, &mut executor)
             .await
             .unwrap();
 
         let long_request = tokio::time::sleep(Duration::from_millis(300));
-        keep_reserved_every(
-            Duration::from_millis(50),
-            Some(&mut reservation),
-            long_request,
-        )
-        .await;
+        keep_reserved_every(Duration::from_millis(50), Some(&reservation), long_request).await;
 
-        let remaining =
-            EntryLockRepository::publish_window_remaining(&entry_path, "t", &mut executor)
-                .await
-                .unwrap()
-                .unwrap();
+        let remaining = EntryLockRepository::publish_window(&entry_path, "t", &mut executor)
+            .await
+            .unwrap()
+            .unwrap()
+            .remaining_secs;
         assert!(
             remaining > PUBLISH_WINDOW_SECS - 5,
             "the heartbeat pushed the window out, {remaining}s remain"
@@ -394,6 +427,63 @@ mod tests {
                 .unwrap(),
             ReleaseOutcome::Released
         );
+    }
+
+    /// A change that ran out of its reservation while waiting, and whose
+    /// holder reserved again for a later change, must not publish under the
+    /// later change's reservation.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn window_check_refuses_a_change_whose_reservation_went_to_a_later_one() {
+        let db = SqlDb::test().await;
+        let entry_path = EntryPath::new(
+            Keypair::random().public_key(),
+            StoragePath::new("/pub/a.txt").unwrap(),
+        );
+        let mut executor: UnifiedExecutor = db.pool().into();
+        EntryLockRepository::acquire(&entry_path, "t", 60, &mut executor)
+            .await
+            .unwrap()
+            .unwrap();
+        let earlier = run_under(Some("t".to_string()), reserve(&entry_path, &db))
+            .await
+            .unwrap()
+            .expect("the change runs under a lock");
+        assert!(check_window(Some(&earlier), &mut executor).await.is_ok());
+
+        // The earlier reservation runs out and a later one is taken.
+        EntryLockRepository::set_publish_window(&entry_path, 0, &mut executor)
+            .await
+            .unwrap();
+        let later = run_under(Some("t".to_string()), reserve(&entry_path, &db))
+            .await
+            .unwrap()
+            .expect("the change runs under a lock");
+
+        let refused = check_window(Some(&earlier), &mut executor)
+            .await
+            .expect_err("the earlier change must not use the later reservation");
+        assert!(matches!(
+            LayerDomainError::of(&refused),
+            Some(LayerDomainError::LockBusy { .. })
+        ));
+        assert!(check_window(Some(&later), &mut executor).await.is_ok());
+    }
+
+    /// A refusal is an answer: the change is done. Only no answer at all
+    /// leaves the backend's outcome unknown.
+    #[test]
+    fn backend_outcome_of_an_error() {
+        let refused = opendal::Error::new(opendal::ErrorKind::RateLimited, "429");
+        assert_eq!(BackendOutcome::of_error(&refused), BackendOutcome::Done);
+        let unanswered = opendal::Error::new(opendal::ErrorKind::Unexpected, "timeout");
+        assert_eq!(
+            BackendOutcome::of_error(&unanswered),
+            BackendOutcome::Unconfirmed
+        );
+        let not_sent = opendal::Error::new(opendal::ErrorKind::Unexpected, "upload timeout")
+            .set_source(LayerDomainError::NotPublished);
+        assert_eq!(BackendOutcome::of_error(&not_sent), BackendOutcome::Done);
     }
 
     struct WriteNeverFails;
@@ -412,7 +502,8 @@ mod tests {
     fn publish_window_covers_a_request_however_it_ends() {
         assert_eq!(BACKEND_IO_TIMEOUT.as_secs(), 60);
         assert_eq!(BACKEND_TCP_USER_TIMEOUT.as_secs(), 30);
-        assert_eq!(MIN_PUBLISH_WINDOW_SECS, 60 + 30 + 30);
+        // The upload's close and the generation read, then the publish.
+        assert_eq!(MIN_PUBLISH_WINDOW_SECS, 60 + 60 + 30 + 30);
         assert_eq!(PUBLISH_WINDOW_SECS, MIN_PUBLISH_WINDOW_SECS + 60);
         const { assert!(PUBLISH_WINDOW_SECS >= MIN_PUBLISH_WINDOW_SECS + USER_ROW_WAIT_BUDGET_SECS) };
         // An abandoned request keeps most of the window it was checked for.

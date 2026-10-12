@@ -6,7 +6,10 @@
 //! 1. **[`write_path_layer`]** — enforces per-user allowed write paths (outermost, runs first).
 //! 2. **[`write_finalization_layer`]** — atomically finalizes collision checks,
 //!    entry metadata, events, and quota accounting around backend writes.
-//! 3. **OpenDAL base** — physical storage I/O.
+//! 3. **[`staged_publish_layer`]** (object store backends only) — stages the
+//!    upload and publishes it by a copy conditional on the object's
+//!    generation, so a stale publish or delete is refused by the backend.
+//! 4. **OpenDAL base** — physical storage I/O.
 //!
 //! # Write lifecycle
 //!
@@ -14,7 +17,10 @@
 //! backend publishes on close, and the filesystem backend does so by staging
 //! the upload in `data/files-tmp` and renaming it into place. An upload that is
 //! rejected by quota or a collision, breaks mid-stream, or loses its client is
-//! aborted instead, leaving the existing blob untouched.
+//! aborted instead, leaving the existing blob untouched. On Google Cloud
+//! Storage the upload is staged under `.staging/` in the bucket and published
+//! by a copy; a lifecycle rule deleting that prefix after a day sweeps what a
+//! crash leaves there.
 //!
 //! Finalizing a write publishes the blob and then commits the entry row;
 //! finalizing a delete commits the row removal and then removes the blob,
@@ -32,7 +38,10 @@
 //! still reach the backend, so the lock cannot change hands under it and a
 //! stalled publish can never land on top of the next holder. A write whose
 //! lock is gone, or still reserved for an earlier change, is refused before
-//! it publishes. See [`write_finalization_layer::write_lock`].
+//! it publishes. See [`write_finalization_layer::write_lock`]. On an object
+//! store the publish and the delete are also conditional on the generation
+//! they were made against, so one that runs late is refused outright, see
+//! [`staged_publish_layer`].
 //!
 //! One limit of that task: a runtime shutdown that cancels it leaves the
 //! staged upload neither published nor aborted.
@@ -45,6 +54,7 @@ mod layer_domain_error;
 mod opendal;
 
 pub(crate) mod events;
+pub(crate) mod staged_publish_layer;
 pub(crate) mod write_finalization_layer;
 pub(crate) mod write_path_layer;
 

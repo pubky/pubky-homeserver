@@ -277,7 +277,7 @@ impl Finalizer {
 }
 
 #[cfg(test)]
-pub(super) mod test_support {
+pub(crate) mod test_support {
     use std::future::Future;
     use std::time::Duration;
 
@@ -313,7 +313,7 @@ pub(super) mod test_support {
         (test_operator_over(db, backend), tmp_dir)
     }
 
-    fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {
+    pub(crate) fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {
         backend.layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
@@ -333,11 +333,21 @@ pub(super) mod test_support {
         .set_temporary()
     }
 
+    /// The error of a backend that never answered a request: a timeout, a
+    /// lost connection. Whether it acted on the request is unknown.
+    pub(in super::super) fn backend_silence() -> opendal::Error {
+        opendal::Error::new(
+            opendal::ErrorKind::Unexpected,
+            "the backend did not answer in time",
+        )
+        .set_temporary()
+    }
+
     pub(in super::super) fn test_user_service(db: &SqlDb) -> UserService {
         UserService::new(db.clone())
     }
 
-    pub(in super::super) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
+    pub(crate) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
         let pubkey = Keypair::random().public_key();
         let user_service = test_user_service(db);
         user_service.create(&pubkey).await.unwrap();

@@ -200,10 +200,9 @@ async fn unlock(
         ReleaseOutcome::Released => Ok(StatusCode::NO_CONTENT.into_response()),
         // A change under the lock may still reach the backend; releasing now
         // would let it land on the next holder. The lock is still the
-        // caller's, and this call succeeds once the change is over.
-        ReleaseOutcome::Reserved { remaining_secs } => {
-            Err(HttpError::lock_busy(remaining_secs as u64))
-        }
+        // caller's, and this call succeeds once the change is over, usually
+        // within seconds: only an unconfirmed change makes it wait longer.
+        ReleaseOutcome::Reserved => Err(HttpError::lock_busy(write_lock::RETRY_AT_ONCE_SECS)),
         ReleaseOutcome::NotHeld => Err(HttpError::conflict("No lock with this token on this path")),
     }
 }
@@ -839,7 +838,7 @@ mod tests {
                 .add_header("lock-token", token.clone())
                 .await;
             refused.assert_status(StatusCode::LOCKED);
-            let retry_after: i64 = refused
+            let retry_after: u64 = refused
                 .headers()
                 .get("retry-after")
                 .expect("a refused UNLOCK says when to retry")
@@ -847,7 +846,7 @@ mod tests {
                 .unwrap()
                 .parse()
                 .unwrap();
-            assert!((1..=write_lock::PUBLISH_WINDOW_SECS).contains(&retry_after));
+            assert_eq!(retry_after, write_lock::RETRY_AT_ONCE_SECS);
             holder.commit().await.unwrap();
         };
         let (response, ()) = tokio::join!(async { write.await }, unlock_meanwhile);

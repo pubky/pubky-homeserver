@@ -37,8 +37,10 @@ enum DeleteOutcome {
 }
 
 /// Which side of the backend request a delete failed on. Before it, nothing
-/// has reached the backend. Unconfirmed, the backend was asked to remove the
-/// blob and did not say it had: it may still, so the lock stays reserved.
+/// has reached the backend; a delete the backend refused outright, finding
+/// another object than the change was made against, counts here too.
+/// Unconfirmed, the backend was asked to remove the blob and did not say it
+/// had: it may still, so the lock stays reserved.
 #[derive(Debug)]
 enum DeleteFailure {
     BeforeRequest(Error),
@@ -46,6 +48,15 @@ enum DeleteFailure {
 }
 
 impl DeleteFailure {
+    /// How a failed backend delete is classed. Refused, nothing was
+    /// removed; otherwise the backend may still act on it.
+    fn of_backend_delete(error: Error) -> Self {
+        match BackendOutcome::of_error(&error) {
+            BackendOutcome::Done => Self::BeforeRequest(error),
+            BackendOutcome::Unconfirmed => Self::Unconfirmed(error),
+        }
+    }
+
     fn error(&self) -> &Error {
         match self {
             Self::BeforeRequest(error) | Self::Unconfirmed(error) => error,
@@ -129,10 +140,9 @@ impl<R: oio::Delete> QueuedDeletes<R> {
 
     async fn finalize_and_remove_blob(&mut self, pending: &PendingDelete) -> Result<DeleteOutcome> {
         // Before any transaction, see `write_lock`.
-        let mut reservation =
-            write_lock::reserve(&pending.entry_path, &self.finalizer.sql_db).await?;
+        let reservation = write_lock::reserve(&pending.entry_path, &self.finalizer.sql_db).await?;
         let result = self
-            .finalize_and_remove_reserved_blob(pending, reservation.as_mut())
+            .finalize_and_remove_reserved_blob(pending, reservation.as_ref())
             .await;
         write_lock::settle(reservation, &result).await;
         result.map_err(DeleteFailure::into_error)
@@ -141,10 +151,14 @@ impl<R: oio::Delete> QueuedDeletes<R> {
     async fn finalize_and_remove_reserved_blob(
         &mut self,
         pending: &PendingDelete,
-        reservation: Option<&mut PublishReservation>,
+        reservation: Option<&PublishReservation>,
     ) -> std::result::Result<DeleteOutcome, DeleteFailure> {
         // Only remove the blob after its database finalization succeeds.
-        let outcome = match self.finalizer.finalize_delete(&pending.entry_path).await {
+        let outcome = match self
+            .finalizer
+            .finalize_delete(&pending.entry_path, reservation)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 tracing::error!(
@@ -199,14 +213,19 @@ impl<R: oio::Delete + 'static> oio::Delete for WriteFinalizationDeleter<R> {
 }
 
 impl Finalizer {
-    async fn finalize_delete(&self, entry_path: &EntryPath) -> Result<DeleteOutcome> {
+    async fn finalize_delete(
+        &self,
+        entry_path: &EntryPath,
+        reservation: Option<&PublishReservation>,
+    ) -> Result<DeleteOutcome> {
         let mut tx = self.sql_db.pool().begin().await.map_err(|error| {
             unexpected("Failed to begin delete finalization transaction", error)
         })?;
 
         let result = {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            self.delete_in_transaction(entry_path, &mut executor).await
+            self.delete_in_transaction(entry_path, reservation, &mut executor)
+                .await
         };
 
         match result {
@@ -247,7 +266,7 @@ impl Finalizer {
         &self,
         backend_deleter: &mut R,
         pending: &PendingDelete,
-        reservation: Option<&mut PublishReservation>,
+        reservation: Option<&PublishReservation>,
     ) -> std::result::Result<(), DeleteFailure> {
         let mut tx = self.sql_db.pool().begin().await.map_err(|error| {
             DeleteFailure::BeforeRequest(unexpected(
@@ -277,7 +296,7 @@ impl Finalizer {
         &self,
         backend_deleter: &mut R,
         pending: &PendingDelete,
-        reservation: Option<&mut PublishReservation>,
+        reservation: Option<&PublishReservation>,
         executor: &mut UnifiedExecutor<'_>,
     ) -> std::result::Result<(), DeleteFailure> {
         let entry_path = &pending.entry_path;
@@ -306,7 +325,7 @@ impl Finalizer {
             }
         }
         // A second wait for the user row since the row removal was checked.
-        write_lock::check_window(entry_path, executor)
+        write_lock::check_window(reservation, executor)
             .await
             .map_err(DeleteFailure::BeforeRequest)?;
 
@@ -320,15 +339,16 @@ impl Finalizer {
         };
         write_lock::keep_reserved(reservation, remove_blob)
             .await
-            .map_err(DeleteFailure::Unconfirmed)
+            .map_err(DeleteFailure::of_backend_delete)
     }
 
     async fn delete_in_transaction(
         &self,
         entry_path: &EntryPath,
+        reservation: Option<&PublishReservation>,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<DeleteOutcome> {
-        let Some(staged) = self.stage_delete(entry_path, executor).await? else {
+        let Some(staged) = self.stage_delete(entry_path, reservation, executor).await? else {
             return Ok(DeleteOutcome::NotFound);
         };
         self.apply_delete_effects(staged, entry_path, executor)
@@ -339,6 +359,7 @@ impl Finalizer {
     async fn stage_delete(
         &self,
         entry_path: &EntryPath,
+        reservation: Option<&PublishReservation>,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<Option<StagedDelete>> {
         let user = match self
@@ -356,7 +377,7 @@ impl Finalizer {
             }
         };
 
-        write_lock::check_window(entry_path, executor).await?;
+        write_lock::check_window(reservation, executor).await?;
 
         let deleted_entry = match EntryRepository::get_by_path(entry_path, executor).await {
             Ok(entry) => entry,
@@ -434,7 +455,7 @@ mod tests {
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, backend_throttle, create_user, install_events_insert_trigger,
+        all_events, backend_silence, backend_throttle, create_user, install_events_insert_trigger,
         install_slow_event_insert, test_finalizer, test_operator, user_usage,
         wait_for_slow_event_insert, wait_until,
     };
@@ -529,7 +550,56 @@ mod tests {
             .unwrap()
     }
 
-    /// A blob removal the backend did not confirm may still happen. Until its
+    /// A blob removal the backend refused is over: the lock is the holder's
+    /// to release at once.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn refused_blob_delete_ends_the_reservation() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        test_operator(&db)
+            .write(entry_path.as_str(), vec![1; 10])
+            .await
+            .unwrap();
+        EntryLockRepository::acquire(&entry_path, "token-a", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+        let mut deleter =
+            WriteFinalizationDeleter::new(ThrottledDelete, Arc::new(test_finalizer(&db)));
+        deleter
+            .delete(entry_path.as_str(), OpDelete::default())
+            .await
+            .unwrap();
+
+        let refused = write_lock::run_under(Some("token-a".to_string()), deleter.close())
+            .await
+            .expect_err("the backend throttled the blob delete");
+        assert!(matches!(
+            FileIoError::from(refused),
+            FileIoError::BackendRateLimited(_)
+        ));
+        assert_eq!(
+            release(&db, &entry_path, "token-a").await,
+            ReleaseOutcome::Released
+        );
+    }
+
+    /// A backend deleter whose flush gets no answer.
+    struct SilentDelete;
+
+    impl oio::Delete for SilentDelete {
+        async fn delete(&mut self, _path: &str, _args: OpDelete) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Err(backend_silence())
+        }
+    }
+
+    /// A blob removal the backend did not answer may still happen. Until its
     /// window has passed, the lock can be neither released nor taken, and a
     /// second change under it is refused.
     #[tokio::test]
@@ -548,7 +618,7 @@ mod tests {
             .expect("the lock should be free");
         let delete_under_lock = || async {
             let mut deleter =
-                WriteFinalizationDeleter::new(ThrottledDelete, Arc::new(test_finalizer(&db)));
+                WriteFinalizationDeleter::new(SilentDelete, Arc::new(test_finalizer(&db)));
             deleter
                 .delete(entry_path.as_str(), OpDelete::default())
                 .await
@@ -558,15 +628,15 @@ mod tests {
 
         let unconfirmed = delete_under_lock()
             .await
-            .expect_err("the backend throttled the blob delete");
+            .expect_err("the backend never answered the blob delete");
         assert!(matches!(
             FileIoError::from(unconfirmed),
-            FileIoError::BackendRateLimited(_)
+            FileIoError::OpenDAL(_)
         ));
-        assert!(matches!(
+        assert_eq!(
             release(&db, &entry_path, "token-a").await,
-            ReleaseOutcome::Reserved { remaining_secs } if remaining_secs > 0
-        ));
+            ReleaseOutcome::Reserved
+        );
         assert!(
             EntryLockRepository::acquire(&entry_path, "token-b", 60, &mut db.pool().into())
                 .await
@@ -610,26 +680,21 @@ mod tests {
             .await
             .unwrap()
             .expect("the lock should be free");
-        EntryLockRepository::reserve_publish(
-            &entry_path,
-            "token-a",
-            write_lock::PUBLISH_WINDOW_SECS,
-            &mut db.pool().into(),
+        let reservation = write_lock::run_under(
+            Some("token-a".to_string()),
+            write_lock::reserve(&entry_path, &db),
         )
         .await
-        .unwrap()
-        .expect("the live lock can be reserved");
+        .unwrap();
         let mut backend = BatchDelete::default();
 
         EntryLockRepository::set_publish_window(&entry_path, 1, &mut db.pool().into())
             .await
             .unwrap();
-        let refused = write_lock::run_under(
-            Some("token-a".to_string()),
-            finalizer.remove_blob_if_unreferenced(&mut backend, &pending, None),
-        )
-        .await
-        .expect_err("the removal should be refused with its window used up");
+        let refused = finalizer
+            .remove_blob_if_unreferenced(&mut backend, &pending, reservation.as_ref())
+            .await
+            .expect_err("the removal should be refused with its window used up");
         assert!(matches!(refused, DeleteFailure::BeforeRequest(_)));
         assert!(matches!(
             FileIoError::from(refused.into_error()),
@@ -743,7 +808,7 @@ mod tests {
             .await
             .unwrap();
 
-        let outcome = finalizer.finalize_delete(&entry_path).await.unwrap();
+        let outcome = finalizer.finalize_delete(&entry_path, None).await.unwrap();
         assert_eq!(outcome, DeleteOutcome::Deleted);
         operator
             .write(entry_path.as_str(), b"new".to_vec())
@@ -760,7 +825,7 @@ mod tests {
         );
 
         // With the row gone and nothing written since, the blob goes.
-        finalizer.finalize_delete(&entry_path).await.unwrap();
+        finalizer.finalize_delete(&entry_path, None).await.unwrap();
         finalizer
             .remove_blob_if_unreferenced(&mut backend, &pending, None)
             .await
@@ -835,11 +900,11 @@ mod tests {
 
         let first = async move {
             first_barrier.wait().await;
-            first_finalizer.finalize_delete(&first_path).await
+            first_finalizer.finalize_delete(&first_path, None).await
         };
         let second = async move {
             second_barrier.wait().await;
-            second_finalizer.finalize_delete(&second_path).await
+            second_finalizer.finalize_delete(&second_path, None).await
         };
         let (first_result, second_result) = tokio::join!(first, second);
 

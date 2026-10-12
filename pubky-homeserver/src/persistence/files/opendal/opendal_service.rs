@@ -6,6 +6,7 @@ use crate::{
     persistence::{
         files::{
             events::EventsService,
+            staged_publish_layer::StagedPublishLayer,
             write_finalization_layer::{write_lock, WriteFinalizationLayer},
             write_path_layer::WritePathLayer,
         },
@@ -22,6 +23,8 @@ use opendal::Buffer;
 use opendal::Operator;
 
 use super::super::{FileIoError, FileStream, WriteStreamError};
+#[cfg(feature = "storage-gcs")]
+use super::gcs_precondition;
 
 /// Build storage operators with one transactional finalization layer and an
 /// app-facing operator that additionally enforces write paths and collisions.
@@ -33,10 +36,12 @@ use super::super::{FileIoError, FileStream, WriteStreamError};
 /// A remote backend's calls are bounded by [`write_lock::BACKEND_IO_TIMEOUT`]
 /// and its connections by [`write_lock::BACKEND_TCP_USER_TIMEOUT`]. A write
 /// under a lock reserves the lock for a window derived from the two, see
-/// [`write_lock`]; a remote backend without these bounds could publish after
-/// the window and land on the next holder. A local backend's calls are not
-/// bounded: abandoning a filesystem rename would not stop it, only lose track
-/// of it, so it is waited for and the reservation kept up meanwhile.
+/// [`write_lock`]. On top of that, a remote backend publishes and deletes
+/// under a generation condition through [`StagedPublishLayer`], so a request
+/// it executes after the window is refused rather than landing on the next
+/// holder. A local backend's calls are not bounded: abandoning a filesystem
+/// rename would not stop it, only lose track of it, so it is waited for and
+/// the reservation kept up meanwhile.
 pub fn build_storage_operators(
     storage_config: &StorageToml,
     data_directory: &Path,
@@ -70,17 +75,7 @@ pub fn build_storage_operators(
                 "Store files in a Google Cloud Storage bucket: {}",
                 config.bucket_name
             );
-            let builder = config.to_builder()?;
-            opendal::Operator::new(builder)?
-                .layer(opendal::layers::HttpClientLayer::new(
-                    opendal::raw::HttpClient::with(backend_http_client()?),
-                ))
-                .finish()
-                .layer(
-                    opendal::layers::TimeoutLayer::new()
-                        .with_timeout(write_lock::BACKEND_IO_TIMEOUT)
-                        .with_io_timeout(write_lock::BACKEND_IO_TIMEOUT),
-                )
+            gcs_backend_operator(config)?
         }
         #[cfg(any(feature = "storage-memory", test))]
         StorageConfigToml::InMemory => {
@@ -109,6 +104,28 @@ pub fn build_storage_operators(
         ))
         .layer(WritePathLayer::new(user_service));
     Ok((operator, admin_operator))
+}
+
+/// The Google Cloud Storage backend: its calls bounded, its publishes and
+/// deletes conditional on the object's generation, see [`StagedPublishLayer`].
+#[cfg(feature = "storage-gcs")]
+fn gcs_backend_operator(
+    config: &crate::data_directory::storage_config::GoogleBucketConfig,
+) -> Result<Operator, FileIoError> {
+    let http_client = opendal::raw::HttpClient::with(gcs_precondition::PreconditionFetcher::new(
+        backend_http_client()?,
+    ));
+    let operator = opendal::Operator::new(config.to_builder()?)?
+        .layer(opendal::layers::HttpClientLayer::new(http_client))
+        .finish()
+        // Each of the staged publish's calls is bounded on its own.
+        .layer(
+            opendal::layers::TimeoutLayer::new()
+                .with_timeout(write_lock::BACKEND_IO_TIMEOUT)
+                .with_io_timeout(write_lock::BACKEND_IO_TIMEOUT),
+        )
+        .layer(StagedPublishLayer);
+    Ok(operator)
 }
 
 /// The HTTP client for a remote backend. Its kernel-level timeout is what
