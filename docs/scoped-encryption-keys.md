@@ -289,6 +289,14 @@ keys. Keys stay with the app across credential cloning and bearer refresh.
 
 ### Relay limits
 
+Rust and JS/WASM clients accept relay response bodies up to **1 MiB (1,048,576
+bytes)**, including encryption overhead, for both inbox and link transports.
+This fixed client limit is independent of the relay's upload limit and the
+HTTP client's error-body limit. Larger responses fail with an authentication
+validation error before decryption or approval parsing, without retry or
+downgrade. Clients check declared lengths and enforce the limit while reading
+the body, cancelling the unread remainder on rejection.
+
 `http-relay` 0.7 and `pubky-testnet` limit each body to **2 KiB (2,048
 bytes)** by default. The limit includes encoding, signatures, and encryption
 overhead. The signed grant is embedded in the approval and base64url-encoded

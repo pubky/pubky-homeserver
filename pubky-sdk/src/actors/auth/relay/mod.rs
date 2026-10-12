@@ -2,6 +2,8 @@ pub mod auth_relay_listener;
 pub mod http_relay_inbox_channel;
 pub mod http_relay_link_channel;
 
+mod response_body;
+
 /// Auth message body delivered through the relay channel.
 #[derive(Clone)]
 pub(crate) struct AuthRelayMessage(zeroize::Zeroizing<Vec<u8>>);

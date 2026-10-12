@@ -7,6 +7,8 @@ use url::Url;
 
 use crate::{PubkyHttpClient, cross_log};
 
+use super::response_body::read_relay_body;
+
 /// Default HTTP relay inbox base when none is supplied.
 pub const DEFAULT_HTTP_RELAY_INBOX: &str = "https://httprelay.pubky.app/inbox";
 
@@ -140,6 +142,7 @@ impl HttpRelayInboxChannel {
     ///
     /// # Errors
     /// Returns an error after 3 consecutive non-timeout failures.
+    /// Responses exceeding 1 MiB (including encryption) fail without retry.
     pub async fn poll(
         &self,
         client: &PubkyHttpClient,
@@ -164,7 +167,7 @@ impl HttpRelayInboxChannel {
                         "Received response for http relay inbox channel polling attempt {attempt}: status {}",
                         response.status()
                     );
-                    return Ok(Some(response.bytes().await?.to_vec()));
+                    return Ok(Some(read_relay_body(response).await?));
                 }
                 Err(e) => match e {
                     PollError::Timeout => {
