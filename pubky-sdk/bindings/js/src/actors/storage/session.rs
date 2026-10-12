@@ -15,8 +15,10 @@ const TS_PATH: &'static str = r#"export type Path = `/pub/${string}` | `/priv/${
 ///
 /// Failures reject with a {@link PubkyError}. Path validation, transport, and HTTP
 /// failures use `RequestError`; only HTTP errors include `data.statusCode`.
-/// URL parsing failures use `InvalidInput`. Credential preparation, refresh,
-/// and reading response bodies can also fail.
+/// Automatic grant refresh failures use `CredentialRefreshError`, with the
+/// refresh HTTP status in `data.statusCode` when available. URL parsing failures
+/// use `InvalidInput`. Other credential preparation and reading response bodies
+/// can also fail.
 ///
 /// Only {@link SessionStorage.exists} and {@link SessionStorage.stats} treat
 /// HTTP 404/410 as missing. Other HTTP failures, including 401/403 and 5xx, reject.

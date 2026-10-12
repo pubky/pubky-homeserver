@@ -11,7 +11,10 @@ use super::{
     credential::{GrantCredential, GrantCredentialState, REFRESH_SLACK_SECS, now_unix},
     grant_exchange::post_grant_session,
 };
-use crate::{PubkyHttpClient, Result, errors::AuthError};
+use crate::{
+    PubkyHttpClient, Result,
+    errors::{AuthError, CredentialRefreshError},
+};
 
 /// Browser-owned state. A pending exchange may have invalidated the saved bearer.
 #[doc(hidden)]
@@ -157,7 +160,9 @@ impl GrantCredential {
             };
             if refresh {
                 drop(lease);
-                self.refresh_shared(client, coordinator, None).await?;
+                self.refresh_shared(client, coordinator, None)
+                    .await
+                    .map_err(CredentialRefreshError::from_refresh_failure)?;
                 continue;
             }
             let retry = request.try_clone();
@@ -170,7 +175,8 @@ impl GrantCredential {
                 && let Some(retry) = retry
             {
                 self.refresh_shared(client, coordinator, Some(&bearer))
-                    .await?;
+                    .await
+                    .map_err(CredentialRefreshError::from_refresh_failure)?;
                 request = retry;
                 retried = true;
                 continue;

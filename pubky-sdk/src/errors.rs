@@ -42,6 +42,7 @@ pub enum BuildError {
 ///
 /// It groups failures into high-level categories:
 /// - [`Error::Request`] — HTTP transport/server/validation issues
+/// - [`Error::CredentialRefresh`] — automatic grant credential refresh failed
 /// - [`Error::Pkarr`] — PKARR/DHT resolution and publishing issues
 /// - [`Error::Parse`] — URL parsing failures
 /// - [`Error::Authentication`] — auth/session/token/crypto issues
@@ -53,6 +54,10 @@ pub enum Error {
     /// HTTP request/response failed (transport, server, validation, JSON).
     #[error("Request failed: {0}")]
     Request(#[from] RequestError),
+
+    /// Automatic grant credential refresh failed while preparing or retrying a request.
+    #[error("{0}")]
+    CredentialRefresh(#[from] CredentialRefreshError),
 
     /// PKARR/DHT operation failed.
     #[error("Pkarr operation failed: {0}")]
@@ -69,6 +74,49 @@ pub enum Error {
     /// Building the client failed (reqwest or pkarr configuration).
     #[error("Client build failed: {0}")]
     Build(#[from] BuildError),
+}
+
+/// Secret-safe provenance for an automatic grant credential refresh failure.
+///
+/// This deliberately omits request URLs, response bodies, grants, proofs, and
+/// bearer values from both [`std::fmt::Display`] and [`std::fmt::Debug`]. A
+/// request status is retained when the refresh server returned one.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CredentialRefreshError {
+    /// The refresh HTTP request failed. `status` is `None` for transport failures.
+    #[error("Grant credential refresh request failed")]
+    Request {
+        /// HTTP status returned by the refresh endpoint, when available.
+        status: Option<reqwest::StatusCode>,
+    },
+
+    /// Preparing refresh authentication failed locally.
+    #[error("Grant credential refresh authentication failed")]
+    Authentication,
+
+    /// Resolving the refresh destination failed.
+    #[error("Grant credential refresh resolution failed")]
+    Resolution,
+
+    /// Refresh failed for another local reason.
+    #[error("Grant credential refresh failed")]
+    Internal,
+}
+
+impl CredentialRefreshError {
+    pub(crate) fn from_refresh_failure(error: Error) -> Self {
+        match error {
+            Error::Request(RequestError::Server { status, .. }) => Self::Request {
+                status: Some(status),
+            },
+            Error::Request(_) => Self::Request { status: None },
+            Error::Authentication(_) => Self::Authentication,
+            Error::Pkarr(_) => Self::Resolution,
+            Error::Parse(_) | Error::Build(_) => Self::Internal,
+            Error::CredentialRefresh(error) => error,
+        }
+    }
 }
 
 // --- Pkarr Operational Errors ---

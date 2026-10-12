@@ -61,7 +61,7 @@ pub use actors::{PublicStorage, SessionStorage};
 
 // Error and global client
 #[doc(inline)]
-pub use errors::{BuildError, Error, Result};
+pub use errors::{BuildError, CredentialRefreshError, Error, Result};
 
 // Export common types and constants
 #[doc(inline)]

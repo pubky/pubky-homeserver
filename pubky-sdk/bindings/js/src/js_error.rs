@@ -50,6 +50,8 @@ where
 pub enum PubkyErrorName {
     /// A network or server request failed. Check the network connection or retry.
     RequestError,
+    /// Automatic grant credential refresh failed while preparing or retrying a request.
+    CredentialRefreshError,
     /// The error was caused by invalid user input, such as a malformed URL.
     InvalidInput,
     /// An error occurred during login, signup, or session validation.
@@ -66,6 +68,7 @@ impl PubkyErrorName {
     fn as_str(&self) -> &'static str {
         match self {
             PubkyErrorName::RequestError => "RequestError",
+            PubkyErrorName::CredentialRefreshError => "CredentialRefreshError",
             PubkyErrorName::InvalidInput => "InvalidInput",
             PubkyErrorName::AuthenticationError => "AuthenticationError",
             PubkyErrorName::PkarrError => "PkarrError",
@@ -197,6 +200,7 @@ impl From<pubky::Error> for PubkyError {
     fn from(err: pubky::Error) -> Self {
         let name = match &err {
             pubky::Error::Request(_) => PubkyErrorName::RequestError,
+            pubky::Error::CredentialRefresh(_) => PubkyErrorName::CredentialRefreshError,
             pubky::Error::Parse(_) => PubkyErrorName::InvalidInput,
             pubky::Error::Authentication(_) => PubkyErrorName::AuthenticationError,
             pubky::Error::Pkarr(_) => PubkyErrorName::PkarrError,
@@ -205,6 +209,12 @@ impl From<pubky::Error> for PubkyError {
 
         // If this was a server error, attach status_code; else leave it None.
         if let pubky::Error::Request(RequestError::Server { status, .. }) = &err {
+            return Self::new_with_status(name, &err, status.as_u16());
+        }
+        if let pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
+            status: Some(status),
+        }) = &err
+        {
             return Self::new_with_status(name, &err, status.as_u16());
         }
         Self::new(name, err)
@@ -417,5 +427,22 @@ mod tests {
             "Authentication error: General authentication error: Browser session was removed"
         );
         assert_eq!(actual.data, None);
+    }
+
+    #[test]
+    fn credential_refresh_errors_preserve_provenance_and_status() {
+        let server = PubkyError::from(pubky::Error::CredentialRefresh(
+            pubky::CredentialRefreshError::Request {
+                status: Some(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            },
+        ));
+        assert_eq!(server.name.as_str(), "CredentialRefreshError");
+        assert_eq!(server.data, Some(json!({ "statusCode": 503 })));
+
+        let transport = PubkyError::from(pubky::Error::CredentialRefresh(
+            pubky::CredentialRefreshError::Request { status: None },
+        ));
+        assert_eq!(transport.name.as_str(), "CredentialRefreshError");
+        assert_eq!(transport.data, None);
     }
 }

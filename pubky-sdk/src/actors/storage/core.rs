@@ -18,8 +18,10 @@ use crate::{
 /// # Request failures
 ///
 /// Invalid paths return [`RequestError::Validation`] inside [`crate::Error::Request`];
-/// URL parsing returns [`crate::Error::Parse`]. Homeserver resolution, credential
-/// preparation or refresh, and transport errors propagate.
+/// URL parsing returns [`crate::Error::Parse`]. Automatic grant refresh failures
+/// return [`crate::Error::CredentialRefresh`]; its secret-safe payload retains
+/// an optional refresh HTTP status. Homeserver resolution, other credential
+/// preparation, and transport errors propagate.
 ///
 /// Non-success HTTP statuses return [`RequestError::Server`] with the status and
 /// server message, including authentication/permission failures (401/403) and 5xx.
