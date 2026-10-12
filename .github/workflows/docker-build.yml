@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       architecture:
-        description: Native architecture for checks (amd64 or arm64); publishing always builds both
+        description: Native architecture for checks; publishing builds both
         type: string
         default: amd64
       build_profile:
@@ -26,10 +26,12 @@ permissions:
 
 jobs:
   build:
-    runs-on: ${{ inputs.publish && 'ubuntu-latest' || inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 150
     strategy:
       matrix:
+        architecture: ${{ fromJSON(inputs.publish && '["amd64", "arm64"]' || format('["{0}"]', inputs.architecture)) }}
+        target: [homeserver, testnet]
         include:
           - image: homeserver-testnet
             target: testnet
@@ -51,32 +53,19 @@ jobs:
         shell: bash
         env:
           PUBLISH: ${{ inputs.publish }}
-          ARCHITECTURE: ${{ inputs.architecture }}
-          CACHE_SCOPE: docker-${{ inputs.build_profile }}-${{ matrix.target }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          CACHE_SCOPE: docker-${{ inputs.build_profile }}-${{ matrix.target }}-${{ matrix.architecture }}
         run: |
-          if [[ "$PUBLISH" == "true" ]]; then
-            # Publishing imports native caches from main without exporting.
-            architectures=(amd64 arm64)
-            cache_to=''
-          else
-            case "$ARCHITECTURE" in
-              amd64|arm64) architectures=("$ARCHITECTURE") ;;
-              *) echo "Unsupported architecture: $ARCHITECTURE" >&2; exit 1 ;;
-            esac
-            cache_to="type=gha,scope=${CACHE_SCOPE}-${ARCHITECTURE},mode=max"
-          fi
+          case "$ARCHITECTURE" in
+            amd64|arm64) ;;
+            *) echo "Unsupported architecture: $ARCHITECTURE" >&2; exit 1 ;;
+          esac
 
-          platforms=''
-          {
-            echo 'cache_from<<EOF'
-            for architecture in "${architectures[@]}"; do
-              platforms+="linux/${architecture},"
-              echo "type=gha,scope=${CACHE_SCOPE}-${architecture}"
-            done
-            echo 'EOF'
-            echo "platforms=${platforms%,}"
-            echo "cache_to=$cache_to"
-          } >> "$GITHUB_OUTPUT"
+          echo "cache_from=type=gha,scope=$CACHE_SCOPE" >> "$GITHUB_OUTPUT"
+          # Publishing imports native caches from main without exporting.
+          if [[ "$PUBLISH" != "true" ]]; then
+            echo "cache_to=type=gha,scope=$CACHE_SCOPE,mode=max" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build Docker image
         uses: pubky/ci-workflows/.github/actions/docker/build_and_push@main
@@ -84,13 +73,60 @@ jobs:
           registry: registry-1.docker.io/synonymsoft
           context: .
           push: ${{ inputs.publish }}
-          latest: ${{ inputs.publish }}
+          # Each native build pushes its own tag; publish combines them below.
+          latest: false
+          sha_tag: ${{ !inputs.publish }}
           tags: |
-            type=ref,event=tag
-          platforms: ${{ steps.settings.outputs.platforms }}
+            type=raw,value=build-${{ github.run_id }}-${{ matrix.architecture }},enable=${{ inputs.publish }}
+            type=ref,event=tag,enable=${{ !inputs.publish }}
+          platforms: linux/${{ matrix.architecture }}
           image: ${{ matrix.image }}
           cache_from: ${{ steps.settings.outputs.cache_from }}
           cache_to: ${{ steps.settings.outputs.cache_to }}
           build_args: |
             BUILD_TARGET=${{ matrix.target }}
             BUILD_PROFILE=${{ inputs.build_profile }}
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        image: [homeserver, homeserver-testnet]
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Set image tags
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: registry-1.docker.io/synonymsoft/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ github.sha }}
+            type=ref,event=tag
+
+      - name: Publish multi-platform image
+        shell: bash
+        env:
+          IMAGE: registry-1.docker.io/synonymsoft/${{ matrix.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          BUILD_TAG: build-${{ github.run_id }}
+        run: |
+          tags=()
+          while IFS= read -r tag; do
+            tags+=(--tag "$tag")
+          done <<< "$TAGS"
+
+          docker buildx imagetools create "${tags[@]}" \
+            "$IMAGE:$BUILD_TAG-amd64" \
+            "$IMAGE:$BUILD_TAG-arm64"
