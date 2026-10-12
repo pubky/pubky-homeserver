@@ -19,8 +19,8 @@
 //! rejected by quota or a collision, breaks mid-stream, or loses its client is
 //! aborted instead, leaving the existing blob untouched. On Google Cloud
 //! Storage the upload is staged under `.staging/` in the bucket and published
-//! by a copy; a lifecycle rule deleting that prefix after a day sweeps what a
-//! crash leaves there.
+//! by a copy; lifecycle rules deleting that prefix, and aborting incomplete
+//! multipart uploads, after a day sweep what a crash leaves there.
 //!
 //! Finalizing a write publishes the blob and then commits the entry row;
 //! finalizing a delete commits the row removal and then removes the blob,
@@ -28,20 +28,24 @@
 //! storage cannot join the database transaction, so the two can diverge if the
 //! database update fails after publication or the process dies between the
 //! steps: the blob then holds new content while the entry describes the old,
-//! or no entry exists, or an unreferenced blob remains after a delete. A client
-//! disconnect cannot cause this: the finalization layer runs every
-//! finalization on its own task, so dropping the request, or any other user of
-//! the operator, cannot stop it halfway. A writer dropped before it closes, as
-//! a disconnect mid-upload does, discards its staged bytes the same way.
+//! or no entry exists, or an unreferenced blob remains after a delete. The
+//! same first divergence follows a publish the object store executes late,
+//! after its finalization was reported failed and rolled back, on a path
+//! nothing has written to since: the blob holds the failed write's bytes
+//! under the old entry, with no event. The next write on the path heals it.
+//! A client disconnect cannot cause any of this: the finalization layer runs
+//! every finalization on its own task, so dropping the request, or any other
+//! user of the operator, cannot stop it halfway. A writer dropped before it
+//! closes, as a disconnect mid-upload does, discards its staged bytes the
+//! same way.
 //!
-//! A write under a lock reserves the lock for as long as its publish can
-//! still reach the backend, so the lock cannot change hands under it and a
-//! stalled publish can never land on top of the next holder. A write whose
-//! lock is gone, or still reserved for an earlier change, is refused before
-//! it publishes. See [`write_finalization_layer::write_lock`]. On an object
-//! store the publish and the delete are also conditional on the generation
-//! they were made against, so one that runs late is refused outright, see
-//! [`staged_publish_layer`].
+//! A disconnect also drops the request's lock keep-alive, so a lock can expire
+//! before its write is finalized. The finalization then refuses the write,
+//! see [`write_finalization_layer::write_lock`]. A publish the backend
+//! executes late, after the lock has moved on, is refused by the backend's
+//! own condition unless nothing has been written since, see
+//! [`staged_publish_layer`]: a locked write is never replaced by one that
+//! was prepared against an older file.
 //!
 //! One limit of that task: a runtime shutdown that cancels it leaves the
 //! staged upload neither published nor aborted.

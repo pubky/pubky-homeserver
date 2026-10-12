@@ -85,18 +85,6 @@ impl HttpError {
         Self::new_with_message(StatusCode::LOCKED, "Resource is locked")
     }
 
-    /// A change under the lock is still being published. The lock stays the
-    /// caller's; the request can be repeated once the change has landed.
-    pub fn lock_busy(retry_after_secs: u64) -> HttpError {
-        Self {
-            retry_after_secs: Some(retry_after_secs),
-            ..Self::new_with_message(
-                StatusCode::LOCKED,
-                "A change under this lock is still being published; retry later",
-            )
-        }
-    }
-
     pub fn lock_token_mismatch() -> HttpError {
         Self::new_with_message(
             StatusCode::PRECONDITION_FAILED,
@@ -187,7 +175,6 @@ impl From<FileIoError> for HttpError {
             // The same answer a stale token gets up front: the client learns
             // its lock is gone rather than seeing its write silently land.
             FileIoError::LockLost => Self::lock_token_mismatch(),
-            FileIoError::LockBusy { retry_after_secs } => Self::lock_busy(retry_after_secs),
             // The backend found another object than the change was made
             // against. Nothing landed; the client reads again and retries.
             FileIoError::PublishConflict => Self::new_with_message(

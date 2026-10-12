@@ -333,16 +333,6 @@ pub(crate) mod test_support {
         .set_temporary()
     }
 
-    /// The error of a backend that never answered a request: a timeout, a
-    /// lost connection. Whether it acted on the request is unknown.
-    pub(in super::super) fn backend_silence() -> opendal::Error {
-        opendal::Error::new(
-            opendal::ErrorKind::Unexpected,
-            "the backend did not answer in time",
-        )
-        .set_temporary()
-    }
-
     pub(in super::super) fn test_user_service(db: &SqlDb) -> UserService {
         UserService::new(db.clone())
     }

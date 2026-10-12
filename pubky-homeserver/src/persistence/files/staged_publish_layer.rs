@@ -3,13 +3,20 @@
 //! replacing.
 //!
 //! An object store executes a request whenever it gets to it, so a publish or
-//! delete the homeserver gave up on can still run long after, on top of a
-//! newer write. The lock machinery bounds that in time, see
-//! [`write_lock`](super::write_finalization_layer::write_lock); this layer
-//! removes it. Every publish and delete carries the generation of the object
-//! it was made against, read right before under the user row, and the
-//! backend refuses a request that finds another: a stale request cannot land,
-//! however late it runs.
+//! delete the homeserver gave up on can still run long after, when the lock
+//! it was made under has moved on, on top of a newer write. Here every
+//! publish and delete carries the generation of the object it was made
+//! against, read right before under the user row, and the backend refuses a
+//! request that finds another. A stale request lands only if nothing has
+//! been written since, so it can never replace a newer write. A write being
+//! finalized wins over it, unless it lands after the generation was read:
+//! then the write is refused with a conflict, and its client reads again
+//! and retries, see [`write_lock`](super::write_finalization_layer::write_lock).
+//! A path deleted since can receive it as an unreferenced blob, which the
+//! next write or delete on the path clears.
+//!
+//! The price is three more requests per write, a stat, a copy and a delete,
+//! on top of the upload itself.
 //!
 //! Google Cloud Storage takes that condition on a single-request upload, a
 //! copy and a delete, but not on a multipart upload. So the upload itself
@@ -24,8 +31,9 @@
 //! The condition travels to the request as a task-local, read by the
 //! backend's HTTP client when it sends a copy or delete, see
 //! [`expected_generation`]. The layer is generic and does nothing
-//! backend-specific itself: on a backend without generations the condition
-//! is simply absent.
+//! backend-specific itself, but it is only for a backend that reports
+//! generations: one that does not is refused rather than written to
+//! unconditionally.
 
 use std::sync::Arc;
 
@@ -49,18 +57,15 @@ pub(crate) enum ExpectedGeneration {
     Absent,
     /// The object at this generation.
     Known(u64),
-    /// An object the backend reports no generation for: no condition.
-    Unknown,
 }
 
 impl ExpectedGeneration {
-    /// The value an `ifGenerationMatch` condition takes, if there is one.
-    /// Zero asks for no live object.
-    pub(crate) fn if_generation_match(self) -> Option<u64> {
+    /// The value an `ifGenerationMatch` condition takes. Zero asks for no
+    /// live object.
+    pub(crate) fn if_generation_match(self) -> u64 {
         match self {
-            Self::Absent => Some(0),
-            Self::Known(generation) => Some(generation),
-            Self::Unknown => None,
+            Self::Absent => 0,
+            Self::Known(generation) => generation,
         }
     }
 }
@@ -83,7 +88,7 @@ pub(crate) async fn under_expected_generation<T>(
     EXPECTED_GENERATION.scope(expected, request).await
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct StagedPublishLayer;
 
 impl<A: Access> Layer<A> for StagedPublishLayer {
@@ -133,12 +138,10 @@ impl<A: Access> LayeredAccess for StagedPublishAccessor<A> {
     }
 
     async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        let (rp, deleter) = self.inner.delete().await?;
         Ok((
-            rp,
+            RpDelete::default(),
             ConditionalDeleter {
                 inner: self.inner.clone(),
-                deleter,
             },
         ))
     }
@@ -155,7 +158,9 @@ enum Upload {
     Open,
     /// Closed, so the staging object exists and is ours to remove.
     Staged,
-    /// Gone: published and removed, aborted, or never confirmed.
+    /// Nothing left to do: published and removed, aborted, or closed
+    /// without an answer, when the backend may still finish it and a late
+    /// abort could cancel a completed upload.
     Done,
 }
 
@@ -174,12 +179,8 @@ impl<A: Access> oio::Write for StagedWriter<A> {
     }
 
     /// Finish the upload and publish it: one copy, conditional on the
-    /// generation the real path has now.
-    ///
-    /// The upload's close and the generation read run together, so the copy
-    /// is sent within one backend call's time of the start; the lock's
-    /// publish window counts on that, see
-    /// [`write_lock`](super::write_finalization_layer::write_lock).
+    /// generation the real path has now. The upload's close and the
+    /// generation read are independent, so they run together.
     async fn close(&mut self) -> Result<Metadata> {
         let (uploaded, expected) = futures_util::join!(
             self.writer.close(),
@@ -187,23 +188,22 @@ impl<A: Access> oio::Write for StagedWriter<A> {
         );
         // An upload the backend did not confirm may still have made the
         // staging object. It is not ours to reason about: the sweep gets it.
-        uploaded.map_err(not_published)?;
+        if let Err(error) = uploaded {
+            self.upload = Upload::Done;
+            return Err(error);
+        }
         self.upload = Upload::Staged;
-        let expected = match expected {
-            Ok(expected) => expected,
-            Err(error) => {
-                self.remove_staging().await;
-                return Err(not_published(error));
-            }
-        };
 
-        let published = under_expected_generation(
-            expected,
-            publish(self.inner.as_ref(), &self.staging, &self.path),
-        )
-        .await;
+        let published = match expected {
+            Ok(expected) => {
+                let publish = publish(self.inner.as_ref(), &self.staging, &self.path);
+                let published = under_expected_generation(expected, publish).await;
+                refused_as_conflict(published, &self.path, expected)
+            }
+            Err(error) => Err(error),
+        };
         self.remove_staging().await;
-        refused_as_conflict(published, &self.path, expected)
+        published
     }
 
     /// Discard the upload: the backend's staged bytes while it is open, the
@@ -231,7 +231,7 @@ impl<A: Access> StagedWriter<A> {
             return;
         }
         self.upload = Upload::Done;
-        if let Err(error) = remove(self.inner.as_ref(), &self.staging).await {
+        if let Err(error) = remove(self.inner.as_ref(), &self.staging, OpDelete::new()).await {
             tracing::warn!(
                 staging = %self.staging,
                 path = %self.path,
@@ -246,23 +246,21 @@ impl<A: Access> StagedWriter<A> {
 /// delete executed late finds a changed object and is refused.
 pub struct ConditionalDeleter<A: Access> {
     inner: Arc<A>,
-    deleter: A::Deleter,
 }
 
 impl<A: Access> oio::Delete for ConditionalDeleter<A> {
-    /// Sent at once rather than queued: the condition is per object, read
-    /// just before, and carried by the request for that one object. A batch
-    /// of several would carry none, see the backend's HTTP client.
+    /// Sent at once rather than queued, on a backend deleter of its own: the
+    /// condition is per object, read just before, and carried by the request
+    /// for that one object. A batch of several would carry none, see the
+    /// backend's HTTP client, and a backend deleter keeps a refused path to
+    /// resend it with the next.
     async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         let expected = live_generation(self.inner.as_ref(), path).await?;
         if expected == ExpectedGeneration::Absent {
             return Ok(());
         }
-        let deleted = under_expected_generation(expected, async {
-            self.deleter.delete(path, args).await?;
-            self.deleter.close().await
-        })
-        .await;
+        let deleted =
+            under_expected_generation(expected, remove(self.inner.as_ref(), path, args)).await;
         refused_as_conflict(deleted, path, expected)
     }
 
@@ -271,14 +269,21 @@ impl<A: Access> oio::Delete for ConditionalDeleter<A> {
     }
 }
 
-/// The generation the object at `path` has now.
+/// The generation the object at `path` has now. A backend that reports none
+/// is refused: the change would otherwise go out unconditional.
 async fn live_generation<A: Access>(inner: &A, path: &str) -> Result<ExpectedGeneration> {
     match inner.stat(path, OpStat::new()).await {
-        Ok(stat) => Ok(stat
+        Ok(stat) => stat
             .into_metadata()
             .version()
             .and_then(|version| version.parse().ok())
-            .map_or(ExpectedGeneration::Unknown, ExpectedGeneration::Known)),
+            .map(ExpectedGeneration::Known)
+            .ok_or_else(|| {
+                opendal::Error::new(
+                    ErrorKind::Unsupported,
+                    format!("The backend reports no usable generation for {path}"),
+                )
+            }),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(ExpectedGeneration::Absent),
         Err(error) => Err(error),
     }
@@ -296,9 +301,10 @@ async fn publish<A: Access>(inner: &A, from: &str, to: &str) -> Result<Metadata>
     }
 }
 
-async fn remove<A: Access>(inner: &A, path: &str) -> Result<()> {
+/// Remove `path` on a backend deleter of its own, flushed at once.
+async fn remove<A: Access>(inner: &A, path: &str, args: OpDelete) -> Result<()> {
     let (_, mut deleter) = inner.delete().await?;
-    deleter.delete(path, OpDelete::new()).await?;
+    deleter.delete(path, args).await?;
     deleter.close().await
 }
 
@@ -324,13 +330,6 @@ fn refused_as_conflict<T>(
     }
 }
 
-/// Mark `error`, raised before anything was sent to the real path, as one
-/// after which nothing can land there. The kind stays: it says what failed.
-fn not_published(error: opendal::Error) -> opendal::Error {
-    opendal::Error::new(error.kind(), format!("Nothing was published: {error}"))
-        .set_source(LayerDomainError::NotPublished)
-}
-
 fn publish_conflict(path: &str, error: opendal::Error) -> opendal::Error {
     opendal::Error::new(
         ErrorKind::ConditionNotMatch,
@@ -349,17 +348,19 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::persistence::files::opendal::opendal_test_operators::get_memory_operator;
     use crate::persistence::files::FileIoError;
 
     /// A backend that reports a generation on stat, records the condition
-    /// each copy and delete of a real path ran under, and can refuse copies
-    /// as an object store does when the condition fails.
+    /// each copy and delete of a real path ran under, refuses copies or
+    /// deletes as an object store does when the condition fails, and deletes
+    /// through a batching deleter, as an object store does.
     #[derive(Debug, Clone, Default)]
     struct Versioned {
         generation: &'static str,
         seen: Arc<Mutex<Vec<Option<ExpectedGeneration>>>>,
         refuse_copies: Arc<AtomicBool>,
+        refuse_deletes: Arc<AtomicBool>,
+        batched: Arc<AtomicBool>,
     }
 
     impl<A: Access> Layer<A> for Versioned {
@@ -367,7 +368,7 @@ mod tests {
 
         fn layer(&self, inner: A) -> Self::LayeredAccess {
             VersionedAccessor {
-                inner,
+                inner: Arc::new(inner),
                 backend: self.clone(),
             }
         }
@@ -375,7 +376,7 @@ mod tests {
 
     #[derive(Debug)]
     struct VersionedAccessor<A> {
-        inner: A,
+        inner: Arc<A>,
         backend: Versioned,
     }
 
@@ -384,7 +385,7 @@ mod tests {
         type Reader = A::Reader;
         type Writer = A::Writer;
         type Lister = A::Lister;
-        type Deleter = RecordingDeleter<A::Deleter>;
+        type Deleter = oio::BatchDeleter<RecordingBatchDelete<A>>;
         type Copier = A::Copier;
 
         fn inner(&self) -> &Self::Inner {
@@ -422,49 +423,60 @@ mod tests {
                 .unwrap()
                 .push(expected_generation());
             if self.backend.refuse_copies.load(Ordering::SeqCst) {
-                return Err(opendal::Error::new(
-                    ErrorKind::ConditionNotMatch,
-                    "412 Precondition Failed",
-                ));
+                return Err(refusal());
             }
             self.inner.copy(from, to, args, opts).await
         }
 
         async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-            let (rp, deleter) = self.inner.delete().await?;
+            let deleter = RecordingBatchDelete {
+                inner: self.inner.clone(),
+                backend: self.backend.clone(),
+            };
             Ok((
-                rp,
-                RecordingDeleter {
-                    inner: deleter,
-                    seen: self.backend.seen.clone(),
-                    queued: 0,
-                },
+                RpDelete::default(),
+                oio::BatchDeleter::new(deleter, Some(100)),
             ))
         }
     }
 
-    struct RecordingDeleter<D> {
-        inner: D,
-        seen: Arc<Mutex<Vec<Option<ExpectedGeneration>>>>,
-        queued: usize,
+    fn refusal() -> opendal::Error {
+        opendal::Error::new(ErrorKind::ConditionNotMatch, "412 Precondition Failed")
     }
 
-    impl<D: oio::Delete> oio::Delete for RecordingDeleter<D> {
-        async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+    /// Deletes one path at a time as told, and notes a batch, which an object
+    /// store would run without any condition.
+    struct RecordingBatchDelete<A> {
+        inner: Arc<A>,
+        backend: Versioned,
+    }
+
+    impl<A: Access> oio::BatchDelete for RecordingBatchDelete<A> {
+        async fn delete_once(&self, path: String, args: OpDelete) -> Result<()> {
             if !path.starts_with(STAGING_PREFIX) {
-                self.seen.lock().unwrap().push(expected_generation());
+                self.backend
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .push(expected_generation());
+                if self.backend.refuse_deletes.load(Ordering::SeqCst) {
+                    return Err(refusal());
+                }
             }
-            self.queued += 1;
-            assert_eq!(
-                self.queued, 1,
-                "a conditional delete must be flushed before the next is queued"
-            );
-            self.inner.delete(path, args).await
+            let (_, mut deleter) = self.inner.delete().await?;
+            deleter.delete(&path, args).await?;
+            deleter.close().await
         }
 
-        async fn close(&mut self) -> Result<()> {
-            self.queued = 0;
-            self.inner.close().await
+        async fn delete_batch(
+            &self,
+            _batch: Vec<(String, OpDelete)>,
+        ) -> Result<oio::BatchDeleteResult> {
+            self.backend.batched.store(true, Ordering::SeqCst);
+            Err(opendal::Error::new(
+                ErrorKind::Unexpected,
+                "a batch carries no condition",
+            ))
         }
     }
 
@@ -474,10 +486,7 @@ mod tests {
     #[tokio::test]
     async fn publish_and_delete_run_under_the_live_generation() {
         let (backend, _tmp_dir) = plain_fs();
-        let versioned = Versioned {
-            generation: "7",
-            ..Versioned::default()
-        };
+        let versioned = versioned();
         let operator = backend.layer(versioned.clone()).layer(StagedPublishLayer);
         let path = "pk/pub/a.txt";
 
@@ -502,10 +511,7 @@ mod tests {
     #[tokio::test]
     async fn queued_deletes_are_flushed_one_at_a_time() {
         let (backend, _tmp_dir) = plain_fs();
-        let versioned = Versioned {
-            generation: "7",
-            ..Versioned::default()
-        };
+        let versioned = versioned();
         let operator = backend.layer(versioned.clone()).layer(StagedPublishLayer);
         operator.write("pk/pub/a.txt", b"a".to_vec()).await.unwrap();
         operator.write("pk/pub/b.txt", b"b".to_vec()).await.unwrap();
@@ -529,6 +535,45 @@ mod tests {
             4,
             "two publishes and two deletes, each under its own condition"
         );
+        assert!(!versioned.batched.load(Ordering::SeqCst));
+    }
+
+    /// A delete the backend refused is not kept by the backend's deleter and
+    /// resent, unconditionally and in a batch, with the next delete.
+    #[tokio::test]
+    async fn refused_delete_is_not_resent_with_the_next() {
+        let (backend, _tmp_dir) = plain_fs();
+        let versioned = versioned();
+        let operator = backend.layer(versioned.clone()).layer(StagedPublishLayer);
+        operator.write("pk/pub/a.txt", b"a".to_vec()).await.unwrap();
+        operator.write("pk/pub/b.txt", b"b".to_vec()).await.unwrap();
+
+        let accessor = operator.clone().into_inner();
+        let (_, mut deleter) = accessor.delete().await.unwrap();
+        versioned.refuse_deletes.store(true, Ordering::SeqCst);
+        let refused = deleter
+            .delete("pk/pub/a.txt", OpDelete::new())
+            .await
+            .expect_err("the backend refused the delete");
+        assert!(matches!(
+            FileIoError::from(refused),
+            FileIoError::PublishConflict
+        ));
+        versioned.refuse_deletes.store(false, Ordering::SeqCst);
+        deleter
+            .delete("pk/pub/b.txt", OpDelete::new())
+            .await
+            .unwrap();
+        deleter.close().await.unwrap();
+
+        assert!(operator.exists("pk/pub/a.txt").await.unwrap());
+        assert!(!operator.exists("pk/pub/b.txt").await.unwrap());
+        assert!(!versioned.batched.load(Ordering::SeqCst));
+        assert_eq!(
+            versioned.seen.lock().unwrap().len(),
+            4,
+            "the refused delete was sent once, the next under its own condition"
+        );
     }
 
     /// A publish the backend refuses on its condition is a conflict, lands
@@ -536,10 +581,7 @@ mod tests {
     #[tokio::test]
     async fn refused_publish_is_a_conflict_and_leaves_nothing_behind() {
         let (backend, _tmp_dir) = plain_fs();
-        let versioned = Versioned {
-            generation: "7",
-            ..Versioned::default()
-        };
+        let versioned = versioned();
         let operator = backend
             .clone()
             .layer(versioned.clone())
@@ -560,21 +602,6 @@ mod tests {
         assert_eq!(staging_objects(&backend).await, 0);
     }
 
-    /// A failure before the publish is sent says so, and keeps its kind.
-    #[test]
-    fn a_failure_before_the_publish_keeps_its_kind() {
-        let error = not_published(opendal::Error::new(ErrorKind::RateLimited, "429"));
-        assert_eq!(error.kind(), ErrorKind::RateLimited);
-        assert!(matches!(
-            LayerDomainError::of(&error),
-            Some(LayerDomainError::NotPublished)
-        ));
-        assert!(matches!(
-            FileIoError::from(error),
-            FileIoError::BackendRateLimited(_)
-        ));
-    }
-
     /// The filesystem backend, which supports copy and abort as an object
     /// store does; the in-memory one supports neither.
     fn plain_fs() -> (Operator, TempDir) {
@@ -587,9 +614,21 @@ mod tests {
         (Operator::new(builder).unwrap().finish(), tmp_dir)
     }
 
+    /// The filesystem backend reporting generation 7 for every object, under
+    /// the staged publish.
     fn staged_fs() -> (Operator, TempDir) {
         let (backend, tmp_dir) = plain_fs();
-        (backend.layer(StagedPublishLayer), tmp_dir)
+        (
+            backend.layer(versioned()).layer(StagedPublishLayer),
+            tmp_dir,
+        )
+    }
+
+    fn versioned() -> Versioned {
+        Versioned {
+            generation: "7",
+            ..Versioned::default()
+        }
     }
 
     /// Staging objects left behind. The listing names the prefix itself too.
@@ -643,22 +682,26 @@ mod tests {
 
     #[tokio::test]
     async fn expected_generation_is_read_from_the_live_object() {
-        let operator = get_memory_operator();
-        let inner = operator.into_inner();
         let path = "pk/pub/a.txt";
+        let (backend, _tmp_dir) = plain_fs();
+        let plain = backend.clone().into_inner();
+        let versioned = backend.layer(versioned()).into_inner();
         assert_eq!(
-            live_generation(&inner, path).await.unwrap(),
+            live_generation(&versioned, path).await.unwrap(),
             ExpectedGeneration::Absent
         );
-        Operator::from_inner(inner.clone())
+
+        Operator::from_inner(plain.clone())
             .write(path, b"x".to_vec())
             .await
             .unwrap();
-        // The memory backend reports no generation.
         assert_eq!(
-            live_generation(&inner, path).await.unwrap(),
-            ExpectedGeneration::Unknown
+            live_generation(&versioned, path).await.unwrap(),
+            ExpectedGeneration::Known(7)
         );
+        // The filesystem backend reports no usable generation, so it is refused.
+        let refused = live_generation(&plain, path).await.unwrap_err();
+        assert_eq!(refused.kind(), ErrorKind::Unsupported);
     }
 
     /// The whole stack over a staged publish: a locked write and delete
@@ -702,9 +745,8 @@ mod tests {
 
     #[test]
     fn condition_value_follows_the_expectation() {
-        assert_eq!(ExpectedGeneration::Absent.if_generation_match(), Some(0));
-        assert_eq!(ExpectedGeneration::Known(7).if_generation_match(), Some(7));
-        assert_eq!(ExpectedGeneration::Unknown.if_generation_match(), None);
+        assert_eq!(ExpectedGeneration::Absent.if_generation_match(), 0);
+        assert_eq!(ExpectedGeneration::Known(7).if_generation_match(), 7);
         assert_eq!(expected_generation(), None);
     }
 

@@ -73,16 +73,8 @@ impl SessionStorage {
     ///
     /// The file need not exist; locking a free path reserves it. `timeoutSeconds` is
     /// the lifetime asked for; the homeserver caps it, and
-    /// {@link StorageLock.timeoutSeconds} tells what was granted. The lifetime is the
-    /// caller's to manage: a write made under the lock must fit inside it, so
-    /// {@link SessionStorage.refreshLock | refresh} the lock during a long upload. Once a
-    /// write comes to change the file the homeserver keeps the lock until the change has
-    /// landed, whatever the lifetime says.
-    ///
-    /// Nothing refreshes the lock on its own: an upload that outlives it is refused with
-    /// 412 when it ends. To cover one longer than the lifetime, call
-    /// {@link SessionStorage.refreshLock | refreshLock} from a timer while the write is
-    /// in flight; the two calls may overlap.
+    /// {@link StorageLock.timeoutSeconds} tells what was granted. A write made under
+    /// the lock keeps it alive until the write ends, so it need not cover the upload itself.
     ///
     /// @param {Path} path File path; must not end with `/`.
     /// @param {number} timeoutSeconds Lifetime to ask for, in seconds; rounded down to
@@ -131,9 +123,7 @@ impl SessionStorage {
     /// @param {StorageLock} lock A lock this client holds.
     /// @returns {Promise<void>}
     /// @throws {PubkyError} A lock that no longer exists rejects with `RequestError`
-    /// and status `409`; a lock under which a write is still being published rejects with
-    /// status `423` and a `Retry-After`, and the lock is still this client's, so unlock
-    /// again once the write has landed. See {@link SessionStorage} for shared errors.
+    /// and status `409`. See {@link SessionStorage} for shared errors.
     #[wasm_bindgen]
     pub async fn unlock(&self, lock: &StorageLock) -> JsResult<()> {
         self.0.unlock(&lock.inner()).await?;
@@ -161,8 +151,9 @@ impl SessionStorage {
     /// @returns {Promise<void>}
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
     /// `RequestError` and status `412`; take a new one and read the file again. A file
-    /// the storage backend found changed since the write was prepared rejects with status
-    /// `409`; read it again and retry. Otherwise as {@link SessionStorage.putText}.
+    /// that changed since the write was prepared rejects with status `409`, which can
+    /// happen when an earlier change the storage backend ran late lands first; read it
+    /// again and retry. Otherwise as {@link SessionStorage.putText}.
     #[wasm_bindgen(js_name = "putTextLocked")]
     pub async fn put_text_locked(&self, lock: &StorageLock, body: &str) -> JsResult<()> {
         self.0
@@ -176,8 +167,7 @@ impl SessionStorage {
     /// @param {StorageLock} lock A lock this client holds.
     /// @returns {Promise<void>}
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
-    /// `RequestError` and status `412`; take a new one. A file the storage backend found
-    /// changed since the delete was prepared rejects with status `409`.
+    /// `RequestError` and status `412`; take a new one.
     /// Otherwise as {@link SessionStorage.delete}.
     #[wasm_bindgen(js_name = "deleteLocked")]
     pub async fn delete_locked(&self, lock: &StorageLock) -> JsResult<()> {

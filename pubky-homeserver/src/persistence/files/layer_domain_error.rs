@@ -14,18 +14,10 @@ pub enum LayerDomainError {
     PathCollision,
     #[error("lock_lost")]
     LockLost,
-    /// A change under the lock is still being published; retry after the
-    /// given number of seconds.
-    #[error("lock_busy")]
-    LockBusy { retry_after_secs: u64 },
     /// The backend refused a publish or delete: the object was not the one
     /// the change was made against.
     #[error("publish_conflict")]
     PublishConflict,
-    /// A change failed before anything was sent to the real path. What went
-    /// wrong is in the error's kind; this only says nothing can land.
-    #[error("not_published")]
-    NotPublished,
 }
 
 impl LayerDomainError {

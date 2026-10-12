@@ -96,6 +96,9 @@ type = "file_system"
 # Path to the service account file. The content of the service account file can also be added directly in here.
 # This must be absolute/full path.
 # credential = "/path/to/my_service_account.json"
+# Uploads are staged under `.staging/` in the bucket and published by a copy. A crash can leave
+# a staging object or an unfinished multipart upload behind: add lifecycle rules to the bucket
+# deleting `.staging/` objects, and aborting incomplete multipart uploads, older than a day.
 
 # In Memory storage
 # Files are saved in memory. Only use when you know what you are doing!

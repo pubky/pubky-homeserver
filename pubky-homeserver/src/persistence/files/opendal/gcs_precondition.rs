@@ -46,7 +46,7 @@ fn with_precondition(
     mut req: Request<Buffer>,
     expected: Option<ExpectedGeneration>,
 ) -> Result<Request<Buffer>> {
-    let Some(generation) = expected.and_then(ExpectedGeneration::if_generation_match) else {
+    let Some(generation) = expected.map(ExpectedGeneration::if_generation_match) else {
         return Ok(req);
     };
     let conditional = req
@@ -112,13 +112,6 @@ mod tests {
         .unwrap();
         assert_eq!(upload.uri().query(), Some("uploadType=media"));
 
-        let unknown = with_precondition(
-            request("RewriteObject", "https://s/b"),
-            Some(ExpectedGeneration::Unknown),
-        )
-        .unwrap();
-        assert_eq!(unknown.uri().query(), None);
-
         let outside = with_precondition(request("RewriteObject", "https://s/b"), None).unwrap();
         assert_eq!(outside.uri().query(), None);
     }
@@ -144,8 +137,8 @@ mod tests {
     // Multi-threaded for the cleaner, which deletes the test root on drop.
     #[tokio::test(flavor = "multi_thread")]
     async fn gcs_refuses_a_publish_or_delete_against_a_changed_object() {
+        use crate::persistence::files::opendal::opendal_service::gcs_operator;
         use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
-        use crate::persistence::files::staged_publish_layer::StagedPublishLayer;
 
         let (Ok(bucket), Ok(credentials)) = (
             std::env::var("GCS_BUCKET"),
@@ -154,18 +147,23 @@ mod tests {
             eprintln!("GCS_BUCKET or GOOGLE_APPLICATION_CREDENTIALS not set; skipping");
             return;
         };
-        let builder = opendal::services::Gcs::default()
-            .bucket(&bucket)
-            .credential_path(&credentials)
-            .root(&format!("test_{}", uuid::Uuid::new_v4()));
-        let backend = opendal::Operator::new(builder)
+        let root = format!("test_{}", uuid::Uuid::new_v4());
+        let builder = || {
+            opendal::services::Gcs::default()
+                .bucket(&bucket)
+                .credential_path(&credentials)
+                .root(&root)
+        };
+        // The production stack, and the bare backend with only the condition
+        // on it, through which the late requests below are sent.
+        let operator = gcs_operator(builder()).unwrap();
+        let backend = opendal::Operator::new(builder())
             .unwrap()
             .layer(opendal::layers::HttpClientLayer::new(
                 opendal::raw::HttpClient::with(PreconditionFetcher::new(reqwest::Client::new())),
             ))
             .finish();
         let _cleaner = OpendalGcpCleaner::new(Some(backend.clone()));
-        let operator = backend.clone().layer(StagedPublishLayer);
         let path = "pk/pub/a.bin";
 
         // Below and above the 5 MiB single-request threshold.

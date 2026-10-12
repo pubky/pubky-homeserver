@@ -5,10 +5,8 @@ use crate::AppContext;
 use crate::{
     persistence::{
         files::{
-            events::EventsService,
-            staged_publish_layer::StagedPublishLayer,
-            write_finalization_layer::{write_lock, WriteFinalizationLayer},
-            write_path_layer::WritePathLayer,
+            events::EventsService, staged_publish_layer::StagedPublishLayer,
+            write_finalization_layer::WriteFinalizationLayer, write_path_layer::WritePathLayer,
         },
         sql::SqlDb,
     },
@@ -33,15 +31,12 @@ use super::gcs_precondition;
 /// important for backends like `InMemory` where separate instances would
 /// have independent data.
 ///
-/// A remote backend's calls are bounded by [`write_lock::BACKEND_IO_TIMEOUT`]
-/// and its connections by [`write_lock::BACKEND_TCP_USER_TIMEOUT`]. A write
-/// under a lock reserves the lock for a window derived from the two, see
-/// [`write_lock`]. On top of that, a remote backend publishes and deletes
-/// under a generation condition through [`StagedPublishLayer`], so a request
-/// it executes after the window is refused rather than landing on the next
-/// holder. A local backend's calls are not bounded: abandoning a filesystem
-/// rename would not stop it, only lose track of it, so it is waited for and
-/// the reservation kept up meanwhile.
+/// A remote backend publishes and deletes under a generation condition
+/// through [`StagedPublishLayer`], so a request it executes late is refused
+/// rather than landing on a newer write. Every call to it is bounded by
+/// [`BACKEND_IO_TIMEOUT`], so a hung request cannot hold a finalization, and
+/// the user row with it, forever. A local backend's calls are not bounded:
+/// abandoning a filesystem rename would not stop it, only lose track of it.
 pub fn build_storage_operators(
     storage_config: &StorageToml,
     data_directory: &Path,
@@ -106,46 +101,38 @@ pub fn build_storage_operators(
     Ok((operator, admin_operator))
 }
 
+/// Longest any one call to the remote backend may take before it is
+/// abandoned: a read or write of a chunk, a part upload, a list, a stat, the
+/// close that finishes an upload, the copy that publishes it, or a delete.
+/// Before this, a call to the bucket could hang for good.
+#[cfg(feature = "storage-gcs")]
+const BACKEND_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The Google Cloud Storage backend: its calls bounded, its publishes and
 /// deletes conditional on the object's generation, see [`StagedPublishLayer`].
 #[cfg(feature = "storage-gcs")]
 fn gcs_backend_operator(
     config: &crate::data_directory::storage_config::GoogleBucketConfig,
 ) -> Result<Operator, FileIoError> {
+    gcs_operator(config.to_builder()?)
+}
+
+/// The operator stack over a GCS service, see [`gcs_backend_operator`].
+#[cfg(feature = "storage-gcs")]
+pub(super) fn gcs_operator(builder: opendal::services::Gcs) -> Result<Operator, FileIoError> {
     let http_client = opendal::raw::HttpClient::with(gcs_precondition::PreconditionFetcher::new(
-        backend_http_client()?,
+        reqwest::Client::new(),
     ));
-    let operator = opendal::Operator::new(config.to_builder()?)?
+    let operator = opendal::Operator::new(builder)?
         .layer(opendal::layers::HttpClientLayer::new(http_client))
         .finish()
-        // Each of the staged publish's calls is bounded on its own.
         .layer(
             opendal::layers::TimeoutLayer::new()
-                .with_timeout(write_lock::BACKEND_IO_TIMEOUT)
-                .with_io_timeout(write_lock::BACKEND_IO_TIMEOUT),
+                .with_timeout(BACKEND_IO_TIMEOUT)
+                .with_io_timeout(BACKEND_IO_TIMEOUT),
         )
         .layer(StagedPublishLayer);
     Ok(operator)
-}
-
-/// The HTTP client for a remote backend. Its kernel-level timeout is what
-/// stops an abandoned request from being delivered long after the fact, see
-/// [`write_lock::BACKEND_TCP_USER_TIMEOUT`]. Only Linux exposes the setting;
-/// elsewhere the kernel's own retransmission limit applies instead.
-#[cfg(feature = "storage-gcs")]
-fn backend_http_client() -> Result<reqwest::Client, FileIoError> {
-    let builder = reqwest::Client::builder();
-    #[cfg(target_os = "linux")]
-    let builder = builder.tcp_user_timeout(write_lock::BACKEND_TCP_USER_TIMEOUT);
-    builder.build().map_err(|error| {
-        FileIoError::OpenDAL(
-            opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "Failed to build the storage backend HTTP client",
-            )
-            .set_source(error),
-        )
-    })
 }
 
 /// Build the storage operators from an `AppContext` (test-only convenience).

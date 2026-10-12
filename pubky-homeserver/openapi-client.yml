@@ -45,9 +45,8 @@ info:
 
     `LOCK` takes an exclusive write lock on one file path, mapped or not, for the
     caller with write capability on it. `Timeout: Second-N` requests a lifetime
-    (capped at 600 seconds, default 30, `Infinite` grants the cap; refresh to
-    hold a lock longer). The lifetime is the client's to manage: a write under
-    the lock must fit inside it, so refresh the lock during a long upload. An optional
+    (capped at 60 seconds, default 30, `Infinite` grants the cap; refresh to
+    hold a lock longer). An optional
     `lockinfo` body is accepted but only `exclusive` `write` is granted. The
     response is `200` with a `lockdiscovery` XML body, a `Timeout` header and a
     `Lock-Token: <opaquelocktoken:...>` header. A `LOCK` carrying the held token
@@ -56,10 +55,7 @@ info:
     or a shared lock request, `413` for a `lockinfo` body over 16 KiB.
 
     `UNLOCK` with `Lock-Token: <opaquelocktoken:...>` releases the lock: `204`,
-    `409` when no lock with that token exists on the path, or `423` with a
-    `Retry-After` while a write under the lock is still being published (see
-    below); the lock is still the caller's, and the `UNLOCK` succeeds once the
-    write has landed.
+    or `409` when no lock with that token exists on the path.
 
     While a lock lives, `PUT` and `DELETE` on the path must carry the token in
     the `If` header, e.g. `If: (<opaquelocktoken:...>)`. Without it they return
@@ -70,16 +66,19 @@ info:
 
     A write checks the lock once, before it starts. An unlocked write holds
     nothing: a `LOCK` taken while it is still streaming is granted and does not
-    stop it from landing. A write that presents the token runs under the lock.
-    When it comes to change the file it reserves the lock for as long as the
-    change can still reach the storage backend (a few minutes at most, usually
-    far less), and until then the lock cannot expire, be released or be used
-    for another write, so a write that stalls can never land on top of a later
-    holder's. Its expiry may therefore end up later than the last granted
-    `Timeout`. A write that finds its lock gone by then returns `412`; one that
-    finds it still reserved for an earlier write, or with too little of the
-    reservation left, returns `423` with a `Retry-After`, and the lock is still
-    the caller's.
+    stop it from landing. A write that presents the token runs under the lock
+    and the server keeps that lock alive until the write ends, so a lock cannot
+    expire under a slow upload. Its expiry may therefore end up later than the
+    last granted `Timeout`.
+
+    On an object store backend every publish and delete is conditional on the
+    exact file version it was prepared against, read by the server as it
+    finalizes the request, so a change the backend executes late can never
+    replace a newer write. A holder's `PUT` wins over such a late change,
+    unless the change lands after the server read the version: then the `PUT`
+    returns `409`, and the client reads the file again and retries. A `DELETE`
+    is done once the entry is removed; a blob the backend refuses to remove
+    stays until the next write or delete on the path.
   version: 0.9.0
   license:
     name: MIT
@@ -616,11 +615,11 @@ paths:
             capability for the path, the path is outside `pub/` and `priv/`,
             or the user account is disabled.
         '409':
-          description: File/folder path collision, or the storage backend found the file changed since the write was prepared (see Locking); read it again and retry.
+          description: File/folder path collision, or the file changed since the write was prepared (see Locking); read it again and retry.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
         '423':
-          description: The path is locked and the request carries no lock token, or the lock is still reserved for an earlier write (`Retry-After` says when to retry).
+          description: The path is locked and the request carries no lock token.
         '507':
           description: Storage quota exceeded.
     delete:
@@ -652,12 +651,10 @@ paths:
           description: Insufficient permissions or path outside `pub/` and `priv/`.
         '404':
           description: File or storage owner not found.
-        '409':
-          description: The storage backend found the file changed since the delete was prepared (see Locking); read it again and retry.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
         '423':
-          description: The path is locked and the request carries no lock token, or the lock is still reserved for an earlier write (`Retry-After` says when to retry).
+          description: The path is locked and the request carries no lock token.
   "/{path}":
     parameters:
     - name: path
@@ -901,11 +898,11 @@ paths:
             Session user does not match target tenant, path is outside `/pub/` and
             `/priv/`, session lacks write capability for path, or user account is disabled.
         '409':
-          description: File/folder path collision, or the storage backend found the file changed since the write was prepared (see Locking)
+          description: File/folder path collision, or the file changed since the write was prepared (see Locking)
         '412':
           description: The `If` header names a token that is not the live lock on this path
         '423':
-          description: The path is locked and the request carries no lock token, or the lock is still reserved for an earlier write (see Locking)
+          description: The path is locked and the request carries no lock token (see Locking)
         '507':
           description: Storage quota exceeded
     delete:
@@ -933,12 +930,10 @@ paths:
           description: Insufficient permissions or path outside `/pub/` and `/priv/`
         '404':
           description: File not found
-        '409':
-          description: The storage backend found the file changed since the delete was prepared (see Locking)
         '412':
           description: The `If` header names a token that is not the live lock on this path
         '423':
-          description: The path is locked and the request carries no lock token, or the lock is still reserved for an earlier write (see Locking)
+          description: The path is locked and the request carries no lock token (see Locking)
   "/events/":
     get:
       tags:
