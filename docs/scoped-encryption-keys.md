@@ -37,6 +37,25 @@ and the [JS SDK README](../pubky-sdk/bindings/js/pkg/README.md#request-encryptio
 `signer.signin()` grants root storage access (`/:rw`) without keys. To receive
 keys, you must request `e` through a signed approval flow.
 
+## Select capabilities on the signing device
+
+`approve_auth()` in Rust and `approveAuthRequest()` in JS approve all requested
+capabilities. After collecting the user's consent, use
+`approve_auth_with_capabilities(url, &approved)` in Rust or
+`approveAuthWithCapabilities(url, approved)` in JS to approve a reduced set.
+The JS argument is a capabilities string. Both approval methods support grant
+and legacy signin/signup requests.
+
+Each approved scope and action must be covered by the request. Separate
+requested capabilities can cover different actions of one approval. You can
+narrow scopes or remove actions, including `e`. To approve no capabilities,
+pass `Capabilities::default()` in Rust or `""` in JS. Malformed capabilities and
+approvals exceeding the request fail before relay delivery.
+
+Signed V1 approvals derive and deliver keys only for the approved `e` scopes;
+declining `e` still returns a signed approval with an empty key bundle. The
+request's client identity, relay channel, and approval format stay the same.
+
 ## Choose scopes and actions
 
 The `e` action is separate from storage access:

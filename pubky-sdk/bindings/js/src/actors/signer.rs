@@ -123,10 +123,33 @@ impl Signer {
         Ok(Session(self.0.signin_cookie_blocking().await?))
     }
 
-    /// Approve a `pubkyauth://` request URL (encrypts & POSTs the signed AuthToken).
+    /// Approve all capabilities in a `pubkyauth://` auth request URL.
     #[wasm_bindgen(js_name = "approveAuthRequest")]
     pub async fn approve_auth(&self, pubkyauth_url: String) -> JsResult<()> {
         self.0.approve_auth(&pubkyauth_url).await?;
+        Ok(())
+    }
+
+    /// Approve selected capabilities in a `pubkyauth://` auth request URL.
+    ///
+    /// Scopes and actions must be covered by the request. An empty string
+    /// approves no capabilities. V1 grants deliver keys only for approved `e`
+    /// scopes. Supports grant and legacy signin/signup requests.
+    /// Invalid capabilities or approvals exceeding the request fail before POST.
+    ///
+    /// @example
+    /// await signer.approveAuthWithCapabilities(authUrl, "/pub/example.app/:r");
+    #[wasm_bindgen(js_name = "approveAuthWithCapabilities")]
+    pub async fn approve_auth_with_capabilities(
+        &self,
+        pubkyauth_url: String,
+        approved_capabilities: String,
+    ) -> JsResult<()> {
+        let capabilities =
+            crate::wrappers::capabilities::parse_capabilities(&approved_capabilities)?;
+        self.0
+            .approve_auth_with_capabilities(&pubkyauth_url, &capabilities)
+            .await?;
         Ok(())
     }
 

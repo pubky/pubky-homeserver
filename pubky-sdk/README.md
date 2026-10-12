@@ -348,6 +348,23 @@ Approve an auth request
 signer.approve_auth(authorization_url).await?;
 ```
 
+`approve_auth()` approves every requested capability. To approve fewer scopes
+or actions, use `approve_auth_with_capabilities()`:
+
+```rust ignore
+// The request includes `/pub/example.app/:rwe`; the user approves only read.
+let approved = Capabilities::builder().read("/pub/example.app/")?.finish();
+signer
+    .approve_auth_with_capabilities(authorization_url, &approved)
+    .await?;
+```
+
+See [selecting capabilities on the signing device][select-capabilities] for
+validation rules, empty approvals, and encryption key delivery.
+
+[select-capabilities]:
+  ../docs/scoped-encryption-keys.md#select-capabilities-on-the-signing-device
+
 See the fully functional [**Auth Flow Example**](https://github.com/pubky/pubky-homeserver/tree/main/examples/rust/2-auth_flow).
 
 #### Relay & reliability

@@ -237,6 +237,20 @@ for compatibility and expiry behavior.
 await signer.approveAuthRequest("pubkyauth://signin?caps=...&secret=...&relay=...");
 ```
 
+`approveAuthRequest()` approves every requested capability. To approve fewer
+scopes or actions, pass a capabilities string to `approveAuthWithCapabilities()`:
+
+```js
+// The request includes `/pub/example.app/:rwe`; the user approves only read.
+await signer.approveAuthWithCapabilities(authUrl, "/pub/example.app/:r");
+```
+
+See [selecting capabilities on the signing device][select-capabilities] for
+validation rules, empty approvals, and encryption key delivery.
+
+[select-capabilities]:
+  ../../../../docs/scoped-encryption-keys.md#select-capabilities-on-the-signing-device
+
 **Handle a pubkyauth deep link**
 
 General entry point for any supported `pubkyauth://` link. Auth request links
