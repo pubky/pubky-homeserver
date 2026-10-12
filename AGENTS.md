@@ -34,11 +34,20 @@ For Rust changes, run formatting, Clippy, and tests for the affected crates:
 
 ```sh
 cargo fmt --check
-cargo clippy --workspace --all-features --exclude pubky-wasm -- -D warnings
+cargo clippy --workspace --all-features --all-targets -- -D warnings
 cargo test -p pubky --all-features
 ```
 
-Replace `pubky` (the SDK) with the affected package. See [TESTING.md](docs/TESTING.md)
+Replace `pubky` (the SDK) in the test command with the affected package.
+For SDK or JS/WASM bindings changes, also lint the WASM bindings and tests:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo clippy -p pubky-wasm --lib --tests \
+  --target wasm32-unknown-unknown -- -D warnings
+```
+
+See [TESTING.md](docs/TESTING.md)
 for PostgreSQL setup and database cleanup with `#[pubky_testnet::test]`.
 Use `pubky-testnet` for integration tests; cover bug reproductions and relevant
 failure paths. For SDK changes, check native and WASM behavior using the
