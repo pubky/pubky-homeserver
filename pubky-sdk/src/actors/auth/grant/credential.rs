@@ -654,10 +654,15 @@ impl SessionCredential for GrantCredential {
                 .send_shared(request, client, coordinator.as_ref())
                 .await
             {
-                Err(Error::Request(RequestError::Server {
-                    status: StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND,
-                    ..
-                })) => return Ok(None),
+                Err(
+                    Error::Request(RequestError::Server {
+                        status: StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND,
+                        ..
+                    })
+                    | Error::CredentialRefresh(CredentialRefreshError::Request {
+                        status: Some(StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND),
+                    }),
+                ) => return Ok(None),
                 result => result?,
             }
         } else {
@@ -855,6 +860,7 @@ mod tests {
     };
     use tokio_rustls::TlsAcceptor;
 
+    use super::super::shared_session::{GrantSessionLease, SharedGrantSession};
     use super::*;
     #[allow(
         deprecated,
@@ -1319,6 +1325,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_revalidation_treats_wrapped_missing_refresh_sessions_as_absent() {
+        for (status, reason) in [(401, "Unauthorized"), (404, "Not Found")] {
+            let response =
+                format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 7\r\n\r\nprivate");
+            let fixture =
+                RequestFailureFixture::new(ServerBehavior::OwnedReply(response.into_bytes())).await;
+            let credential = fixture.grant_credential(true);
+            let shared = SharedGrantSession {
+                response: credential.state.lock().await.response(),
+                refresh_pending: false,
+                logout_pending: false,
+            };
+            credential.state.lock().await.coordinator = Some(Arc::new(TestCoordinator {
+                shared: Arc::new(tokio::sync::Mutex::new(Some(shared))),
+            }));
+
+            let result = credential
+                .revalidate(&fixture.client, &fixture.user.public_key())
+                .await;
+
+            assert!(
+                matches!(result, Ok(None)),
+                "wrapped {status} refresh failure must mean missing session, got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     #[allow(
         deprecated,
         reason = "cookie credential is the supported non-grant control"
@@ -1388,7 +1422,44 @@ mod tests {
 
     enum ServerBehavior {
         Reply(&'static [u8]),
+        OwnedReply(Vec<u8>),
         Stall,
+    }
+
+    #[derive(Debug)]
+    struct TestCoordinator {
+        shared: Arc<tokio::sync::Mutex<Option<SharedGrantSession>>>,
+    }
+
+    #[derive(Debug)]
+    struct TestLease {
+        shared: Arc<tokio::sync::Mutex<Option<SharedGrantSession>>>,
+    }
+
+    #[async_trait]
+    impl GrantSessionCoordinator for TestCoordinator {
+        async fn acquire(&self, _: bool) -> Result<Box<dyn GrantSessionLease>> {
+            Ok(Box::new(TestLease {
+                shared: Arc::clone(&self.shared),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl GrantSessionLease for TestLease {
+        async fn load(&self) -> Result<Option<SharedGrantSession>> {
+            Ok(self.shared.lock().await.clone())
+        }
+
+        async fn store(&self, session: &SharedGrantSession) -> Result<()> {
+            *self.shared.lock().await = Some(session.clone());
+            Ok(())
+        }
+
+        async fn remove(&self) -> Result<()> {
+            *self.shared.lock().await = None;
+            Ok(())
+        }
     }
 
     struct RequestFailureFixture {
@@ -1434,6 +1505,9 @@ mod tests {
                 }
                 match behavior {
                     ServerBehavior::Reply(response) => stream.write_all(response).await.unwrap(),
+                    ServerBehavior::OwnedReply(response) => {
+                        stream.write_all(&response).await.unwrap();
+                    }
                     ServerBehavior::Stall => tokio::time::sleep(Duration::from_secs(1)).await,
                 }
             });

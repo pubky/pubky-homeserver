@@ -16,9 +16,18 @@ let base;
 function call(window, method, ...args) {
   return window.webContents.executeJavaScript(`(async () => {
     try { return { ok: true, value: await tabs.${method}(...${JSON.stringify(args)}) }; }
-    catch (error) { return { ok: false, error: error.message || String(error) }; }
+    catch (error) { return { ok: false, error: {
+      name: error.name,
+      message: error.message || String(error),
+      statusCode: error.data?.statusCode,
+    } }; }
   })()`, true).then(result => {
-    if (!result.ok) throw new Error(`${method}: ${result.error}`);
+    if (!result.ok) {
+      const error = new Error(`${method}: ${result.error.message}`);
+      error.name = result.error.name;
+      error.statusCode = result.error.statusCode;
+      throw error;
+    }
     return result.value;
   });
 }
@@ -58,16 +67,23 @@ async function scenario(delegated) {
   assert.equal(await call(a, "restoreTogether", id), grant);
 
   // Revalidation distinguishes rejected credentials from transient refresh failures.
-  for (const [status, error] of [
-    [0, /HTTP transport error/],
-    [429, /429 Too Many Requests/],
-    [500, /500 Internal Server Error/],
-    [401, /Browser session is no longer valid/],
-    [404, /Browser session is no longer valid/],
-  ]) {
+  for (const status of [0, 429, 500, 401, 404]) {
     await call(a, "expire");
     await call(a, "failExchange", status);
-    await assert.rejects(call(a, "restore", id), error);
+    await assert.rejects(call(a, "restore", id), error => {
+      if (status === 401 || status === 404) {
+        assert.equal(error.name, "ClientStateError");
+        assert.equal(error.statusCode, undefined);
+        assert.match(error.message, /Browser session is no longer valid/);
+      } else {
+        assert.equal(error.name, "CredentialRefreshError");
+        assert.equal(error.statusCode, status || undefined);
+        assert.match(error.message, /Grant credential refresh request failed/);
+      }
+      assert.doesNotMatch(error.message, /Simulated exchange failure/);
+      assert.doesNotMatch(error.message, /auth\/grant\/session/);
+      return true;
+    });
     assert.equal(await call(a, "restore", id), grant);
   }
 

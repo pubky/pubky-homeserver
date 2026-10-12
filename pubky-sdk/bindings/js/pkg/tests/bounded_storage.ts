@@ -29,6 +29,24 @@ async function assertServerError(t: Test, request: Promise<unknown>, message: st
   }
 }
 
+async function assertRefreshError(t: Test, request: Promise<unknown>) {
+  try {
+    await request;
+    t.fail("request must reject failed credential refresh");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(error.name, "CredentialRefreshError", "refresh uses typed error name");
+    t.equal(getStatusCode(error), 500, "refresh status survives");
+    t.equal(
+      error.message,
+      "Grant credential refresh request failed",
+      "refresh diagnostic is secret-safe",
+    );
+    t.notOk(error.message.includes("Internal Server Error"), "status text is redacted");
+    t.notOk(error.message.includes("response body"), "response diagnostic is redacted");
+  }
+}
+
 for (const setting of [undefined, 16, 8192, 0]) {
   const label = setting ?? "default";
   const limit = setting ?? 4096;
@@ -137,7 +155,7 @@ for (const setting of [undefined, 16, 8192, 0]) {
 
     try {
       const session = await signer.signin("bounded-reader.test");
-      await assertServerError(t, session.storage.get(PATH), overflowMessage);
+      await assertRefreshError(t, session.storage.get(PATH));
       t.equal(exchanges, 2, "expired bearer triggers a refresh");
       t.notOk(storageSent, "failed refresh prevents the storage GET");
     } finally {
