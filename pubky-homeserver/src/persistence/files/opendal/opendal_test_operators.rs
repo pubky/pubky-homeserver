@@ -405,7 +405,8 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
     async fn test_operator_test_providers() {
         let providers = OpendalTestOperators::new();
@@ -427,7 +428,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
     async fn test_gcs_cleanup() {
         let test_root_dir = {

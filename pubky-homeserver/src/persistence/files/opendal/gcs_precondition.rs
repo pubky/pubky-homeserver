@@ -131,14 +131,26 @@ mod tests {
     }
 
     /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
-    /// `GCS_BUCKET` are set: the staged publish lands files on both sides of
-    /// the multipart threshold, and a publish or delete prepared against an
-    /// object that has since changed is refused by GCS.
+    /// `GCS_BUCKET` are set, the production stack end to end:
+    ///
+    /// 1. Writes land through staging, below and above the 5 MiB multipart
+    ///    threshold, and leave no staging object behind.
+    /// 2. A publish and a delete prepared against an object that a newer
+    ///    write has since replaced are refused, and the newer data stays.
+    /// 3. A read returns one version of the object or fails, never bytes of
+    ///    two: an overwrite between two chunks ends the stream.
     // Multi-threaded for the cleaner, which deletes the test root on drop.
     #[tokio::test(flavor = "multi_thread")]
-    async fn gcs_refuses_a_publish_or_delete_against_a_changed_object() {
-        use crate::persistence::files::opendal::opendal_service::gcs_operator;
+    async fn gcs_refuses_stale_changes_and_mixed_reads() {
+        use futures_util::StreamExt;
+        use pubky_common::crypto::Keypair;
+
+        use async_dropper::AsyncDropper;
+
+        use crate::persistence::files::opendal::opendal_service::{gcs_operator, OpendalService};
         use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
+        use crate::persistence::files::staged_publish_layer::live_generation;
+        use crate::shared::webdav::{EntryPath, StoragePath};
 
         let (Ok(bucket), Ok(credentials)) = (
             std::env::var("GCS_BUCKET"),
@@ -163,97 +175,128 @@ mod tests {
                 opendal::raw::HttpClient::with(PreconditionFetcher::new(reqwest::Client::new())),
             ))
             .finish();
-        let _cleaner = OpendalGcpCleaner::new(Some(backend.clone()));
-        let path = "pk/pub/a.bin";
+        // Removes the test root from the bucket on drop.
+        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
+        let entry_path = EntryPath::new(
+            Keypair::random().public_key(),
+            StoragePath::new("/pub/a.bin").unwrap(),
+        );
+        let path = entry_path.as_str();
+        let small = 1024;
+        let large = 6 * 1024 * 1024;
 
         // What the finalization does: read the generation, then change the
-        // object under it. Below and above the 5 MiB single-request threshold.
-        let generation = |path: &'static str| {
-            let backend = backend.clone();
+        // object under it.
+        let generation = || {
+            let backend = backend.clone().into_inner();
             async move {
-                crate::persistence::files::staged_publish_layer::live_generation(
-                    &backend.into_inner(),
-                    path,
-                )
-                .await
-                .unwrap()
-                .expect("GCS reports a generation")
+                live_generation(&backend, path)
+                    .await
+                    .unwrap()
+                    .expect("GCS reports a generation")
             }
         };
-        let g = generation(path).await;
+        let staging_objects = || async {
+            operator
+                .list(".staging/")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.metadata().is_file())
+                .count()
+        };
+
+        // 1. A single-request upload, then a multipart one.
+        let g = generation().await;
         assert_eq!(g, ExpectedGeneration::Absent);
-        under_expected_generation(g, operator.write(path, vec![1u8; 1024]))
+        under_expected_generation(g, operator.write(path, vec![1u8; small]))
             .await
             .unwrap();
-        assert_eq!(operator.read(path).await.unwrap().len(), 1024);
-        let large = 6 * 1024 * 1024;
-        let g = generation(path).await;
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![1u8; small]
+        );
+        let g = generation().await;
         under_expected_generation(g, operator.write(path, vec![2u8; large]))
             .await
             .unwrap();
-        assert_eq!(operator.read(path).await.unwrap().len(), large);
-        let stale = generation(path).await;
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![2u8; large]
+        );
+        assert_eq!(
+            staging_objects().await,
+            0,
+            "every staging object was removed"
+        );
+
+        // 2. A publish and a delete are prepared against the object as it is
+        // now, a newer write lands, and both are refused; the newer data,
+        // itself a multipart upload, stays intact.
+        let stale = generation().await;
         assert!(matches!(stale, ExpectedGeneration::Known(_)));
-        let staging_left = operator
-            .list(".staging/")
-            .await
-            .unwrap()
-            .iter()
-            .filter(|entry| entry.metadata().is_file())
-            .count();
-        assert_eq!(staging_left, 0, "every staging object was removed");
-
-        // A read is pinned to the ETag the stat returned, chunk by chunk.
-        let etag = backend
-            .stat(path)
-            .await
-            .unwrap()
-            .etag()
-            .expect("GCS reports an ETag")
-            .to_string();
-        let pinned = backend
-            .reader_with(path)
-            .chunk(16 * 1024)
-            .if_match(&etag)
-            .await
-            .unwrap()
-            .read(..)
+        under_expected_generation(stale, operator.write(path, vec![3u8; large]))
             .await
             .unwrap();
-        assert_eq!(pinned.len(), large);
-        let mismatched = backend
-            .reader_with(path)
-            .chunk(16 * 1024)
-            .if_match("\"not-the-etag\"")
-            .await
-            .unwrap()
-            .read(..)
-            .await
-            .expect_err("a read pinned to another ETag is refused");
-        assert_eq!(mismatched.kind(), ErrorKind::ConditionNotMatch);
-
-        // The object changes after a publish and a delete were prepared
-        // against it: both are refused and the object is left alone.
-        under_expected_generation(stale, operator.write(path, vec![3u8; 10]))
-            .await
-            .unwrap();
-        backend.write("pk/staged", vec![4u8; 10]).await.unwrap();
+        backend.write("stale", vec![4u8; 10]).await.unwrap();
         let late_publish =
-            under_expected_generation(stale, async { backend.copy("pk/staged", path).await })
+            under_expected_generation(stale, async { backend.copy("stale", path).await })
                 .await
-                .expect_err("a publish against a changed object is refused");
+                .expect_err("a publish against a replaced object is refused");
         assert_eq!(late_publish.kind(), ErrorKind::ConditionNotMatch);
         let late_delete = under_expected_generation(stale, async { backend.delete(path).await })
             .await
-            .expect_err("a delete against a changed object is refused");
+            .expect_err("a delete against a replaced object is refused");
         assert_eq!(late_delete.kind(), ErrorKind::ConditionNotMatch);
-        assert_eq!(operator.read(path).await.unwrap().to_vec(), vec![3u8; 10]);
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![3u8; large]
+        );
 
-        let g = generation(path).await;
+        // 3. A read through the server's read path, overwritten between two
+        // of its chunks: what it delivered is the version it started on, and
+        // it either completes that version or fails.
+        let service = OpendalService::new_from_operator(operator.clone());
+        let (length, mut stream) = service.get_sized_stream(&entry_path).await.unwrap();
+        assert_eq!(length as usize, large);
+        let first = stream.next().await.unwrap().unwrap();
+        assert!(first.iter().all(|&byte| byte == 3));
+        let g = generation().await;
+        under_expected_generation(g, operator.write(path, vec![5u8; large]))
+            .await
+            .unwrap();
+        let mut delivered = first.len();
+        let mut ended_in = Ok(());
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    assert!(
+                        chunk.iter().all(|&byte| byte == 3),
+                        "a chunk of the newer version was mixed in"
+                    );
+                    delivered += chunk.len();
+                }
+                Err(error) => {
+                    ended_in = Err(error);
+                    break;
+                }
+            }
+        }
+        assert!(
+            ended_in.is_err() || delivered == large,
+            "the read neither completed its version nor failed"
+        );
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![5u8; large]
+        );
+
+        let g = generation().await;
         under_expected_generation(g, operator.delete(path))
             .await
             .unwrap();
         assert!(!operator.exists(path).await.unwrap());
+        assert_eq!(staging_objects().await, 0);
     }
 
     #[tokio::test]
