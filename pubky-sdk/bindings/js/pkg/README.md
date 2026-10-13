@@ -639,7 +639,7 @@ All async methods throw a structured `PubkyError`:
 interface PubkyError extends Error {
   name:
     | "RequestError" // network/server/validation/JSON
-    | "CredentialRefreshError" // automatic grant refresh failed
+    | "CredentialRefreshError" // grant refresh request failed
     | "InvalidInput"
     | "AuthenticationError"
     | "PkarrError"
@@ -649,10 +649,11 @@ interface PubkyError extends Error {
 }
 ```
 
-`CredentialRefreshError` is secret-safe. It includes
-`data: { statusCode: number }` when the refresh endpoint responded, while
-transport failures omit `data`. This distinguishes unavailable grant refresh
-from a failure returned by the requested storage operation.
+`CredentialRefreshError` represents secret-safe refresh request failures. It
+includes `data: { statusCode: number }` when the refresh endpoint responded, while
+transport failures omit `data`. Local authentication, resolution, parsing, and
+build failures keep their normal error names. This distinguishes unavailable
+grant refresh from a failure returned by the requested storage operation.
 
 Example:
 

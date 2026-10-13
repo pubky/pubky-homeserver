@@ -529,7 +529,8 @@ impl GrantCredential {
             &state.client_signer,
             &state.homeserver_pk,
         )
-        .await?;
+        .await
+        .map_err(CredentialRefreshError::from_refresh_failure)?;
 
         state.bearer = parsed.token;
         state.session = parsed.session;
@@ -631,9 +632,7 @@ impl SessionCredential for GrantCredential {
             grant_state.needs_refresh(now_unix(), REFRESH_SLACK_SECS)
         };
         if needs_refresh {
-            self.refresh(client)
-                .await
-                .map_err(CredentialRefreshError::from_refresh_failure)?;
+            self.refresh(client).await?;
         }
         let bearer = self.state.lock().await.bearer.clone();
         Ok(rb.bearer_auth(bearer))
@@ -1268,17 +1267,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_refresh_server_failure_has_typed_secret_safe_provenance() {
+    async fn refresh_server_failure_has_typed_secret_safe_provenance() {
         let fixture = RequestFailureFixture::new(TestServerBehavior::Reply(
             b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\nsensitive".to_vec(),
         ))
         .await;
-        let session = PubkySession::from_grant_credential(
-            fixture.client.clone(),
-            fixture.grant_credential(true),
-        );
+        let credential = fixture.grant_credential(true);
 
-        let error = session.storage().get("/pub/test/file").await.unwrap_err();
+        let error = credential.refresh(&fixture.client).await.unwrap_err();
 
         assert!(
             matches!(
@@ -1303,14 +1299,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_refresh_timeout_has_typed_secret_safe_provenance() {
+    async fn refresh_timeout_has_typed_secret_safe_provenance() {
         let fixture = RequestFailureFixture::new(TestServerBehavior::Stall).await;
-        let session = PubkySession::from_grant_credential(
-            fixture.client.clone(),
-            fixture.grant_credential(true),
-        );
+        let credential = fixture.grant_credential(true);
 
-        let error = session.storage().get("/pub/test/file").await.unwrap_err();
+        let error = credential.refresh(&fixture.client).await.unwrap_err();
 
         assert!(
             matches!(
@@ -1322,6 +1315,79 @@ mod tests {
         let debug = format!("{error:?}");
         assert!(!debug.contains("localhost"));
         assert!(!debug.contains("auth/grant/session"));
+    }
+
+    #[tokio::test]
+    async fn shared_refresh_request_failure_uses_same_secret_safe_error() {
+        let fixture = RequestFailureFixture::new(TestServerBehavior::Reply(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\nsensitive".to_vec(),
+        ))
+        .await;
+        let credential = fixture.grant_credential(true);
+        let coordinator = TestCoordinator {
+            shared: Arc::new(tokio::sync::Mutex::new(Some(SharedGrantSession {
+                response: credential.state.lock().await.response(),
+                refresh_pending: false,
+                logout_pending: false,
+            }))),
+        };
+
+        let error = credential
+            .refresh_shared(&fixture.client, &coordinator, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::CredentialRefresh(CredentialRefreshError::Request {
+                status: Some(StatusCode::SERVICE_UNAVAILABLE)
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_preserves_local_authentication_failure() {
+        let (stored, claims) = stored_credential(now_unix() + 3600);
+        let credential = test_credential(
+            stored,
+            claims.clone(),
+            GrantPopSigner::delegated(
+                "missing-key".into(),
+                claims.cnf,
+                super::super::pop_signer::delegated_sign_callback(|_| async {
+                    Err(super::super::pop_signer::GrantSigningError::KeyUnavailable(
+                        "deleted key".into(),
+                    ))
+                }),
+            ),
+        );
+        credential.state.lock().await.session.token_expires_at = now_unix();
+        let client = PubkyHttpClient::new().unwrap();
+
+        let error = credential.refresh(&client).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Authentication(AuthError::Validation(message)) if message.contains("deleted key")
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_refresh_preserves_coordinator_request_failure() {
+        let (stored, claims) = stored_credential(now_unix() + 3600);
+        let signer = GrantPopSigner::local(Keypair::from_secret(&stored.client_key_secret));
+        let credential = test_credential(stored, claims, signer);
+        let client = PubkyHttpClient::new().unwrap();
+
+        let error = credential
+            .refresh_shared(&client, &FailingCoordinator, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Request(RequestError::Validation { message }) if message == "browser storage failed"
+        ));
     }
 
     #[tokio::test]
@@ -1397,6 +1463,19 @@ mod tests {
     #[derive(Debug)]
     struct TestCoordinator {
         shared: Arc<tokio::sync::Mutex<Option<SharedGrantSession>>>,
+    }
+
+    #[derive(Debug)]
+    struct FailingCoordinator;
+
+    #[async_trait]
+    impl GrantSessionCoordinator for FailingCoordinator {
+        async fn acquire(&self, _: bool) -> Result<Box<dyn GrantSessionLease>> {
+            Err(RequestError::Validation {
+                message: "browser storage failed".into(),
+            }
+            .into())
+        }
     }
 
     #[derive(Debug)]

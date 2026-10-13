@@ -50,7 +50,7 @@ where
 pub enum PubkyErrorName {
     /// A network or server request failed. Check the network connection or retry.
     RequestError,
-    /// Automatic grant credential refresh failed while preparing or retrying a request.
+    /// A grant credential refresh request failed while preparing or retrying a request.
     CredentialRefreshError,
     /// The error was caused by invalid user input, such as a malformed URL.
     InvalidInput,

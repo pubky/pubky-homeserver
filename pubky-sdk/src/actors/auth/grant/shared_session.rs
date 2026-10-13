@@ -132,7 +132,8 @@ impl GrantCredential {
             &state.client_signer,
             &state.homeserver_pk,
         )
-        .await?;
+        .await
+        .map_err(CredentialRefreshError::from_refresh_failure)?;
         shared.response = response;
         shared.refresh_pending = false;
         lease.store(&shared).await?;
@@ -160,9 +161,7 @@ impl GrantCredential {
             };
             if refresh {
                 drop(lease);
-                self.refresh_shared(client, coordinator, None)
-                    .await
-                    .map_err(CredentialRefreshError::from_refresh_failure)?;
+                self.refresh_shared(client, coordinator, None).await?;
                 continue;
             }
             let retry = request.try_clone();
@@ -175,8 +174,7 @@ impl GrantCredential {
                 && let Some(retry) = retry
             {
                 self.refresh_shared(client, coordinator, Some(&bearer))
-                    .await
-                    .map_err(CredentialRefreshError::from_refresh_failure)?;
+                    .await?;
                 request = retry;
                 retried = true;
                 continue;

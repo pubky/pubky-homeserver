@@ -86,9 +86,10 @@ let pubky = Pubky::with_client(client);
 ```
 
 The setting applies to all checked requests made through that client, including
-credential refresh. Automatic refresh failures surface as
-`Error::CredentialRefresh(CredentialRefreshError)`. The error retains an
-optional HTTP status but redacts response bodies,
+credential refresh. Refresh request failures surface as
+`Error::CredentialRefresh(CredentialRefreshError)`. Local failures keep their
+original error type. The refresh request error retains an optional HTTP status
+but redacts response bodies,
 URLs, grants, proofs, and bearers from `Display` and `Debug`. Other checked
 request errors use the captured message. Set the limit to `0` to skip error-body
 reads and use the HTTP status reason as that message. Positive limits preserve

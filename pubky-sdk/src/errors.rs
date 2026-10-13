@@ -76,7 +76,7 @@ pub enum Error {
     Build(#[from] BuildError),
 }
 
-/// Secret-safe provenance for an automatic grant credential refresh failure.
+/// Secret-safe provenance for a failed grant credential refresh request.
 ///
 /// This deliberately omits request URLs, response bodies, grants, proofs, and
 /// bearer values from both [`std::fmt::Display`] and [`std::fmt::Debug`]. A
@@ -90,31 +90,17 @@ pub enum CredentialRefreshError {
         /// HTTP status returned by the refresh endpoint, when available.
         status: Option<reqwest::StatusCode>,
     },
-
-    /// Preparing refresh authentication failed locally.
-    #[error("Grant credential refresh authentication failed")]
-    Authentication,
-
-    /// Resolving the refresh destination failed.
-    #[error("Grant credential refresh resolution failed")]
-    Resolution,
-
-    /// Refresh failed for another local reason.
-    #[error("Grant credential refresh failed")]
-    Internal,
 }
 
 impl CredentialRefreshError {
-    pub(crate) fn from_refresh_failure(error: Error) -> Self {
+    pub(crate) fn from_refresh_failure(error: Error) -> Error {
         match error {
             Error::Request(RequestError::Server { status, .. }) => Self::Request {
                 status: Some(status),
-            },
-            Error::Request(_) => Self::Request { status: None },
-            Error::Authentication(_) => Self::Authentication,
-            Error::Pkarr(_) => Self::Resolution,
-            Error::Parse(_) | Error::Build(_) => Self::Internal,
-            Error::CredentialRefresh(error) => error,
+            }
+            .into(),
+            Error::Request(_) => Self::Request { status: None }.into(),
+            error => error,
         }
     }
 }
