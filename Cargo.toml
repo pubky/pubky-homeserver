@@ -20,7 +20,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.16.0"
+version = "0.16.1"
 rust-version = "1.89"
 edition = "2021"
 authors = [
