@@ -194,6 +194,43 @@ mod tests {
         assert_eq!(operator.read(path).await.unwrap().len(), large);
         let stale = generation(path).await;
         assert!(matches!(stale, ExpectedGeneration::Known(_)));
+        let staging_left = operator
+            .list(".staging/")
+            .await
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.metadata().is_file())
+            .count();
+        assert_eq!(staging_left, 0, "every staging object was removed");
+
+        // A read is pinned to the ETag the stat returned, chunk by chunk.
+        let etag = backend
+            .stat(path)
+            .await
+            .unwrap()
+            .etag()
+            .expect("GCS reports an ETag")
+            .to_string();
+        let pinned = backend
+            .reader_with(path)
+            .chunk(16 * 1024)
+            .if_match(&etag)
+            .await
+            .unwrap()
+            .read(..)
+            .await
+            .unwrap();
+        assert_eq!(pinned.len(), large);
+        let mismatched = backend
+            .reader_with(path)
+            .chunk(16 * 1024)
+            .if_match("\"not-the-etag\"")
+            .await
+            .unwrap()
+            .read(..)
+            .await
+            .expect_err("a read pinned to another ETag is refused");
+        assert_eq!(mismatched.kind(), ErrorKind::ConditionNotMatch);
 
         // The object changes after a publish and a delete were prepared
         // against it: both are refused and the object is left alone.

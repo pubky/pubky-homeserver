@@ -271,6 +271,21 @@ impl Finalizer {
             }
         }
 
+        self.remove_blob_under_its_generation(backend_deleter, backend, pending, executor)
+            .await
+    }
+
+    /// Remove the blob under the generation it has now. A removal the backend
+    /// refuses on that condition is done with: the blob is left, see
+    /// [`Self::remove_blob_if_unreferenced`].
+    async fn remove_blob_under_its_generation<R: oio::Delete, A: Access>(
+        &self,
+        backend_deleter: &mut R,
+        backend: &A,
+        pending: &PendingDelete,
+        executor: &mut UnifiedExecutor<'_>,
+    ) -> Result<()> {
+        let entry_path = &pending.entry_path;
         let generation = generation_under_lock(backend, entry_path, executor).await?;
         if generation == Some(ExpectedGeneration::Absent) {
             return Ok(());

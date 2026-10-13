@@ -212,4 +212,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()[RETRY_AFTER], "1");
     }
+
+    /// A publish the backend refused, because the file changed since it was
+    /// prepared, is a conflict the client resolves by reading again.
+    #[test]
+    fn publish_conflict_is_a_409() {
+        let response = HttpError::from(FileIoError::PublishConflict).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }

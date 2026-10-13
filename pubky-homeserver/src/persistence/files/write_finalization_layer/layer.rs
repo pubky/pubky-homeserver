@@ -509,11 +509,114 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use crate::persistence::files::events::EventType;
+    use crate::persistence::files::opendal::opendal_test_operators::{get_fs_operator, Versioned};
+    use crate::persistence::files::staged_publish_layer::StagedPublishLayer;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
+    use tempfile::TempDir;
 
-    use super::test_support::{all_events, create_user, test_operator, user_usage};
+    use super::test_support::{
+        all_events, create_user, test_operator, test_operator_over, user_usage,
+    };
+
+    /// The finalization over a staged publish on a versioned backend, which
+    /// is returned to steer it, with the backend's directory.
+    fn staged_operator(db: &SqlDb) -> (opendal::Operator, opendal::Operator, Versioned, TempDir) {
+        let (fs, tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let backend = fs.layer(versioned.clone()).layer(StagedPublishLayer);
+        (
+            test_operator_over(db, backend.clone()),
+            backend,
+            versioned,
+            tmp_dir,
+        )
+    }
+
+    /// End every other connection to the test database: the finalization's
+    /// transaction among them.
+    async fn kill_other_connections(db: &SqlDb) {
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = current_database() AND pid <> pg_backend_pid()",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    /// The race the generation read guards against: the finalization's
+    /// transaction dies while the generation lookup is pending, the lock
+    /// passes to someone who writes, and the lookup returns their generation.
+    /// A publish under it would replace their write and pass the condition.
+    /// The finalization must find its transaction gone before publishing.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn write_whose_transaction_died_during_the_generation_read_is_refused() {
+        let db = SqlDb::test().await;
+        let (operator, _backend, versioned, _tmp_dir) = staged_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/pub/a.txt").unwrap());
+
+        let release = versioned.stall_next_stat();
+        let write = tokio::spawn({
+            let (operator, entry_path) = (operator.clone(), entry_path.clone());
+            async move { operator.write(entry_path.as_str(), b"late".to_vec()).await }
+        });
+        versioned.until_stat_stalled().await;
+        kill_other_connections(&db).await;
+        release.send(()).unwrap();
+
+        write
+            .await
+            .unwrap()
+            .expect_err("the write must be refused once its transaction is gone");
+        assert!(
+            versioned.seen.lock().unwrap().is_empty(),
+            "nothing may be published under a generation read after the transaction died"
+        );
+        assert!(!operator.exists(entry_path.as_str()).await.unwrap());
+        assert!(matches!(
+            EntryRepository::get_by_path(&entry_path, &mut db.pool().into()).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+    }
+
+    /// The same ordering on the delete path: the blob removal's transaction
+    /// dies during the generation lookup. The blob must be left alone.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn blob_removal_whose_transaction_died_during_the_generation_read_is_refused() {
+        let db = SqlDb::test().await;
+        let (operator, backend, versioned, _tmp_dir) = staged_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/pub/a.txt").unwrap());
+        operator
+            .write(entry_path.as_str(), b"kept".to_vec())
+            .await
+            .unwrap();
+
+        let release = versioned.stall_next_stat();
+        let delete = tokio::spawn({
+            let (operator, entry_path) = (operator.clone(), entry_path.clone());
+            async move { operator.delete(entry_path.as_str()).await }
+        });
+        versioned.until_stat_stalled().await;
+        kill_other_connections(&db).await;
+        release.send(()).unwrap();
+
+        delete
+            .await
+            .unwrap()
+            .expect_err("the removal must be refused once its transaction is gone");
+        assert_eq!(
+            versioned.seen.lock().unwrap().len(),
+            1,
+            "only the publish was sent; no delete under a stale generation"
+        );
+        assert!(backend.exists(entry_path.as_str()).await.unwrap());
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]

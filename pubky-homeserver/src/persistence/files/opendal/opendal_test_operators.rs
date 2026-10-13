@@ -3,13 +3,24 @@
 //! This is normally not necessary but helps to find subtle differences
 //! in the opendal operators.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_dropper::{AsyncDrop, AsyncDropper};
 use async_trait::async_trait;
-use opendal::Operator;
+use opendal::raw::oio::{self, Delete as _};
+use opendal::raw::{
+    Access, Layer, LayeredAccess, OpCopier, OpCopy, OpDelete, OpList, OpRead, OpStat, OpWrite,
+    RpCopy, RpDelete, RpList, RpRead, RpStat, RpWrite,
+};
+use opendal::{ErrorKind, Operator, Result};
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 use uuid::Uuid;
+
+use crate::persistence::files::staged_publish_layer::{
+    expected_generation, ExpectedGeneration, STAGING_PREFIX,
+};
 
 /// A provider of operators for testing.
 ///
@@ -189,6 +200,203 @@ pub(crate) fn get_memory_operator() -> Operator {
     let builder = opendal::services::Memory::default();
 
     opendal::Operator::new(builder).unwrap().finish()
+}
+
+/// A backend for tests that behaves like an object store on the points the
+/// generation condition relies on: it reports a generation and an ETag on
+/// stat, refuses a read whose `If-Match` is not the current ETag, records
+/// the condition each copy and delete of a real path ran under, refuses
+/// copies or deletes on demand as the store does when the condition fails,
+/// can hold a stat back until told to go on, and deletes through a batching
+/// deleter. Layered over a real backend, which does the storing.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Versioned {
+    generation: Arc<Mutex<String>>,
+    pub(crate) seen: Arc<Mutex<Vec<Option<ExpectedGeneration>>>>,
+    pub(crate) refuse_copies: Arc<AtomicBool>,
+    pub(crate) refuse_deletes: Arc<AtomicBool>,
+    pub(crate) batched: Arc<AtomicBool>,
+    stall_stat: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    stat_stalled: Arc<AtomicBool>,
+}
+
+impl Versioned {
+    pub(crate) fn new(generation: &str) -> Self {
+        let versioned = Self::default();
+        versioned.set_generation(generation);
+        versioned
+    }
+
+    /// Make every object report `generation` from now on, as an overwrite
+    /// of all of them would.
+    pub(crate) fn set_generation(&self, generation: &str) {
+        *self.generation.lock().unwrap() = generation.to_string();
+    }
+
+    fn generation(&self) -> String {
+        self.generation.lock().unwrap().clone()
+    }
+
+    fn etag(&self) -> String {
+        format!("\"generation-{}\"", self.generation())
+    }
+
+    /// Hold the next stat back until the returned sender is used.
+    pub(crate) fn stall_next_stat(&self) -> oneshot::Sender<()> {
+        let (release, stalled) = oneshot::channel();
+        *self.stall_stat.lock().unwrap() = Some(stalled);
+        release
+    }
+
+    pub(crate) async fn until_stat_stalled(&self) {
+        for _ in 0..500 {
+            if self.stat_stalled.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the stat never stalled");
+    }
+}
+
+impl<A: Access> Layer<A> for Versioned {
+    type LayeredAccess = VersionedAccessor<A>;
+
+    fn layer(&self, inner: A) -> Self::LayeredAccess {
+        VersionedAccessor {
+            inner: Arc::new(inner),
+            backend: self.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct VersionedAccessor<A> {
+    inner: Arc<A>,
+    backend: Versioned,
+}
+
+impl<A: Access> LayeredAccess for VersionedAccessor<A> {
+    type Inner = A;
+    type Reader = A::Reader;
+    type Writer = A::Writer;
+    type Lister = A::Lister;
+    type Deleter = oio::BatchDeleter<RecordingBatchDelete<A>>;
+    type Copier = A::Copier;
+
+    fn inner(&self) -> &Self::Inner {
+        &self.inner
+    }
+
+    /// Refuses a read conditional on another ETag than the current one, as
+    /// an object store does once the object was replaced. The condition is
+    /// not passed on: the backend underneath does not support it.
+    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+        if args
+            .if_match()
+            .is_some_and(|etag| etag != self.backend.etag())
+        {
+            return Err(refusal());
+        }
+        let unconditional = OpRead::new().with_range(args.range());
+        self.inner.read(path, unconditional).await
+    }
+
+    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+        self.inner.write(path, args).await
+    }
+
+    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
+        self.inner.list(path, args).await
+    }
+
+    async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
+        let stalled = self.backend.stall_stat.lock().unwrap().take();
+        if let Some(stalled) = stalled {
+            self.backend.stat_stalled.store(true, Ordering::SeqCst);
+            stalled.await.expect("the test lets the stat go on");
+        }
+        let mut metadata = self.inner.stat(path, args).await?.into_metadata();
+        metadata.set_version(&self.backend.generation());
+        metadata.set_etag(&self.backend.etag());
+        Ok(RpStat::new(metadata))
+    }
+
+    async fn copy(
+        &self,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<(RpCopy, Self::Copier)> {
+        self.backend
+            .seen
+            .lock()
+            .unwrap()
+            .push(expected_generation());
+        if self.backend.refuse_copies.load(Ordering::SeqCst) {
+            return Err(refusal());
+        }
+        self.inner.copy(from, to, args, opts).await
+    }
+
+    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
+        let deleter = RecordingBatchDelete {
+            inner: self.inner.clone(),
+            backend: self.backend.clone(),
+        };
+        Ok((
+            RpDelete::default(),
+            oio::BatchDeleter::new(deleter, Some(100)),
+        ))
+    }
+}
+
+/// What an object store answers when a condition does not hold.
+fn refusal() -> opendal::Error {
+    opendal::Error::new(ErrorKind::ConditionNotMatch, "412 Precondition Failed")
+}
+
+/// Deletes one path at a time as told, and notes a batch, which an object
+/// store would run without any condition.
+pub(crate) struct RecordingBatchDelete<A> {
+    inner: Arc<A>,
+    backend: Versioned,
+}
+
+impl<A: Access> oio::BatchDelete for RecordingBatchDelete<A> {
+    async fn delete_once(&self, path: String, args: OpDelete) -> Result<()> {
+        if path.starts_with(STAGING_PREFIX) {
+            // A staging object never has the real path's generation: a
+            // removal under one is refused, as an object store refuses it.
+            if expected_generation().is_some() {
+                return Err(refusal());
+            }
+        } else {
+            self.backend
+                .seen
+                .lock()
+                .unwrap()
+                .push(expected_generation());
+            if self.backend.refuse_deletes.load(Ordering::SeqCst) {
+                return Err(refusal());
+            }
+        }
+        let (_, mut deleter) = self.inner.delete().await?;
+        deleter.delete(&path, args).await?;
+        deleter.close().await
+    }
+
+    async fn delete_batch(
+        &self,
+        _batch: Vec<(String, OpDelete)>,
+    ) -> Result<oio::BatchDeleteResult> {
+        self.backend.batched.store(true, Ordering::SeqCst);
+        Err(opendal::Error::new(
+            ErrorKind::Unexpected,
+            "a batch carries no condition",
+        ))
+    }
 }
 
 #[cfg(test)]

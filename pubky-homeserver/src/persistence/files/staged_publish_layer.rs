@@ -53,7 +53,7 @@ use super::layer_domain_error::LayerDomainError;
 
 /// Where uploads are staged. Never a user path: a user path begins with a
 /// public key, which cannot start with a dot.
-const STAGING_PREFIX: &str = ".staging/";
+pub(crate) const STAGING_PREFIX: &str = ".staging/";
 
 /// What a publish or delete must find at the real path to apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,13 +76,16 @@ impl ExpectedGeneration {
 }
 
 tokio::task_local! {
-    static EXPECTED_GENERATION: ExpectedGeneration;
+    static EXPECTED_GENERATION: Option<ExpectedGeneration>;
 }
 
 /// The generation the current task's backend request must find, if it is a
 /// publish or delete made under one.
 pub(crate) fn expected_generation() -> Option<ExpectedGeneration> {
-    EXPECTED_GENERATION.try_with(|expected| *expected).ok()
+    EXPECTED_GENERATION
+        .try_with(|expected| *expected)
+        .ok()
+        .flatten()
 }
 
 /// Run `request`, a publish or delete, under `expected`.
@@ -90,7 +93,13 @@ pub(crate) async fn under_expected_generation<T>(
     expected: ExpectedGeneration,
     request: impl std::future::Future<Output = T>,
 ) -> T {
-    EXPECTED_GENERATION.scope(expected, request).await
+    EXPECTED_GENERATION.scope(Some(expected), request).await
+}
+
+/// Run `request` under no generation, whatever the task runs under: for a
+/// request to an object that is not the one the generation is of.
+async fn without_generation<T>(request: impl std::future::Future<Output = T>) -> T {
+    EXPECTED_GENERATION.scope(None, request).await
 }
 
 /// The generation the object at `path` has now. `None` on a backend that
@@ -179,7 +188,7 @@ impl<A: Access> LayeredAccess for StagedPublishAccessor<A> {
 enum Upload {
     /// Still being written; the backend writer owns it.
     Open,
-    /// Closed, so the staging object exists and is ours to remove.
+    /// Closed: the staging object exists, until the publish is over.
     Staged,
     /// Nothing left to do: published and removed, aborted, or closed
     /// without an answer, when the backend may still finish it and a late
@@ -243,13 +252,16 @@ impl<A: Access> oio::Write for StagedWriter<A> {
 
 impl<A: Access> StagedWriter<A> {
     /// Remove the staging object, if there is one. Best effort: a leftover
-    /// is for the sweep, and must not fail the publish it follows.
+    /// is for the sweep, and must not fail the publish it follows. Under no
+    /// generation: the one the task runs under is the real path's, and a
+    /// condition on it would refuse the removal.
     async fn remove_staging(&mut self) {
         if self.upload != Upload::Staged {
             return;
         }
         self.upload = Upload::Done;
-        if let Err(error) = remove(self.inner.as_ref(), &self.staging, OpDelete::new()).await {
+        let removal = remove(self.inner.as_ref(), &self.staging, OpDelete::new());
+        if let Err(error) = without_generation(removal).await {
             tracing::warn!(
                 staging = %self.staging,
                 path = %self.path,
@@ -345,178 +357,19 @@ fn publish_conflict(path: &str, error: opendal::Error) -> opendal::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
 
-    use opendal::raw::{OpCopier, RpStat};
     use opendal::Operator;
     use tempfile::TempDir;
-    use tokio::sync::oneshot;
 
     use super::*;
+    use crate::persistence::files::opendal::opendal_test_operators::Versioned;
     use crate::persistence::files::write_finalization_layer::test_support::{
         create_user, test_operator_over,
     };
     use crate::persistence::files::FileIoError;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::shared::webdav::{EntryPath, StoragePath};
-
-    /// A backend that reports a generation on stat, records the condition
-    /// each copy and delete of a real path ran under, refuses copies or
-    /// deletes as an object store does when the condition fails, can hold a
-    /// stat back until told to go on, and deletes through a batching
-    /// deleter, as an object store does.
-    #[derive(Debug, Clone, Default)]
-    struct Versioned {
-        generation: &'static str,
-        seen: Arc<Mutex<Vec<Option<ExpectedGeneration>>>>,
-        refuse_copies: Arc<AtomicBool>,
-        refuse_deletes: Arc<AtomicBool>,
-        batched: Arc<AtomicBool>,
-        stall_stat: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-        stat_stalled: Arc<AtomicBool>,
-    }
-
-    impl Versioned {
-        /// Hold the next stat back until the returned sender is used.
-        fn stall_next_stat(&self) -> oneshot::Sender<()> {
-            let (release, stalled) = oneshot::channel();
-            *self.stall_stat.lock().unwrap() = Some(stalled);
-            release
-        }
-
-        async fn until_stat_stalled(&self) {
-            for _ in 0..500 {
-                if self.stat_stalled.load(Ordering::SeqCst) {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            panic!("the stat never stalled");
-        }
-    }
-
-    impl<A: Access> Layer<A> for Versioned {
-        type LayeredAccess = VersionedAccessor<A>;
-
-        fn layer(&self, inner: A) -> Self::LayeredAccess {
-            VersionedAccessor {
-                inner: Arc::new(inner),
-                backend: self.clone(),
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    struct VersionedAccessor<A> {
-        inner: Arc<A>,
-        backend: Versioned,
-    }
-
-    impl<A: Access> LayeredAccess for VersionedAccessor<A> {
-        type Inner = A;
-        type Reader = A::Reader;
-        type Writer = A::Writer;
-        type Lister = A::Lister;
-        type Deleter = oio::BatchDeleter<RecordingBatchDelete<A>>;
-        type Copier = A::Copier;
-
-        fn inner(&self) -> &Self::Inner {
-            &self.inner
-        }
-
-        async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-            self.inner.read(path, args).await
-        }
-
-        async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-            self.inner.write(path, args).await
-        }
-
-        async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-            self.inner.list(path, args).await
-        }
-
-        async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-            let stalled = self.backend.stall_stat.lock().unwrap().take();
-            if let Some(stalled) = stalled {
-                self.backend.stat_stalled.store(true, Ordering::SeqCst);
-                stalled.await.expect("the test lets the stat go on");
-            }
-            let mut metadata = self.inner.stat(path, args).await?.into_metadata();
-            metadata.set_version(self.backend.generation);
-            Ok(RpStat::new(metadata))
-        }
-
-        async fn copy(
-            &self,
-            from: &str,
-            to: &str,
-            args: OpCopy,
-            opts: OpCopier,
-        ) -> Result<(opendal::raw::RpCopy, Self::Copier)> {
-            self.backend
-                .seen
-                .lock()
-                .unwrap()
-                .push(expected_generation());
-            if self.backend.refuse_copies.load(Ordering::SeqCst) {
-                return Err(refusal());
-            }
-            self.inner.copy(from, to, args, opts).await
-        }
-
-        async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-            let deleter = RecordingBatchDelete {
-                inner: self.inner.clone(),
-                backend: self.backend.clone(),
-            };
-            Ok((
-                RpDelete::default(),
-                oio::BatchDeleter::new(deleter, Some(100)),
-            ))
-        }
-    }
-
-    fn refusal() -> opendal::Error {
-        opendal::Error::new(ErrorKind::ConditionNotMatch, "412 Precondition Failed")
-    }
-
-    /// Deletes one path at a time as told, and notes a batch, which an object
-    /// store would run without any condition.
-    struct RecordingBatchDelete<A> {
-        inner: Arc<A>,
-        backend: Versioned,
-    }
-
-    impl<A: Access> oio::BatchDelete for RecordingBatchDelete<A> {
-        async fn delete_once(&self, path: String, args: OpDelete) -> Result<()> {
-            if !path.starts_with(STAGING_PREFIX) {
-                self.backend
-                    .seen
-                    .lock()
-                    .unwrap()
-                    .push(expected_generation());
-                if self.backend.refuse_deletes.load(Ordering::SeqCst) {
-                    return Err(refusal());
-                }
-            }
-            let (_, mut deleter) = self.inner.delete().await?;
-            deleter.delete(&path, args).await?;
-            deleter.close().await
-        }
-
-        async fn delete_batch(
-            &self,
-            _batch: Vec<(String, OpDelete)>,
-        ) -> Result<oio::BatchDeleteResult> {
-            self.backend.batched.store(true, Ordering::SeqCst);
-            Err(opendal::Error::new(
-                ErrorKind::Unexpected,
-                "a batch carries no condition",
-            ))
-        }
-    }
 
     /// The filesystem backend, which supports copy and abort as an object
     /// store does; the in-memory one supports neither.
@@ -534,10 +387,7 @@ mod tests {
     /// the staged publish. The versioned backend is returned to steer it.
     fn staged_fs() -> (Operator, Versioned, TempDir) {
         let (backend, tmp_dir) = plain_fs();
-        let versioned = Versioned {
-            generation: "7",
-            ..Versioned::default()
-        };
+        let versioned = Versioned::new("7");
         let operator = backend.layer(versioned.clone()).layer(StagedPublishLayer);
         (operator, versioned, tmp_dir)
     }
@@ -742,12 +592,7 @@ mod tests {
         let path = "pk/pub/a.txt";
         let (backend, _tmp_dir) = plain_fs();
         let plain = backend.clone().into_inner();
-        let versioned = backend
-            .layer(Versioned {
-                generation: "7",
-                ..Versioned::default()
-            })
-            .into_inner();
+        let versioned = backend.layer(Versioned::new("7")).into_inner();
         assert_eq!(
             live_generation(&versioned, path).await.unwrap(),
             Some(ExpectedGeneration::Absent)
@@ -805,92 +650,6 @@ mod tests {
             ],
             "the publish ran under no object, the delete under the live one"
         );
-    }
-
-    /// End every other connection to the test database: the finalization's
-    /// transaction among them.
-    async fn kill_other_connections(db: &SqlDb) {
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-             WHERE datname = current_database() AND pid <> pg_backend_pid()",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-    }
-
-    /// The race the generation read guards against: the finalization's
-    /// transaction dies while the generation lookup is pending, the lock
-    /// passes to someone who writes, and the lookup returns their generation.
-    /// A publish under it would replace their write and pass the condition.
-    /// The finalization must find its transaction gone before publishing.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn write_whose_transaction_died_during_the_generation_read_is_refused() {
-        let db = SqlDb::test().await;
-        let (backend, versioned, _tmp_dir) = staged_fs();
-        let operator = test_operator_over(&db, backend);
-        let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey, StoragePath::new("/pub/a.txt").unwrap());
-
-        let release = versioned.stall_next_stat();
-        let write = tokio::spawn({
-            let (operator, entry_path) = (operator.clone(), entry_path.clone());
-            async move { operator.write(entry_path.as_str(), b"late".to_vec()).await }
-        });
-        versioned.until_stat_stalled().await;
-        kill_other_connections(&db).await;
-        release.send(()).unwrap();
-
-        write
-            .await
-            .unwrap()
-            .expect_err("the write must be refused once its transaction is gone");
-        assert!(
-            versioned.seen.lock().unwrap().is_empty(),
-            "nothing may be published under a generation read after the transaction died"
-        );
-        assert!(!operator.exists(entry_path.as_str()).await.unwrap());
-        assert!(matches!(
-            EntryRepository::get_by_path(&entry_path, &mut db.pool().into()).await,
-            Err(sqlx::Error::RowNotFound)
-        ));
-    }
-
-    /// The same ordering on the delete path: the blob removal's transaction
-    /// dies during the generation lookup. The blob must be left alone.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn blob_removal_whose_transaction_died_during_the_generation_read_is_refused() {
-        let db = SqlDb::test().await;
-        let (backend, versioned, _tmp_dir) = staged_fs();
-        let operator = test_operator_over(&db, backend.clone());
-        let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey, StoragePath::new("/pub/a.txt").unwrap());
-        operator
-            .write(entry_path.as_str(), b"kept".to_vec())
-            .await
-            .unwrap();
-
-        let release = versioned.stall_next_stat();
-        let delete = tokio::spawn({
-            let (operator, entry_path) = (operator.clone(), entry_path.clone());
-            async move { operator.delete(entry_path.as_str()).await }
-        });
-        versioned.until_stat_stalled().await;
-        kill_other_connections(&db).await;
-        release.send(()).unwrap();
-
-        delete
-            .await
-            .unwrap()
-            .expect_err("the removal must be refused once its transaction is gone");
-        assert_eq!(
-            versioned.seen.lock().unwrap().len(),
-            1,
-            "only the publish was sent; no delete under a stale generation"
-        );
-        assert!(backend.exists(entry_path.as_str()).await.unwrap());
     }
 
     #[test]

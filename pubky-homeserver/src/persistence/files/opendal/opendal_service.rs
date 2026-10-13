@@ -228,22 +228,28 @@ impl OpendalService {
         }
     }
 
-    /// The size of the stored blob and a stream of its bytes.
+    /// The size of the stored blob and a stream of its bytes, all from the
+    /// one version of the blob the `stat` saw.
     ///
     /// One `stat` sizes both: opendal would otherwise `stat` on its own to
     /// bound an open-ended chunked read, and a second observation could see a
-    /// blob that an overwrite published in between.
+    /// blob that an overwrite published in between. On an object store every
+    /// chunk is a request of its own, so the read is made conditional on the
+    /// ETag the `stat` returned: a chunk that would come from a blob an
+    /// overwrite published meanwhile fails the stream instead, rather than
+    /// mixing the two versions' bytes. A backend without ETags has no such
+    /// chunks to mix.
     pub async fn get_sized_stream(
         &self,
         path: &EntryPath,
     ) -> Result<(u64, FileStream), FileIoError> {
-        let length = self.blob_length(path).await?;
-        let reader = self
-            .operator
-            .reader_with(path.as_str())
-            .chunk(CHUNK_SIZE)
-            .await?;
-        let stream = reader.into_bytes_stream(0..length).await?;
+        let metadata = self.operator.stat(path.as_str()).await?;
+        let length = metadata.content_length();
+        let mut reader = self.operator.reader_with(path.as_str()).chunk(CHUNK_SIZE);
+        if let Some(etag) = metadata.etag() {
+            reader = reader.if_match(etag);
+        }
+        let stream = reader.await?.into_bytes_stream(0..length).await?;
         Ok((length, Box::new(stream)))
     }
 
@@ -316,6 +322,44 @@ impl OpendalService {
 
 #[cfg(test)]
 mod tests {
+    /// A read streams one version of the blob or fails: once the blob is
+    /// replaced under it, the next chunk is refused rather than served from
+    /// the new version.
+    #[tokio::test]
+    async fn read_fails_rather_than_mix_two_versions_of_the_blob() {
+        use futures_util::StreamExt;
+        use pubky_common::crypto::Keypair;
+
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::shared::webdav::{EntryPath, StoragePath};
+
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let service = OpendalService::new_from_operator(fs.layer(versioned.clone()));
+        let path = EntryPath::new(
+            Keypair::random().public_key(),
+            StoragePath::new("/pub/a.bin").unwrap(),
+        );
+        service
+            .operator
+            .write(path.as_str(), vec![1u8; 3 * CHUNK_SIZE])
+            .await
+            .unwrap();
+
+        let (length, mut stream) = service.get_sized_stream(&path).await.unwrap();
+        assert_eq!(length as usize, 3 * CHUNK_SIZE);
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.len(), CHUNK_SIZE);
+
+        // The blob is replaced between two chunks.
+        versioned.set_generation("8");
+        stream
+            .next()
+            .await
+            .unwrap()
+            .expect_err("a chunk from another version of the blob is refused");
+    }
+
     use super::*;
     use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
     use crate::shared::webdav::StoragePath;
