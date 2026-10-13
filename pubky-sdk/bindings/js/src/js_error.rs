@@ -207,17 +207,18 @@ impl From<pubky::Error> for PubkyError {
             pubky::Error::Build(_) => PubkyErrorName::InternalError,
         };
 
-        // If this was a server error, attach status_code; else leave it None.
-        if let pubky::Error::Request(RequestError::Server { status, .. }) = &err {
-            return Self::new_with_status(name, &err, status.as_u16());
+        // Only errors that carry an HTTP status populate `data.statusCode`.
+        let status = match &err {
+            pubky::Error::Request(RequestError::Server { status, .. })
+            | pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
+                status: Some(status),
+            }) => Some(status.as_u16()),
+            _ => None,
+        };
+        match status {
+            Some(status) => Self::new_with_status(name, &err, status),
+            None => Self::new(name, err),
         }
-        if let pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
-            status: Some(status),
-        }) = &err
-        {
-            return Self::new_with_status(name, &err, status.as_u16());
-        }
-        Self::new(name, err)
     }
 }
 
