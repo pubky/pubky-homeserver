@@ -228,17 +228,18 @@ impl OpendalService {
         }
     }
 
-    /// The size of the stored blob and a stream of its bytes, all from the
-    /// one version of the blob the `stat` saw.
+    /// The size of the stored blob and a stream of its bytes.
     ///
     /// One `stat` sizes both: opendal would otherwise `stat` on its own to
     /// bound an open-ended chunked read, and a second observation could see a
-    /// blob that an overwrite published in between. On an object store every
-    /// chunk is a request of its own, so the read is made conditional on the
-    /// ETag the `stat` returned: a chunk that would come from a blob an
-    /// overwrite published meanwhile fails the stream instead, rather than
-    /// mixing the two versions' bytes. A backend without ETags has no such
-    /// chunks to mix.
+    /// blob that an overwrite published in between. Every chunk is a read of
+    /// its own, so an overwrite landing mid-stream can make later chunks come
+    /// from the new blob. On a backend that returns an ETag the read is made
+    /// conditional on the one the `stat` returned, and such a chunk fails the
+    /// stream instead: the bytes delivered are all of one version. The
+    /// filesystem backend returns none, and opendal reopens the file for each
+    /// chunk, so there a read overlapping an overwrite can still mix the two
+    /// versions, as it always could.
     pub async fn get_sized_stream(
         &self,
         path: &EntryPath,
