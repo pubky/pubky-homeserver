@@ -949,7 +949,12 @@ async fn root_session_can_list_and_revoke_scoped_grant() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::UNAUTHORIZED),
+        matches!(
+            err,
+            Error::CredentialRefresh(CredentialRefreshError::Request {
+                status: Some(StatusCode::UNAUTHORIZED)
+            })
+        ),
         "revoked grant must fail to refresh with 401, got {err:?}"
     );
 

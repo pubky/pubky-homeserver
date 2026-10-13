@@ -13,8 +13,8 @@ use pubky_testnet::pubky::IntoPubkyResource;
 #[allow(deprecated, reason = "E2E tests cover the deprecated cookie flow")]
 use pubky_testnet::pubky::PubkyCookieAuthFlow;
 use pubky_testnet::pubky::{
-    AuthFlowKind, ClientId, GrantManager, Keypair, Method, PubkyGrantAuthFlow, PubkyHttpClient,
-    PubkySession, StatusCode,
+    AuthFlowKind, ClientId, CredentialRefreshError, GrantManager, Keypair, Method,
+    PubkyGrantAuthFlow, PubkyHttpClient, PubkySession, StatusCode,
 };
 use pubky_testnet::pubky_common::capabilities::{Capabilities, Capability};
 use pubky_testnet::{
