@@ -8,12 +8,16 @@ use crate::persistence::sql::{
 };
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
-use opendal::raw::{oio, OpDelete};
+use opendal::raw::{oio, Access, OpDelete};
 use opendal::{Error, Result};
 
-use super::layer::{already_closed, spawn_finalization, unexpected, Finalizer};
+use super::layer::{
+    already_closed, generation_under_lock, spawn_finalization, under_generation, unexpected,
+    Finalizer,
+};
 use super::write_lock;
 use crate::persistence::files::layer_domain_error::LayerDomainError;
+use crate::persistence::files::staged_publish_layer::ExpectedGeneration;
 
 struct StagedDelete {
     user: UserEntity,
@@ -41,17 +45,18 @@ enum DeleteOutcome {
 ///
 /// Closing finalizes on a task of its own, so a caller dropped mid-close (a
 /// client disconnect) cannot stop a finalization halfway.
-pub struct WriteFinalizationDeleter<R> {
+pub struct WriteFinalizationDeleter<R, A: Access> {
     /// `None` while a close runs on its finalization task, and for good if
     /// that close was dropped.
-    queued: Option<QueuedDeletes<R>>,
+    queued: Option<QueuedDeletes<R, A>>,
 }
 
-impl<R> WriteFinalizationDeleter<R> {
-    pub(super) fn new(inner: R, finalizer: Arc<Finalizer>) -> Self {
+impl<R, A: Access> WriteFinalizationDeleter<R, A> {
+    pub(super) fn new(inner: R, backend: Arc<A>, finalizer: Arc<Finalizer>) -> Self {
         Self {
             queued: Some(QueuedDeletes {
                 inner,
+                backend,
                 finalizer,
                 delete_queue: Vec::new(),
             }),
@@ -60,13 +65,15 @@ impl<R> WriteFinalizationDeleter<R> {
 }
 
 /// The deleter's working state, moved whole onto the finalization task.
-struct QueuedDeletes<R> {
+struct QueuedDeletes<R, A: Access> {
     inner: R,
+    /// The backend, to read the blob's generation from before removing it.
+    backend: Arc<A>,
     finalizer: Arc<Finalizer>,
     delete_queue: Vec<PendingDelete>,
 }
 
-impl<R: oio::Delete> QueuedDeletes<R> {
+impl<R: oio::Delete, A: Access> QueuedDeletes<R, A> {
     async fn close(&mut self) -> Result<()> {
         let outcome = self.process_delete_queue().await;
 
@@ -111,7 +118,7 @@ impl<R: oio::Delete> QueuedDeletes<R> {
         };
 
         self.finalizer
-            .remove_blob_if_unreferenced(&mut self.inner, pending)
+            .remove_blob_if_unreferenced(&mut self.inner, self.backend.as_ref(), pending)
             .await
             .map_err(|error| {
                 tracing::error!(
@@ -126,7 +133,7 @@ impl<R: oio::Delete> QueuedDeletes<R> {
     }
 }
 
-impl<R: oio::Delete + 'static> oio::Delete for WriteFinalizationDeleter<R> {
+impl<R: oio::Delete + 'static, A: Access> oio::Delete for WriteFinalizationDeleter<R, A> {
     async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         let queued = self
             .queued
@@ -201,9 +208,10 @@ impl Finalizer {
     /// because the blob is not the one it was prepared against has seen a
     /// late publish land there; the blob stays, unreferenced, for the next
     /// write or delete on the path to clear. The delete itself is done.
-    async fn remove_blob_if_unreferenced<R: oio::Delete>(
+    async fn remove_blob_if_unreferenced<R: oio::Delete, A: Access>(
         &self,
         backend_deleter: &mut R,
+        backend: &A,
         pending: &PendingDelete,
     ) -> Result<()> {
         let mut tx = self
@@ -215,7 +223,7 @@ impl Finalizer {
 
         let result = {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            self.remove_blob_in_transaction(backend_deleter, pending, &mut executor)
+            self.remove_blob_in_transaction(backend_deleter, backend, pending, &mut executor)
                 .await
         };
 
@@ -230,9 +238,10 @@ impl Finalizer {
         result
     }
 
-    async fn remove_blob_in_transaction<R: oio::Delete>(
+    async fn remove_blob_in_transaction<R: oio::Delete, A: Access>(
         &self,
         backend_deleter: &mut R,
+        backend: &A,
         pending: &PendingDelete,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<()> {
@@ -262,14 +271,18 @@ impl Finalizer {
             }
         }
 
-        let removed = async {
+        let generation = generation_under_lock(backend, entry_path, executor).await?;
+        if generation == Some(ExpectedGeneration::Absent) {
+            return Ok(());
+        }
+        let removed = under_generation(generation, async {
             backend_deleter
                 .delete(entry_path.as_str(), pending.args.clone())
                 .await?;
             // Flushed here: a backend that batches would otherwise remove the
             // blob after the user row is released.
             backend_deleter.close().await
-        }
+        })
         .await;
         match removed {
             Err(error)
@@ -397,8 +410,8 @@ mod tests {
 
     use super::super::layer::test_support::{
         all_events, backend_throttle, create_user, install_events_insert_trigger,
-        install_slow_event_insert, test_finalizer, test_operator, user_usage,
-        wait_for_slow_event_insert, wait_until,
+        install_slow_event_insert, test_finalizer, test_operator, test_operator_with_backend,
+        user_usage, wait_for_slow_event_insert, wait_until,
     };
     use super::*;
 
@@ -526,13 +539,14 @@ mod tests {
         let db = SqlDb::test().await;
         let pubkey = create_user(&db).await;
         let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
-        test_operator(&db)
+        let (operator, backend) = test_operator_with_backend(&db);
+        operator
             .write(entry_path.as_str(), vec![1; 10])
             .await
             .unwrap();
 
         let mut deleter =
-            WriteFinalizationDeleter::new(ThrottledDelete, Arc::new(test_finalizer(&db)));
+            WriteFinalizationDeleter::new(ThrottledDelete, backend, Arc::new(test_finalizer(&db)));
         deleter
             .delete(entry_path.as_str(), OpDelete::default())
             .await
@@ -580,13 +594,14 @@ mod tests {
         let db = SqlDb::test().await;
         let pubkey = create_user(&db).await;
         let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
-        test_operator(&db)
+        let (operator, backend) = test_operator_with_backend(&db);
+        operator
             .write(entry_path.as_str(), vec![1; 10])
             .await
             .unwrap();
 
         let mut deleter =
-            WriteFinalizationDeleter::new(RefusingDelete, Arc::new(test_finalizer(&db)));
+            WriteFinalizationDeleter::new(RefusingDelete, backend, Arc::new(test_finalizer(&db)));
         deleter
             .delete(entry_path.as_str(), OpDelete::default())
             .await
@@ -609,7 +624,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn blob_removal_spares_a_file_written_since_the_delete() {
         let db = SqlDb::test().await;
-        let operator = test_operator(&db);
+        let (operator, store) = test_operator_with_backend(&db);
         let pubkey = create_user(&db).await;
         let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
         let finalizer = test_finalizer(&db);
@@ -630,7 +645,7 @@ mod tests {
             .unwrap();
         let mut backend = BatchDelete::default();
         finalizer
-            .remove_blob_if_unreferenced(&mut backend, &pending)
+            .remove_blob_if_unreferenced(&mut backend, store.as_ref(), &pending)
             .await
             .unwrap();
         assert!(
@@ -641,7 +656,7 @@ mod tests {
         // With the row gone and nothing written since, the blob goes.
         finalizer.finalize_delete(&entry_path).await.unwrap();
         finalizer
-            .remove_blob_if_unreferenced(&mut backend, &pending)
+            .remove_blob_if_unreferenced(&mut backend, store.as_ref(), &pending)
             .await
             .unwrap();
         assert_eq!(backend.closed_paths, vec![entry_path.as_str().to_string()]);
@@ -781,7 +796,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn batched_delete_continues_finalization_after_error() {
         let db = SqlDb::test().await;
-        let operator = test_operator(&db);
+        let (operator, backend) = test_operator_with_backend(&db);
         let pubkey = create_user(&db).await;
         let failing_path =
             EntryPath::new(pubkey.clone(), StoragePath::new("/failing.txt").unwrap());
@@ -799,8 +814,11 @@ mod tests {
 
         fail_delete_event_inserts_for_failing_path(&db).await;
 
-        let mut deleter =
-            WriteFinalizationDeleter::new(BatchDelete::default(), Arc::new(test_finalizer(&db)));
+        let mut deleter = WriteFinalizationDeleter::new(
+            BatchDelete::default(),
+            backend,
+            Arc::new(test_finalizer(&db)),
+        );
         deleter
             .delete(failing_path.as_str(), OpDelete::default())
             .await

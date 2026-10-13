@@ -10,11 +10,14 @@ use crate::persistence::sql::{
 };
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
-use opendal::raw::oio;
+use opendal::raw::{oio, Access};
 use opendal::Result;
 
 use super::{
-    layer::{already_closed, check_no_path_collision, spawn_finalization, unexpected, Finalizer},
+    layer::{
+        already_closed, check_no_path_collision, generation_under_lock, spawn_finalization,
+        under_generation, unexpected, Finalizer,
+    },
     resolve_storage_max_bytes, would_exceed_limit, write_lock,
 };
 
@@ -63,19 +66,27 @@ impl PreparedWrite {
 /// client disconnect) cannot stop the finalization halfway. A writer dropped
 /// before it is closed or aborted discards its staged bytes on a spawned task,
 /// so a disconnect mid-upload leaves nothing behind either.
-pub struct WriteFinalizationWriter<R: oio::Write + 'static> {
+pub struct WriteFinalizationWriter<R: oio::Write + 'static, A: Access> {
     /// `None` once the backend writer has been handed to the finalization task
     /// or aborted.
     inner: Option<R>,
+    /// The backend, to read the object's generation from before publishing.
+    backend: Arc<A>,
     finalizer: Arc<Finalizer>,
     entry_path: EntryPath,
     metadata_builder: FileMetadataBuilder,
 }
 
-impl<R: oio::Write + 'static> WriteFinalizationWriter<R> {
-    pub(super) fn new(inner: R, finalizer: Arc<Finalizer>, entry_path: EntryPath) -> Self {
+impl<R: oio::Write + 'static, A: Access> WriteFinalizationWriter<R, A> {
+    pub(super) fn new(
+        inner: R,
+        backend: Arc<A>,
+        finalizer: Arc<Finalizer>,
+        entry_path: EntryPath,
+    ) -> Self {
         Self {
             inner: Some(inner),
+            backend,
             finalizer,
             entry_path,
             metadata_builder: FileMetadataBuilder::default(),
@@ -83,7 +94,7 @@ impl<R: oio::Write + 'static> WriteFinalizationWriter<R> {
     }
 }
 
-impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
+impl<R: oio::Write + 'static, A: Access> oio::Write for WriteFinalizationWriter<R, A> {
     async fn write(&mut self, bs: opendal::Buffer) -> Result<()> {
         let inner = self
             .inner
@@ -110,11 +121,12 @@ impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
         self.metadata_builder
             .guess_mime_type_from_path(self.entry_path.path().as_str());
         let file_metadata = self.metadata_builder.clone().finalize();
+        let backend = self.backend.clone();
         let finalizer = self.finalizer.clone();
         let entry_path = self.entry_path.clone();
         spawn_finalization(async move {
             match finalizer
-                .finalize_write(&mut inner, &entry_path, &file_metadata)
+                .finalize_write(&mut inner, &backend, &entry_path, &file_metadata)
                 .await
             {
                 Ok(metadata) => Ok(metadata),
@@ -129,7 +141,7 @@ impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
     }
 }
 
-impl<R: oio::Write + 'static> Drop for WriteFinalizationWriter<R> {
+impl<R: oio::Write + 'static, A: Access> Drop for WriteFinalizationWriter<R, A> {
     fn drop(&mut self) {
         let Some(mut inner) = self.inner.take() else {
             return;
@@ -167,9 +179,10 @@ enum WriteFailure {
 }
 
 impl Finalizer {
-    async fn finalize_write<R: oio::Write>(
+    async fn finalize_write<R: oio::Write, A: Access>(
         &self,
         backend_writer: &mut R,
+        backend: &A,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
     ) -> std::result::Result<opendal::Metadata, WriteFailure> {
@@ -182,8 +195,14 @@ impl Finalizer {
 
         let result = {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            self.write_in_transaction(backend_writer, entry_path, file_metadata, &mut executor)
-                .await
+            self.write_in_transaction(
+                backend_writer,
+                backend,
+                entry_path,
+                file_metadata,
+                &mut executor,
+            )
+            .await
         };
 
         let metadata = match result {
@@ -212,9 +231,10 @@ impl Finalizer {
         Ok(metadata)
     }
 
-    async fn write_in_transaction<R: oio::Write>(
+    async fn write_in_transaction<R: oio::Write, A: Access>(
         &self,
         backend_writer: &mut R,
+        backend: &A,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
         executor: &mut UnifiedExecutor<'_>,
@@ -223,8 +243,10 @@ impl Finalizer {
             .prepare_write(entry_path, file_metadata, executor)
             .await
             .map_err(WriteFailure::BeforePublication)?;
-        let backend_metadata = backend_writer
-            .close()
+        let generation = generation_under_lock(backend, entry_path, executor)
+            .await
+            .map_err(WriteFailure::BeforePublication)?;
+        let backend_metadata = under_generation(generation, backend_writer.close())
             .await
             .map_err(WriteFailure::AfterPublication)?;
         self.apply_write_effects(prepared, entry_path, file_metadata, executor)
@@ -357,9 +379,9 @@ mod tests {
 
     use super::super::layer::test_support::{
         all_events, backend_throttle, create_user, install_events_insert_trigger,
-        install_slow_event_insert, staged_count, test_finalizer, test_fs_operator, test_operator,
-        test_user_service, user_usage, wait_for_slow_event_insert, wait_for_staged_count,
-        wait_until,
+        install_slow_event_insert, memory_backend, staged_count, test_finalizer, test_fs_operator,
+        test_operator, test_user_service, user_usage, wait_for_slow_event_insert,
+        wait_for_staged_count, wait_until,
     };
     use super::*;
 
@@ -391,6 +413,7 @@ mod tests {
         let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
         let mut writer = WriteFinalizationWriter::new(
             ThrottledWriter,
+            memory_backend(),
             Arc::new(test_finalizer(&db)),
             entry_path.clone(),
         );

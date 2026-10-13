@@ -166,40 +166,56 @@ mod tests {
         let _cleaner = OpendalGcpCleaner::new(Some(backend.clone()));
         let path = "pk/pub/a.bin";
 
-        // Below and above the 5 MiB single-request threshold.
-        operator.write(path, vec![1u8; 1024]).await.unwrap();
+        // What the finalization does: read the generation, then change the
+        // object under it. Below and above the 5 MiB single-request threshold.
+        let generation = |path: &'static str| {
+            let backend = backend.clone();
+            async move {
+                crate::persistence::files::staged_publish_layer::live_generation(
+                    &backend.into_inner(),
+                    path,
+                )
+                .await
+                .unwrap()
+                .expect("GCS reports a generation")
+            }
+        };
+        let g = generation(path).await;
+        assert_eq!(g, ExpectedGeneration::Absent);
+        under_expected_generation(g, operator.write(path, vec![1u8; 1024]))
+            .await
+            .unwrap();
         assert_eq!(operator.read(path).await.unwrap().len(), 1024);
         let large = 6 * 1024 * 1024;
-        operator.write(path, vec![2u8; large]).await.unwrap();
-        assert_eq!(operator.read(path).await.unwrap().len(), large);
-        let stale: u64 = backend
-            .stat(path)
+        let g = generation(path).await;
+        under_expected_generation(g, operator.write(path, vec![2u8; large]))
             .await
-            .unwrap()
-            .version()
-            .expect("GCS reports the generation")
-            .parse()
             .unwrap();
+        assert_eq!(operator.read(path).await.unwrap().len(), large);
+        let stale = generation(path).await;
+        assert!(matches!(stale, ExpectedGeneration::Known(_)));
 
         // The object changes after a publish and a delete were prepared
         // against it: both are refused and the object is left alone.
-        operator.write(path, vec![3u8; 10]).await.unwrap();
+        under_expected_generation(stale, operator.write(path, vec![3u8; 10]))
+            .await
+            .unwrap();
         backend.write("pk/staged", vec![4u8; 10]).await.unwrap();
-        let late_publish = under_expected_generation(ExpectedGeneration::Known(stale), async {
-            backend.copy("pk/staged", path).await
-        })
-        .await
-        .expect_err("a publish against a changed object is refused");
+        let late_publish =
+            under_expected_generation(stale, async { backend.copy("pk/staged", path).await })
+                .await
+                .expect_err("a publish against a changed object is refused");
         assert_eq!(late_publish.kind(), ErrorKind::ConditionNotMatch);
-        let late_delete = under_expected_generation(ExpectedGeneration::Known(stale), async {
-            backend.delete(path).await
-        })
-        .await
-        .expect_err("a delete against a changed object is refused");
+        let late_delete = under_expected_generation(stale, async { backend.delete(path).await })
+            .await
+            .expect_err("a delete against a changed object is refused");
         assert_eq!(late_delete.kind(), ErrorKind::ConditionNotMatch);
         assert_eq!(operator.read(path).await.unwrap().to_vec(), vec![3u8; 10]);
 
-        operator.delete(path).await.unwrap();
+        let g = generation(path).await;
+        under_expected_generation(g, operator.delete(path))
+            .await
+            .unwrap();
         assert!(!operator.exists(path).await.unwrap());
     }
 

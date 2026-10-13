@@ -1,6 +1,10 @@
 use std::{future::Future, sync::Arc};
 
-use crate::persistence::files::{events::EventsService, layer_domain_error::LayerDomainError};
+use crate::persistence::files::{
+    events::EventsService,
+    layer_domain_error::LayerDomainError,
+    staged_publish_layer::{live_generation, under_expected_generation, ExpectedGeneration},
+};
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
@@ -112,6 +116,46 @@ pub(super) async fn spawn_finalization<T: Send + 'static>(
     }
 }
 
+/// The generation the object at `entry_path` has now, for a publish or
+/// delete under it, read inside the finalization transaction with the
+/// transaction proven alive after the read.
+///
+/// The user row the transaction holds keeps every other change to the path
+/// out until the transaction ends. A generation read while the transaction
+/// lives therefore predates any change a later holder makes, and a publish
+/// under it cannot replace one. The proof is a round trip on the
+/// transaction's own connection, which fails if the transaction has died
+/// meanwhile: without it, a lookup still pending when the transaction died
+/// could return the generation of a later holder's write and let the
+/// publish replace it. `None` on a backend without generations.
+pub(super) async fn generation_under_lock<A: Access>(
+    backend: &A,
+    entry_path: &EntryPath,
+    executor: &mut UnifiedExecutor<'_>,
+) -> Result<Option<ExpectedGeneration>> {
+    let generation = live_generation(backend, entry_path.as_str()).await?;
+    let lost = |error| {
+        unexpected(
+            format!("Finalization transaction of {entry_path} lost after reading the generation"),
+            error,
+        )
+    };
+    let con = executor.get_con().await.map_err(lost)?;
+    sqlx::query("SELECT 1").execute(con).await.map_err(lost)?;
+    Ok(generation)
+}
+
+/// Run `request`, a publish or delete, under `generation` if there is one.
+pub(super) async fn under_generation<T>(
+    generation: Option<ExpectedGeneration>,
+    request: impl Future<Output = T>,
+) -> T {
+    match generation {
+        Some(generation) => under_expected_generation(generation, request).await,
+        None => request.await,
+    }
+}
+
 fn path_collision_error(entry_path: &EntryPath) -> opendal::Error {
     opendal::Error::new(
         opendal::ErrorKind::AlreadyExists,
@@ -170,9 +214,9 @@ where
 {
     type Inner = A;
     type Reader = A::Reader;
-    type Writer = WriteFinalizationWriter<A::Writer>;
+    type Writer = WriteFinalizationWriter<A::Writer, A>;
     type Lister = A::Lister;
-    type Deleter = WriteFinalizationDeleter<A::Deleter>;
+    type Deleter = WriteFinalizationDeleter<A::Deleter, A>;
     type Copier = A::Copier;
 
     fn inner(&self) -> &Self::Inner {
@@ -195,7 +239,12 @@ where
         let (rp, writer) = self.inner.write(entry_path.as_str(), args).await?;
         Ok((
             rp,
-            WriteFinalizationWriter::new(writer, self.finalizer.clone(), entry_path),
+            WriteFinalizationWriter::new(
+                writer,
+                self.inner.clone(),
+                self.finalizer.clone(),
+                entry_path,
+            ),
         ))
     }
 
@@ -229,7 +278,7 @@ where
         let (rp, deleter) = self.inner.delete().await?;
         Ok((
             rp,
-            WriteFinalizationDeleter::new(deleter, self.finalizer.clone()),
+            WriteFinalizationDeleter::new(deleter, self.inner.clone(), self.finalizer.clone()),
         ))
     }
 
@@ -311,6 +360,21 @@ pub(crate) mod test_support {
     pub(in super::super) fn test_fs_operator(db: &SqlDb) -> (opendal::Operator, TempDir) {
         let (backend, tmp_dir) = get_fs_operator();
         (test_operator_over(db, backend), tmp_dir)
+    }
+
+    /// A backend without generations, for a finalization under test.
+    pub(in super::super) fn memory_backend() -> Arc<Accessor> {
+        Arc::new(get_memory_operator().into_inner())
+    }
+
+    /// Like [`test_operator`], with the backend it writes to, for a
+    /// finalization under test that must find the files the operator wrote.
+    pub(in super::super) fn test_operator_with_backend(
+        db: &SqlDb,
+    ) -> (opendal::Operator, Arc<Accessor>) {
+        let backend = get_memory_operator();
+        let store = Arc::new(backend.clone().into_inner());
+        (test_operator_over(db, backend), store)
     }
 
     pub(crate) fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {
