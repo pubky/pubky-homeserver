@@ -144,7 +144,8 @@ impl<'a> GrantSessionView<'a> {
     ///
     /// Browser restore calls this to keep existing handles usable.
     /// # Errors
-    /// Propagates grant exchange errors.
+    /// Refresh request failures arrive as [`crate::Error::CredentialRefresh`];
+    /// local failures keep their original type.
     #[doc(hidden)]
     pub async fn refresh_if_needed(&self) -> Result<()> {
         self.credential.refresh(self.session.client()).await
@@ -168,7 +169,8 @@ impl<'a> GrantSessionView<'a> {
     /// Bypasses the proactive-refresh time check so the refresh always runs.
     ///
     /// # Errors
-    /// - Propagates HTTP errors from the refresh exchange.
+    /// - Refresh request failures arrive as [`crate::Error::CredentialRefresh`];
+    ///   local failures keep their original type.
     #[doc(hidden)]
     pub async fn force_refresh(&self) -> Result<String> {
         if let Some(coordinator) = self.credential.coordinator().await {

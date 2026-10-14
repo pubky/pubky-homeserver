@@ -133,7 +133,7 @@ impl GrantCredential {
             &state.homeserver_pk,
         )
         .await
-        .map_err(CredentialRefreshError::from_refresh_failure)?;
+        .map_err(CredentialRefreshError::redact_request_failure)?;
         shared.response = response;
         shared.refresh_pending = false;
         lease.store(&shared).await?;

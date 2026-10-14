@@ -93,7 +93,11 @@ pub enum CredentialRefreshError {
 }
 
 impl CredentialRefreshError {
-    pub(crate) fn from_refresh_failure(error: Error) -> Error {
+    /// Replace a failed refresh request with its secret-safe form.
+    ///
+    /// Only request errors can carry a response body or URL; every other
+    /// error is local and passes through unchanged.
+    pub(crate) fn redact_request_failure(error: Error) -> Error {
         match error {
             Error::Request(RequestError::Server { status, .. }) => Self::Request {
                 status: Some(status),

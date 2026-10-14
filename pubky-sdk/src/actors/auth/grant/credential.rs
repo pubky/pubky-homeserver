@@ -530,7 +530,7 @@ impl GrantCredential {
             &state.homeserver_pk,
         )
         .await
-        .map_err(CredentialRefreshError::from_refresh_failure)?;
+        .map_err(CredentialRefreshError::redact_request_failure)?;
 
         state.bearer = parsed.token;
         state.session = parsed.session;
@@ -649,19 +649,16 @@ impl SessionCredential for GrantCredential {
     ) -> Result<Option<SessionInfo>> {
         let request = self.grant_session_request(client, Method::GET).await?;
         let response = if let Some(coordinator) = self.coordinator().await {
+            // A shared send only checks HTTP status inside the refresh
+            // exchange, so a rejected refresh is how the server reports a
+            // missing session before the GET itself is answered.
             match self
                 .send_shared(request, client, coordinator.as_ref())
                 .await
             {
-                Err(
-                    Error::Request(RequestError::Server {
-                        status: StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND,
-                        ..
-                    })
-                    | Error::CredentialRefresh(CredentialRefreshError::Request {
-                        status: Some(StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND),
-                    }),
-                ) => return Ok(None),
+                Err(Error::CredentialRefresh(CredentialRefreshError::Request {
+                    status: Some(StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND),
+                })) => return Ok(None),
                 result => result?,
             }
         } else {
