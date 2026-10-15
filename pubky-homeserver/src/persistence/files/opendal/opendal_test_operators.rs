@@ -36,7 +36,8 @@ use crate::persistence::files::staged_publish_layer::{
 ///
 /// Example:
 /// ```ignore
-/// #[tokio::test]
+/// // Multi-threaded for the GCS cleaner, which blocks on its async drop.
+/// #[tokio::test(flavor = "multi_thread")]
 /// async fn test_ensure_valid_path() {
 ///     // Iterate over all operators.
 ///     for (_scheme, operator) in OpendalTestOperators::new().operators() {
@@ -192,7 +193,14 @@ pub(crate) fn get_gcs_operator(test_root_dir: bool) -> anyhow::Result<Option<Ope
     if test_root_dir {
         builder = builder.root(&format!("test_{}", Uuid::new_v4()));
     }
-    let operator = opendal::Operator::new(builder)?.finish();
+    // A client of its own: opendal's default is one shared by the process,
+    // and a connection it pools dies with the runtime that opened it. Each
+    // test, and the cleaner, runs on a runtime of its own, so a shared pool
+    // hands one test a connection that died with another's runtime.
+    let http_client = opendal::raw::HttpClient::with(reqwest::Client::new());
+    let operator = opendal::Operator::new(builder)?
+        .layer(opendal::layers::HttpClientLayer::new(http_client))
+        .finish();
     Ok(Some(operator))
 }
 

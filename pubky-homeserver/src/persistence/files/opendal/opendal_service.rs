@@ -431,7 +431,8 @@ mod tests {
     }
 
     /// Test the chunked reading of a file.
-    #[tokio::test]
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
     async fn test_get_content_chunked() {
         let operators = OpendalTestOperators::new();
@@ -495,7 +496,8 @@ mod tests {
 
     /// The length and the stream come from the same `stat`, and a missing
     /// blob fails before a reader is opened.
-    #[tokio::test]
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
     async fn test_get_sized_stream() {
         let operators = OpendalTestOperators::new();
@@ -524,7 +526,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
     async fn test_write_content_stream() {
         let operators = OpendalTestOperators::new();
