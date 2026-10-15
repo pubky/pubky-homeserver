@@ -59,6 +59,7 @@ mod opendal;
 
 pub(crate) mod events;
 pub(crate) mod staged_publish_layer;
+mod storage_repair;
 pub(crate) mod write_finalization_layer;
 pub(crate) mod write_path_layer;
 
@@ -67,3 +68,4 @@ pub(crate) use file::file_metadata::{FileMetadata, FileMetadataBuilder};
 pub use file::file_service::FileService;
 pub use file::file_stream_type::FileStream;
 pub use opendal::opendal_service::OpendalService;
+pub(crate) use storage_repair::StorageRepair;

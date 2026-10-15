@@ -147,6 +147,15 @@ impl<'a> Migrator<'a> {
         Ok(migration_names)
     }
 
+    /// Whether the migration `name` is marked as done.
+    pub async fn is_applied(&self, name: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .get_applied_migrations()
+            .await?
+            .iter()
+            .any(|applied| applied == name))
+    }
+
     /// Marks a migration as done.
     /// This is done by inserting a row into the migrations table with the migration name.
     pub async fn mark_migration_as_done(

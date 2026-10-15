@@ -120,6 +120,15 @@ fn gcs_backend_operator(
 /// The operator stack over a GCS service, see [`gcs_backend_operator`].
 #[cfg(feature = "storage-gcs")]
 pub(super) fn gcs_operator(builder: opendal::services::Gcs) -> Result<Operator, FileIoError> {
+    Ok(gcs_conditional_backend(builder)?.layer(StagedPublishLayer))
+}
+
+/// The GCS service under [`gcs_operator`]'s staging: its calls bounded, and
+/// its copies and deletes conditional on the generation the task runs under.
+#[cfg(feature = "storage-gcs")]
+pub(super) fn gcs_conditional_backend(
+    builder: opendal::services::Gcs,
+) -> Result<Operator, FileIoError> {
     let http_client = opendal::raw::HttpClient::with(gcs_precondition::PreconditionFetcher::new(
         reqwest::Client::new(),
     ));
@@ -130,8 +139,7 @@ pub(super) fn gcs_operator(builder: opendal::services::Gcs) -> Result<Operator, 
             opendal::layers::TimeoutLayer::new()
                 .with_timeout(BACKEND_IO_TIMEOUT)
                 .with_io_timeout(BACKEND_IO_TIMEOUT),
-        )
-        .layer(StagedPublishLayer);
+        );
     Ok(operator)
 }
 
@@ -534,6 +542,96 @@ mod tests {
 
             file_service.delete(&path).await.unwrap();
         }
+    }
+
+    /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
+    /// `GCS_BUCKET` are set: a path with characters that URLs percent-encode
+    /// is stored under its own name, below and above the 5 MiB multipart
+    /// threshold, so it can be read back.
+    ///
+    /// opendal 0.57 percent-encodes the name of an upload twice, and an
+    /// object uploaded straight to such a path lands under the path encoded
+    /// once, where nothing finds it, see
+    /// [`gcs_name_repair`](super::super::gcs_name_repair). Uploads go to a
+    /// staging name without such characters and are published by a copy,
+    /// which encodes the name once.
+    // Multi-threaded for the cleaner, which deletes the test root on drop.
+    #[cfg(feature = "storage-gcs")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gcs_stores_paths_with_special_characters_under_their_own_name() {
+        use async_dropper::AsyncDropper;
+
+        use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
+        use crate::persistence::files::staged_publish_layer::{
+            under_expected_generation, ExpectedGeneration, STAGING_PREFIX,
+        };
+
+        let (Ok(bucket), Ok(credentials)) = (
+            std::env::var("GCS_BUCKET"),
+            std::env::var("GOOGLE_APPLICATION_CREDENTIALS"),
+        ) else {
+            eprintln!("GCS_BUCKET or GOOGLE_APPLICATION_CREDENTIALS not set; skipping");
+            return;
+        };
+        let root = format!("test_{}", uuid::Uuid::new_v4());
+        let builder = || {
+            opendal::services::Gcs::default()
+                .bucket(&bucket)
+                .credential_path(&credentials)
+                .root(&root)
+        };
+        let service = OpendalService::new_from_operator(gcs_operator(builder()).unwrap());
+        // The bare backend, to see the names the objects are stored under.
+        let backend = opendal::Operator::new(builder())
+            .unwrap()
+            .layer(opendal::layers::HttpClientLayer::new(
+                opendal::raw::HttpClient::with(reqwest::Client::new()),
+            ))
+            .finish();
+        // Removes the test root from the bucket on drop.
+        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        let small = 1024;
+        let large = 6 * 1024 * 1024;
+        let files = [
+            ("/pub/plain.txt", small),
+            ("/pub/Teest%20share/.keep", small),
+            ("/pub/a b+c#d%e.txt", small),
+            ("/pub/\u{fc}\u{b7}~!'()*.txt", small),
+            ("/pub/big%20file \u{fc}.bin", large),
+        ]
+        .map(|(path, size)| {
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
+            (path, size)
+        });
+
+        for (path, size) in &files {
+            // What the finalization does for a new file.
+            let write = service.operator.write(path.as_str(), vec![7u8; *size]);
+            under_expected_generation(ExpectedGeneration::Absent, write)
+                .await
+                .unwrap();
+            assert_eq!(service.blob_length(path).await.unwrap(), *size as u64);
+            assert_eq!(service.get(path).await.unwrap().len(), *size, "{path}");
+        }
+
+        let mut stored: Vec<String> = backend
+            .list_with("")
+            .recursive(true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.metadata().is_file())
+            .map(|entry| entry.path().to_string())
+            .filter(|name| !name.starts_with(STAGING_PREFIX))
+            .collect();
+        stored.sort();
+        let mut expected: Vec<String> = files
+            .iter()
+            .map(|(path, _)| path.as_str().to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(stored, expected);
     }
 
     // Multi-threaded for the cleaner, which blocks on its async drop.

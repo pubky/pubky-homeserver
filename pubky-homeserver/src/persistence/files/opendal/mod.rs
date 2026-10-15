@@ -5,6 +5,8 @@
 //! [`StorageConfig`](crate::data_directory::storage_config::StorageConfig).
 
 #[cfg(feature = "storage-gcs")]
+pub(crate) mod gcs_name_repair;
+#[cfg(feature = "storage-gcs")]
 mod gcs_precondition;
 pub mod opendal_service;
 #[cfg(test)]
