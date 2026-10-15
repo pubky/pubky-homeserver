@@ -149,13 +149,6 @@ pub fn build_storage_operators_from_context(
     )
 }
 
-/// The chunk size to use for reading and writing files.
-/// This is used to avoid reading and writing the entire file at once.
-/// Important: Not all opendal providers will respect this chunk size.
-/// For example, Google Cloud Buckets will deliver chunks anything from
-/// 200B to 16KB but max CHUNK_SIZE.
-const CHUNK_SIZE: usize = 16 * 1024;
-
 /// The service to write and read files to and from the configured opendal storage.
 #[derive(Debug, Clone)]
 pub struct OpendalService {
@@ -230,23 +223,24 @@ impl OpendalService {
 
     /// The size of the stored blob and a stream of its bytes.
     ///
-    /// One `stat` sizes both: opendal would otherwise `stat` on its own to
-    /// bound an open-ended chunked read, and a second observation could see a
-    /// blob that an overwrite published in between. Every chunk is a read of
-    /// its own, so an overwrite landing mid-stream can make later chunks come
-    /// from the new blob. On a backend that returns an ETag the read is made
-    /// conditional on the one the `stat` returned, and such a chunk fails the
-    /// stream instead: the bytes delivered are all of one version. The
-    /// filesystem backend returns none, and opendal reopens the file for each
-    /// chunk, so there a read overlapping an overwrite can still mix the two
-    /// versions, as it always could.
+    /// The stream is one read of the backend, streamed as it arrives. Setting
+    /// a chunk size would split it into one read per chunk, issued one after
+    /// another, and on an object store each of those is a round trip.
+    ///
+    /// The length comes from a `stat`, and on a backend that returns an ETag
+    /// the read is conditional on it, so the length and the bytes are of the
+    /// same version: if an overwrite landed in between, the read is refused.
+    /// Once open, the read keeps delivering the version it opened, even if an
+    /// overwrite lands mid-stream: an object store serves a GET from one
+    /// generation, and the filesystem backend's open file outlives the rename
+    /// that an overwrite publishes with.
     pub async fn get_sized_stream(
         &self,
         path: &EntryPath,
     ) -> Result<(u64, FileStream), FileIoError> {
         let metadata = self.operator.stat(path.as_str()).await?;
         let length = metadata.content_length();
-        let mut reader = self.operator.reader_with(path.as_str()).chunk(CHUNK_SIZE);
+        let mut reader = self.operator.reader_with(path.as_str());
         if let Some(etag) = metadata.etag() {
             reader = reader.if_match(etag);
         }
@@ -285,7 +279,6 @@ impl OpendalService {
     }
 
     /// Get the content of a file as a stream of bytes.
-    /// The stream is chunked by the CHUNK_SIZE.
     pub async fn get_stream(&self, path: &EntryPath) -> Result<FileStream, FileIoError> {
         Ok(self.get_sized_stream(path).await?.1)
     }
@@ -323,47 +316,92 @@ impl OpendalService {
 
 #[cfg(test)]
 mod tests {
-    /// A read streams one version of the blob or fails: once the blob is
-    /// replaced under it, the next chunk is refused rather than served from
-    /// the new version.
+    use super::*;
+    use crate::persistence::files::opendal::opendal_test_operators::{
+        get_fs_operator, get_memory_operator, CountingReads, OpendalTestOperators, Versioned,
+    };
+    use crate::shared::webdav::StoragePath;
+
+    /// A size for test data that spans several stream items.
+    const TEST_CHUNK_SIZE: usize = 16 * 1024;
+
+    /// A read whose blob is replaced after it was sized is refused rather
+    /// than served from the new version, whose length may differ.
     #[tokio::test]
-    async fn read_fails_rather_than_mix_two_versions_of_the_blob() {
-        use futures_util::StreamExt;
-        use pubky_common::crypto::Keypair;
-
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
-        use crate::shared::webdav::{EntryPath, StoragePath};
-
+    async fn read_of_a_blob_replaced_after_its_stat_is_refused() {
         let (fs, _tmp_dir) = get_fs_operator();
         let versioned = Versioned::new("7");
         let service = OpendalService::new_from_operator(fs.layer(versioned.clone()));
         let path = EntryPath::new(
-            Keypair::random().public_key(),
+            pubky_common::crypto::Keypair::random().public_key(),
             StoragePath::new("/pub/a.bin").unwrap(),
         );
         service
-            .operator
-            .write(path.as_str(), vec![1u8; 3 * CHUNK_SIZE])
+            .write(&path, vec![1u8; 3 * TEST_CHUNK_SIZE])
             .await
             .unwrap();
 
         let (length, mut stream) = service.get_sized_stream(&path).await.unwrap();
-        assert_eq!(length as usize, 3 * CHUNK_SIZE);
-        let first = stream.next().await.unwrap().unwrap();
-        assert_eq!(first.len(), CHUNK_SIZE);
+        assert_eq!(length as usize, 3 * TEST_CHUNK_SIZE);
 
-        // The blob is replaced between two chunks.
+        // The blob is replaced before the read is opened.
         versioned.set_generation("8");
         stream
             .next()
             .await
             .unwrap()
-            .expect_err("a chunk from another version of the blob is refused");
+            .expect_err("a read of another version of the blob is refused");
     }
 
-    use super::*;
-    use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
-    use crate::shared::webdav::StoragePath;
+    /// An overwrite landing mid-download does not mix the two versions: the
+    /// download completes the version it opened.
+    #[tokio::test]
+    async fn an_overwrite_mid_download_does_not_mix_versions() {
+        let (fs, _tmp_dir) = get_fs_operator();
+        let service = OpendalService::new_from_operator(fs);
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/a.bin").unwrap(),
+        );
+        // Larger than the filesystem backend's 2 MiB read buffer, so the
+        // download is more than one stream item.
+        let length = 3 * 1024 * 1024;
+        service.write(&path, vec![1u8; length]).await.unwrap();
+
+        let (_, mut stream) = service.get_sized_stream(&path).await.unwrap();
+        let mut delivered = stream.next().await.unwrap().unwrap().to_vec();
+        assert!(delivered.len() < length, "the download is still going");
+
+        service.write(&path, vec![2u8; length]).await.unwrap();
+        while let Some(chunk) = stream.next().await {
+            delivered.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(delivered, vec![1u8; length]);
+        assert_eq!(
+            service.get(&path).await.unwrap().to_vec(),
+            vec![2u8; length]
+        );
+    }
+
+    /// A download is one read of the backend, whatever the blob's size. On
+    /// an object store every read is a round trip, so reading a blob in small
+    /// pieces one after another made a download as slow as its piece count.
+    #[tokio::test]
+    async fn a_download_is_one_backend_read() {
+        let counting = CountingReads::default();
+        let service =
+            OpendalService::new_from_operator(get_memory_operator().layer(counting.clone()));
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/large.bin").unwrap(),
+        );
+        let test_data = vec![9u8; 10 * TEST_CHUNK_SIZE];
+        service.write(&path, test_data.clone()).await.unwrap();
+
+        let reads_before = counting.reads();
+        assert_eq!(service.get(&path).await.unwrap().to_vec(), test_data);
+        assert_eq!(counting.reads() - reads_before, 1);
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]
@@ -430,11 +468,11 @@ mod tests {
         );
     }
 
-    /// Test the chunked reading of a file.
+    /// Test the streamed reading of a file.
     // Multi-threaded for the cleaner, which blocks on its async drop.
     #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
-    async fn test_get_content_chunked() {
+    async fn test_get_content_streamed() {
         let operators = OpendalTestOperators::new();
         for (_scheme, operator) in operators.operators() {
             let file_service = OpendalService::new_from_operator(operator);
@@ -442,42 +480,14 @@ mod tests {
             let pubkey = pubky_common::crypto::Keypair::random().public_key();
             let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
 
-            // Write a 10KB file filled with test data
-            let should_chunk_count = 5;
-            let test_data = vec![42u8; should_chunk_count * CHUNK_SIZE];
+            let test_data = vec![42u8; 5 * TEST_CHUNK_SIZE];
             file_service.write(&path, test_data.clone()).await.unwrap();
 
-            // Read the content back using the chunked stream
             let mut stream = file_service.get_stream(&path).await.unwrap();
-
             let mut collected_data = Vec::new();
-            let mut count = 0;
             while let Some(chunk_result) = stream.next().await {
-                count += 1;
-                let chunk = chunk_result.unwrap();
-                collected_data.extend_from_slice(&chunk);
+                collected_data.extend_from_slice(&chunk_result.unwrap());
             }
-
-            // Verify the data matches what we wrote
-            assert_eq!(
-                collected_data.len(),
-                test_data.len(),
-                "Total size should be 10KB"
-            );
-            assert_eq!(
-                collected_data, test_data,
-                "Content should match original data"
-            );
-
-            // Verify that we received multiple chunks according to the chunk count
-            assert!(count >= should_chunk_count, "Should have received x chunks");
-
-            // Verify that the chunks are of the correct size
-            assert_eq!(
-                collected_data.len(),
-                should_chunk_count * CHUNK_SIZE,
-                "Total size should be 10KB"
-            );
             assert_eq!(
                 collected_data, test_data,
                 "Content should match original data"
@@ -511,7 +521,7 @@ mod tests {
                 Err(FileIoError::NotFound)
             ));
 
-            let test_data = vec![7u8; CHUNK_SIZE + 1];
+            let test_data = vec![7u8; TEST_CHUNK_SIZE + 1];
             file_service.write(&path, test_data.clone()).await.unwrap();
 
             let (length, mut stream) = file_service.get_sized_stream(&path).await.unwrap();
@@ -544,7 +554,7 @@ mod tests {
 
             // Create chunks with different patterns to verify order
             for i in 0..chunk_count {
-                let chunk_data = vec![i as u8; CHUNK_SIZE];
+                let chunk_data = vec![i as u8; TEST_CHUNK_SIZE];
                 test_data.extend_from_slice(&chunk_data);
                 chunks.push(Ok(Bytes::from(chunk_data)));
             }

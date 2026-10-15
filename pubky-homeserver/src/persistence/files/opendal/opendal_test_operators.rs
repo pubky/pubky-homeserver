@@ -3,7 +3,7 @@
 //! This is normally not necessary but helps to find subtle differences
 //! in the opendal operators.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_dropper::{AsyncDrop, AsyncDropper};
@@ -404,6 +404,66 @@ impl<A: Access> oio::BatchDelete for RecordingBatchDelete<A> {
             ErrorKind::Unexpected,
             "a batch carries no condition",
         ))
+    }
+}
+
+/// Counts the reads that reach the backend underneath. Each one is a request
+/// of its own on an object store, so their count is what a download costs.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CountingReads {
+    reads: Arc<AtomicUsize>,
+}
+
+impl CountingReads {
+    pub(crate) fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+impl<A: Access> Layer<A> for CountingReads {
+    type LayeredAccess = CountingReadsAccessor<A>;
+
+    fn layer(&self, inner: A) -> Self::LayeredAccess {
+        CountingReadsAccessor {
+            inner,
+            reads: self.reads.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CountingReadsAccessor<A> {
+    inner: A,
+    reads: Arc<AtomicUsize>,
+}
+
+impl<A: Access> LayeredAccess for CountingReadsAccessor<A> {
+    type Inner = A;
+    type Reader = A::Reader;
+    type Writer = A::Writer;
+    type Lister = A::Lister;
+    type Deleter = A::Deleter;
+    type Copier = A::Copier;
+
+    fn inner(&self) -> &Self::Inner {
+        &self.inner
+    }
+
+    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.read(path, args).await
+    }
+
+    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+        self.inner.write(path, args).await
+    }
+
+    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
+        self.inner.list(path, args).await
+    }
+
+    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
+        self.inner.delete().await
     }
 }
 
