@@ -1495,7 +1495,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2e"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2354,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "homeservercli"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4085,7 +4085,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pubky"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4121,7 +4121,7 @@ dependencies = [
 
 [[package]]
 name = "pubky-common"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -4145,7 +4145,7 @@ dependencies = [
 
 [[package]]
 name = "pubky-homeserver"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "async-dropper",
@@ -4211,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "pubky-homeserver-examples"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4230,7 +4230,7 @@ dependencies = [
 
 [[package]]
 name = "pubky-testnet"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4269,7 +4269,7 @@ dependencies = [
 
 [[package]]
 name = "pubky-wasm"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
