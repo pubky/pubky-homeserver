@@ -56,7 +56,7 @@ pub enum Error {
     Request(#[from] RequestError),
 
     /// Automatic grant credential refresh failed while preparing or retrying a request.
-    #[error("{0}")]
+    #[error("Credential refresh failed: {0}")]
     CredentialRefresh(#[from] CredentialRefreshError),
 
     /// PKARR/DHT operation failed.
@@ -90,23 +90,6 @@ pub enum CredentialRefreshError {
         /// HTTP status returned by the refresh endpoint, when available.
         status: Option<reqwest::StatusCode>,
     },
-}
-
-impl CredentialRefreshError {
-    /// Replace a failed refresh request with its secret-safe form.
-    ///
-    /// Only request errors can carry a response body or URL; every other
-    /// error is local and passes through unchanged.
-    pub(crate) fn redact_request_failure(error: Error) -> Error {
-        match error {
-            Error::Request(RequestError::Server { status, .. }) => Self::Request {
-                status: Some(status),
-            }
-            .into(),
-            Error::Request(_) => Self::Request { status: None }.into(),
-            error => error,
-        }
-    }
 }
 
 // --- Pkarr Operational Errors ---

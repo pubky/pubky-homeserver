@@ -438,6 +438,10 @@ mod tests {
             },
         ));
         assert_eq!(server.name.as_str(), "CredentialRefreshError");
+        assert_eq!(
+            server.message,
+            "Credential refresh failed: Grant credential refresh request failed"
+        );
         assert_eq!(server.data, Some(json!({ "statusCode": 503 })));
 
         let transport = PubkyError::from(pubky::Error::CredentialRefresh(

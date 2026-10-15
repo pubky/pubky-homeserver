@@ -9,12 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     credential::{GrantCredential, GrantCredentialState, REFRESH_SLACK_SECS, now_unix},
-    grant_exchange::post_grant_session,
+    grant_exchange::refresh_grant_session,
 };
-use crate::{
-    PubkyHttpClient, Result,
-    errors::{AuthError, CredentialRefreshError},
-};
+use crate::{PubkyHttpClient, Result, errors::AuthError};
 
 /// Browser-owned state. A pending exchange may have invalidated the saved bearer.
 #[doc(hidden)]
@@ -125,15 +122,14 @@ impl GrantCredential {
         }
         shared.refresh_pending = true;
         lease.store(&shared).await?;
-        let response = post_grant_session(
+        let response = refresh_grant_session(
             client,
             &state.grant_jws,
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
         )
-        .await
-        .map_err(CredentialRefreshError::redact_request_failure)?;
+        .await?;
         shared.response = response;
         shared.refresh_pending = false;
         lease.store(&shared).await?;

@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 
 use super::{
     approval::{GrantApproval, SignedApproval, VerifiedApproval},
-    grant_exchange::{credential_from_grant_exchange, post_grant_session},
+    grant_exchange::{credential_from_grant_exchange, refresh_grant_session},
     pop_signer::{DelegatedSignFn, GrantPopSigner},
     shared_session::GrantSessionCoordinator,
 };
@@ -522,15 +522,14 @@ impl GrantCredential {
             return Ok(());
         }
 
-        let parsed = post_grant_session(
+        let parsed = refresh_grant_session(
             client,
             &state.grant_jws,
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
         )
-        .await
-        .map_err(CredentialRefreshError::redact_request_failure)?;
+        .await?;
 
         state.bearer = parsed.token;
         state.session = parsed.session;
@@ -897,12 +896,13 @@ mod tests {
         };
         let jws = grant.sign(&user, GRANT_JWS_TYP);
         let signer = GrantPopSigner::local(pop_key);
-        let response = post_grant_session(&client, &jws, &grant, &signer, &homeserver)
+        let credential = credential_from_grant_exchange(&client, jws, grant, signer, homeserver)
             .await
             .unwrap();
-        let bearer = response.token.clone();
-        assert_eq!(response.session.token_expires_at, grant.exp);
-        let credential = GrantCredential::from_response(response, jws, grant, signer, homeserver);
+        let state = credential.state.lock().await;
+        let bearer = state.bearer.clone();
+        assert_eq!(state.session.token_expires_at, state.grant_claims.exp);
+        drop(state);
         for _ in 0..3 {
             credential.refresh(&client).await.unwrap();
             let request = credential
@@ -1283,6 +1283,10 @@ mod tests {
             "unexpected error: {error:?}"
         );
         let display = error.to_string();
+        assert_eq!(
+            display,
+            "Credential refresh failed: Grant credential refresh request failed"
+        );
         let debug = format!("{error:?}");
         for secret in [
             "sensitive",
@@ -1293,6 +1297,49 @@ mod tests {
             assert!(!display.contains(secret));
             assert!(!debug.contains(secret));
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_error_status_does_not_wait_for_response_body() {
+        let fixture = RequestFailureFixture::new_with_timeout(
+            TestServerBehavior::ReplyThenStall(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\n".to_vec(),
+            ),
+            Duration::from_secs(5),
+        )
+        .await;
+        let credential = fixture.grant_credential(true);
+
+        let error =
+            tokio::time::timeout(Duration::from_secs(1), credential.refresh(&fixture.client))
+                .await
+                .expect("refresh must discard the unread error body")
+                .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::CredentialRefresh(CredentialRefreshError::Request {
+                status: Some(StatusCode::SERVICE_UNAVAILABLE)
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_json_decode_failure_preserves_response_status() {
+        let fixture = RequestFailureFixture::new(TestServerBehavior::Reply(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot-json".to_vec(),
+        ))
+        .await;
+        let credential = fixture.grant_credential(true);
+
+        let error = credential.refresh(&fixture.client).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::CredentialRefresh(CredentialRefreshError::Request {
+                status: Some(StatusCode::OK)
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1515,6 +1562,10 @@ mod tests {
 
     impl RequestFailureFixture {
         async fn new(behavior: TestServerBehavior) -> Self {
+            Self::new_with_timeout(behavior, Duration::from_millis(100)).await
+        }
+
+        async fn new_with_timeout(behavior: TestServerBehavior, timeout: Duration) -> Self {
             let port = spawn_https_test_server(behavior).await;
             let homeserver = pkarr::Keypair::random();
             let user = Keypair::random();
@@ -1524,7 +1575,7 @@ mod tests {
             builder
                 .isolated_pkarr_test()
                 .pkarr(|builder| builder.cache(cache))
-                .request_timeout(Duration::from_millis(100))
+                .request_timeout(timeout)
                 .add_root_certificates_pem(include_bytes!("../../../client/test_certs/ca.pem"))
                 .unwrap();
             let fixture = Self {
@@ -1619,6 +1670,8 @@ mod tests {
     enum TestServerBehavior {
         /// Write these raw HTTP bytes once the request headers have arrived.
         Reply(Vec<u8>),
+        /// Write response headers, then keep the declared body pending.
+        ReplyThenStall(Vec<u8>),
         /// Keep the connection open without answering.
         Stall,
     }
@@ -1637,6 +1690,10 @@ mod tests {
             }
             match behavior {
                 TestServerBehavior::Reply(response) => stream.write_all(&response).await.unwrap(),
+                TestServerBehavior::ReplyThenStall(response) => {
+                    stream.write_all(&response).await.unwrap();
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
                 TestServerBehavior::Stall => tokio::time::sleep(Duration::from_secs(1)).await,
             }
         });
