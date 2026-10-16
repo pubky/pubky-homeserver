@@ -9,14 +9,14 @@ use axum::http::{Method, Request};
 
 use crate::client_server::auth::AuthSession;
 
-use super::extract_ip::extract_ip;
+use super::extract_ip::{extract_ip, MissingClientAddress};
 
 /// Pre-extracted request metadata so that `resolve_bandwidth_throttlers`
 /// does not need to borrow the `!Send` `Request<Body>` across `.await`.
 pub(super) struct RequestInfo {
     pub method: Method,
     pub user_pubkey: Option<pubky_common::crypto::PublicKey>,
-    pub client_ip: Result<std::net::IpAddr, anyhow::Error>,
+    pub client_ip: Result<std::net::IpAddr, MissingClientAddress>,
 }
 
 impl RequestInfo {

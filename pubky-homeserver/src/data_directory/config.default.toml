@@ -6,6 +6,8 @@ database_url = "postgres://localhost:5432/pubky_homeserver"
 [drive]
 pubky_listen_socket = "127.0.0.1:6287"
 icann_listen_socket = "127.0.0.1:6286"
+icann_client_identity = { mode = "direct" }
+pubky_client_identity = { mode = "direct" }
 
 [[drive.rate_limits]]
 path = "/signup_tokens/*"
