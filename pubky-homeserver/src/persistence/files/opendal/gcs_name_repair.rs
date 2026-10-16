@@ -18,11 +18,19 @@
 //! place holds it too: when one entry's misnamed name is another entry's
 //! path, as for `c d` and `c%20d`, the object in place may be the other
 //! entry's, and the leftover this entry's only copy. Such a conflict is
-//! logged and left for manual repair. A run that got through every entry is
-//! marked as [`FINISHED_MARKER`] in the migrations table, and later startups
-//! skip the repair. A run that failed on any entry is not, so the next
-//! startup tries again. Once every deployment has finished it, remove this
-//! module.
+//! logged and left for manual repair.
+//!
+//! The move copies only the version of the misnamed object whose content was
+//! checked, and only to a path that has no object. A write that lands on
+//! either name meanwhile makes GCS refuse the copy, and the repair looks at
+//! the entry again. Both can happen: the misnamed name can be another
+//! entry's path, and the entry's path can get an object that no entry
+//! refers to, from a write that rolled back after its publish was sent.
+//!
+//! A run that got through every entry is marked as [`FINISHED_MARKER`] in
+//! the migrations table, and later startups skip the repair. A run that
+//! failed on any entry is not, so the next startup tries again. Once every
+//! deployment has finished it, remove this module.
 //!
 //! Not repaired:
 //! - Misnamed objects of entries deleted before the repair: it only goes over
@@ -41,6 +49,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use pubky_common::crypto::{Hash, Hasher};
 use tokio::task::JoinHandle;
 
+use super::gcs_precondition::under_expected_source_generation;
 use super::opendal_service::gcs_conditional_backend;
 use crate::data_directory::storage_config::GoogleBucketConfig;
 use crate::persistence::files::staged_publish_layer::{
@@ -75,6 +84,10 @@ const FINISHED_MARKER: &str = "gcs_repair_object_names_2026_10";
 
 /// Entries read from the database at a time.
 const BATCH_SIZE: u64 = 100;
+
+/// How many times the repair looks at an entry whose copy GCS keeps
+/// refusing, before it counts the entry as failed.
+const ATTEMPTS_PER_ENTRY: usize = 2;
 
 /// The name the object of `path` was stored under by an affected version.
 fn misnamed_object_name(path: &EntryPath) -> String {
@@ -175,6 +188,15 @@ enum Outcome {
     Conflict,
 }
 
+/// What one look at an entry came to.
+enum Attempt {
+    Finished(Outcome),
+    /// GCS refused the copy: the misnamed object changed since its content
+    /// was checked, or the entry's path got an object. The refusal does not
+    /// tell which, so the entry is looked at again.
+    CopyRefused,
+}
+
 /// How many entries ended in each outcome.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Summary {
@@ -224,7 +246,10 @@ enum MisnamedCopy {
 /// A misnamed object, as the repair saw it.
 struct MisnamedObject {
     name: String,
-    /// Its generation when seen, so a delete spares an object written since.
+    /// Its generation when seen, read before its content was checked. A copy
+    /// or delete conditional on it applies only if no write landed since, so
+    /// the content checked is the content copied, and a delete spares an
+    /// object written since.
     generation: u64,
 }
 
@@ -316,41 +341,58 @@ impl GcsNameRepair {
     }
 
     /// Repair one entry. Only a misnamed object that holds the entry's
-    /// content is touched.
+    /// content is touched. Fails if GCS refused the copy on every attempt.
     async fn repair(&self, entry: &EntryEntity) -> anyhow::Result<Outcome> {
+        for _ in 0..ATTEMPTS_PER_ENTRY {
+            if let Attempt::Finished(outcome) = self.attempt_repair(entry).await? {
+                return Ok(outcome);
+            }
+        }
+        anyhow::bail!(
+            "GCS refused the copy {ATTEMPTS_PER_ENTRY} times: writes kept landing on the \
+             entry's path or its misnamed name"
+        )
+    }
+
+    /// Look at the entry's path and its misnamed name, and repair what they
+    /// hold.
+    async fn attempt_repair(&self, entry: &EntryEntity) -> anyhow::Result<Attempt> {
         match self.operator.stat(entry.path.as_str()).await {
-            Ok(in_place) => self.remove_leftover(entry, &in_place).await,
+            Ok(in_place) => Ok(Attempt::Finished(
+                self.remove_leftover(entry, &in_place).await?,
+            )),
             Err(error) if error.kind() == ErrorKind::NotFound => self.move_misnamed(entry).await,
             Err(error) => Err(error.into()),
         }
     }
 
-    /// Move the misnamed object to the entry's path, which has no object.
-    async fn move_misnamed(&self, entry: &EntryEntity) -> anyhow::Result<Outcome> {
+    /// Move the misnamed object to the entry's path, which had no object
+    /// when looked at.
+    async fn move_misnamed(&self, entry: &EntryEntity) -> anyhow::Result<Attempt> {
         let misnamed = match self.find_misnamed_copy(entry).await? {
             MisnamedCopy::Found(misnamed) => misnamed,
-            MisnamedCopy::Absent => return Ok(Outcome::Missing),
-            MisnamedCopy::OtherContent => return Ok(Outcome::Mismatch),
+            MisnamedCopy::Absent => return Ok(Attempt::Finished(Outcome::Missing)),
+            MisnamedCopy::OtherContent => return Ok(Attempt::Finished(Outcome::Mismatch)),
         };
-        let copied = self
-            .copy_unless_present(&misnamed.name, entry.path.as_str())
-            .await?;
-        if !copied {
-            // A write landed on the path meanwhile: the misnamed object is a
-            // leftover now.
-            return self.delete_leftover(&misnamed).await;
+        match self.copy_as_checked(&misnamed, entry.path.as_str()).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::ConditionNotMatch => {
+                return Ok(Attempt::CopyRefused)
+            }
+            Err(error) => return Err(error.into()),
         }
         if self.is_object_of_an_entry(&misnamed.name).await? {
-            return Ok(Outcome::Copied);
+            return Ok(Attempt::Finished(Outcome::Copied));
         }
         self.delete_unless_replaced(&misnamed).await?;
-        Ok(Outcome::Moved)
+        Ok(Attempt::Finished(Outcome::Moved))
     }
 
-    /// Remove the misnamed object an earlier run copied to the entry's path
-    /// but failed to delete, if the object in place holds the entry's
-    /// content. If not, the object in place is another entry's misnamed
-    /// object, and the misnamed one may be this entry's only copy.
+    /// Remove the misnamed object that an earlier run copied to the entry's
+    /// path but failed to delete, or that a write to the path left behind,
+    /// if the object in place holds the entry's content. If not, the object
+    /// in place is another entry's misnamed object, or one that no entry
+    /// refers to, and the misnamed one may be this entry's only copy.
     async fn remove_leftover(
         &self,
         entry: &EntryEntity,
@@ -430,16 +472,18 @@ impl GcsNameRepair {
         Ok(hasher.finalize())
     }
 
-    /// Copy `from` to `to`, conditional on `to` having no object, so a
-    /// write that lands meanwhile is never replaced. Whether it copied:
-    /// `false` if `to` has an object.
-    async fn copy_unless_present(&self, from: &str, to: &str) -> opendal::Result<bool> {
-        let copy = self.operator.copy(from, to);
-        match under_expected_generation(ExpectedGeneration::Absent, copy).await {
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == ErrorKind::ConditionNotMatch => Ok(false),
-            Err(error) => Err(error),
-        }
+    /// Copy `misnamed` to `to`, conditional on `misnamed` being at the
+    /// generation whose content was checked and on `to` having no object, so
+    /// only checked content is copied and a write to `to` is never replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::ConditionNotMatch`] if either condition failed.
+    async fn copy_as_checked(&self, misnamed: &MisnamedObject, to: &str) -> opendal::Result<()> {
+        let copy = self.operator.copy(&misnamed.name, to);
+        let copy_of_checked_source = under_expected_source_generation(misnamed.generation, copy);
+        under_expected_generation(ExpectedGeneration::Absent, copy_of_checked_source).await?;
+        Ok(())
     }
 
     /// Whether `name` is the path of an entry, which makes the object under
@@ -698,11 +742,157 @@ mod tests {
             .unwrap());
     }
 
-    /// A copy refused because a write landed on the entry's path meanwhile
-    /// leaves the misnamed object a leftover, which is removed.
+    /// Runs the repair over every affected entry, and while its first copy is
+    /// held back, lets `write_meanwhile` change the bucket. The copy is then
+    /// refused, as GCS refuses a copy whose source or destination changed.
+    async fn repair_with_a_write_before_the_copy(
+        repair: &GcsNameRepair,
+        versioned: &super::super::opendal_test_operators::Versioned,
+        write_meanwhile: impl std::future::Future<Output = ()>,
+    ) -> Summary {
+        use std::sync::atomic::Ordering;
+
+        let release = versioned.stall_next_copy();
+        let (summary, ()) = tokio::join!(repair.repair_all_affected_entries(), async {
+            versioned.until_copy_stalled().await;
+            write_meanwhile.await;
+            versioned.refuse_copies.store(true, Ordering::SeqCst);
+            release.send(()).unwrap();
+        });
+        summary.unwrap()
+    }
+
+    /// A write of the entry's content that lands on the entry's path before
+    /// the copy leaves the misnamed object a leftover, which is removed.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn a_write_landing_before_the_copy_leaves_a_leftover_to_remove() {
+    async fn a_write_of_the_entry_content_before_the_copy_leaves_a_leftover_to_remove() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let repair = GcsNameRepair {
+            operator: fs.layer(versioned.clone()),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let path = misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
+
+        let write_of_the_entry_content = async {
+            repair
+                .operator
+                .write(path.as_str(), b"a".to_vec())
+                .await
+                .unwrap();
+        };
+        assert_eq!(
+            repair_with_a_write_before_the_copy(&repair, &versioned, write_of_the_entry_content)
+                .await,
+            Summary {
+                leftover_removed: 1,
+                ..Summary::default()
+            }
+        );
+        assert!(!repair
+            .operator
+            .exists(&misnamed_object_name(&path))
+            .await
+            .unwrap());
+    }
+
+    /// An object that no entry refers to, as a write that rolled back after
+    /// its publish was sent leaves it, lands on the entry's path before the
+    /// copy. The misnamed object is the entry's only copy and is kept.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn an_unreferenced_object_landing_before_the_copy_keeps_the_misnamed_one() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let repair = GcsNameRepair {
+            operator: fs.layer(versioned.clone()),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let path = misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
+
+        let rolled_back_write = async {
+            repair
+                .operator
+                .write(path.as_str(), b"rolled back".to_vec())
+                .await
+                .unwrap();
+        };
+        assert_eq!(
+            repair_with_a_write_before_the_copy(&repair, &versioned, rolled_back_write).await,
+            Summary {
+                conflict: 1,
+                ..Summary::default()
+            }
+        );
+        assert_eq!(
+            repair
+                .operator
+                .read(&misnamed_object_name(&path))
+                .await
+                .unwrap()
+                .to_vec(),
+            b"a"
+        );
+    }
+
+    /// A write to the misnamed name, which is another entry's path, that
+    /// lands after the misnamed object's content was checked is not copied
+    /// to the entry's path.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn a_write_to_the_misnamed_name_before_the_copy_is_not_copied() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let repair = GcsNameRepair {
+            operator: fs.layer(versioned.clone()),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let space = misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
+
+        let write_to_the_encoded_path = async {
+            entry_in_place(&db, &repair.operator, &user, "/pub/a%20b", b"encoded").await;
+        };
+        assert_eq!(
+            repair_with_a_write_before_the_copy(&repair, &versioned, write_to_the_encoded_path)
+                .await,
+            Summary {
+                // `/pub/a b`: its content was overwritten by the user's write.
+                missing: 1,
+                // `/pub/a%20b`, the user's write.
+                in_place: 1,
+                ..Summary::default()
+            }
+        );
+        assert!(!repair.operator.exists(space.as_str()).await.unwrap());
+    }
+
+    /// An entry whose copy GCS refuses on every attempt fails, so the run is
+    /// not marked and the next startup tries again.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn an_entry_whose_copy_is_always_refused_fails() {
         use std::sync::atomic::Ordering;
 
         use super::super::opendal_test_operators::{get_fs_operator, Versioned};
@@ -719,19 +909,23 @@ mod tests {
             .await
             .unwrap();
         let path = misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
-        // Refused as GCS refuses a copy onto a path that got an object.
         versioned.refuse_copies.store(true, Ordering::SeqCst);
 
         assert_eq!(
-            repair.repair_all_affected_entries().await.unwrap(),
-            Summary {
-                leftover_removed: 1,
+            repair.run_once().await.unwrap(),
+            RepairRun::Ran(Summary {
+                failed: 1,
                 ..Summary::default()
-            }
+            })
         );
-        assert!(!repair
+        assert_eq!(versioned.seen.lock().unwrap().len(), ATTEMPTS_PER_ENTRY);
+        assert!(repair
             .operator
             .exists(&misnamed_object_name(&path))
+            .await
+            .unwrap());
+        assert!(!Migrator::new(&db)
+            .is_applied(FINISHED_MARKER)
             .await
             .unwrap());
     }
@@ -1048,5 +1242,13 @@ mod tests {
             operator.read(&replaced).await.unwrap().to_vec(),
             b"newer".to_vec()
         );
+
+        // A copy of it is refused too, and the entry's path stays empty.
+        let refused = repair
+            .copy_as_checked(&as_seen, mismatch.as_str())
+            .await
+            .expect_err("the copy is conditional on the source generation seen");
+        assert_eq!(refused.kind(), ErrorKind::ConditionNotMatch);
+        assert!(!operator.exists(mismatch.as_str()).await.unwrap());
     }
 }

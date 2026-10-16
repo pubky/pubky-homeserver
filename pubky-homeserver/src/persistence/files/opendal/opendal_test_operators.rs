@@ -215,8 +215,8 @@ pub(crate) fn get_memory_operator() -> Operator {
 /// stat, refuses a read whose `If-Match` is not the current ETag, records
 /// the condition each copy and delete of a real path ran under, refuses
 /// copies or deletes on demand as the store does when the condition fails,
-/// can hold a stat back until told to go on, and deletes through a batching
-/// deleter. Layered over a real backend, which does the storing.
+/// can hold a stat or a copy back until told to go on, and deletes through a
+/// batching deleter. Layered over a real backend, which does the storing.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Versioned {
     generation: Arc<Mutex<String>>,
@@ -224,8 +224,44 @@ pub(crate) struct Versioned {
     pub(crate) refuse_copies: Arc<AtomicBool>,
     pub(crate) refuse_deletes: Arc<AtomicBool>,
     pub(crate) batched: Arc<AtomicBool>,
-    stall_stat: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    stat_stalled: Arc<AtomicBool>,
+    stat_stall: Stall,
+    copy_stall: Stall,
+}
+
+/// Holds the next call of one kind back until the test lets it go on, so the
+/// test can change the store while the call is in flight.
+#[derive(Debug, Clone, Default)]
+struct Stall {
+    release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    reached: Arc<AtomicBool>,
+}
+
+impl Stall {
+    /// Hold the next call back until the returned sender is used.
+    fn arm(&self) -> oneshot::Sender<()> {
+        let (release, stalled) = oneshot::channel();
+        *self.release.lock().unwrap() = Some(stalled);
+        release
+    }
+
+    /// Called by the call: waits for the release if the stall is armed.
+    async fn hold(&self) {
+        let release = self.release.lock().unwrap().take();
+        if let Some(release) = release {
+            self.reached.store(true, Ordering::SeqCst);
+            release.await.expect("the test lets the call go on");
+        }
+    }
+
+    async fn until_reached(&self) {
+        for _ in 0..500 {
+            if self.reached.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the call never stalled");
+    }
 }
 
 impl Versioned {
@@ -251,19 +287,21 @@ impl Versioned {
 
     /// Hold the next stat back until the returned sender is used.
     pub(crate) fn stall_next_stat(&self) -> oneshot::Sender<()> {
-        let (release, stalled) = oneshot::channel();
-        *self.stall_stat.lock().unwrap() = Some(stalled);
-        release
+        self.stat_stall.arm()
     }
 
     pub(crate) async fn until_stat_stalled(&self) {
-        for _ in 0..500 {
-            if self.stat_stalled.load(Ordering::SeqCst) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("the stat never stalled");
+        self.stat_stall.until_reached().await;
+    }
+
+    /// Hold the next copy back until the returned sender is used. Whether it
+    /// is refused is decided once it goes on.
+    pub(crate) fn stall_next_copy(&self) -> oneshot::Sender<()> {
+        self.copy_stall.arm()
+    }
+
+    pub(crate) async fn until_copy_stalled(&self) {
+        self.copy_stall.until_reached().await;
     }
 }
 
@@ -319,11 +357,7 @@ impl<A: Access> LayeredAccess for VersionedAccessor<A> {
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-        let stalled = self.backend.stall_stat.lock().unwrap().take();
-        if let Some(stalled) = stalled {
-            self.backend.stat_stalled.store(true, Ordering::SeqCst);
-            stalled.await.expect("the test lets the stat go on");
-        }
+        self.backend.stat_stall.hold().await;
         let mut metadata = self.inner.stat(path, args).await?.into_metadata();
         metadata.set_version(&self.backend.generation());
         metadata.set_etag(&self.backend.etag());
@@ -337,6 +371,7 @@ impl<A: Access> LayeredAccess for VersionedAccessor<A> {
         args: OpCopy,
         opts: OpCopier,
     ) -> Result<(RpCopy, Self::Copier)> {
+        self.backend.copy_stall.hold().await;
         self.backend
             .seen
             .lock()

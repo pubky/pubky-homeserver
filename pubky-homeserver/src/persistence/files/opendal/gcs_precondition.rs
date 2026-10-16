@@ -8,6 +8,11 @@
 //! gets `ifGenerationMatch` with that value, and GCS answers 412 when the
 //! object's generation differs. Uploads are never conditional: they go to a
 //! staging object, and the copy that publishes is what carries the condition.
+//!
+//! A copy sent under an expected source generation, see
+//! [`under_expected_source_generation`], also gets `ifSourceGenerationMatch`,
+//! so it copies only the version of the source that was seen. GCS answers 412
+//! for either condition, so a refusal does not tell which object changed.
 
 use axum::http::{Request, Response, Uri};
 use opendal::raw::{HttpBody, HttpFetch, ServiceOperation};
@@ -20,6 +25,30 @@ use crate::persistence::files::staged_publish_layer::{expected_generation, Expec
 /// sub-request inside the body. The staged publish layer flushes deletes one
 /// path at a time so that opendal never batches them, and its tests pin that.
 const CONDITIONAL_OPERATIONS: [&str; 2] = ["RewriteObject", "DeleteObject"];
+
+/// The service operation of a copy, the only one with a source.
+const COPY_OPERATION: &str = "RewriteObject";
+
+tokio::task_local! {
+    static EXPECTED_SOURCE_GENERATION: u64;
+}
+
+/// Run `request`, a copy, so that GCS refuses it unless its source is at
+/// `generation`.
+pub(super) async fn under_expected_source_generation<T>(
+    generation: u64,
+    request: impl std::future::Future<Output = T>,
+) -> T {
+    EXPECTED_SOURCE_GENERATION.scope(generation, request).await
+}
+
+/// The generation the source of the current task's copy must be at, if it
+/// runs under one.
+fn expected_source_generation() -> Option<u64> {
+    EXPECTED_SOURCE_GENERATION
+        .try_with(|generation| *generation)
+        .ok()
+}
 
 /// Wraps an HTTP client so that conditional requests carry their condition.
 #[derive(Debug, Clone)]
@@ -35,30 +64,40 @@ impl<F: HttpFetch> PreconditionFetcher<F> {
 
 impl<F: HttpFetch> HttpFetch for PreconditionFetcher<F> {
     async fn fetch(&self, req: Request<Buffer>) -> Result<Response<HttpBody>> {
-        let req = with_precondition(req, expected_generation())?;
+        let req = with_precondition(req, expected_generation(), expected_source_generation())?;
         self.inner.fetch(req).await
     }
 }
 
 /// Put `ifGenerationMatch` on `req` if it is a conditional operation and
-/// `expected` asks for a condition.
+/// `expected` asks for a condition, and `ifSourceGenerationMatch` if it is a
+/// copy and `expected_source` asks for one.
 fn with_precondition(
     mut req: Request<Buffer>,
     expected: Option<ExpectedGeneration>,
+    expected_source: Option<u64>,
 ) -> Result<Request<Buffer>> {
-    let Some(generation) = expected.map(ExpectedGeneration::if_generation_match) else {
-        return Ok(req);
-    };
-    let conditional = req
+    let operation = req
         .extensions()
         .get::<ServiceOperation>()
-        .is_some_and(|operation| CONDITIONAL_OPERATIONS.contains(&operation.0));
-    if !conditional {
+        .map(|operation| operation.0);
+    let mut conditions = Vec::new();
+    if let Some(generation) = expected.map(ExpectedGeneration::if_generation_match) {
+        if operation.is_some_and(|operation| CONDITIONAL_OPERATIONS.contains(&operation)) {
+            conditions.push(format!("ifGenerationMatch={generation}"));
+        }
+    }
+    if let Some(generation) = expected_source {
+        if operation == Some(COPY_OPERATION) {
+            conditions.push(format!("ifSourceGenerationMatch={generation}"));
+        }
+    }
+    if conditions.is_empty() {
         return Ok(req);
     }
     let uri = req.uri();
     let separator = if uri.query().is_some() { '&' } else { '?' };
-    let conditional_uri: Uri = format!("{uri}{separator}ifGenerationMatch={generation}")
+    let conditional_uri: Uri = format!("{uri}{separator}{}", conditions.join("&"))
         .parse()
         .map_err(|error| {
             Error::new(
@@ -94,6 +133,7 @@ mod tests {
         let copy = with_precondition(
             request("RewriteObject", "https://s/b/o/a/rewriteTo/b/o/b?x=1"),
             known,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -102,18 +142,51 @@ mod tests {
             "a copy under a known generation is conditional on it"
         );
 
-        let delete = with_precondition(request("DeleteObject", "https://s/b/o/a"), absent).unwrap();
+        let delete =
+            with_precondition(request("DeleteObject", "https://s/b/o/a"), absent, None).unwrap();
         assert_eq!(delete.uri().query(), Some("ifGenerationMatch=0"));
 
         let upload = with_precondition(
             request("InsertObject", "https://s/upload?uploadType=media"),
             known,
+            None,
         )
         .unwrap();
         assert_eq!(upload.uri().query(), Some("uploadType=media"));
 
-        let outside = with_precondition(request("RewriteObject", "https://s/b"), None).unwrap();
+        let outside =
+            with_precondition(request("RewriteObject", "https://s/b"), None, None).unwrap();
         assert_eq!(outside.uri().query(), None);
+    }
+
+    #[test]
+    fn source_condition_goes_on_copy_requests_only() {
+        let copy = with_precondition(
+            request("RewriteObject", "https://s/b/o/a/rewriteTo/b/o/b"),
+            Some(ExpectedGeneration::Absent),
+            Some(42),
+        )
+        .unwrap();
+        assert_eq!(
+            copy.uri().query(),
+            Some("ifGenerationMatch=0&ifSourceGenerationMatch=42"),
+            "a copy carries both conditions"
+        );
+
+        let source_only = with_precondition(
+            request("RewriteObject", "https://s/b/o/a/rewriteTo/b/o/b"),
+            None,
+            Some(42),
+        )
+        .unwrap();
+        assert_eq!(
+            source_only.uri().query(),
+            Some("ifSourceGenerationMatch=42")
+        );
+
+        let delete =
+            with_precondition(request("DeleteObject", "https://s/b/o/a"), None, Some(42)).unwrap();
+        assert_eq!(delete.uri().query(), None, "a delete has no source");
     }
 
     /// A client that records the URL of every request it is given.
@@ -316,11 +389,20 @@ mod tests {
             .await
             .unwrap();
 
+        under_expected_source_generation(5, async {
+            fetcher
+                .fetch(request("RewriteObject", "https://s/b/o/a/rewriteTo/b/o/b"))
+                .await
+                .unwrap();
+        })
+        .await;
+
         assert_eq!(
             *recorder.0.lock().unwrap(),
             vec![
                 "https://s/b/o/a?ifGenerationMatch=9".to_string(),
-                "https://s/b/o/a".to_string()
+                "https://s/b/o/a".to_string(),
+                "https://s/b/o/a/rewriteTo/b/o/b?ifSourceGenerationMatch=5".to_string(),
             ]
         );
     }
