@@ -1,7 +1,7 @@
 # ========================
 # Build Stage
 # ========================
-FROM rust:1.89.0-alpine3.20 AS builder
+FROM rust:1.91.1-alpine3.20 AS builder
 
 # Build platform argument (x86_64 or aarch64) (default: x86_64)
 RUN echo "TARGETARCH: $TARGETARCH"
