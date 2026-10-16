@@ -36,7 +36,7 @@
 //! [`MISNAMED_ENCODE_SET`].
 
 use futures_util::StreamExt;
-use opendal::{ErrorKind, Operator};
+use opendal::{ErrorKind, Metadata, Operator};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use pubky_common::crypto::{Hash, Hasher};
 use tokio::task::JoinHandle;
@@ -103,8 +103,14 @@ impl GcsNameRepairJob {
                 Ok(RepairRun::AlreadyFinished) => {
                     tracing::debug!("GCS name repair finished before; skipping");
                 }
-                Ok(RepairRun::Ran(summary)) if summary.is_complete() => {
+                Ok(RepairRun::Ran(summary)) if summary.is_complete() && summary.conflict == 0 => {
                     tracing::info!(?summary, "GCS name repair finished");
+                }
+                Ok(RepairRun::Ran(summary)) if summary.is_complete() => {
+                    tracing::warn!(
+                        ?summary,
+                        "GCS name repair finished; the conflicts logged are left for manual repair"
+                    );
                 }
                 Ok(RepairRun::Ran(summary)) => {
                     tracing::warn!(
@@ -145,8 +151,7 @@ enum RepairRun {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     /// The object is under the entry's path, and no misnamed object with the
-    /// entry's content is left to remove. One with other content is left as
-    /// it is: it is not the entry's.
+    /// entry's content is left to remove.
     InPlace,
     /// The misnamed object was moved to the entry's path.
     Moved,
@@ -164,8 +169,9 @@ enum Outcome {
     /// the entry.
     Mismatch,
     /// The misnamed object holds the entry's content, but the object under
-    /// the entry's path does not: it is another entry's misnamed object, as
-    /// when a user has both `c d` and `c%20d`. Both are left as they are.
+    /// the entry's path does not. That object is another entry's misnamed
+    /// object, as when a user has both `c d` and `c%20d`, or a write to the
+    /// path is in progress. Both are left as they are.
     Conflict,
 }
 
@@ -207,9 +213,11 @@ impl Summary {
 enum MisnamedCopy {
     /// A misnamed object that holds the entry's content.
     Found(MisnamedObject),
-    /// No misnamed object.
+    /// No misnamed object of the entry: none at all, or another entry's
+    /// object under that entry's path.
     Absent,
-    /// A misnamed object with other content.
+    /// A misnamed object with other content that is not another entry's
+    /// object: left over from an older version of the entry.
     OtherContent,
 }
 
@@ -288,8 +296,9 @@ impl GcsNameRepair {
                         tracing::warn!(
                             path = %entry.path,
                             misnamed = %misnamed_object_name(&entry.path),
-                            "GCS name repair: the entry's path holds another entry's object; \
-                             its content is under the misnamed name, left for manual repair"
+                            "GCS name repair: the object at the entry's path does not hold the \
+                             entry's content (another entry's misnamed object, or a write in \
+                             progress); the misnamed copy is kept for manual repair"
                         );
                         summary.count(Outcome::Conflict);
                     }
@@ -309,10 +318,11 @@ impl GcsNameRepair {
     /// Repair one entry. Only a misnamed object that holds the entry's
     /// content is touched.
     async fn repair(&self, entry: &EntryEntity) -> anyhow::Result<Outcome> {
-        if self.operator.exists(entry.path.as_str()).await? {
-            return self.remove_leftover(entry).await;
+        match self.operator.stat(entry.path.as_str()).await {
+            Ok(in_place) => self.remove_leftover(entry, &in_place).await,
+            Err(error) if error.kind() == ErrorKind::NotFound => self.move_misnamed(entry).await,
+            Err(error) => Err(error.into()),
         }
-        self.move_misnamed(entry).await
     }
 
     /// Move the misnamed object to the entry's path, which has no object.
@@ -341,16 +351,18 @@ impl GcsNameRepair {
     /// but failed to delete, if the object in place holds the entry's
     /// content. If not, the object in place is another entry's misnamed
     /// object, and the misnamed one may be this entry's only copy.
-    async fn remove_leftover(&self, entry: &EntryEntity) -> anyhow::Result<Outcome> {
+    async fn remove_leftover(
+        &self,
+        entry: &EntryEntity,
+        in_place: &Metadata,
+    ) -> anyhow::Result<Outcome> {
         let misnamed = match self.find_misnamed_copy(entry).await? {
             MisnamedCopy::Found(misnamed) => misnamed,
             MisnamedCopy::Absent => return Ok(Outcome::InPlace),
             MisnamedCopy::OtherContent => return Ok(Outcome::Mismatch),
         };
-        let path = entry.path.as_str();
-        let in_place = self.operator.stat(path).await?;
         if !self
-            .holds_content(path, in_place.content_length(), entry)
+            .holds_content(entry.path.as_str(), in_place.content_length(), entry)
             .await?
         {
             return Ok(Outcome::Conflict);
@@ -381,6 +393,9 @@ impl GcsNameRepair {
             .holds_content(&name, metadata.content_length(), entry)
             .await?
         {
+            if self.is_object_of_an_entry(&name).await? {
+                return Ok(MisnamedCopy::Absent);
+            }
             return Ok(MisnamedCopy::OtherContent);
         }
         let generation = metadata
@@ -572,6 +587,23 @@ mod tests {
         path
     }
 
+    /// Stores `content` under `path`, as a fixed version does, with an entry
+    /// for it.
+    async fn entry_in_place(
+        db: &SqlDb,
+        operator: &Operator,
+        user: &UserEntity,
+        path: &str,
+        content: &[u8],
+    ) -> EntryPath {
+        let path = create_entry(db, user, path, content).await;
+        operator
+            .write(path.as_str(), content.to_vec())
+            .await
+            .unwrap();
+        path
+    }
+
     /// A run that got through every entry is marked, and the repair does
     /// not run again.
     #[tokio::test]
@@ -704,6 +736,81 @@ mod tests {
             .unwrap());
     }
 
+    /// A misnamed object with other content next to the entry's object is
+    /// left over from an older version: a mismatch, left as it is.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn a_misnamed_object_of_an_older_version_is_a_kept_mismatch() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let repair = GcsNameRepair {
+            operator: fs.layer(Versioned::new("7")),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let path = entry_in_place(&db, &repair.operator, &user, "/pub/a b", b"new").await;
+        let misnamed = misnamed_object_name(&path);
+        repair
+            .operator
+            .write(&misnamed, b"old".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repair.repair_all_affected_entries().await.unwrap(),
+            Summary {
+                mismatch: 1,
+                ..Summary::default()
+            }
+        );
+        assert_eq!(
+            repair.operator.read(path.as_str()).await.unwrap().to_vec(),
+            b"new"
+        );
+        assert_eq!(
+            repair.operator.read(&misnamed).await.unwrap().to_vec(),
+            b"old"
+        );
+    }
+
+    /// A misnamed name that is another entry's path holds that entry's
+    /// object, which says nothing about the first entry: it is in place if
+    /// its object is, and missing if not.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn another_entry_object_under_the_misnamed_name_is_no_mismatch() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let repair = GcsNameRepair {
+            operator: fs.layer(Versioned::new("7")),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        entry_in_place(&db, &repair.operator, &user, "/pub/c d", b"space").await;
+        entry_in_place(&db, &repair.operator, &user, "/pub/c%20d", b"encoded").await;
+        create_entry(&db, &user, "/pub/e f", b"space").await;
+        entry_in_place(&db, &repair.operator, &user, "/pub/e%20f", b"encoded").await;
+
+        assert_eq!(
+            repair.repair_all_affected_entries().await.unwrap(),
+            Summary {
+                in_place: 3,
+                missing: 1,
+                ..Summary::default()
+            }
+        );
+    }
+
     /// When one entry's misnamed name is another entry's path, the object
     /// under that path is the first entry's. The second entry's content is
     /// only under its own misnamed name, which is kept, in either id order.
@@ -756,11 +863,11 @@ mod tests {
         }
     }
 
-    /// Another homeserver on the same database marked the repair as finished
-    /// meanwhile: marking it again succeeds.
+    /// Marking the repair as finished succeeds when another homeserver on the
+    /// same database marked it meanwhile.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn marking_a_repair_finished_by_another_homeserver_succeeds() {
+    async fn marking_an_already_finished_repair_succeeds() {
         use super::super::opendal_test_operators::get_fs_operator;
 
         let db = SqlDb::test().await;
