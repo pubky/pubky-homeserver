@@ -89,6 +89,46 @@ impl EntryRepository {
         Ok(entry)
     }
 
+    /// List the entries whose path matches the PostgreSQL regular expression
+    /// `pattern`, in id order, starting after the entry with id `after_id`.
+    /// The executor can either be db.pool() or a transaction.
+    pub async fn list_by_path_pattern<'a>(
+        pattern: &str,
+        after_id: i64,
+        limit: u64,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<EntryEntity>, sqlx::Error> {
+        let statement = Query::select()
+            .from(ENTRY_TABLE)
+            .columns([
+                (ENTRY_TABLE, EntryIden::Id),
+                (ENTRY_TABLE, EntryIden::User),
+                (ENTRY_TABLE, EntryIden::Path),
+                (ENTRY_TABLE, EntryIden::ContentHash),
+                (ENTRY_TABLE, EntryIden::ContentLength),
+                (ENTRY_TABLE, EntryIden::ContentType),
+                (ENTRY_TABLE, EntryIden::ModifiedAt),
+                (ENTRY_TABLE, EntryIden::CreatedAt),
+            ])
+            .column((USER_TABLE, UserIden::PublicKey))
+            .left_join(
+                USER_TABLE,
+                Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
+            )
+            .and_where(Expr::cust_with_values(
+                "entries.path ~ $1",
+                vec![sea_query::Value::from(pattern)],
+            ))
+            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).gt(after_id))
+            .order_by((ENTRY_TABLE, EntryIden::Id), Order::Asc)
+            .limit(limit)
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        let entries: Vec<EntryEntity> = sqlx::query_as_with(&query, values).fetch_all(con).await?;
+        Ok(entries)
+    }
+
     pub async fn update<'a>(
         entry: &EntryEntity,
         executor: &mut UnifiedExecutor<'a>,

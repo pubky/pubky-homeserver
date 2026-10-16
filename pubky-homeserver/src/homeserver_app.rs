@@ -2,12 +2,14 @@
 //!
 //! [`HomeserverApp`] owns and coordinates the three HTTP servers
 //! ([`ClientServer`], [`AdminServer`], [`MetricsServer`]) and the background
-//! DHT republishers. It handles startup (config loading, database connection,
+//! DHT republishers and the [`StorageRepair`] the storage backend needs.
+//! It handles startup (config loading, database connection,
 //! migration) and graceful shutdown.
 
 use crate::admin_server::{AdminServer, AdminServerBuildError};
 use crate::client_server::{ClientServer, ClientServerBuildError};
 use crate::metrics_server::{MetricsServer, MetricsServerBuildError};
+use crate::persistence::files::StorageRepair;
 use crate::republishers::{
     HomeserverKeyRepublisher, KeyRepublisherBuildError, UserKeysRepublisherJob,
 };
@@ -50,6 +52,9 @@ pub struct HomeserverApp {
 
     // Republishing is stopped when the HomeserverKeyRepublisher is dropped.
     _key_republisher: HomeserverKeyRepublisher,
+
+    // The repairs are stopped when the StorageRepair is dropped.
+    _storage_repair: StorageRepair,
 
     #[allow(dead_code)] // Keep this alive. When dropped, the admin server will stop.
     admin_server: Option<AdminServer>,
@@ -96,6 +101,8 @@ impl HomeserverApp {
             republish_interval,
         );
 
+        let storage_repair = StorageRepair::start(&context.config_toml.storage, &context.sql_db);
+
         let admin_server = if context.config_toml.admin.enabled {
             Some(AdminServer::start(Arc::clone(&context)).await?)
         } else {
@@ -123,6 +130,7 @@ impl HomeserverApp {
             metrics_server,
             _user_keys_republisher_job: user_keys_republisher_job,
             _key_republisher: key_republisher,
+            _storage_repair: storage_repair,
         })
     }
 
