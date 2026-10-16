@@ -22,8 +22,9 @@
 //!
 //! The move copies only the version of the misnamed object whose content was
 //! checked, and only to a path that has no object. A write that lands on
-//! either name meanwhile makes GCS refuse the copy, and the repair looks at
-//! the entry again. Both can happen: the misnamed name can be another
+//! either name meanwhile, or another homeserver that moved the object first,
+//! makes GCS refuse the copy, and the repair looks at the entry again. Both
+//! writes can happen: the misnamed name can be another
 //! entry's path, and the entry's path can get an object that no entry
 //! refers to, from a write that rolled back after its publish was sent.
 //!
@@ -92,6 +93,17 @@ const ATTEMPTS_PER_ENTRY: usize = 2;
 /// The name the object of `path` was stored under by an affected version.
 fn misnamed_object_name(path: &EntryPath) -> String {
     utf8_percent_encode(path.as_str(), MISNAMED_ENCODE_SET).to_string()
+}
+
+/// Whether `error` says the object does not exist. A read of a stream
+/// reports it as an I/O error wrapping the opendal one.
+fn is_not_found(error: &anyhow::Error) -> bool {
+    if let Some(error) = error.downcast_ref::<opendal::Error>() {
+        return error.kind() == ErrorKind::NotFound;
+    }
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Runs the repair once in the background. Dropping it stops the repair.
@@ -191,10 +203,11 @@ enum Outcome {
 /// What one look at an entry came to.
 enum Attempt {
     Finished(Outcome),
-    /// GCS refused the copy: the misnamed object changed since its content
-    /// was checked, or the entry's path got an object. The refusal does not
-    /// tell which, so the entry is looked at again.
-    CopyRefused,
+    /// The objects changed while the repair looked at them, so the entry is
+    /// looked at again: the misnamed object changed or was deleted, as when
+    /// another homeserver moved it, or the entry's path got an object. GCS
+    /// refusing the copy does not tell which.
+    Raced,
 }
 
 /// How many entries ended in each outcome.
@@ -241,6 +254,9 @@ enum MisnamedCopy {
     /// A misnamed object with other content that is not another entry's
     /// object: left over from an older version of the entry.
     OtherContent,
+    /// A misnamed object that was deleted while its content was read, as
+    /// when another homeserver moved it.
+    Vanished,
 }
 
 /// A misnamed object, as the repair saw it.
@@ -341,7 +357,7 @@ impl GcsNameRepair {
     }
 
     /// Repair one entry. Only a misnamed object that holds the entry's
-    /// content is touched. Fails if GCS refused the copy on every attempt.
+    /// content is touched. Fails if the objects changed on every attempt.
     async fn repair(&self, entry: &EntryEntity) -> anyhow::Result<Outcome> {
         for _ in 0..ATTEMPTS_PER_ENTRY {
             if let Attempt::Finished(outcome) = self.attempt_repair(entry).await? {
@@ -349,8 +365,8 @@ impl GcsNameRepair {
             }
         }
         anyhow::bail!(
-            "GCS refused the copy {ATTEMPTS_PER_ENTRY} times: writes kept landing on the \
-             entry's path or its misnamed name"
+            "the objects changed on all {ATTEMPTS_PER_ENTRY} attempts: writes or another \
+             homeserver kept changing the entry's path or its misnamed name"
         )
     }
 
@@ -373,11 +389,18 @@ impl GcsNameRepair {
             MisnamedCopy::Found(misnamed) => misnamed,
             MisnamedCopy::Absent => return Ok(Attempt::Finished(Outcome::Missing)),
             MisnamedCopy::OtherContent => return Ok(Attempt::Finished(Outcome::Mismatch)),
+            MisnamedCopy::Vanished => return Ok(Attempt::Raced),
         };
         match self.copy_as_checked(&misnamed, entry.path.as_str()).await {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::ConditionNotMatch => {
-                return Ok(Attempt::CopyRefused)
+            // A deleted source is answered with 404, a changed one with 412.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConditionNotMatch | ErrorKind::NotFound
+                ) =>
+            {
+                return Ok(Attempt::Raced)
             }
             Err(error) => return Err(error.into()),
         }
@@ -400,7 +423,8 @@ impl GcsNameRepair {
     ) -> anyhow::Result<Outcome> {
         let misnamed = match self.find_misnamed_copy(entry).await? {
             MisnamedCopy::Found(misnamed) => misnamed,
-            MisnamedCopy::Absent => return Ok(Outcome::InPlace),
+            // Gone either way: nothing is left to remove.
+            MisnamedCopy::Absent | MisnamedCopy::Vanished => return Ok(Outcome::InPlace),
             MisnamedCopy::OtherContent => return Ok(Outcome::Mismatch),
         };
         if !self
@@ -431,10 +455,15 @@ impl GcsNameRepair {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(MisnamedCopy::Absent),
             Err(error) => return Err(error.into()),
         };
-        if !self
+        let holds_content = match self
             .holds_content(&name, metadata.content_length(), entry)
-            .await?
+            .await
         {
+            Ok(holds_content) => holds_content,
+            Err(error) if is_not_found(&error) => return Ok(MisnamedCopy::Vanished),
+            Err(error) => return Err(error),
+        };
+        if !holds_content {
             if self.is_object_of_an_entry(&name).await? {
                 return Ok(MisnamedCopy::Absent);
             }
@@ -478,7 +507,8 @@ impl GcsNameRepair {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::ConditionNotMatch`] if either condition failed.
+    /// [`ErrorKind::ConditionNotMatch`] if either condition failed, and
+    /// [`ErrorKind::NotFound`] if `misnamed` was deleted since.
     async fn copy_as_checked(&self, misnamed: &MisnamedObject, to: &str) -> opendal::Result<()> {
         let copy = self.operator.copy(&misnamed.name, to);
         let copy_of_checked_source = under_expected_source_generation(misnamed.generation, copy);
@@ -886,6 +916,213 @@ mod tests {
             }
         );
         assert!(!repair.operator.exists(space.as_str()).await.unwrap());
+    }
+
+    /// Another homeserver that moves the object between this run's content
+    /// check and its copy leaves the source deleted. The copy fails with
+    /// not found, and the entry is looked at again and found in place.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn an_object_another_homeserver_moved_before_the_copy_is_in_place() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let repair = GcsNameRepair {
+            operator: fs.layer(versioned.clone()),
+            sql_db: db.clone(),
+        };
+        let other_homeserver = GcsNameRepair {
+            operator: repair.operator.clone(),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let path = misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
+
+        let release = versioned.stall_next_copy();
+        let (summary, ()) = tokio::join!(repair.repair_all_affected_entries(), async {
+            versioned.until_copy_stalled().await;
+            assert_eq!(
+                other_homeserver
+                    .repair_all_affected_entries()
+                    .await
+                    .unwrap(),
+                Summary {
+                    moved: 1,
+                    ..Summary::default()
+                }
+            );
+            release.send(()).unwrap();
+        });
+
+        assert_eq!(
+            summary.unwrap(),
+            Summary {
+                in_place: 1,
+                ..Summary::default()
+            }
+        );
+        assert_eq!(
+            repair.operator.read(path.as_str()).await.unwrap().to_vec(),
+            b"a"
+        );
+    }
+
+    /// Another homeserver that moves the object while this run reads it to
+    /// check its content leaves the read failing with not found. The entry
+    /// is looked at again and found in place.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn an_object_another_homeserver_moved_during_the_content_check_is_in_place() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let repair = GcsNameRepair {
+            operator: fs.layer(versioned.clone()),
+            sql_db: db.clone(),
+        };
+        let other_homeserver = GcsNameRepair {
+            operator: repair.operator.clone(),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
+
+        let release = versioned.stall_next_read();
+        let (summary, ()) = tokio::join!(repair.repair_all_affected_entries(), async {
+            versioned.until_read_stalled().await;
+            assert_eq!(
+                other_homeserver
+                    .repair_all_affected_entries()
+                    .await
+                    .unwrap(),
+                Summary {
+                    moved: 1,
+                    ..Summary::default()
+                }
+            );
+            release.send(()).unwrap();
+        });
+
+        assert_eq!(
+            summary.unwrap(),
+            Summary {
+                in_place: 1,
+                ..Summary::default()
+            }
+        );
+    }
+
+    /// The repair reads the affected entries in batches: entries on both
+    /// sides of a batch boundary, among unaffected ones, are each moved once.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn entries_over_several_batches_are_each_moved_once() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let db = SqlDb::test().await;
+        let (fs, _tmp_dir) = get_fs_operator();
+        let repair = GcsNameRepair {
+            operator: fs.layer(Versioned::new("7")),
+            sql_db: db.clone(),
+        };
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let affected_count = 2 * BATCH_SIZE + 1;
+        let mut affected = Vec::new();
+        for i in 0..affected_count {
+            entry_in_place(
+                &db,
+                &repair.operator,
+                &user,
+                &format!("/pub/plain{i}"),
+                b"x",
+            )
+            .await;
+            let content = format!("content {i}").into_bytes();
+            let path = format!("/pub/a b {i}");
+            let path = misnamed_entry(&db, &repair.operator, &user, &path, &content).await;
+            affected.push((path, content));
+        }
+
+        assert_eq!(
+            repair.repair_all_affected_entries().await.unwrap(),
+            Summary {
+                moved: affected_count,
+                ..Summary::default()
+            }
+        );
+        for (path, content) in &affected {
+            assert_eq!(
+                &repair.operator.read(path.as_str()).await.unwrap().to_vec(),
+                content
+            );
+        }
+    }
+
+    /// Identical content under colliding names, as empty `.keep` files are:
+    /// the content check passes for both entries, and both end up served,
+    /// with no misnamed object left, in either id order.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn identical_content_under_colliding_names_is_placed_for_both() {
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        for space_first in [true, false] {
+            let db = SqlDb::test().await;
+            let (fs, _tmp_dir) = get_fs_operator();
+            let repair = GcsNameRepair {
+                operator: fs.layer(Versioned::new("7")),
+                sql_db: db.clone(),
+            };
+            let user = UserService::new(db.clone())
+                .create(&Keypair::random().public_key())
+                .await
+                .unwrap();
+            let mut names = ["/pub/Teest share/.keep", "/pub/Teest%20share/.keep"];
+            if !space_first {
+                names.reverse();
+            }
+            let mut paths = Vec::new();
+            for name in names {
+                paths.push(misnamed_entry(&db, &repair.operator, &user, name, b"").await);
+            }
+
+            assert_eq!(
+                repair.repair_all_affected_entries().await.unwrap(),
+                Summary {
+                    copied: 1,
+                    leftover_removed: 1,
+                    ..Summary::default()
+                },
+                "space first: {space_first}"
+            );
+            let mut stored: Vec<String> = repair
+                .operator
+                .list_with("")
+                .recursive(true)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.metadata().is_file())
+                .map(|entry| entry.path().to_string())
+                .collect();
+            stored.sort();
+            let mut expected: Vec<String> = paths.iter().map(|path| path.to_string()).collect();
+            expected.sort();
+            assert_eq!(stored, expected, "space first: {space_first}");
+        }
     }
 
     /// An entry whose copy GCS refuses on every attempt fails, so the run is

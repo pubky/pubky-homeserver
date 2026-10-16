@@ -215,7 +215,7 @@ pub(crate) fn get_memory_operator() -> Operator {
 /// stat, refuses a read whose `If-Match` is not the current ETag, records
 /// the condition each copy and delete of a real path ran under, refuses
 /// copies or deletes on demand as the store does when the condition fails,
-/// can hold a stat or a copy back until told to go on, and deletes through a
+/// can hold a stat, read or copy back until told to go on, and deletes through a
 /// batching deleter. Layered over a real backend, which does the storing.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Versioned {
@@ -225,6 +225,7 @@ pub(crate) struct Versioned {
     pub(crate) refuse_deletes: Arc<AtomicBool>,
     pub(crate) batched: Arc<AtomicBool>,
     stat_stall: Stall,
+    read_stall: Stall,
     copy_stall: Stall,
 }
 
@@ -294,6 +295,15 @@ impl Versioned {
         self.stat_stall.until_reached().await;
     }
 
+    /// Hold the next read back until the returned sender is used.
+    pub(crate) fn stall_next_read(&self) -> oneshot::Sender<()> {
+        self.read_stall.arm()
+    }
+
+    pub(crate) async fn until_read_stalled(&self) {
+        self.read_stall.until_reached().await;
+    }
+
     /// Hold the next copy back until the returned sender is used. Whether it
     /// is refused is decided once it goes on.
     pub(crate) fn stall_next_copy(&self) -> oneshot::Sender<()> {
@@ -338,6 +348,7 @@ impl<A: Access> LayeredAccess for VersionedAccessor<A> {
     /// an object store does once the object was replaced. The condition is
     /// not passed on: the backend underneath does not support it.
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+        self.backend.read_stall.hold().await;
         if args
             .if_match()
             .is_some_and(|etag| etag != self.backend.etag())
