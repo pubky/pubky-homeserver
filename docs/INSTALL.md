@@ -16,7 +16,7 @@ Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), 
     - [Docker](#docker) | [Native](#native) | [Existing](#existing-instance)
   - [Configure the Homeserver with PostgreSQL](#configure-the-homeserver-with-postgresql)
   - [Run](#run)
-    - [Docker](#docker-1) | [Native](#native-1) | [systemd Service](#systemd-service)
+    - [Docker](#docker-1) | [Native](#native-foreground) | [systemd Service](#systemd-service)
 - [Next Steps](#next-steps)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
@@ -24,10 +24,16 @@ Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), 
 
 ## Install the Homeserver
 
-Pick a version and platform from the [releases page](https://github.com/pubky/pubky-homeserver/releases). The commands below use these variables, so set them first:
+PROXY protocol deployments require homeserver **v0.17.0 or later**. For an
+existing proxy deployment, follow the
+[upgrade instructions](DEPLOY.md#upgrade-an-existing-proxy-deployment).
+
+For a released binary or tagged source build, pick a version and platform from
+the [releases page](https://github.com/pubky/pubky-homeserver/releases).
+Set these variables for the release commands below:
 
 ```bash
-PUBKY_VERSION=0.11.0
+PUBKY_VERSION=0.17.0
 PUBKY_PLATFORM=linux-amd64  # or linux-arm64. Alternatively: osx-arm64, osx-amd64, windows-amd64
 ```
 
@@ -60,7 +66,7 @@ Install build dependencies:
 sudo apt update && sudo apt install -y build-essential pkg-config libssl-dev git curl
 ```
 
-Clone the repository:
+Clone the repository and select the release tag:
 
 ```bash
 git clone https://github.com/pubky/pubky-homeserver.git

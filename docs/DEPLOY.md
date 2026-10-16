@@ -1,34 +1,73 @@
-# Deploy a Pubky Homeserver
+# Deploy a Pubky homeserver
 
-How to make a Pubky homeserver reachable from the internet. This guide assumes you have already [installed the homeserver](./INSTALL.md) and have it running.
-
-> **Note:** These guides cover homeserver-specific setup only, not general server hardening. If you're new to running public-facing servers, look into basic Linux server security before proceeding.
+Make an [installed, running homeserver](INSTALL.md) reachable from the internet.
+These guides cover homeserver-specific settings. Use your provider's official
+instructions for DNS, firewall rules, and general server administration.
 
 ## Protocols
 
-The homeserver speaks two protocols. Both serve the same data — the difference is how clients find and connect to your server:
+Both protocols serve the same data:
 
-- **Pubky TLS** (port 6287) — the native protocol. Clients resolve your homeserver's public key on the DHT and connect directly, bypassing any certificate authority.
-- **HTTPS** (port 443) — standard web TLS. Browsers and the browser-based SDK use this, which requires a CA-issued certificate.
+- **Pubky TLS** (port 6287): native clients resolve the homeserver's public key
+  through PKARR and connect directly, without a certificate authority.
+- **HTTPS** (port 443): browsers and the browser SDK connect using a CA-issued
+  certificate, with TLS terminated by nginx or Cloudflare.
 
-Ideally your deployment supports both, but some setups only provide HTTPS. The comparison table below shows what each option gives you.
+## Choose your setup
 
-## Choose Your Setup
+- **[Public IP with nginx](deploy/public-ip.md)**: recommended for production.
+  Requires a static public IP and inbound ports 80, 443, and 6287. A domain is
+  optional. Supports both protocols.
+- **[Cloudflare Tunnel](deploy/cloudflare-tunnel.md)**: for networks without a
+  static IP or inbound ports, including NAT/CGNAT. Requires a Cloudflare-managed
+  domain. Supports HTTPS only.
 
-There are three deployment guides depending on your requirements and network limitations. Compare them below and follow the one that fits your situation.
+## Client addresses and rate limits
 
-- **[With a Domain](deploy/domain.md)** — standard setup with a domain name and static IP. Long-lived certificates, full protocol support. The recommended production option.
-- **[IP Address Only](deploy/ip-only.md)** — no domain registration needed. Uses short-lived certificates that auto-renew, so the server must stay healthy. Full protocol support.
-- **[Cloudflare Tunnel](deploy/cloudflare-tunnel.md)** — no static IP or open ports needed. Cloudflare proxies HTTPS traffic through an outbound tunnel. Ideal for home servers behind NAT/CGNAT. **Does not support Pubky TLS.**
+PROXY protocol support requires homeserver **v0.17.0 or later**.
 
-| | [Domain](deploy/domain.md) | [IP Address Only](deploy/ip-only.md) | [Cloudflare Tunnel](deploy/cloudflare-tunnel.md) |
-| --- | --- | --- | --- |
-| Static IP required | Yes | Yes | No |
-| Domain required | Yes | No | Yes (Cloudflare-managed, from ~$5/year) |
-| Open ports required | 80, 443, 6287 | 80, 443, 6287 | None |
-| Pubky TLS (native) | Yes | Yes | No |
-| HTTPS (browsers) | Yes | Yes | Yes |
-| Certificate lifetime | 90 days (auto-renewed) | ~6 days (auto-renewed) | Managed by Cloudflare |
-| Extra software | Caddy | Caddy (v2.10.1+) | cloudflared |
-| Best for | Production servers | Quick setup, no domain | Home networks, no static IP |
+From v0.17.0, IP-based limits use the TCP client address, ignoring
+`X-Forwarded-For`, `X-Real-IP`, and `CF-Connecting-IP`. User-based limits still
+use user keys.
 
+Under `[drive]`, `icann_client_identity` controls the HTTP listener (6286) and
+`pubky_client_identity` controls Pubky TLS (6287). Both default to `direct`.
+Behind a proxy, this groups clients under the proxy's IP-based limits.
+
+For separate client IPs, use `proxy_protocol` with a proxy that sends PROXY v1
+or v2. This mode requires a valid preface from a peer in `trusted_proxies`;
+it cannot also accept ordinary direct connections. See the
+[homeserver configuration](deploy/public-ip.md#configure-the-homeserver) and
+[nginx setup](deploy/nginx.md).
+
+### Optional: proxy Pubky TLS
+
+Direct Pubky TLS connections in `direct` mode are recommended for a single
+server: the homeserver handles TLS and receives client IPs directly.
+
+Pubky TLS also supports a TCP proxy, such as nginx stream, while preserving
+client IPs through PROXY protocol. Set `drive.pubky_client_identity` to
+`proxy_protocol` with `trusted_proxies`, and restrict backend access to the
+proxy. The proxy must send the PROXY preface before passing TLS through to the
+homeserver, which still terminates TLS. Publish the proxy's public address and
+port in PKARR. See the
+[configuration reference](../pubky-homeserver/config.sample.toml).
+
+### Upgrade an existing proxy deployment
+
+Upgrade to v0.17.0 or later using the [install guide](INSTALL.md). Stop the old
+homeserver before replacing its binary or container.
+If your deployment relied on forwarding headers, follow the nginx setup above.
+Apply proxy and homeserver changes together; mismatched modes interrupt
+requests.
+
+If you followed the previous Caddy domain or IP-only guide, prepare nginx and
+its certificates first, then validate with `sudo nginx -t`. During the cutover,
+run `sudo systemctl disable --now caddy` to free ports 80 and 443. Restart the
+homeserver with the new `proxy_protocol` settings, then start nginx with
+`sudo systemctl enable --now nginx`. Expect a brief interruption while switching.
+
+HTTP tunnels must instead keep `direct` mode and account for
+[shared IP-based limits][tunnel-limits].
+
+[tunnel-limits]: deploy/cloudflare-tunnel.md#client-addresses-and-rate-limits
