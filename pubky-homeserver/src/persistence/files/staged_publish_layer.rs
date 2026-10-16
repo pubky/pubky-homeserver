@@ -191,14 +191,20 @@ impl Service for StagedPublishService {
         self.inner.list(ctx, path, args)
     }
 
+    /// Refused: a copy would land on the real path unconditionally, past the
+    /// generation condition, and create no entry. Files are published by
+    /// writes only.
     fn copy(
         &self,
-        ctx: &OperationContext,
-        from: &str,
-        to: &str,
-        args: OpCopy,
+        _ctx: &OperationContext,
+        _from: &str,
+        _to: &str,
+        _args: OpCopy,
     ) -> Result<Self::Copier> {
-        self.inner.copy(ctx, from, to, args)
+        Err(opendal::Error::new(
+            ErrorKind::Unsupported,
+            "Copy is not supported: files are published by writes only",
+        ))
     }
 
     async fn rename(
@@ -499,6 +505,26 @@ mod tests {
         assert_eq!(refused.kind(), ErrorKind::Unsupported);
         assert!(operator.exists(path).await.unwrap());
         assert_eq!(versioned.seen.lock().unwrap().len(), 1);
+    }
+
+    /// A copy is refused: it would land without the generation condition.
+    #[tokio::test]
+    async fn copy_is_refused() {
+        let (operator, versioned, _tmp_dir) = staged_fs();
+        under_7(operator.write("pk/pub/a.txt", b"a".to_vec()))
+            .await
+            .unwrap();
+
+        let refused = under_7(operator.copy("pk/pub/a.txt", "pk/pub/b.txt"))
+            .await
+            .expect_err("a copy is refused");
+        assert_eq!(refused.kind(), ErrorKind::Unsupported);
+        assert!(!operator.exists("pk/pub/b.txt").await.unwrap());
+        assert_eq!(
+            versioned.seen.lock().unwrap().len(),
+            1,
+            "only the write's publish"
+        );
     }
 
     #[tokio::test]
