@@ -1,14 +1,15 @@
 //! Moves the objects that v0.13.0 to v0.16.1 stored under the wrong name in
 //! Google Cloud Storage to the name they belong under.
 //!
-//! The GCS service of opendal 0.57 percent-encodes the name of an upload
-//! twice. Those versions uploaded straight to the entry's path, so an entry
-//! whose path has a character that GCS keeps encoded, see
+//! Up to 0.57, the GCS service of opendal percent-encoded the name of an
+//! upload twice. Those versions uploaded straight to the entry's path, so an
+//! entry whose path has a character that GCS keeps encoded, see
 //! [`MISNAMED_ENCODE_SET`], was stored under its path percent-encoded once:
-//! `a b` under `a%20b`. Reading it fails with 404. Uploads now go to a
-//! staging name without such characters and are published by a copy, which
-//! encodes the name once, see
+//! `a b` under `a%20b`. Reading it fails with 404. Since v0.16.2, uploads go
+//! to a staging name without such characters and are published by a copy,
+//! which encodes the name once, see
 //! [`StagedPublishLayer`](crate::persistence::files::staged_publish_layer::StagedPublishLayer).
+//! opendal 0.58.1 encodes the name of an upload once too.
 //!
 //! On startup, [`GcsNameRepairJob`] goes over every entry whose path has
 //! such a character. If the entry's object is missing, it moves the
@@ -45,17 +46,15 @@
 //! [`MISNAMED_ENCODE_SET`].
 
 use futures_util::StreamExt;
+use opendal::options::ComposeSourceOptions;
 use opendal::{ErrorKind, Metadata, Operator};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use pubky_common::crypto::{Hash, Hasher};
 use tokio::task::JoinHandle;
 
-use super::gcs_precondition::under_expected_source_generation;
-use super::opendal_service::gcs_conditional_backend;
+use super::opendal_service::gcs_backend;
 use crate::data_directory::storage_config::GoogleBucketConfig;
-use crate::persistence::files::staged_publish_layer::{
-    under_expected_generation, ExpectedGeneration,
-};
+use crate::persistence::files::staged_publish_layer::ExpectedGeneration;
 use crate::persistence::sql::entry::{EntryEntity, EntryRepository};
 use crate::persistence::sql::{Migrator, SqlDb};
 use crate::shared::webdav::EntryPath;
@@ -156,11 +155,11 @@ impl Drop for GcsNameRepairJob {
     }
 }
 
-/// The backend the repair runs on: copies and deletes on it are conditional
-/// on the generation the task runs under.
+/// The backend the repair runs on, without the staged publish: the repair
+/// copies and deletes objects itself, under conditions of its own.
 fn build_operator(config: &GoogleBucketConfig) -> anyhow::Result<Operator> {
     let builder = config.to_builder()?;
-    Ok(gcs_conditional_backend(builder)?)
+    Ok(gcs_backend(builder)?)
 }
 
 /// What one start of the repair did.
@@ -267,14 +266,15 @@ struct MisnamedObject {
     /// the content checked is the content copied, and a delete spares an
     /// object written since.
     generation: u64,
+    /// Its content type, kept on the copy.
+    content_type: Option<String>,
 }
 
 /// Repairs the objects of the affected entries, and records in the
 /// migrations table when a run got through all of them, so the repair runs
 /// to completion once.
 struct GcsNameRepair {
-    /// Copies and deletes on it are conditional on the generation the task
-    /// runs under.
+    /// The backend, without the staged publish.
     operator: Operator,
     sql_db: SqlDb,
 }
@@ -393,7 +393,8 @@ impl GcsNameRepair {
         };
         match self.copy_as_checked(&misnamed, entry.path.as_str()).await {
             Ok(()) => {}
-            // A deleted source is answered with 404, a changed one with 412.
+            // A replaced or deleted source is answered with 404, as its checked
+            // generation is gone, and an object at the path with 412.
             Err(error)
                 if matches!(
                     error.kind(),
@@ -473,7 +474,11 @@ impl GcsNameRepair {
             .version()
             .and_then(|version| version.parse().ok())
             .ok_or_else(|| anyhow::anyhow!("GCS reported no generation for {name}"))?;
-        Ok(MisnamedCopy::Found(MisnamedObject { name, generation }))
+        Ok(MisnamedCopy::Found(MisnamedObject {
+            name,
+            generation,
+            content_type: metadata.content_type().map(str::to_owned),
+        }))
     }
 
     /// Whether the object `name` of `length` bytes holds the entry's
@@ -501,18 +506,33 @@ impl GcsNameRepair {
         Ok(hasher.finalize())
     }
 
-    /// Copy `misnamed` to `to`, conditional on `misnamed` being at the
-    /// generation whose content was checked and on `to` having no object, so
-    /// only checked content is copied and a write to `to` is never replaced.
+    /// Copy the generation of `misnamed` whose content was checked to `to`,
+    /// conditional on `to` having no object, so only checked content is
+    /// copied and a write to `to` is never replaced.
+    ///
+    /// A compose of one source, not a copy: opendal's GCS service does not
+    /// take a source generation on a copy, but does on a compose. The object
+    /// it makes is a composite one, which GCS keeps a CRC32C but no MD5 for,
+    /// and which gets no metadata but the content type passed here.
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::ConditionNotMatch`] if either condition failed, and
-    /// [`ErrorKind::NotFound`] if `misnamed` was deleted since.
+    /// [`ErrorKind::ConditionNotMatch`] if `to` has an object, and
+    /// [`ErrorKind::NotFound`] if the checked generation of `misnamed` was
+    /// replaced or deleted since.
     async fn copy_as_checked(&self, misnamed: &MisnamedObject, to: &str) -> opendal::Result<()> {
-        let copy = self.operator.copy(&misnamed.name, to);
-        let copy_of_checked_source = under_expected_source_generation(misnamed.generation, copy);
-        under_expected_generation(ExpectedGeneration::Absent, copy_of_checked_source).await?;
+        let checked_source = ComposeSourceOptions {
+            version: Some(misnamed.generation.to_string()),
+            ..ComposeSourceOptions::default()
+        };
+        let mut compose = self
+            .operator
+            .compose_with([(misnamed.name.as_str(), checked_source)], to)
+            .if_version_match(&ExpectedGeneration::Absent.version_condition());
+        if let Some(content_type) = &misnamed.content_type {
+            compose = compose.content_type(content_type);
+        }
+        compose.await?;
         Ok(())
     }
 
@@ -530,10 +550,26 @@ impl GcsNameRepair {
     }
 
     /// Delete `misnamed`, conditional on its generation, so that an object a
-    /// write has put there since it was seen stays.
+    /// write has put there since it was seen stays. GCS also refuses the
+    /// delete when the object is gone; then another repair running at the
+    /// same time removed it, and the delete is done.
     async fn delete_unless_replaced(&self, misnamed: &MisnamedObject) -> opendal::Result<()> {
-        let delete = self.operator.delete(&misnamed.name);
-        under_expected_generation(ExpectedGeneration::Known(misnamed.generation), delete).await
+        let generation = ExpectedGeneration::Known(misnamed.generation);
+        let deleted = self
+            .operator
+            .delete_with(&misnamed.name)
+            .if_version_match(&generation.version_condition())
+            .await;
+        match deleted {
+            Err(error) if error.kind() == ErrorKind::ConditionNotMatch => {
+                if self.operator.exists(&misnamed.name).await? {
+                    Err(error)
+                } else {
+                    Ok(())
+                }
+            }
+            deleted => deleted,
+        }
     }
 }
 
@@ -543,7 +579,9 @@ mod tests {
 
     use super::super::opendal_service::gcs_operator;
     use super::*;
-    use crate::persistence::files::staged_publish_layer::STAGING_PREFIX;
+    use crate::persistence::files::staged_publish_layer::{
+        under_expected_generation, STAGING_PREFIX,
+    };
     use crate::persistence::sql::user::UserEntity;
     use crate::services::user_service::UserService;
     use crate::shared::webdav::StoragePath;
@@ -782,11 +820,11 @@ mod tests {
     ) -> Summary {
         use std::sync::atomic::Ordering;
 
-        let release = versioned.stall_next_copy();
+        let release = versioned.stall_next_compose();
         let (summary, ()) = tokio::join!(repair.repair_all_affected_entries(), async {
-            versioned.until_copy_stalled().await;
+            versioned.until_compose_stalled().await;
             write_meanwhile.await;
-            versioned.refuse_copies.store(true, Ordering::SeqCst);
+            versioned.refuse_composes.store(true, Ordering::SeqCst);
             release.send(()).unwrap();
         });
         summary.unwrap()
@@ -943,9 +981,9 @@ mod tests {
             .unwrap();
         let path = misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
 
-        let release = versioned.stall_next_copy();
+        let release = versioned.stall_next_compose();
         let (summary, ()) = tokio::join!(repair.repair_all_affected_entries(), async {
-            versioned.until_copy_stalled().await;
+            versioned.until_compose_stalled().await;
             assert_eq!(
                 other_homeserver
                     .repair_all_affected_entries()
@@ -1146,7 +1184,7 @@ mod tests {
             .await
             .unwrap();
         let path = misnamed_entry(&db, &repair.operator, &user, "/pub/a b", b"a").await;
-        versioned.refuse_copies.store(true, Ordering::SeqCst);
+        versioned.refuse_composes.store(true, Ordering::SeqCst);
 
         assert_eq!(
             repair.run_once().await.unwrap(),
@@ -1240,6 +1278,43 @@ mod tests {
                 ..Summary::default()
             }
         );
+    }
+
+    /// A refused delete of a misnamed object that is still there fails. One
+    /// of an object that another repair removed meanwhile is done.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn a_misnamed_object_removed_meanwhile_counts_as_deleted() {
+        use std::sync::atomic::Ordering;
+
+        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let repair = GcsNameRepair {
+            operator: fs.layer(versioned.clone()),
+            sql_db: SqlDb::test().await,
+        };
+        let seen = MisnamedObject {
+            name: "pk/pub/a%20b".to_string(),
+            generation: 7,
+            content_type: None,
+        };
+        repair
+            .operator
+            .write(&seen.name, b"a".to_vec())
+            .await
+            .unwrap();
+
+        versioned.refuse_deletes.store(true, Ordering::SeqCst);
+        repair
+            .delete_unless_replaced(&seen)
+            .await
+            .expect_err("a refused delete of an object still there fails");
+        versioned.refuse_deletes.store(false, Ordering::SeqCst);
+
+        repair.operator.delete(&seen.name).await.unwrap();
+        repair.delete_unless_replaced(&seen).await.unwrap();
     }
 
     /// When one entry's misnamed name is another entry's path, the object
@@ -1340,16 +1415,12 @@ mod tests {
                 .root(&root)
         };
         let operator = gcs_operator(builder()).unwrap();
-        // The bare backend uploads straight to the path, as an affected
-        // version did, and so stores the object under the wrong name.
-        let affected_version = opendal::Operator::new(builder())
-            .unwrap()
-            .layer(opendal::layers::HttpClientLayer::new(
-                opendal::raw::HttpClient::with(reqwest::Client::new()),
-            ))
-            .finish();
+        // The backend without the staged publish, to store objects under
+        // the names an affected version gave them. Those names are pinned
+        // against a real bucket by `misnamed_object_name_is_the_name_gcs_stored`.
+        let backend = gcs_backend(builder()).unwrap();
         // Removes the test root from the bucket on drop.
-        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(affected_version.clone())));
+        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
         let db = SqlDb::test().await;
         let user = UserService::new(db.clone())
             .create(&Keypair::random().public_key())
@@ -1360,19 +1431,19 @@ mod tests {
 
         // Misnamed, below and above the multipart threshold: moved.
         let moved = create_entry(&db, &user, "/pub/Teest%20share/.keep", &small).await;
-        affected_version
-            .write(moved.as_str(), small.clone())
+        backend
+            .write(&misnamed_object_name(&moved), small.clone())
             .await
             .unwrap();
         let moved_large = create_entry(&db, &user, "/pub/big file.bin", &large).await;
-        affected_version
-            .write(moved_large.as_str(), large.clone())
+        backend
+            .write(&misnamed_object_name(&moved_large), large.clone())
             .await
             .unwrap();
         // Misnamed, but the object holds other content: left alone.
         let mismatch = create_entry(&db, &user, "/pub/other content", b"expected").await;
-        affected_version
-            .write(mismatch.as_str(), small.clone())
+        backend
+            .write(&misnamed_object_name(&mismatch), small.clone())
             .await
             .unwrap();
         // Written by a fixed version: in place.
@@ -1389,19 +1460,19 @@ mod tests {
         // has both `c d` and `c%20d`: copied and kept for the other entry,
         // whose own misnamed object is kept as a conflict.
         let copied = create_entry(&db, &user, "/pub/c d", &small).await;
-        affected_version
-            .write(copied.as_str(), small.clone())
+        backend
+            .write(&misnamed_object_name(&copied), small.clone())
             .await
             .unwrap();
         let other_content = b"other".to_vec();
         let other = create_entry(&db, &user, "/pub/c%20d", &other_content).await;
-        affected_version
-            .write(other.as_str(), other_content.clone())
+        backend
+            .write(&misnamed_object_name(&other), other_content.clone())
             .await
             .unwrap();
 
         let repair = GcsNameRepair {
-            operator: gcs_conditional_backend(builder()).unwrap(),
+            operator: gcs_backend(builder()).unwrap(),
             sql_db: db.clone(),
         };
         assert_eq!(
@@ -1470,6 +1541,7 @@ mod tests {
         let as_seen = MisnamedObject {
             name: replaced.clone(),
             generation,
+            content_type: None,
         };
         repair
             .delete_unless_replaced(&as_seen)
@@ -1480,12 +1552,13 @@ mod tests {
             b"newer".to_vec()
         );
 
-        // A copy of it is refused too, and the entry's path stays empty.
+        // A copy of it fails too, as the generation seen is gone, and the
+        // entry's path stays empty.
         let refused = repair
             .copy_as_checked(&as_seen, mismatch.as_str())
             .await
-            .expect_err("the copy is conditional on the source generation seen");
-        assert_eq!(refused.kind(), ErrorKind::ConditionNotMatch);
+            .expect_err("the copy reads the source generation seen");
+        assert_eq!(refused.kind(), ErrorKind::NotFound);
         assert!(!operator.exists(mismatch.as_str()).await.unwrap());
     }
 }

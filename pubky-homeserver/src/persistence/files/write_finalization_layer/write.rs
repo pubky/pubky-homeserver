@@ -10,8 +10,8 @@ use crate::persistence::sql::{
 };
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
-use opendal::raw::{oio, Access};
-use opendal::Result;
+use opendal::raw::oio;
+use opendal::{Operator, Result};
 
 use super::{
     layer::{
@@ -66,21 +66,21 @@ impl PreparedWrite {
 /// client disconnect) cannot stop the finalization halfway. A writer dropped
 /// before it is closed or aborted discards its staged bytes on a spawned task,
 /// so a disconnect mid-upload leaves nothing behind either.
-pub struct WriteFinalizationWriter<R: oio::Write + 'static, A: Access> {
+pub struct WriteFinalizationWriter<R: oio::Write + 'static> {
     /// `None` once the backend writer has been handed to the finalization task
     /// or aborted.
     inner: Option<R>,
     /// The backend, to read the object's generation from before publishing.
-    backend: Arc<A>,
+    backend: Operator,
     finalizer: Arc<Finalizer>,
     entry_path: EntryPath,
     metadata_builder: FileMetadataBuilder,
 }
 
-impl<R: oio::Write + 'static, A: Access> WriteFinalizationWriter<R, A> {
+impl<R: oio::Write + 'static> WriteFinalizationWriter<R> {
     pub(super) fn new(
         inner: R,
-        backend: Arc<A>,
+        backend: Operator,
         finalizer: Arc<Finalizer>,
         entry_path: EntryPath,
     ) -> Self {
@@ -94,7 +94,7 @@ impl<R: oio::Write + 'static, A: Access> WriteFinalizationWriter<R, A> {
     }
 }
 
-impl<R: oio::Write + 'static, A: Access> oio::Write for WriteFinalizationWriter<R, A> {
+impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
     async fn write(&mut self, bs: opendal::Buffer) -> Result<()> {
         let inner = self
             .inner
@@ -141,7 +141,7 @@ impl<R: oio::Write + 'static, A: Access> oio::Write for WriteFinalizationWriter<
     }
 }
 
-impl<R: oio::Write + 'static, A: Access> Drop for WriteFinalizationWriter<R, A> {
+impl<R: oio::Write + 'static> Drop for WriteFinalizationWriter<R> {
     fn drop(&mut self) {
         let Some(mut inner) = self.inner.take() else {
             return;
@@ -179,10 +179,10 @@ enum WriteFailure {
 }
 
 impl Finalizer {
-    async fn finalize_write<R: oio::Write, A: Access>(
+    async fn finalize_write<R: oio::Write>(
         &self,
         backend_writer: &mut R,
-        backend: &A,
+        backend: &Operator,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
     ) -> std::result::Result<opendal::Metadata, WriteFailure> {
@@ -231,10 +231,10 @@ impl Finalizer {
         Ok(metadata)
     }
 
-    async fn write_in_transaction<R: oio::Write, A: Access>(
+    async fn write_in_transaction<R: oio::Write>(
         &self,
         backend_writer: &mut R,
-        backend: &A,
+        backend: &Operator,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
         executor: &mut UnifiedExecutor<'_>,

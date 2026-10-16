@@ -3,13 +3,14 @@ use std::{future::Future, sync::Arc};
 use crate::persistence::files::{
     events::EventsService,
     layer_domain_error::LayerDomainError,
+    preflight::{preflight_copier, Preflight, PreflightWriter},
     staged_publish_layer::{live_generation, under_expected_generation, ExpectedGeneration},
 };
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::*;
-use opendal::Result;
+use opendal::{Capability, OperationContext, Operator, Result};
 use tracing::Instrument;
 
 use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
@@ -23,7 +24,7 @@ use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
 /// Blob storage cannot be part of the database transaction. The ways the two
 /// can still diverge are described in the [`files`](crate::persistence::files)
 /// module docs.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct WriteFinalizationLayer {
     finalizer: Arc<Finalizer>,
 }
@@ -128,8 +129,8 @@ pub(super) async fn spawn_finalization<T: Send + 'static>(
 /// meanwhile: without it, a lookup still pending when the transaction died
 /// could return the generation of a later holder's write and let the
 /// publish replace it. `None` on a backend without generations.
-pub(super) async fn generation_under_lock<A: Access>(
-    backend: &A,
+pub(super) async fn generation_under_lock(
+    backend: &Operator,
     entry_path: &EntryPath,
     executor: &mut UnifiedExecutor<'_>,
 ) -> Result<Option<ExpectedGeneration>> {
@@ -184,111 +185,140 @@ pub(super) async fn check_no_path_collision(
     Ok(())
 }
 
-// Finalization runs on spawned tasks that own the backend writer or deleter,
-// hence the `'static` bounds.
-impl<A: Access> Layer<A> for WriteFinalizationLayer
-where
-    A::Writer: 'static,
-    A::Deleter: 'static,
-{
-    type LayeredAccess = WriteFinalizationAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        WriteFinalizationAccessor {
-            inner: Arc::new(inner),
+impl Layer for WriteFinalizationLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(WriteFinalizationService {
+            inner,
             finalizer: self.finalizer.clone(),
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct WriteFinalizationAccessor<A: Access> {
-    inner: Arc<A>,
+pub(crate) struct WriteFinalizationService {
+    inner: Servicer,
     finalizer: Arc<Finalizer>,
 }
 
-impl<A: Access> LayeredAccess for WriteFinalizationAccessor<A>
-where
-    A::Writer: 'static,
-    A::Deleter: 'static,
-{
-    type Inner = A;
-    type Reader = A::Reader;
-    type Writer = WriteFinalizationWriter<A::Writer, A>;
-    type Lister = A::Lister;
-    type Deleter = WriteFinalizationDeleter<A::Deleter, A>;
-    type Copier = A::Copier;
-
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+impl WriteFinalizationService {
+    /// The backend underneath, for a request made in `ctx`: the finalization
+    /// reads the generation of the object it changes from it.
+    fn backend(&self, ctx: &OperationContext) -> Operator {
+        Operator::from_parts(ctx.clone(), self.inner.clone())
     }
 
-    async fn create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
+    /// A preflight that rejects a write or copy to `entry_path` early if it
+    /// would collide with a file or folder. The finalization checks again
+    /// under the lock.
+    fn collision_preflight(&self, entry_path: EntryPath) -> Preflight {
+        let finalizer = self.finalizer.clone();
+        Arc::new(move || {
+            let finalizer = finalizer.clone();
+            let entry_path = entry_path.clone();
+            Box::pin(async move { finalizer.collision_preflight(&entry_path).await })
+        })
+    }
+}
+
+impl Service for WriteFinalizationService {
+    type Reader = oio::Reader;
+    type Writer = PreflightWriter<WriteFinalizationWriter<oio::Writer>>;
+    type Lister = oio::Lister;
+    type Deleter = WriteFinalizationDeleter<oio::Deleter>;
+    type Copier = oio::OneShotCopier;
+    type Composer = oio::Composer;
+
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
+    }
+
+    fn capability(&self) -> Capability {
+        self.inner.capability()
+    }
+
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
         let entry_path = EntryPath::parse_opendal(path)?;
         self.finalizer.collision_preflight(&entry_path).await?;
-        self.inner.create_dir(entry_path.as_str(), args).await
+        self.inner.create_dir(ctx, entry_path.as_str(), args).await
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        self.inner.read(path, args).await
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        self.inner.read(ctx, path, args)
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         let entry_path = EntryPath::parse_opendal(path)?;
-        self.finalizer.collision_preflight(&entry_path).await?;
-        let (rp, writer) = self.inner.write(entry_path.as_str(), args).await?;
-        Ok((
-            rp,
-            WriteFinalizationWriter::new(
-                writer,
-                self.inner.clone(),
-                self.finalizer.clone(),
-                entry_path,
-            ),
+        let writer = self.inner.write(ctx, entry_path.as_str(), args)?;
+        let writer = WriteFinalizationWriter::new(
+            writer,
+            self.backend(ctx),
+            self.finalizer.clone(),
+            entry_path.clone(),
+        );
+        Ok(PreflightWriter::new(
+            writer,
+            self.collision_preflight(entry_path),
         ))
     }
 
-    async fn copy(
+    fn copy(
         &self,
+        ctx: &OperationContext,
         from: &str,
         to: &str,
         args: OpCopy,
-        opts: OpCopier,
-    ) -> Result<(RpCopy, Self::Copier)> {
+    ) -> Result<Self::Copier> {
+        let from = EntryPath::parse_opendal(from)?;
+        let to = EntryPath::parse_opendal(to)?;
+        let (inner, ctx, to_path) = (self.inner.clone(), ctx.clone(), to.clone());
+        let copier = move || inner.copy(&ctx, from.as_str(), to_path.as_str(), args);
+        Ok(preflight_copier(self.collision_preflight(to), copier))
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
         let from = EntryPath::parse_opendal(from)?;
         let to = EntryPath::parse_opendal(to)?;
         self.finalizer.collision_preflight(&to).await?;
         self.inner
-            .copy(from.as_str(), to.as_str(), args, opts)
+            .rename(ctx, from.as_str(), to.as_str(), args)
             .await
     }
 
-    async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
-        let from = EntryPath::parse_opendal(from)?;
-        let to = EntryPath::parse_opendal(to)?;
-        self.finalizer.collision_preflight(&to).await?;
-        self.inner.rename(from.as_str(), to.as_str(), args).await
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
     }
 
-    async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-        self.inner.stat(path, args).await
-    }
-
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        let (rp, deleter) = self.inner.delete().await?;
-        Ok((
-            rp,
-            WriteFinalizationDeleter::new(deleter, self.inner.clone(), self.finalizer.clone()),
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        Ok(WriteFinalizationDeleter::new(
+            self.inner.delete(ctx)?,
+            self.backend(ctx),
+            self.finalizer.clone(),
         ))
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
     }
 
-    async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
         let entry_path = EntryPath::parse_opendal(path)?;
-        self.inner.presign(entry_path.as_str(), args).await
+        self.inner.presign(ctx, entry_path.as_str(), args).await
     }
 }
 
@@ -363,18 +393,17 @@ pub(crate) mod test_support {
     }
 
     /// A backend without generations, for a finalization under test.
-    pub(in super::super) fn memory_backend() -> Arc<Accessor> {
-        Arc::new(get_memory_operator().into_inner())
+    pub(in super::super) fn memory_backend() -> opendal::Operator {
+        get_memory_operator()
     }
 
     /// Like [`test_operator`], with the backend it writes to, for a
     /// finalization under test that must find the files the operator wrote.
     pub(in super::super) fn test_operator_with_backend(
         db: &SqlDb,
-    ) -> (opendal::Operator, Arc<Accessor>) {
+    ) -> (opendal::Operator, opendal::Operator) {
         let backend = get_memory_operator();
-        let store = Arc::new(backend.clone().into_inner());
-        (test_operator_over(db, backend), store)
+        (test_operator_over(db, backend.clone()), backend)
     }
 
     pub(crate) fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {

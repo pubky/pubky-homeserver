@@ -8,19 +8,20 @@ use std::sync::{Arc, Mutex};
 
 use async_dropper::{AsyncDrop, AsyncDropper};
 use async_trait::async_trait;
-use opendal::raw::oio::{self, Delete as _};
+use opendal::raw::oio::{self, Copy as _, Delete as _};
 use opendal::raw::{
-    Access, Layer, LayeredAccess, OpCopier, OpCopy, OpDelete, OpList, OpRead, OpStat, OpWrite,
-    RpCopy, RpDelete, RpList, RpRead, RpStat, RpWrite,
+    Layer, OpCompose, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
+    OpWrite, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, ServiceInfo, Servicer,
 };
-use opendal::{ErrorKind, Operator, Result};
+use opendal::{
+    Buffer, BytesRange, Capability, ErrorKind, Metadata, OperationContext, Operator, Result,
+};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::persistence::files::staged_publish_layer::{
-    expected_generation, ExpectedGeneration, STAGING_PREFIX,
-};
+use super::opendal_service::with_own_http_client;
+use crate::persistence::files::staged_publish_layer::{ExpectedGeneration, STAGING_PREFIX};
 
 /// A provider of operators for testing.
 ///
@@ -167,7 +168,7 @@ pub(crate) fn get_fs_operator() -> (Operator, TempDir) {
     let builder = opendal::services::Fs::default()
         .root(root.to_str().unwrap())
         .atomic_write_dir(staging.to_str().unwrap());
-    let operator = opendal::Operator::new(builder).unwrap().finish();
+    let operator = opendal::Operator::new(builder).unwrap();
     (operator, tmp_dir)
 }
 
@@ -193,40 +194,37 @@ pub(crate) fn get_gcs_operator(test_root_dir: bool) -> anyhow::Result<Option<Ope
     if test_root_dir {
         builder = builder.root(&format!("test_{}", Uuid::new_v4()));
     }
-    // A client of its own: opendal's default is one shared by the process,
-    // and a connection it pools dies with the runtime that opened it. Each
-    // test, and the cleaner, runs on a runtime of its own, so a shared pool
-    // hands one test a connection that died with another's runtime.
-    let http_client = opendal::raw::HttpClient::with(reqwest::Client::new());
-    let operator = opendal::Operator::new(builder)?
-        .layer(opendal::layers::HttpClientLayer::new(http_client))
-        .finish();
+    let operator = with_own_http_client(opendal::Operator::new(builder)?);
     Ok(Some(operator))
 }
 
 pub(crate) fn get_memory_operator() -> Operator {
     let builder = opendal::services::Memory::default();
 
-    opendal::Operator::new(builder).unwrap().finish()
+    opendal::Operator::new(builder).unwrap()
 }
 
 /// A backend for tests that behaves like an object store on the points the
 /// generation condition relies on: it reports a generation and an ETag on
-/// stat, refuses a read whose `If-Match` is not the current ETag, records
-/// the condition each copy and delete of a real path ran under, refuses
-/// copies or deletes on demand as the store does when the condition fails,
-/// can hold a stat, read or copy back until told to go on, and deletes through a
-/// batching deleter. Layered over a real backend, which does the storing.
+/// stat, refuses a read whose `If-Match` is not the current ETag when the
+/// read is sent, records the condition each copy, compose and delete of a
+/// real path carries, refuses a conditional delete of a missing object,
+/// refuses copies, composes or deletes on demand as the store does when the
+/// condition fails, composes one source as a copy of the generation asked
+/// for, can hold a stat, read or compose back until told to go on, and
+/// deletes through a batching deleter. Layered over a real backend, which
+/// does the storing without conditions.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Versioned {
     generation: Arc<Mutex<String>>,
     pub(crate) seen: Arc<Mutex<Vec<Option<ExpectedGeneration>>>>,
     pub(crate) refuse_copies: Arc<AtomicBool>,
+    pub(crate) refuse_composes: Arc<AtomicBool>,
     pub(crate) refuse_deletes: Arc<AtomicBool>,
     pub(crate) batched: Arc<AtomicBool>,
     stat_stall: Stall,
     read_stall: Stall,
-    copy_stall: Stall,
+    compose_stall: Stall,
 }
 
 /// Holds the next call of one kind back until the test lets it go on, so the
@@ -304,105 +302,156 @@ impl Versioned {
         self.read_stall.until_reached().await;
     }
 
-    /// Hold the next copy back until the returned sender is used. Whether it
-    /// is refused is decided once it goes on.
-    pub(crate) fn stall_next_copy(&self) -> oneshot::Sender<()> {
-        self.copy_stall.arm()
+    /// Hold the next compose back until the returned sender is used. Whether
+    /// it is refused is decided once it goes on.
+    pub(crate) fn stall_next_compose(&self) -> oneshot::Sender<()> {
+        self.compose_stall.arm()
     }
 
-    pub(crate) async fn until_copy_stalled(&self) {
-        self.copy_stall.until_reached().await;
+    pub(crate) async fn until_compose_stalled(&self) {
+        self.compose_stall.until_reached().await;
+    }
+
+    /// Note the condition a copy or delete of a real path carries.
+    fn record(&self, if_version_match: Option<&str>) {
+        let expected = if_version_match.map(|version| match version {
+            "0" => ExpectedGeneration::Absent,
+            known => ExpectedGeneration::Known(known.parse().expect("a generation is a number")),
+        });
+        self.seen.lock().unwrap().push(expected);
     }
 }
 
-impl<A: Access> Layer<A> for Versioned {
-    type LayeredAccess = VersionedAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        VersionedAccessor {
-            inner: Arc::new(inner),
+impl Layer for Versioned {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(VersionedService {
+            inner,
             backend: self.clone(),
-        }
+        })
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct VersionedAccessor<A> {
-    inner: Arc<A>,
+pub(crate) struct VersionedService {
+    inner: Servicer,
     backend: Versioned,
 }
 
-impl<A: Access> LayeredAccess for VersionedAccessor<A> {
-    type Inner = A;
-    type Reader = A::Reader;
-    type Writer = A::Writer;
-    type Lister = A::Lister;
-    type Deleter = oio::BatchDeleter<RecordingBatchDelete<A>>;
-    type Copier = A::Copier;
+impl Service for VersionedService {
+    type Reader = VersionedReader;
+    type Writer = oio::Writer;
+    type Lister = oio::Lister;
+    type Deleter = oio::BatchDeleter<RecordingBatchDelete>;
+    type Copier = oio::Copier;
+    type Composer = oio::Composer;
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    /// Refuses a read conditional on another ETag than the current one, as
-    /// an object store does once the object was replaced. The condition is
-    /// not passed on: the backend underneath does not support it.
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        self.backend.read_stall.hold().await;
-        if args
-            .if_match()
-            .is_some_and(|etag| etag != self.backend.etag())
-        {
-            return Err(refusal());
-        }
-        let unconditional = OpRead::new().with_range(args.range());
-        self.inner.read(path, unconditional).await
+    /// The backend's, with the conditions an object store takes, and a
+    /// compose of one source at a given generation.
+    fn capability(&self) -> Capability {
+        let mut capability = self.inner.capability();
+        capability.read_with_if_match = true;
+        capability.copy_with_if_version_match = true;
+        capability.delete_with_if_version_match = true;
+        capability.compose = true;
+        capability.compose_with_source_version = true;
+        capability.compose_with_if_version_match = true;
+        capability.compose_with_content_type = true;
+        capability
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        self.inner.write(path, args).await
-    }
-
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
-    }
-
-    async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-        self.backend.stat_stall.hold().await;
-        let mut metadata = self.inner.stat(path, args).await?.into_metadata();
-        metadata.set_version(&self.backend.generation());
-        metadata.set_etag(&self.backend.etag());
-        Ok(RpStat::new(metadata))
-    }
-
-    async fn copy(
+    async fn create_dir(
         &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        self.inner.create_dir(ctx, path, args).await
+    }
+
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.backend.stat_stall.hold().await;
+        let metadata = self.inner.stat(ctx, path, args).await?.into_metadata();
+        let mut metadata = metadata.into_builder();
+        metadata
+            .version(self.backend.generation())
+            .etag(self.backend.etag());
+        Ok(RpStat::new(metadata.build()))
+    }
+
+    /// The condition is checked when the read is sent, as an object store
+    /// checks it. It is not passed on: the backend underneath does not
+    /// support it.
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        Ok(VersionedReader {
+            inner: self.inner.read(ctx, path, OpRead::new())?,
+            if_match: args.if_match().map(str::to_string),
+            backend: self.backend.clone(),
+        })
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        self.inner.write(ctx, path, args)
+    }
+
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        let deleter = RecordingBatchDelete {
+            inner: self.inner.clone(),
+            ctx: ctx.clone(),
+            backend: self.backend.clone(),
+        };
+        Ok(oio::BatchDeleter::new(deleter, Some(100)))
+    }
+
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
         from: &str,
         to: &str,
         args: OpCopy,
-        opts: OpCopier,
-    ) -> Result<(RpCopy, Self::Copier)> {
-        self.backend.copy_stall.hold().await;
-        self.backend
-            .seen
-            .lock()
-            .unwrap()
-            .push(expected_generation());
+    ) -> Result<Self::Copier> {
+        self.backend.record(args.if_version_match());
         if self.backend.refuse_copies.load(Ordering::SeqCst) {
             return Err(refusal());
         }
-        self.inner.copy(from, to, args, opts).await
+        self.inner.copy(ctx, from, to, OpCopy::new())
     }
 
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        let deleter = RecordingBatchDelete {
+    fn compose(&self, ctx: &OperationContext, to: &str, args: OpCompose) -> Result<Self::Composer> {
+        Ok(Box::new(VersionedComposer {
             inner: self.inner.clone(),
+            ctx: ctx.clone(),
+            to: to.to_string(),
+            if_version_match: args.if_version_match().map(str::to_string),
+            source: None,
             backend: self.backend.clone(),
-        };
-        Ok((
-            RpDelete::default(),
-            oio::BatchDeleter::new(deleter, Some(100)),
-        ))
+        }))
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
+        self.inner.rename(ctx, from, to, args).await
+    }
+
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
+        self.inner.presign(ctx, path, args).await
     }
 }
 
@@ -411,33 +460,127 @@ fn refusal() -> opendal::Error {
     opendal::Error::new(ErrorKind::ConditionNotMatch, "412 Precondition Failed")
 }
 
-/// Deletes one path at a time as told, and notes a batch, which an object
-/// store would run without any condition.
-pub(crate) struct RecordingBatchDelete<A> {
-    inner: Arc<A>,
+/// Reader that refuses a read conditional on another ETag than the current
+/// one at the time it is sent, as an object store does once the object was
+/// replaced.
+pub(crate) struct VersionedReader {
+    inner: oio::Reader,
+    if_match: Option<String>,
     backend: Versioned,
 }
 
-impl<A: Access> oio::BatchDelete for RecordingBatchDelete<A> {
+impl VersionedReader {
+    fn check_condition(&self) -> Result<()> {
+        match &self.if_match {
+            Some(etag) if *etag != self.backend.etag() => Err(refusal()),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl oio::Read for VersionedReader {
+    async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        self.backend.read_stall.hold().await;
+        self.check_condition()?;
+        self.inner.open(range).await
+    }
+
+    async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
+        self.backend.read_stall.hold().await;
+        self.check_condition()?;
+        self.inner.read(range).await
+    }
+}
+
+/// Composes one source, as the GCS name repair does, by copying it in the
+/// backend underneath. A source generation other than the current one is
+/// gone, as on a bucket that keeps no older generations: not found.
+pub(crate) struct VersionedComposer {
+    inner: Servicer,
+    ctx: OperationContext,
+    to: String,
+    if_version_match: Option<String>,
+    /// The source path and the generation asked for.
+    source: Option<(String, Option<String>)>,
+    backend: Versioned,
+}
+
+impl oio::Compose for VersionedComposer {
+    async fn compose(&mut self, path: &str, args: OpRead) -> Result<()> {
+        if self.source.is_some() {
+            return Err(opendal::Error::new(
+                ErrorKind::Unsupported,
+                "the test backend composes one source",
+            ));
+        }
+        self.source = Some((path.to_string(), args.version().map(str::to_string)));
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<Metadata> {
+        self.backend.compose_stall.hold().await;
+        self.backend.record(self.if_version_match.as_deref());
+        if self.backend.refuse_composes.load(Ordering::SeqCst) {
+            return Err(refusal());
+        }
+        let Some((from, generation)) = self.source.take() else {
+            return Err(opendal::Error::new(
+                ErrorKind::ConfigInvalid,
+                "a compose needs a source",
+            ));
+        };
+        if generation.is_some_and(|generation| generation != self.backend.generation()) {
+            return Err(opendal::Error::new(
+                ErrorKind::NotFound,
+                "404 the source generation is gone",
+            ));
+        }
+        let mut copier = self.inner.copy(&self.ctx, &from, &self.to, OpCopy::new())?;
+        while copier.next().await?.is_some() {}
+        copier.close().await
+    }
+}
+
+/// Deletes one path at a time as told, and notes a batch, which this test
+/// backend cannot run under a condition per path.
+pub(crate) struct RecordingBatchDelete {
+    inner: Servicer,
+    ctx: OperationContext,
+    backend: Versioned,
+}
+
+impl RecordingBatchDelete {
+    async fn exists(&self, path: &str) -> Result<bool> {
+        match self.inner.stat(&self.ctx, path, OpStat::new()).await {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl oio::BatchDelete for RecordingBatchDelete {
     async fn delete_once(&self, path: String, args: OpDelete) -> Result<()> {
+        let condition = args.if_version_match();
         if path.starts_with(STAGING_PREFIX) {
             // A staging object never has the real path's generation: a
             // removal under one is refused, as an object store refuses it.
-            if expected_generation().is_some() {
+            if condition.is_some() {
                 return Err(refusal());
             }
         } else {
-            self.backend
-                .seen
-                .lock()
-                .unwrap()
-                .push(expected_generation());
+            self.backend.record(condition);
             if self.backend.refuse_deletes.load(Ordering::SeqCst) {
                 return Err(refusal());
             }
+            // An object store refuses a conditional delete of a missing
+            // object; the backend underneath would report success.
+            if condition.is_some() && !self.exists(&path).await? {
+                return Err(refusal());
+            }
         }
-        let (_, mut deleter) = self.inner.delete().await?;
-        deleter.delete(&path, args).await?;
+        let mut deleter = self.inner.delete(&self.ctx)?;
+        deleter.delete(&path, OpDelete::new()).await?;
         deleter.close().await
     }
 
@@ -466,50 +609,114 @@ impl CountingReads {
     }
 }
 
-impl<A: Access> Layer<A> for CountingReads {
-    type LayeredAccess = CountingReadsAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        CountingReadsAccessor {
+impl Layer for CountingReads {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(CountingReadsService {
             inner,
             reads: self.reads.clone(),
-        }
+        })
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct CountingReadsAccessor<A> {
-    inner: A,
+pub(crate) struct CountingReadsService {
+    inner: Servicer,
     reads: Arc<AtomicUsize>,
 }
 
-impl<A: Access> LayeredAccess for CountingReadsAccessor<A> {
-    type Inner = A;
-    type Reader = A::Reader;
-    type Writer = A::Writer;
-    type Lister = A::Lister;
-    type Deleter = A::Deleter;
-    type Copier = A::Copier;
+impl Service for CountingReadsService {
+    type Reader = CountingReader;
+    type Writer = oio::Writer;
+    type Lister = oio::Lister;
+    type Deleter = oio::Deleter;
+    type Copier = oio::Copier;
+    type Composer = oio::Composer;
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+    fn capability(&self) -> Capability {
+        self.inner.capability()
+    }
+
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        self.inner.create_dir(ctx, path, args).await
+    }
+
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
+    }
+
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        Ok(CountingReader {
+            inner: self.inner.read(ctx, path, args)?,
+            reads: self.reads.clone(),
+        })
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        self.inner.write(ctx, path, args)
+    }
+
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        self.inner.delete(ctx)
+    }
+
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+    ) -> Result<Self::Copier> {
+        self.inner.copy(ctx, from, to, args)
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
+        self.inner.rename(ctx, from, to, args).await
+    }
+
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
+        self.inner.presign(ctx, path, args).await
+    }
+}
+
+/// Reader that counts every request it sends.
+pub(crate) struct CountingReader {
+    inner: oio::Reader,
+    reads: Arc<AtomicUsize>,
+}
+
+impl oio::Read for CountingReader {
+    async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        self.inner.read(path, args).await
+        self.inner.open(range).await
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        self.inner.write(path, args).await
-    }
-
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
-    }
-
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        self.inner.delete().await
+    async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.read(range).await
     }
 }
 

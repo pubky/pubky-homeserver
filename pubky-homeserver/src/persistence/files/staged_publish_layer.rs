@@ -35,19 +35,22 @@
 //! copy, or a failed removal, leaves a staging object behind: a lifecycle
 //! rule on the prefix is the cheap way to sweep those.
 //!
-//! The condition travels to the request as a task-local, set by the
-//! finalization around the publish or delete and read by the backend's HTTP
-//! client when it sends the copy or delete, see [`expected_generation`]. The
-//! layer is generic and does nothing backend-specific itself.
+//! The finalization hands the generation down as a task-local, set around
+//! the publish or delete, see [`under_expected_generation`]. This layer puts
+//! it on the copy or delete as opendal's `if_version_match` condition, which
+//! the GCS service sends as `ifGenerationMatch`. The layer is generic: any
+//! backend that supports version conditions on copy and delete can run under
+//! it.
 
 use std::sync::Arc;
 
-use opendal::raw::oio::{self, Copy as _, Delete as _};
+use opendal::options::DeleteOptions;
+use opendal::raw::oio;
 use opendal::raw::{
-    Access, Layer, LayeredAccess, OpCopier, OpCopy, OpDelete, OpList, OpRead, OpStat, OpWrite,
-    RpDelete, RpList, RpRead, RpWrite,
+    Layer, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat, OpWrite,
+    RpCreateDir, RpPresign, RpRename, RpStat, Service, ServiceInfo, Servicer,
 };
-use opendal::{ErrorKind, Metadata, Result};
+use opendal::{Capability, ErrorKind, Metadata, OperationContext, Operator, Result};
 
 use super::layer_domain_error::LayerDomainError;
 
@@ -65,27 +68,25 @@ pub(crate) enum ExpectedGeneration {
 }
 
 impl ExpectedGeneration {
-    /// The value an `ifGenerationMatch` condition takes. Zero asks for no
-    /// live object.
-    pub(crate) fn if_generation_match(self) -> u64 {
+    /// The version the request is conditional on, as opendal's
+    /// `if_version_match` takes it. GCS reads generation 0 as "no live
+    /// object". opendal's `if_not_exists` cannot ask that of a GCS copy.
+    pub(crate) fn version_condition(self) -> String {
         match self {
-            Self::Absent => 0,
-            Self::Known(generation) => generation,
+            Self::Absent => "0".to_string(),
+            Self::Known(generation) => generation.to_string(),
         }
     }
 }
 
 tokio::task_local! {
-    static EXPECTED_GENERATION: Option<ExpectedGeneration>;
+    static EXPECTED_GENERATION: ExpectedGeneration;
 }
 
-/// The generation the current task's backend request must find, if it is a
-/// publish or delete made under one.
+/// The generation the current task's publish or delete must find, if it
+/// runs under one.
 pub(crate) fn expected_generation() -> Option<ExpectedGeneration> {
-    EXPECTED_GENERATION
-        .try_with(|expected| *expected)
-        .ok()
-        .flatten()
+    EXPECTED_GENERATION.try_with(|expected| *expected).ok()
 }
 
 /// Run `request`, a publish or delete, under `expected`.
@@ -93,25 +94,18 @@ pub(crate) async fn under_expected_generation<T>(
     expected: ExpectedGeneration,
     request: impl std::future::Future<Output = T>,
 ) -> T {
-    EXPECTED_GENERATION.scope(Some(expected), request).await
-}
-
-/// Run `request` under no generation, whatever the task runs under: for a
-/// request to an object that is not the one the generation is of.
-async fn without_generation<T>(request: impl std::future::Future<Output = T>) -> T {
-    EXPECTED_GENERATION.scope(None, request).await
+    EXPECTED_GENERATION.scope(expected, request).await
 }
 
 /// The generation the object at `path` has now. `None` on a backend that
 /// reports no usable generation: a publish or delete under `None` is refused
 /// by this layer, see [`StagedWriter`].
-pub(crate) async fn live_generation<A: Access>(
-    backend: &A,
+pub(crate) async fn live_generation(
+    backend: &Operator,
     path: &str,
 ) -> Result<Option<ExpectedGeneration>> {
-    match backend.stat(path, OpStat::new()).await {
-        Ok(stat) => Ok(stat
-            .into_metadata()
+    match backend.stat(path).await {
+        Ok(metadata) => Ok(metadata
             .version()
             .and_then(|version| version.parse().ok())
             .map(ExpectedGeneration::Known)),
@@ -123,63 +117,107 @@ pub(crate) async fn live_generation<A: Access>(
 #[derive(Debug, Clone, Copy)]
 pub struct StagedPublishLayer;
 
-impl<A: Access> Layer<A> for StagedPublishLayer {
-    type LayeredAccess = StagedPublishAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        StagedPublishAccessor {
-            inner: Arc::new(inner),
-        }
+impl Layer for StagedPublishLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(StagedPublishService { inner })
     }
 }
 
 #[derive(Debug)]
-pub struct StagedPublishAccessor<A: Access> {
-    inner: Arc<A>,
+pub struct StagedPublishService {
+    inner: Servicer,
 }
 
-impl<A: Access> LayeredAccess for StagedPublishAccessor<A> {
-    type Inner = A;
-    type Reader = A::Reader;
-    type Writer = StagedWriter<A>;
-    type Lister = A::Lister;
-    type Deleter = ConditionalDeleter<A>;
-    type Copier = A::Copier;
+impl StagedPublishService {
+    /// The backend underneath, for a request made in `ctx`.
+    fn backend(&self, ctx: &OperationContext) -> Operator {
+        Operator::from_parts(ctx.clone(), self.inner.clone())
+    }
+}
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+impl Service for StagedPublishService {
+    type Reader = oio::Reader;
+    type Writer = StagedWriter;
+    type Lister = oio::Lister;
+    type Deleter = ConditionalDeleter;
+    type Copier = oio::Copier;
+    type Composer = oio::Composer;
+
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        self.inner.read(path, args).await
+    fn capability(&self) -> Capability {
+        self.inner.capability()
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        self.inner.create_dir(ctx, path, args).await
+    }
+
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
+    }
+
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        self.inner.read(ctx, path, args)
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         let staging = format!("{STAGING_PREFIX}{}", uuid::Uuid::new_v4());
-        let (rp, writer) = self.inner.write(&staging, args).await?;
-        Ok((
-            rp,
-            StagedWriter {
-                inner: self.inner.clone(),
-                writer,
-                staging,
-                path: path.to_string(),
-                upload: Upload::Open,
-            },
-        ))
+        let writer = self.inner.write(ctx, &staging, args)?;
+        Ok(StagedWriter {
+            backend: self.backend(ctx),
+            writer,
+            staging,
+            path: path.to_string(),
+            upload: Upload::Open,
+        })
     }
 
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        Ok((
-            RpDelete::default(),
-            ConditionalDeleter {
-                inner: self.inner.clone(),
-            },
-        ))
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        Ok(ConditionalDeleter {
+            inner: self.inner.clone(),
+            ctx: ctx.clone(),
+        })
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+    ) -> Result<Self::Copier> {
+        self.inner.copy(ctx, from, to, args)
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
+        self.inner.rename(ctx, from, to, args).await
+    }
+
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
+        self.inner.presign(ctx, path, args).await
     }
 }
 
@@ -198,15 +236,15 @@ enum Upload {
 
 /// Writer that uploads to a staging object and publishes it on close, under
 /// the generation the task provides.
-pub struct StagedWriter<A: Access> {
-    inner: Arc<A>,
-    writer: A::Writer,
+pub struct StagedWriter {
+    backend: Operator,
+    writer: oio::Writer,
     staging: String,
     path: String,
     upload: Upload,
 }
 
-impl<A: Access> oio::Write for StagedWriter<A> {
+impl oio::Write for StagedWriter {
     async fn write(&mut self, bs: opendal::Buffer) -> Result<()> {
         self.writer.write(bs).await
     }
@@ -224,7 +262,11 @@ impl<A: Access> oio::Write for StagedWriter<A> {
 
         let published = match expected_generation() {
             Some(expected) => {
-                let published = publish(self.inner.as_ref(), &self.staging, &self.path).await;
+                let published = self
+                    .backend
+                    .copy_with(&self.staging, &self.path)
+                    .if_version_match(&expected.version_condition())
+                    .await;
                 refused_as_conflict(published, &self.path, expected)
             }
             None => Err(no_generation(&self.path)),
@@ -250,18 +292,16 @@ impl<A: Access> oio::Write for StagedWriter<A> {
     }
 }
 
-impl<A: Access> StagedWriter<A> {
+impl StagedWriter {
     /// Remove the staging object, if there is one. Best effort: a leftover
-    /// is for the sweep, and must not fail the publish it follows. Under no
-    /// generation: the one the task runs under is the real path's, and a
-    /// condition on it would refuse the removal.
+    /// is for the sweep, and must not fail the publish it follows. With no
+    /// condition: the generation the task runs under is the real path's.
     async fn remove_staging(&mut self) {
         if self.upload != Upload::Staged {
             return;
         }
         self.upload = Upload::Done;
-        let removal = remove(self.inner.as_ref(), &self.staging, OpDelete::new());
-        if let Err(error) = without_generation(removal).await {
+        if let Err(error) = self.backend.delete(&self.staging).await {
             tracing::warn!(
                 staging = %self.staging,
                 path = %self.path,
@@ -274,21 +314,25 @@ impl<A: Access> StagedWriter<A> {
 
 /// Deleter that removes each object under the generation the task provides,
 /// so a delete executed late finds a changed object and is refused.
-pub struct ConditionalDeleter<A: Access> {
-    inner: Arc<A>,
+pub struct ConditionalDeleter {
+    inner: Servicer,
+    ctx: OperationContext,
 }
 
-impl<A: Access> oio::Delete for ConditionalDeleter<A> {
+impl oio::Delete for ConditionalDeleter {
     /// Sent at once rather than queued, on a backend deleter of its own: the
-    /// condition is per object and carried by the request for that one
-    /// object. A batch of several would carry none, see the backend's HTTP
-    /// client, and a backend deleter keeps a refused path to resend it with
-    /// the next.
+    /// condition belongs to this one path, and a backend deleter keeps a
+    /// refused path to resend it with the next.
     async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         let Some(expected) = expected_generation() else {
             return Err(no_generation(path));
         };
-        let deleted = remove(self.inner.as_ref(), path, args).await;
+        let args = conditional_on(args, expected, &self.inner.capability())?;
+        let mut deleter = self.inner.delete(&self.ctx)?;
+        let deleted = match deleter.delete(path, args).await {
+            Ok(()) => deleter.close().await,
+            Err(error) => Err(error),
+        };
         refused_as_conflict(deleted, path, expected)
     }
 
@@ -297,23 +341,19 @@ impl<A: Access> oio::Delete for ConditionalDeleter<A> {
     }
 }
 
-/// Copy `from` onto `to`, as the operator would.
-async fn publish<A: Access>(inner: &A, from: &str, to: &str) -> Result<Metadata> {
-    let (_, mut copier) = inner.copy(from, to, OpCopy::new(), OpCopier::new()).await?;
-    match copier.close().await {
-        Ok(metadata) => Ok(metadata),
-        Err(error) => {
-            let _ = copier.abort().await;
-            Err(error)
-        }
-    }
-}
-
-/// Remove `path` on a backend deleter of its own, flushed at once.
-async fn remove<A: Access>(inner: &A, path: &str, args: OpDelete) -> Result<()> {
-    let (_, mut deleter) = inner.delete().await?;
-    deleter.delete(path, args).await?;
-    deleter.close().await
+/// `args` with the condition that the object is at `expected`.
+fn conditional_on(
+    args: OpDelete,
+    expected: ExpectedGeneration,
+    capability: &Capability,
+) -> Result<OpDelete> {
+    let options = DeleteOptions {
+        version: args.version().map(str::to_string),
+        recursive: args.recursive(),
+        if_version_match: Some(expected.version_condition()),
+        ..DeleteOptions::default()
+    };
+    OpDelete::from_options(capability, options)
 }
 
 /// Pass `result` on, turning a refusal of the condition into a publish
@@ -359,6 +399,7 @@ fn publish_conflict(path: &str, error: opendal::Error) -> opendal::Error {
 mod tests {
     use std::sync::atomic::Ordering;
 
+    use opendal::raw::oio::Delete as _;
     use opendal::Operator;
     use tempfile::TempDir;
 
@@ -380,7 +421,7 @@ mod tests {
         let builder = opendal::services::Fs::default()
             .root(root.to_str().unwrap())
             .atomic_write_dir(atomic.to_str().unwrap());
-        (Operator::new(builder).unwrap().finish(), tmp_dir)
+        (Operator::new(builder).unwrap(), tmp_dir)
     }
 
     /// The filesystem backend reporting generation 7 for every object, under
@@ -493,8 +534,7 @@ mod tests {
     }
 
     /// Several deletes queued on one deleter go to the backend one at a
-    /// time: the condition is carried per request, and a batch would carry
-    /// none.
+    /// time, each with its own condition, never in a batch.
     #[tokio::test]
     async fn queued_deletes_are_flushed_one_at_a_time() {
         let (operator, versioned, _tmp_dir) = staged_fs();
@@ -505,9 +545,9 @@ mod tests {
             .await
             .unwrap();
 
-        let accessor = operator.clone().into_inner();
+        let (ctx, service) = operator.clone().into_parts();
         under_7(async {
-            let (_, mut deleter) = accessor.delete().await.unwrap();
+            let mut deleter = service.delete(&ctx).unwrap();
             deleter
                 .delete("pk/pub/a.txt", OpDelete::new())
                 .await
@@ -538,9 +578,9 @@ mod tests {
             .await
             .unwrap();
 
-        let accessor = operator.clone().into_inner();
+        let (ctx, service) = operator.clone().into_parts();
         under_7(async {
-            let (_, mut deleter) = accessor.delete().await.unwrap();
+            let mut deleter = service.delete(&ctx).unwrap();
             versioned.refuse_deletes.store(true, Ordering::SeqCst);
             let refused = deleter
                 .delete("pk/pub/a.txt", OpDelete::new())
@@ -590,18 +630,14 @@ mod tests {
     #[tokio::test]
     async fn generation_is_read_from_the_live_object() {
         let path = "pk/pub/a.txt";
-        let (backend, _tmp_dir) = plain_fs();
-        let plain = backend.clone().into_inner();
-        let versioned = backend.layer(Versioned::new("7")).into_inner();
+        let (plain, _tmp_dir) = plain_fs();
+        let versioned = plain.clone().layer(Versioned::new("7"));
         assert_eq!(
             live_generation(&versioned, path).await.unwrap(),
             Some(ExpectedGeneration::Absent)
         );
 
-        Operator::from_inner(plain.clone())
-            .write(path, b"x".to_vec())
-            .await
-            .unwrap();
+        plain.write(path, b"x".to_vec()).await.unwrap();
         assert_eq!(
             live_generation(&versioned, path).await.unwrap(),
             Some(ExpectedGeneration::Known(7))
@@ -654,8 +690,8 @@ mod tests {
 
     #[test]
     fn condition_value_follows_the_expectation() {
-        assert_eq!(ExpectedGeneration::Absent.if_generation_match(), 0);
-        assert_eq!(ExpectedGeneration::Known(7).if_generation_match(), 7);
+        assert_eq!(ExpectedGeneration::Absent.version_condition(), "0");
+        assert_eq!(ExpectedGeneration::Known(7).version_condition(), "7");
         assert_eq!(expected_generation(), None);
     }
 

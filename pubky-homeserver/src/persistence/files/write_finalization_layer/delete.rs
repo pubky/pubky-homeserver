@@ -8,8 +8,8 @@ use crate::persistence::sql::{
 };
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
-use opendal::raw::{oio, Access, OpDelete};
-use opendal::{Error, Result};
+use opendal::raw::{oio, OpDelete};
+use opendal::{Error, Operator, Result};
 
 use super::layer::{
     already_closed, generation_under_lock, spawn_finalization, under_generation, unexpected,
@@ -45,14 +45,14 @@ enum DeleteOutcome {
 ///
 /// Closing finalizes on a task of its own, so a caller dropped mid-close (a
 /// client disconnect) cannot stop a finalization halfway.
-pub struct WriteFinalizationDeleter<R, A: Access> {
+pub struct WriteFinalizationDeleter<R> {
     /// `None` while a close runs on its finalization task, and for good if
     /// that close was dropped.
-    queued: Option<QueuedDeletes<R, A>>,
+    queued: Option<QueuedDeletes<R>>,
 }
 
-impl<R, A: Access> WriteFinalizationDeleter<R, A> {
-    pub(super) fn new(inner: R, backend: Arc<A>, finalizer: Arc<Finalizer>) -> Self {
+impl<R> WriteFinalizationDeleter<R> {
+    pub(super) fn new(inner: R, backend: Operator, finalizer: Arc<Finalizer>) -> Self {
         Self {
             queued: Some(QueuedDeletes {
                 inner,
@@ -65,15 +65,15 @@ impl<R, A: Access> WriteFinalizationDeleter<R, A> {
 }
 
 /// The deleter's working state, moved whole onto the finalization task.
-struct QueuedDeletes<R, A: Access> {
+struct QueuedDeletes<R> {
     inner: R,
     /// The backend, to read the blob's generation from before removing it.
-    backend: Arc<A>,
+    backend: Operator,
     finalizer: Arc<Finalizer>,
     delete_queue: Vec<PendingDelete>,
 }
 
-impl<R: oio::Delete, A: Access> QueuedDeletes<R, A> {
+impl<R: oio::Delete> QueuedDeletes<R> {
     async fn close(&mut self) -> Result<()> {
         let outcome = self.process_delete_queue().await;
 
@@ -118,7 +118,7 @@ impl<R: oio::Delete, A: Access> QueuedDeletes<R, A> {
         };
 
         self.finalizer
-            .remove_blob_if_unreferenced(&mut self.inner, self.backend.as_ref(), pending)
+            .remove_blob_if_unreferenced(&mut self.inner, &self.backend, pending)
             .await
             .map_err(|error| {
                 tracing::error!(
@@ -133,7 +133,7 @@ impl<R: oio::Delete, A: Access> QueuedDeletes<R, A> {
     }
 }
 
-impl<R: oio::Delete + 'static, A: Access> oio::Delete for WriteFinalizationDeleter<R, A> {
+impl<R: oio::Delete + 'static> oio::Delete for WriteFinalizationDeleter<R> {
     async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
         let queued = self
             .queued
@@ -208,10 +208,10 @@ impl Finalizer {
     /// because the blob is not the one it was prepared against has seen a
     /// late publish land there; the blob stays, unreferenced, for the next
     /// write or delete on the path to clear. The delete itself is done.
-    async fn remove_blob_if_unreferenced<R: oio::Delete, A: Access>(
+    async fn remove_blob_if_unreferenced<R: oio::Delete>(
         &self,
         backend_deleter: &mut R,
-        backend: &A,
+        backend: &Operator,
         pending: &PendingDelete,
     ) -> Result<()> {
         let mut tx = self
@@ -238,10 +238,10 @@ impl Finalizer {
         result
     }
 
-    async fn remove_blob_in_transaction<R: oio::Delete, A: Access>(
+    async fn remove_blob_in_transaction<R: oio::Delete>(
         &self,
         backend_deleter: &mut R,
-        backend: &A,
+        backend: &Operator,
         pending: &PendingDelete,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<()> {
@@ -278,10 +278,10 @@ impl Finalizer {
     /// Remove the blob under the generation it has now. A removal the backend
     /// refuses on that condition is done with: the blob is left, see
     /// [`Self::remove_blob_if_unreferenced`].
-    async fn remove_blob_under_its_generation<R: oio::Delete, A: Access>(
+    async fn remove_blob_under_its_generation<R: oio::Delete>(
         &self,
         backend_deleter: &mut R,
-        backend: &A,
+        backend: &Operator,
         pending: &PendingDelete,
         executor: &mut UnifiedExecutor<'_>,
     ) -> Result<()> {
@@ -660,7 +660,7 @@ mod tests {
             .unwrap();
         let mut backend = BatchDelete::default();
         finalizer
-            .remove_blob_if_unreferenced(&mut backend, store.as_ref(), &pending)
+            .remove_blob_if_unreferenced(&mut backend, &store, &pending)
             .await
             .unwrap();
         assert!(
@@ -671,7 +671,7 @@ mod tests {
         // With the row gone and nothing written since, the blob goes.
         finalizer.finalize_delete(&entry_path).await.unwrap();
         finalizer
-            .remove_blob_if_unreferenced(&mut backend, store.as_ref(), &pending)
+            .remove_blob_if_unreferenced(&mut backend, &store, &pending)
             .await
             .unwrap();
         assert_eq!(backend.closed_paths, vec![entry_path.as_str().to_string()]);

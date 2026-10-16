@@ -21,8 +21,6 @@ use opendal::Buffer;
 use opendal::Operator;
 
 use super::super::{FileIoError, FileStream, WriteStreamError};
-#[cfg(feature = "storage-gcs")]
-use super::gcs_precondition;
 
 /// Build storage operators with one transactional finalization layer and an
 /// app-facing operator that additionally enforces write paths and collisions.
@@ -62,7 +60,7 @@ pub fn build_storage_operators(
             let builder = opendal::services::Fs::default()
                 .root(files_dir)
                 .atomic_write_dir(staging_dir);
-            opendal::Operator::new(builder)?.finish()
+            opendal::Operator::new(builder)?
         }
         #[cfg(feature = "storage-gcs")]
         StorageConfigToml::GoogleBucket(config) => {
@@ -76,7 +74,7 @@ pub fn build_storage_operators(
         StorageConfigToml::InMemory => {
             tracing::info!("Store files in memory");
             let builder = opendal::services::Memory::default();
-            opendal::Operator::new(builder)?.finish()
+            opendal::Operator::new(builder)?
         }
     };
 
@@ -120,27 +118,31 @@ fn gcs_backend_operator(
 /// The operator stack over a GCS service, see [`gcs_backend_operator`].
 #[cfg(feature = "storage-gcs")]
 pub(super) fn gcs_operator(builder: opendal::services::Gcs) -> Result<Operator, FileIoError> {
-    Ok(gcs_conditional_backend(builder)?.layer(StagedPublishLayer))
+    Ok(gcs_backend(builder)?.layer(StagedPublishLayer))
 }
 
-/// The GCS service under [`gcs_operator`]'s staging: its calls bounded, and
-/// its copies and deletes conditional on the generation the task runs under.
+/// The GCS service under [`gcs_operator`]'s staging, its calls bounded.
 #[cfg(feature = "storage-gcs")]
-pub(super) fn gcs_conditional_backend(
-    builder: opendal::services::Gcs,
-) -> Result<Operator, FileIoError> {
-    let http_client = opendal::raw::HttpClient::with(gcs_precondition::PreconditionFetcher::new(
-        reqwest::Client::new(),
-    ));
-    let operator = opendal::Operator::new(builder)?
-        .layer(opendal::layers::HttpClientLayer::new(http_client))
-        .finish()
-        .layer(
-            opendal::layers::TimeoutLayer::new()
-                .with_timeout(BACKEND_IO_TIMEOUT)
-                .with_io_timeout(BACKEND_IO_TIMEOUT),
-        );
+pub(super) fn gcs_backend(builder: opendal::services::Gcs) -> Result<Operator, FileIoError> {
+    let operator = with_own_http_client(opendal::Operator::new(builder)?).layer(
+        opendal::layers::TimeoutLayer::new()
+            .with_timeout(BACKEND_IO_TIMEOUT)
+            .with_io_timeout(BACKEND_IO_TIMEOUT),
+    );
     Ok(operator)
+}
+
+#[cfg(any(feature = "storage-gcs", test))]
+/// `operator` with an HTTP client of its own. opendal's default client is
+/// shared by the process, and a connection it pools dies with the runtime
+/// that opened it: tests, and a test's cleaner, each run on a runtime of
+/// their own.
+pub(super) fn with_own_http_client(operator: Operator) -> Operator {
+    let transport = opendal_http_transport_reqwest::ReqwestTransport::new(reqwest::Client::new());
+    operator.with_context(
+        opendal::OperationContext::new()
+            .with_http_transport(opendal::HttpTransporter::new(transport)),
+    )
 }
 
 /// Build the storage operators from an `AppContext` (test-only convenience).
@@ -547,14 +549,13 @@ mod tests {
     /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
     /// `GCS_BUCKET` are set: a path with characters that URLs percent-encode
     /// is stored under its own name, below and above the 5 MiB multipart
-    /// threshold, so it can be read back.
+    /// threshold, so it can be read back. That holds for a write through the
+    /// staged publish and for an upload straight to the path.
     ///
-    /// opendal 0.57 percent-encodes the name of an upload twice, and an
-    /// object uploaded straight to such a path lands under the path encoded
-    /// once, where nothing finds it, see
-    /// [`gcs_name_repair`](super::super::gcs_name_repair). Uploads go to a
-    /// staging name without such characters and are published by a copy,
-    /// which encodes the name once.
+    /// Up to opendal 0.57, an upload straight to such a path landed under
+    /// the path percent-encoded once, where nothing finds it, see
+    /// [`gcs_name_repair`](super::super::gcs_name_repair). opendal 0.58.1
+    /// encodes the name of an upload once.
     // Multi-threaded for the cleaner, which deletes the test root on drop.
     #[cfg(feature = "storage-gcs")]
     #[tokio::test(flavor = "multi_thread")]
@@ -581,13 +582,9 @@ mod tests {
                 .root(&root)
         };
         let service = OpendalService::new_from_operator(gcs_operator(builder()).unwrap());
-        // The bare backend, to see the names the objects are stored under.
-        let backend = opendal::Operator::new(builder())
-            .unwrap()
-            .layer(opendal::layers::HttpClientLayer::new(
-                opendal::raw::HttpClient::with(reqwest::Client::new()),
-            ))
-            .finish();
+        // The bare backend, to upload straight to a path and to see the names
+        // the objects are stored under.
+        let backend = with_own_http_client(opendal::Operator::new(builder()).unwrap());
         // Removes the test root from the bucket on drop.
         let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -614,6 +611,21 @@ mod tests {
             assert_eq!(service.blob_length(path).await.unwrap(), *size as u64);
             assert_eq!(service.get(path).await.unwrap().len(), *size, "{path}");
         }
+        let uploaded_straight = [
+            ("/pub/straight a b+c#d%e.txt", small),
+            ("/pub/straight big \u{fc}.bin", large),
+        ]
+        .map(|(path, size)| {
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
+            (path, size)
+        });
+        for (path, size) in &uploaded_straight {
+            backend
+                .write(path.as_str(), vec![8u8; *size])
+                .await
+                .unwrap();
+            assert_eq!(service.get(path).await.unwrap().len(), *size, "{path}");
+        }
 
         let mut stored: Vec<String> = backend
             .list_with("")
@@ -628,10 +640,182 @@ mod tests {
         stored.sort();
         let mut expected: Vec<String> = files
             .iter()
+            .chain(&uploaded_straight)
             .map(|(path, _)| path.as_str().to_string())
             .collect();
         expected.sort();
         assert_eq!(stored, expected);
+    }
+
+    /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
+    /// `GCS_BUCKET` are set, the production stack end to end:
+    ///
+    /// 1. Writes land through staging, below and above the 5 MiB multipart
+    ///    threshold, and leave no staging object behind.
+    /// 2. A write, a publish and a delete prepared against an object that a
+    ///    newer write has since replaced are refused, and the newer data
+    ///    stays.
+    /// 3. A read returns one version of the object or fails, never bytes of
+    ///    two: an overwrite between two chunks ends the stream.
+    // Multi-threaded for the cleaner, which deletes the test root on drop.
+    #[cfg(feature = "storage-gcs")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gcs_refuses_stale_changes_and_mixed_reads() {
+        use async_dropper::AsyncDropper;
+
+        use crate::persistence::files::layer_domain_error::LayerDomainError;
+        use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
+        use crate::persistence::files::staged_publish_layer::{
+            live_generation, under_expected_generation, ExpectedGeneration, STAGING_PREFIX,
+        };
+
+        let (Ok(bucket), Ok(credentials)) = (
+            std::env::var("GCS_BUCKET"),
+            std::env::var("GOOGLE_APPLICATION_CREDENTIALS"),
+        ) else {
+            eprintln!("GCS_BUCKET or GOOGLE_APPLICATION_CREDENTIALS not set; skipping");
+            return;
+        };
+        let root = format!("test_{}", uuid::Uuid::new_v4());
+        let builder = || {
+            opendal::services::Gcs::default()
+                .bucket(&bucket)
+                .credential_path(&credentials)
+                .root(&root)
+        };
+        // The production stack, and the backend under its staged publish,
+        // through which the late requests below are sent.
+        let operator = gcs_operator(builder()).unwrap();
+        let backend = gcs_backend(builder()).unwrap();
+        // Removes the test root from the bucket on drop.
+        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
+        let entry_path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/a.bin").unwrap(),
+        );
+        let path = entry_path.as_str();
+        let small = 1024;
+        let large = 6 * 1024 * 1024;
+
+        // What the finalization does: read the generation, then change the
+        // object under it.
+        let generation = || async {
+            live_generation(&backend, path)
+                .await
+                .unwrap()
+                .expect("GCS reports a generation")
+        };
+        let staging_objects = || async {
+            operator
+                .list(STAGING_PREFIX)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.metadata().is_file())
+                .count()
+        };
+
+        // 1. A single-request upload, then a multipart one.
+        let g = generation().await;
+        assert_eq!(g, ExpectedGeneration::Absent);
+        under_expected_generation(g, operator.write(path, vec![1u8; small]))
+            .await
+            .unwrap();
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![1u8; small]
+        );
+        let g = generation().await;
+        under_expected_generation(g, operator.write(path, vec![2u8; large]))
+            .await
+            .unwrap();
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![2u8; large]
+        );
+        assert_eq!(
+            staging_objects().await,
+            0,
+            "every staging object was removed"
+        );
+
+        // 2. A write, a publish and a delete are prepared against the object
+        // as it is now, a newer write lands, and all three are refused; the
+        // newer data, itself a multipart upload, stays intact.
+        let stale = generation().await;
+        assert!(matches!(stale, ExpectedGeneration::Known(_)));
+        under_expected_generation(stale, operator.write(path, vec![3u8; large]))
+            .await
+            .unwrap();
+        let late_write = under_expected_generation(stale, operator.write(path, vec![4u8; small]))
+            .await
+            .expect_err("a write against a replaced object is refused");
+        assert!(matches!(
+            LayerDomainError::of(&late_write),
+            Some(LayerDomainError::PublishConflict)
+        ));
+        backend.write("stale", vec![4u8; 10]).await.unwrap();
+        let late_publish = backend
+            .copy_with("stale", path)
+            .if_version_match(&stale.version_condition())
+            .await
+            .expect_err("a publish against a replaced object is refused");
+        assert_eq!(late_publish.kind(), opendal::ErrorKind::ConditionNotMatch);
+        let late_delete = backend
+            .delete_with(path)
+            .if_version_match(&stale.version_condition())
+            .await
+            .expect_err("a delete against a replaced object is refused");
+        assert_eq!(late_delete.kind(), opendal::ErrorKind::ConditionNotMatch);
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![3u8; large]
+        );
+
+        // 3. A read through the server's read path, overwritten between two
+        // of its chunks: what it delivered is the version it started on, and
+        // it either completes that version or fails.
+        let service = OpendalService::new_from_operator(operator.clone());
+        let (length, mut stream) = service.get_sized_stream(&entry_path).await.unwrap();
+        assert_eq!(length as usize, large);
+        let first = stream.next().await.unwrap().unwrap();
+        assert!(first.iter().all(|&byte| byte == 3));
+        let g = generation().await;
+        under_expected_generation(g, operator.write(path, vec![5u8; large]))
+            .await
+            .unwrap();
+        let mut delivered = first.len();
+        let mut ended_in = Ok(());
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    assert!(
+                        chunk.iter().all(|&byte| byte == 3),
+                        "a chunk of the newer version was mixed in"
+                    );
+                    delivered += chunk.len();
+                }
+                Err(error) => {
+                    ended_in = Err(error);
+                    break;
+                }
+            }
+        }
+        assert!(
+            ended_in.is_err() || delivered == large,
+            "the read neither completed its version nor failed"
+        );
+        assert_eq!(
+            operator.read(path).await.unwrap().to_vec(),
+            vec![5u8; large]
+        );
+
+        let g = generation().await;
+        under_expected_generation(g, operator.delete(path))
+            .await
+            .unwrap();
+        assert!(!operator.exists(path).await.unwrap());
+        assert_eq!(staging_objects().await, 0);
     }
 
     // Multi-threaded for the cleaner, which blocks on its async drop.
