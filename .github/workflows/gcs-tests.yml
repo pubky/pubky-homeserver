@@ -1,15 +1,11 @@
 name: GCS Tests
 
 # The homeserver tests marked `#[ignore]` that run against a real Google Cloud
-# Storage bucket, see docs/TESTING.md. Nightly too, because Dependabot pull
-# requests don't get the credentials: a dependency bump is tested on GCS at
-# the latest the night after it merged.
+# Storage bucket, see docs/TESTING.md.
 on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 jobs:

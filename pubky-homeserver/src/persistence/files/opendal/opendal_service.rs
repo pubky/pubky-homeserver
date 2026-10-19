@@ -23,18 +23,8 @@ use opendal::Operator;
 use super::super::{FileIoError, FileStream, WriteStreamError};
 
 /// Build storage operators with one transactional finalization layer and an
-/// app-facing operator that additionally enforces write paths and collisions.
-///
-/// Both operators share the same underlying storage backend, which is
-/// important for backends like `InMemory` where separate instances would
-/// have independent data.
-///
-/// A remote backend publishes and deletes under a generation condition
-/// through [`StagedPublishLayer`], so a request it executes late is refused
-/// rather than landing on a newer write. Every call to it is bounded by
-/// [`BACKEND_IO_TIMEOUT`], so a hung request cannot hold a finalization, and
-/// the user row with it, forever. A local backend's calls are not bounded:
-/// abandoning a filesystem rename would not stop it, only lose track of it.
+/// app-facing operator that additionally enforces write paths and collisions,
+/// over the backend `storage_config` names, see [`layer_storage_operators`].
 pub fn build_storage_operators(
     storage_config: &StorageToml,
     data_directory: &Path,
@@ -42,14 +32,41 @@ pub fn build_storage_operators(
     events_service: EventsService,
     user_service: UserService,
 ) -> Result<(Operator, Operator), FileIoError> {
-    let backend_operator = match &storage_config.backend {
+    let backend_operator = backend_operator(&storage_config.backend, data_directory)?;
+    Ok(layer_storage_operators(
+        backend_operator,
+        storage_config.default_quota_mb,
+        sql_db,
+        events_service,
+        user_service,
+    ))
+}
+
+/// Where the filesystem backend keeps the files, under the data directory.
+const FILE_SYSTEM_FILES_DIR: &str = "data/files";
+/// Where the filesystem backend stages uploads, under the data directory.
+pub(crate) const FILE_SYSTEM_STAGING_DIR: &str = "data/files-tmp";
+
+/// The storage backend `backend` names.
+///
+/// A remote backend publishes and deletes under a generation condition
+/// through [`StagedPublishLayer`], so a request it executes late is refused
+/// rather than landing on a newer write. Every call to it is bounded by
+/// [`BACKEND_IO_TIMEOUT`], so a hung request cannot hold a finalization, and
+/// the user row with it, forever. A local backend's calls are not bounded:
+/// abandoning a filesystem rename would not stop it, only lose track of it.
+pub(super) fn backend_operator(
+    backend: &StorageConfigToml,
+    data_directory: &Path,
+) -> Result<Operator, FileIoError> {
+    let operator = match backend {
         StorageConfigToml::FileSystem => {
-            let files_dir = data_directory.join("data/files");
+            let files_dir = data_directory.join(FILE_SYSTEM_FILES_DIR);
             // Uploads are staged here and renamed into place on close, so a
             // rejected or aborted write never touches the existing file. Must
             // be on the same filesystem as the root, and outside it so staged
             // files never show up in listings.
-            let staging_dir = data_directory.join("data/files-tmp");
+            let staging_dir = data_directory.join(FILE_SYSTEM_STAGING_DIR);
             let (Some(files_dir), Some(staging_dir)) = (files_dir.to_str(), staging_dir.to_str())
             else {
                 return Err(FileIoError::OpenDAL(opendal::Error::new(
@@ -77,14 +94,30 @@ pub fn build_storage_operators(
             opendal::Operator::new(builder)?
         }
     };
+    Ok(operator)
+}
 
+/// The app-facing and the admin operator over `backend_operator`, in that
+/// order. Both finalize every write and delete in one transaction with its
+/// entry, events and quota; the app-facing one also enforces write paths and
+/// collisions.
+///
+/// Both share `backend_operator`, which matters for backends like `InMemory`,
+/// where separate instances would have independent data.
+pub(super) fn layer_storage_operators(
+    backend_operator: Operator,
+    default_quota_mb: Option<u64>,
+    sql_db: SqlDb,
+    events_service: EventsService,
+    user_service: UserService,
+) -> (Operator, Operator) {
     // Collision checks apply only to app-facing mutations, so each operator
     // needs its own finalization layer.
     let admin_operator = backend_operator.clone().layer(WriteFinalizationLayer::new(
         user_service.clone(),
         sql_db.clone(),
         events_service.clone(),
-        storage_config.default_quota_mb,
+        default_quota_mb,
         false,
     ));
     let operator = backend_operator
@@ -92,11 +125,11 @@ pub fn build_storage_operators(
             user_service.clone(),
             sql_db,
             events_service,
-            storage_config.default_quota_mb,
+            default_quota_mb,
             true,
         ))
         .layer(WritePathLayer::new(user_service));
-    Ok((operator, admin_operator))
+    (operator, admin_operator)
 }
 
 /// Longest any one call to the remote backend may take before it is
@@ -334,7 +367,8 @@ impl OpendalService {
 mod tests {
     use super::*;
     use crate::persistence::files::test_support::{
-        get_fs_operator, get_memory_operator, storage_contract_tests, CountingReads, Versioned,
+        get_fs_operator, get_memory_operator, storage_contract_tests, CountingReads, TestStorage,
+        Versioned,
     };
     use crate::shared::webdav::StoragePath;
 
@@ -367,36 +401,6 @@ mod tests {
             .await
             .unwrap()
             .expect_err("a read of another version of the blob is refused");
-    }
-
-    /// An overwrite landing mid-download does not mix the two versions: the
-    /// download completes the version it opened.
-    #[tokio::test]
-    async fn an_overwrite_mid_download_does_not_mix_versions() {
-        let (fs, _tmp_dir) = get_fs_operator();
-        let service = OpendalService::new_from_operator(fs);
-        let path = EntryPath::new(
-            pubky_common::crypto::Keypair::random().public_key(),
-            StoragePath::new("/pub/a.bin").unwrap(),
-        );
-        // Larger than the filesystem backend's 2 MiB read buffer, so the
-        // download is more than one stream item.
-        let length = 3 * 1024 * 1024;
-        service.write(&path, vec![1u8; length]).await.unwrap();
-
-        let (_, mut stream) = service.get_sized_stream(&path).await.unwrap();
-        let mut delivered = stream.next().await.unwrap().unwrap().to_vec();
-        assert!(delivered.len() < length, "the download is still going");
-
-        service.write(&path, vec![2u8; length]).await.unwrap();
-        while let Some(chunk) = stream.next().await {
-            delivered.extend_from_slice(&chunk.unwrap());
-        }
-        assert_eq!(delivered, vec![1u8; length]);
-        assert_eq!(
-            service.get(&path).await.unwrap().to_vec(),
-            vec![2u8; length]
-        );
     }
 
     /// A download is one read of the backend, whatever the blob's size. On
@@ -454,141 +458,193 @@ mod tests {
         ));
     }
 
-    /// A body that breaks mid-stream is aborted, and the caller gets the
-    /// stream error rather than a cleanup error.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn broken_stream_leaves_no_staged_file_and_the_old_bytes() {
-        let context = AppContext::test_with_config(|c| {
-            c.storage.backend = StorageConfigToml::FileSystem;
-        })
-        .await;
-        let service = OpendalService::new(&context).unwrap();
-        let pubky = pubky_common::crypto::Keypair::random().public_key();
-        context.user_service.create(&pubky).await.unwrap();
-        let path = EntryPath::new(pubky, StoragePath::new("/pub/test.txt").unwrap());
-        service.write(&path, b"old".to_vec()).await.unwrap();
-        let staging_dir = context.data_dir.path().join("data/files-tmp");
+    // The cases below run on every backend, see `storage_contract_tests`.
+    storage_contract_tests!(
+        reads_back_what_was_written,
+        read_of_a_missing_file_is_not_found,
+        overwrite_replaces_content_and_length,
+        delete_removes_the_file,
+        stores_names_that_urls_percent_encode,
+        streams_a_multipart_sized_write,
+        broken_stream_keeps_the_old_file,
+        overwrite_mid_download_does_not_mix_versions,
+    );
 
+    /// Above the 5 MiB from which GCS uploads in parts.
+    const MULTIPART_SIZE: usize = 6 * 1024 * 1024;
+
+    /// A file reads back with its length, streamed in several items, and
+    /// nothing is left staged.
+    async fn reads_back_what_was_written(storage: &TestStorage) {
+        let path = storage.path("/pub/a.bin");
+        let content = vec![1u8; 5 * TEST_CHUNK_SIZE];
+
+        storage.service.write(&path, content.clone()).await.unwrap();
+
+        let (length, mut stream) = storage.service.get_sized_stream(&path).await.unwrap();
+        let mut read = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            read.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(length, content.len() as u64);
+        assert_eq!(read, content);
+        assert!(storage.staging_is_empty().await);
+    }
+
+    /// A read of a missing file fails before a reader is opened.
+    async fn read_of_a_missing_file_is_not_found(storage: &TestStorage) {
+        let path = storage.path("/pub/missing.bin");
+
+        assert!(matches!(
+            storage.service.get_sized_stream(&path).await,
+            Err(FileIoError::NotFound)
+        ));
+        assert!(!storage.service.exists(&path).await.unwrap());
+    }
+
+    async fn overwrite_replaces_content_and_length(storage: &TestStorage) {
+        let path = storage.path("/pub/a.bin");
+        storage
+            .service
+            .write(&path, vec![1u8; 3 * TEST_CHUNK_SIZE])
+            .await
+            .unwrap();
+
+        storage.service.write(&path, vec![2u8; 10]).await.unwrap();
+
+        assert_eq!(storage.service.blob_length(&path).await.unwrap(), 10);
+        assert_eq!(
+            storage.service.get(&path).await.unwrap().to_vec(),
+            vec![2u8; 10]
+        );
+        assert!(storage.staging_is_empty().await);
+    }
+
+    /// A deleted file is gone, and deleting a missing file succeeds.
+    async fn delete_removes_the_file(storage: &TestStorage) {
+        let path = storage.path("/pub/a.bin");
+        storage.service.write(&path, vec![1u8; 10]).await.unwrap();
+
+        storage.service.delete(&path).await.unwrap();
+
+        assert!(!storage.service.exists(&path).await.unwrap());
+        storage
+            .service
+            .delete(&path)
+            .await
+            .expect("deleting a missing file succeeds");
+    }
+
+    /// Names with characters that URLs percent-encode, and one that is
+    /// percent-encoded already, are stored and read under their own name,
+    /// not under the decoded one.
+    async fn stores_names_that_urls_percent_encode(storage: &TestStorage) {
+        let names = [
+            "/pub/a b+c#d%e.txt",
+            "/pub/\u{fc}\u{b7}~!'()*.txt",
+            "/pub/Teest%20share/.keep",
+        ];
+
+        for name in names {
+            let path = storage.path(name);
+            storage
+                .service
+                .write(&path, name.as_bytes().to_vec())
+                .await
+                .unwrap();
+            assert_eq!(
+                storage.service.get(&path).await.unwrap().as_ref(),
+                name.as_bytes(),
+                "{name}"
+            );
+        }
+        let decoded = storage.path("/pub/Teest share/.keep");
+        assert!(!storage.service.exists(&decoded).await.unwrap());
+    }
+
+    /// A stream of chunks that adds up to more than one upload request is
+    /// stored in order, and nothing is left staged.
+    async fn streams_a_multipart_sized_write(storage: &TestStorage) {
+        let path = storage.path("/pub/large.bin");
+        let chunks: Vec<Vec<u8>> = (0..6u8)
+            .map(|chunk| vec![chunk; MULTIPART_SIZE / 6])
+            .collect();
+        let stream =
+            futures_util::stream::iter(chunks.clone().into_iter().map(|chunk| Ok(chunk.into())));
+
+        storage.service.write_stream(&path, stream).await.unwrap();
+
+        assert_eq!(
+            storage.service.get(&path).await.unwrap().to_vec(),
+            chunks.concat()
+        );
+        assert!(storage.staging_is_empty().await);
+    }
+
+    /// A body that breaks mid-stream is aborted: the caller gets the stream
+    /// error rather than a cleanup error, the old file stays, and nothing is
+    /// left staged.
+    async fn broken_stream_keeps_the_old_file(storage: &TestStorage) {
+        let path = storage.path("/pub/a.txt");
+        storage.service.write(&path, b"old".to_vec()).await.unwrap();
         let stream = futures_util::stream::iter([
             Ok(Bytes::from_static(b"partial")),
             Err(WriteStreamError::Other(anyhow::anyhow!("connection reset"))),
         ]);
-        let result = service.write_stream(&path, Box::pin(stream)).await;
+
+        let result = storage.service.write_stream(&path, stream).await;
 
         assert!(matches!(result, Err(FileIoError::StreamBroken(_))));
-        assert_eq!(std::fs::read_dir(&staging_dir).unwrap().count(), 0);
         assert_eq!(
-            service.get(&path).await.unwrap(),
+            storage.service.get(&path).await.unwrap(),
             Bytes::from_static(b"old")
         );
+        assert!(storage.staging_is_empty().await);
     }
 
-    // The cases below run on every backend, see `storage_contract_tests`.
-    storage_contract_tests!(get_content_streamed, get_sized_stream, write_content_stream);
-
-    /// Test the streamed reading of a file.
-    async fn get_content_streamed(operator: Operator) {
-        let file_service = OpendalService::new_from_operator(operator);
-
-        let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
-
-        let test_data = vec![42u8; 5 * TEST_CHUNK_SIZE];
-        file_service.write(&path, test_data.clone()).await.unwrap();
-
-        let mut stream = file_service.get_stream(&path).await.unwrap();
-        let mut collected_data = Vec::new();
-        while let Some(chunk_result) = stream.next().await {
-            collected_data.extend_from_slice(&chunk_result.unwrap());
-        }
-        assert_eq!(
-            collected_data, test_data,
-            "Content should match original data"
-        );
-
-        file_service
-            .delete(&path)
+    /// An overwrite landing mid-download does not mix the two versions: the
+    /// download delivers only bytes of the version it opened, and either
+    /// completes that version or fails.
+    async fn overwrite_mid_download_does_not_mix_versions(storage: &TestStorage) {
+        let path = storage.path("/pub/a.bin");
+        // More than one stream item of the filesystem backend, which reads
+        // 2 MiB at a time, and of a GCS response.
+        let length = 3 * 1024 * 1024;
+        storage
+            .service
+            .write(&path, vec![1u8; length])
             .await
-            .expect("Should delete file");
-        assert!(
-            !file_service.exists(&path).await.unwrap(),
-            "File should not exist after deletion"
-        );
-    }
+            .unwrap();
+        let (_, mut stream) = storage.service.get_sized_stream(&path).await.unwrap();
+        let mut delivered = stream.next().await.unwrap().unwrap().to_vec();
 
-    /// The length and the stream come from the same `stat`, and a missing
-    /// blob fails before a reader is opened.
-    async fn get_sized_stream(operator: Operator) {
-        let file_service = OpendalService::new_from_operator(operator);
-        let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let path = EntryPath::new(pubkey, StoragePath::new("/sized.bin").unwrap());
-
-        assert!(matches!(
-            file_service.get_sized_stream(&path).await,
-            Err(FileIoError::NotFound)
-        ));
-
-        let test_data = vec![7u8; TEST_CHUNK_SIZE + 1];
-        file_service.write(&path, test_data.clone()).await.unwrap();
-
-        let (length, mut stream) = file_service.get_sized_stream(&path).await.unwrap();
-        let mut collected_data = Vec::new();
-        while let Some(chunk_result) = stream.next().await {
-            collected_data.extend_from_slice(&chunk_result.unwrap());
-        }
-        assert_eq!(length, test_data.len() as u64);
-        assert_eq!(collected_data, test_data);
-
-        file_service.delete(&path).await.unwrap();
-    }
-
-    /// A stream of several chunks is stored in order.
-    async fn write_content_stream(operator: Operator) {
-        let file_service = OpendalService::new_from_operator(operator);
-
-        let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
-
-        // Create test data - multiple chunks to test streaming
-        let chunk_count = 3;
-        let mut test_data = Vec::new();
-        let mut chunks = Vec::new();
-
-        // Create chunks with different patterns to verify order
-        for i in 0..chunk_count {
-            let chunk_data = vec![i as u8; TEST_CHUNK_SIZE];
-            test_data.extend_from_slice(&chunk_data);
-            chunks.push(Ok(Bytes::from(chunk_data)));
-        }
-
-        // Create a stream from the chunks
-        let stream = futures_util::stream::iter(chunks);
-
-        // Write the stream to storage
-        file_service.write_stream(&path, stream).await.unwrap();
-
-        // Read the content back and verify it matches
-        let read_content = file_service.get(&path).await.unwrap();
-
-        assert_eq!(
-            read_content.len(),
-            test_data.len(),
-            "Content length should match"
-        );
-        assert_eq!(
-            read_content.to_vec(),
-            test_data,
-            "Content should match original data"
-        );
-
-        file_service
-            .delete(&path)
+        storage
+            .service
+            .write(&path, vec![2u8; length])
             .await
-            .expect("Should delete file");
+            .unwrap();
+
+        let mut failed = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => delivered.extend_from_slice(&chunk),
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
         assert!(
-            !file_service.exists(&path).await.unwrap(),
-            "File should not exist after deletion"
+            delivered.iter().all(|&byte| byte == 1),
+            "bytes of the overwrite were mixed in"
+        );
+        assert!(
+            failed || delivered.len() == length,
+            "the download neither completed its version nor failed"
+        );
+        assert_eq!(
+            storage.service.get(&path).await.unwrap().to_vec(),
+            vec![2u8; length]
         );
     }
 

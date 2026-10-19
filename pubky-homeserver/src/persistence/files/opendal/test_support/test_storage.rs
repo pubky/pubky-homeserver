@@ -1,17 +1,28 @@
 //! The backends the storage contract runs on, see [`storage_contract_tests`].
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use opendal::Operator;
+use pubky_common::crypto::{Keypair, PublicKey};
 use tempfile::TempDir;
+
+use super::super::opendal_service::{
+    backend_operator, layer_storage_operators, OpendalService, FILE_SYSTEM_STAGING_DIR,
+};
+use crate::shared::webdav::{EntryPath, StoragePath};
+use crate::storage_config::StorageConfigToml;
+use crate::AppContext;
 
 /// Runs each storage contract case as a test of its own on each backend:
 /// `memory::<case>`, `file_system::<case>` and `gcs::<case>`. A case is an
-/// `async fn(Operator)` in the calling module.
+/// `async fn(&TestStorage)` in the calling module.
 ///
 /// The `gcs` tests run against the real bucket and are ignored unless asked
 /// for, see [`gcs_test_bucket`](super::gcs_test_bucket).
 ///
 /// ```ignore
-/// async fn reads_back_what_was_written(operator: Operator) { /* ... */ }
+/// async fn reads_back_what_was_written(storage: &TestStorage) { /* ... */ }
 ///
 /// storage_contract_tests!(reads_back_what_was_written);
 /// ```
@@ -21,9 +32,9 @@ macro_rules! storage_contract_tests {
             use $crate::persistence::files::test_support::TestStorage;
             $(
                 #[tokio::test]
+                #[pubky_test_utils::test]
                 async fn $case() {
-                    let storage = TestStorage::memory();
-                    super::$case(storage.operator.clone()).await;
+                    super::$case(&TestStorage::memory().await).await;
                 }
             )+
         }
@@ -32,9 +43,9 @@ macro_rules! storage_contract_tests {
             use $crate::persistence::files::test_support::TestStorage;
             $(
                 #[tokio::test]
+                #[pubky_test_utils::test]
                 async fn $case() {
-                    let storage = TestStorage::file_system();
-                    super::$case(storage.operator.clone()).await;
+                    super::$case(&TestStorage::file_system().await).await;
                 }
             )+
         }
@@ -46,9 +57,9 @@ macro_rules! storage_contract_tests {
                 // Multi-threaded for the cleaner, which blocks on its async drop.
                 #[tokio::test(flavor = "multi_thread")]
                 #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
+                #[pubky_test_utils::test]
                 async fn $case() {
-                    let storage = TestStorage::gcs();
-                    super::$case(storage.operator.clone()).await;
+                    super::$case(&TestStorage::gcs().await).await;
                 }
             )+
         }
@@ -56,50 +67,55 @@ macro_rules! storage_contract_tests {
 }
 pub(crate) use storage_contract_tests;
 
-/// A backend the storage contract runs on. Dropping it at the end of the
+/// A backend under the layers production puts on it: the finalization of
+/// every write and delete with its entry, and the write paths. A case writes
+/// as [`Self::path`]'s user, who is signed up. Dropping it at the end of the
 /// test removes what the test stored.
 pub(crate) struct TestStorage {
-    pub(crate) operator: Operator,
-    _cleanup: Cleanup,
+    /// The app-facing service over the layered backend.
+    pub(crate) service: OpendalService,
+    user: PublicKey,
+    backend: Backend,
+    /// Holds the test database the finalization writes to.
+    _context: Arc<AppContext>,
 }
 
-/// What a backend removes once the test is done, by being dropped.
-enum Cleanup {
-    /// The memory backend goes with its operator.
-    Nothing,
+/// The backend under a [`TestStorage`], with where it stages uploads and
+/// what it removes once dropped.
+enum Backend {
+    /// Stages nothing, and goes with its operator.
+    Memory,
     FileSystem {
+        staging_dir: PathBuf,
         _directory: TempDir,
     },
     #[cfg(feature = "storage-gcs")]
     Bucket {
-        _test_root: async_dropper::AsyncDropper<super::gcs_test_bucket::BucketCleaner>,
+        operator: Operator,
+        _test_root: Box<async_dropper::AsyncDropper<super::gcs_test_bucket::BucketCleaner>>,
     },
 }
 
 impl TestStorage {
-    pub(crate) fn memory() -> Self {
-        Self {
-            operator: get_memory_operator(),
-            _cleanup: Cleanup::Nothing,
-        }
+    pub(crate) async fn memory() -> Self {
+        Self::layered_over(get_memory_operator(), Backend::Memory).await
     }
 
-    /// The filesystem backend configured like production, in a temporary
-    /// directory.
-    pub(crate) fn file_system() -> Self {
-        let (operator, directory) = get_fs_operator();
-        Self {
-            operator,
-            _cleanup: Cleanup::FileSystem {
-                _directory: directory,
-            },
-        }
+    /// The filesystem backend as production configures it, in a temporary
+    /// data directory.
+    pub(crate) async fn file_system() -> Self {
+        let directory = tempfile::tempdir().expect("a temporary directory is created");
+        let operator = backend_operator(&StorageConfigToml::FileSystem, directory.path())
+            .expect("the filesystem backend builds");
+        let backend = Backend::FileSystem {
+            staging_dir: directory.path().join(FILE_SYSTEM_STAGING_DIR),
+            _directory: directory,
+        };
+        Self::layered_over(operator, backend).await
     }
 
-    /// The GCS backend in the bucket from the environment, under a root of
-    /// the test's own. Without the staged publish on top, which refuses a
-    /// write or delete that the finalization did not give a generation; the
-    /// GCS tests of the staged publish cover it.
+    /// The GCS backend as production builds it, with the staged publish, in
+    /// the bucket from the environment under a root of the test's own.
     ///
     /// # Panics
     ///
@@ -107,16 +123,65 @@ impl TestStorage {
     ///
     /// [`TestBucket::from_env`]: super::gcs_test_bucket::TestBucket::from_env
     #[cfg(feature = "storage-gcs")]
-    pub(crate) fn gcs() -> Self {
+    pub(crate) async fn gcs() -> Self {
         let bucket = super::gcs_test_bucket::TestBucket::from_env();
-        let operator =
-            super::super::opendal_service::gcs_unstaged_backend(bucket.test_root_builder())
-                .expect("the bucket builder is valid");
+        let operator = super::super::opendal_service::gcs_operator(bucket.test_root_builder())
+            .expect("the bucket builder is valid");
+        let backend = Backend::Bucket {
+            operator: operator.clone(),
+            _test_root: Box::new(bucket.test_root_cleaner()),
+        };
+        Self::layered_over(operator, backend).await
+    }
+
+    async fn layered_over(backend_operator: Operator, backend: Backend) -> Self {
+        let context = AppContext::test().await;
+        let user = Keypair::random().public_key();
+        context
+            .user_service
+            .create(&user)
+            .await
+            .expect("a new user is created");
+        let (operator, admin_operator) = layer_storage_operators(
+            backend_operator,
+            context.config_toml.storage.default_quota_mb,
+            context.sql_db.clone(),
+            context.events_service.clone(),
+            context.user_service.clone(),
+        );
         Self {
-            operator,
-            _cleanup: Cleanup::Bucket {
-                _test_root: bucket.test_root_cleaner(),
+            service: OpendalService {
+                operator,
+                admin_operator,
             },
+            user,
+            backend,
+            _context: context,
+        }
+    }
+
+    /// `path` of the signed-up user.
+    pub(crate) fn path(&self, path: &str) -> EntryPath {
+        EntryPath::new(
+            self.user.clone(),
+            StoragePath::new(path).expect("the test uses a valid storage path"),
+        )
+    }
+
+    /// Whether no upload is left staged: each one was published or removed.
+    pub(crate) async fn staging_is_empty(&self) -> bool {
+        match &self.backend {
+            Backend::Memory => true,
+            Backend::FileSystem { staging_dir, .. } => match std::fs::read_dir(staging_dir) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => panic!("the staging directory can't be read: {error}"),
+            },
+            #[cfg(feature = "storage-gcs")]
+            Backend::Bucket { operator, .. } => {
+                crate::persistence::files::staged_publish_layer::staging_objects(operator).await
+                    == 0
+            }
         }
     }
 }

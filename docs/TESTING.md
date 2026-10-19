@@ -102,9 +102,12 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
 Most tests run on the in-memory storage backend. Two kinds of tests cover the
 backends a homeserver runs on in production:
 
-- **Storage contract:** each case runs as a test of its own on every backend,
-  named `memory::<case>`, `file_system::<case>`, and `gcs::<case>`. Add a case
-  with `storage_contract_tests!` in
+- **Storage contract:** what the file service promises on every backend, such
+  as overwrites, deletes, names that URLs percent-encode, multipart-sized
+  writes, broken uploads, and downloads during an overwrite. Each case runs
+  as a test of its own on each backend, under the layers production puts on
+  it, named `memory::<case>`, `file_system::<case>`, and `gcs::<case>`. Add a
+  case with `storage_contract_tests!` in
   [`opendal_service.rs`](../pubky-homeserver/src/persistence/files/opendal/opendal_service.rs).
 - **Backend smoke tests:** the client API on a homeserver configured with
   `file_system` or `google_bucket` storage, in
@@ -140,12 +143,11 @@ objects and incomplete multipart uploads older than one day, so that what a
 killed test leaves behind is removed.
 
 In CI, the [GCS Tests](../.github/workflows/gcs-tests.yml) workflow runs them
-on pull requests, on pushes to `main`, and nightly. It reads the key from the
-`GCS_CI_CREDENTIALS` secret and the bucket name from the `GCS_CI_BUCKET`
+on pull requests, on pushes to `main`, and on demand. It reads the key from
+the `GCS_CI_CREDENTIALS` secret and the bucket name from the `GCS_CI_BUCKET`
 variable. Pull requests from forks and Dependabot don't get the secret, so
-the workflow skips the tests with a warning; the nightly run covers the
-dependency bumps after they merge. On `main` and nightly, a missing secret
-fails the workflow.
+the workflow skips the tests with a warning; the push to `main` runs them
+after the merge. On `main`, a missing secret fails the workflow.
 
 ## Docker Build Options
 
