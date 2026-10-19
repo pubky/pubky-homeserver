@@ -11,6 +11,8 @@ use url::Url;
 
 use crate::{PubkyHttpClient, cross_log};
 
+use super::response_body::read_relay_body;
+
 /// Default HTTP relay base when none is supplied.
 #[deprecated(note = "Use `DEFAULT_HTTP_RELAY_INBOX` with `HttpRelayInboxChannel` instead")]
 pub const DEFAULT_HTTP_RELAY: &str = "https://httprelay.pubky.app/link";
@@ -106,6 +108,7 @@ impl HttpRelayLinkChannel {
     /// This poll will retry until a message is received or the timeout is reached.
     /// If the timeout is reached, Ok(None) is returned.
     /// Any underlying network errors will be retried.
+    /// Responses exceeding 1 MiB (including encryption) fail without retry.
     pub async fn poll(
         &self,
         client: &PubkyHttpClient,
@@ -130,7 +133,7 @@ impl HttpRelayLinkChannel {
                         "Received response for http relay channel polling attempt {attempt}: status {}",
                         response.status()
                     );
-                    return Ok(Some(response.bytes().await?.to_vec()));
+                    return Ok(Some(read_relay_body(response).await?));
                 }
                 Err(e) => match e {
                     PollError::Timeout => {}
@@ -210,11 +213,21 @@ impl FromStr for HttpRelayLinkChannel {
 /// A encrypted HTTP relay channel that can produce and consume an encrypted message.
 /// Deprecated, use `EncryptedHttpRelayInboxChannel` instead.
 #[deprecated(note = "Use `EncryptedHttpRelayInboxChannel` instead")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[allow(deprecated, reason = "Internal use of deprecated public API")]
 pub struct EncryptedHttpRelayLinkChannel {
     channel: HttpRelayLinkChannel,
     secret: [u8; 32],
+}
+
+#[allow(deprecated, reason = "Internal use of deprecated public API")]
+impl std::fmt::Debug for EncryptedHttpRelayLinkChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedHttpRelayLinkChannel")
+            .field("channel", &self.channel)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 #[allow(dead_code, deprecated, reason = "Internal use only")]

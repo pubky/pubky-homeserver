@@ -1,0 +1,58 @@
+{
+  "version": "v1",
+  "identity_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "vectors": [
+    {
+      "path": "/",
+      "key_hex": "88ae3faea51c7cc6e109debf049a735ea86c09732cad5fecec73eef5dda13cee"
+    },
+    {
+      "path": "/pub/",
+      "key_hex": "fa7acaa11d0805f5fa0b5ab699a4e55ecfd5ae2d2bffcc375c0afd649049b899"
+    },
+    {
+      "path": "/pub/app/",
+      "key_hex": "c0d46c55a46456fdc3c70a4aee94f5d27f2a4622341d9e56352d7a680cc0c8f8"
+    },
+    {
+      "path": "/pub/app",
+      "key_hex": "b634d82c627ac540f95b650fdead73bdbf1713036dfc8ceceb05d5024529b341"
+    },
+    {
+      "path": "/pub/app/messages.json",
+      "key_hex": "70ae93506486e0bf9c00e004606fde35833db7c91758193fc4e962f3dbeac84d"
+    },
+    {
+      "path": "/pub/app/sub/",
+      "key_hex": "71db717b61b1ea40e77835517c334dae4b022326792a1620e960df63f56e0ba4"
+    },
+    {
+      "path": "/pub/app/sub/file",
+      "key_hex": "91c9016c377ff00f0d9fee5fbab348cb5860d78c11fa7de8c8a738c6cb687cb0"
+    },
+    {
+      "path": "/pub/My File/\u00fcber%20.json",
+      "key_hex": "84d1dc3e1bb9dce823e19cd6721a6d181523e8b83827088fc7c1975d5ad12121"
+    },
+    {
+      "path": "/priv/",
+      "key_hex": "268c5347a463f3a066baf135838ac5a176e9bf40099ea5a75582695c516de017"
+    },
+    {
+      "path": "/priv/chat/",
+      "key_hex": "c3ac1b2eb359903d5f5f7e514a9e34e0d9427e493db052e83db5e5476e9017b8"
+    },
+    {
+      "path": "/priv/chat/message.json",
+      "key_hex": "362009f14b7622f079e11bbed2b7494dd426218dd6c93aef3e473ccd4e5ff870"
+    },
+    {
+      "path": "/pub/app/caf\u00e9.json",
+      "key_hex": "343632f97e3aa24d76c3771956018d2ffd7c5b6fe1bb3ce3a5934e0ce95fba14"
+    },
+    {
+      "path": "/pub/app/cafe\u0301.json",
+      "key_hex": "97c81228ef5520c46869bc299c64faa98f1fe4c1111aa26a906846b702618944"
+    }
+  ]
+}

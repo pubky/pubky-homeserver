@@ -21,20 +21,22 @@ pub enum FileIoError {
     WritePathForbidden,
     #[error("File/folder path collision")]
     PathCollision,
+    #[error("Lock lost before the file was changed")]
+    LockLost,
+    #[error("The file is not the one the change was made against")]
+    PublishConflict,
 }
 
 impl From<opendal::Error> for FileIoError {
     fn from(e: opendal::Error) -> Self {
-        use std::error::Error as _;
         // Recover domain-specific errors embedded by our custom OpenDAL layers.
-        if let Some(domain) = e
-            .source()
-            .and_then(|s| s.downcast_ref::<LayerDomainError>())
-        {
+        if let Some(domain) = LayerDomainError::of(&e) {
             return match domain {
                 LayerDomainError::WritePathForbidden => FileIoError::WritePathForbidden,
                 LayerDomainError::DiskSpaceQuotaExceeded => FileIoError::DiskSpaceQuotaExceeded,
                 LayerDomainError::PathCollision => FileIoError::PathCollision,
+                LayerDomainError::LockLost => FileIoError::LockLost,
+                LayerDomainError::PublishConflict => FileIoError::PublishConflict,
             };
         }
         match e.kind() {

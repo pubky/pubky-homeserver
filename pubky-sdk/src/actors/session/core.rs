@@ -119,6 +119,8 @@ impl PubkySession {
     /// # Errors
     /// - Propagates transport failures from the session endpoint.
     /// - Returns [`crate::errors::Error::Authentication`] if the homeserver rejects the request.
+    /// - Returns [`crate::errors::Error::CredentialRefresh`] when a browser-managed
+    ///   session fails to refresh its bearer for a reason other than revocation.
     pub async fn revalidate(&self) -> Result<Option<SessionInfo>> {
         let user = self.info().public_key().clone();
         cross_log!(info, "Revalidating session for {}", user);

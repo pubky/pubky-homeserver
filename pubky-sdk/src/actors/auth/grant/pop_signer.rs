@@ -6,7 +6,19 @@ use pubky_common::{
 };
 use serde::Serialize;
 
-use crate::errors::Result;
+/// Failures from the delegated signing boundary shared by grant proof formats.
+#[doc(hidden)]
+#[derive(Debug, thiserror::Error)]
+pub enum GrantSigningError {
+    /// The signing key could not be loaded or accessed.
+    #[error("Signing key unavailable: {0}")]
+    KeyUnavailable(String),
+    /// The signing operation failed after accessing the key.
+    #[error("Signing failed: {0}")]
+    SigningFailed(String),
+}
+
+type SigningResult<T> = std::result::Result<T, GrantSigningError>;
 
 /// Boxed future returned by a delegated grant PoP signing callback.
 ///
@@ -15,7 +27,7 @@ use crate::errors::Result;
 /// across threads.
 #[doc(hidden)]
 #[cfg(not(target_arch = "wasm32"))]
-pub type BoxSignFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>>;
+pub type BoxSignFuture = Pin<Box<dyn Future<Output = SigningResult<Vec<u8>>> + Send + 'static>>;
 /// Boxed future returned by a delegated grant PoP signing callback.
 ///
 /// The future resolves to raw Ed25519 signature bytes for a precomputed JWS
@@ -23,7 +35,7 @@ pub type BoxSignFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + '
 /// browser futures such as `JsFuture` are single-threaded.
 #[doc(hidden)]
 #[cfg(target_arch = "wasm32")]
-pub type BoxSignFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'static>>;
+pub type BoxSignFuture = Pin<Box<dyn Future<Output = SigningResult<Vec<u8>>> + 'static>>;
 /// Async signing callback used by delegated grant PoP signers.
 ///
 /// The input is the exact JWS signing input (`base64url(header) + "." +
@@ -74,7 +86,11 @@ impl GrantPopSigner {
     }
 
     /// Signs the given claims as a JWS with the appropriate signing input format for `PoP` proofs, and returns the complete JWS string.
-    pub(crate) async fn sign_jws<T: Serialize>(&self, typ: &str, claims: &T) -> Result<String> {
+    pub(crate) async fn sign_jws<T: Serialize>(
+        &self,
+        typ: &str,
+        claims: &T,
+    ) -> SigningResult<String> {
         let signing_input = jws_signing_input(typ, claims);
         match self {
             Self::Local(keypair) => {
@@ -123,7 +139,7 @@ impl fmt::Debug for DelegatedGrantPopSigner {
 
 impl DelegatedGrantPopSigner {
     /// Signs the given JWS signing input using the provided async signing callback, and returns the complete JWS string.
-    async fn sign_jws(&self, signing_input: String) -> Result<String> {
+    async fn sign_jws(&self, signing_input: String) -> SigningResult<String> {
         let signature = (self.sign)(signing_input.clone()).await?;
         Ok(finish_jws(signing_input, signature))
     }
@@ -138,7 +154,7 @@ impl DelegatedGrantPopSigner {
 pub fn delegated_sign_callback<F, Fut>(sign: F) -> DelegatedSignFn
 where
     F: Fn(String) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Vec<u8>>> + Send + 'static,
+    Fut: Future<Output = SigningResult<Vec<u8>>> + Send + 'static,
 {
     Arc::new(move |signing_input| Box::pin(sign(signing_input)))
 }
@@ -152,7 +168,7 @@ where
 pub fn delegated_sign_callback<F, Fut>(sign: F) -> DelegatedSignFn
 where
     F: Fn(String) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Vec<u8>>> + 'static,
+    Fut: Future<Output = SigningResult<Vec<u8>>> + 'static,
 {
     Arc::new(move |signing_input| Box::pin(sign(signing_input)))
 }
@@ -203,5 +219,26 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "Signature is all zeros which is all 'A' in base64"
         );
+    }
+
+    #[tokio::test]
+    async fn homeserver_proof_keeps_the_existing_authentication_error_contract() {
+        let signer = GrantPopSigner::delegated(
+            "missing-key".into(),
+            Keypair::random().public_key(),
+            delegated_sign_callback(|_| async {
+                Err(GrantSigningError::KeyUnavailable("deleted key".into()))
+            }),
+        );
+        let error = super::super::credential::sign_pop_for_grant(
+            &signer,
+            &Keypair::random().public_key(),
+            &pubky_common::auth::jws::GrantId::generate(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error,
+            crate::Error::Authentication(crate::errors::AuthError::Validation(message))
+                if message.contains("deleted key")));
     }
 }

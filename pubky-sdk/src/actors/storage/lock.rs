@@ -145,7 +145,10 @@ impl SessionStorage {
     ///
     /// # Errors
     /// A lock that has expired or was unlocked returns 412; take a new one and
-    /// read the file again. Otherwise as [`Self::put`](SessionStorage::put).
+    /// read the file again. A file that changed since the write was prepared
+    /// returns 409, which can happen when an earlier change the storage
+    /// backend ran late lands first; read it again and retry. Otherwise as
+    /// [`Self::put`](SessionStorage::put).
     pub async fn put_locked<B: Into<reqwest::Body>>(
         &self,
         lock: &StorageLock,

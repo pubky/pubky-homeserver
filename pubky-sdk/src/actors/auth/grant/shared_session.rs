@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     credential::{GrantCredential, GrantCredentialState, REFRESH_SLACK_SECS, now_unix},
-    grant_exchange::post_grant_session,
+    grant_exchange::refresh_grant_session,
 };
 use crate::{PubkyHttpClient, Result, errors::AuthError};
 
@@ -122,7 +122,7 @@ impl GrantCredential {
         }
         shared.refresh_pending = true;
         lease.store(&shared).await?;
-        let response = post_grant_session(
+        let response = refresh_grant_session(
             client,
             &state.grant_jws,
             &state.grant_claims,

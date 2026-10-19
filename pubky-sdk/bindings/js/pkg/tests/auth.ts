@@ -347,6 +347,40 @@ test("startGrantAuthFlow validates capabilities and options", async (t) => {
   t.end();
 });
 
+test("Grant auth: selective approval narrows access and delivered keys", async (t) => {
+  const sdk = Pubky.testnet();
+  const signer = sdk.signer(Keypair.random());
+  await signer.signup(HOMESERVER_PUBLICKEY, await createSignupToken());
+
+  for (const approved of ["/pub/pubky.app/file:r", "/pub/pubky.app/selected/:re", ""]) {
+    const flow = await sdk.startGrantAuthFlow(
+      "/pub/pubky.app/:rwe",
+      AuthFlowKind.signin(),
+      { clientId: "selective-js.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "signedApprovalV1" },
+    );
+    for (const [invalid, expectedError] of [
+      ["/pub/other/:r", "AuthenticationError"],
+      ["not-a-capability", "InvalidInput"],
+    ]) {
+      try {
+        await signer.approveAuthWithCapabilities(flow.authorizationUrl, invalid);
+        t.fail("invalid approval should fail");
+      } catch (error) {
+        assertPubkyError(t, error);
+        t.equal(error.name, expectedError, "invalid approval returns a structured error");
+      }
+    }
+    await signer.approveAuthWithCapabilities(flow.authorizationUrl, approved);
+    const session = await flow.awaitApproval();
+    t.deepEqual(session.info.capabilities, approved ? [approved] : [], "session has only approved capabilities");
+    const keys = session.grant!.encryptionKeys!;
+    t.deepEqual(keys.scopes, approved.endsWith(":re") ? ["/pub/pubky.app/selected/"] : [], "only approved e scopes deliver keys");
+    keys.free();
+    await session.signout();
+  }
+  t.end();
+});
+
 test("Grant auth: resume signin flow from saved state", async (t) => {
   const sdk = Pubky.testnet();
 
@@ -355,11 +389,11 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   const signupToken = await createSignupToken();
   await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
 
-  const capabilities = "/pub/pubky.app/:rw";
+  const capabilities = "/pub/pubky.app/:rwe";
   const originalFlow = await sdk.startGrantAuthFlow(
     capabilities,
     AuthFlowKind.signin(),
-    { clientId: "grant-resume-js.test", relay: TESTNET_HTTP_RELAY },
+    { clientId: "grant-resume-js.test", relay: TESTNET_HTTP_RELAY, approvalFormat: "signedApprovalV1" },
   );
   const savedUrl = originalFlow.authorizationUrl;
   let savedState: string;
@@ -370,6 +404,13 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   } catch (_error) {
     savedState = originalFlow.saveLocal();
   }
+  t.ok(new URL(savedUrl).searchParams.has("epk"), "signed approval includes its HPKE recipient key");
+  t.equal(
+    SigninGrantDeepLink.parse(savedUrl).ephemeralPublicKey?.length,
+    32,
+    "parsed link exposes the 32-byte HPKE public key",
+  );
+  t.notOk(new URL(savedUrl).searchParams.has("secret"), "signed approval omits the shared relay secret");
   originalFlow.free();
 
   await signer.approveAuthRequest(savedUrl);
@@ -394,6 +435,9 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
     capabilities.split(","),
     "resumed grant session capabilities match",
   );
+  const keys = session.grant!.encryptionKeys!;
+  t.deepEqual(keys.scopes, ["/pub/pubky.app/"], "resumed signed approval flow decrypts scoped keys");
+  keys.free();
 
   t.end();
 });

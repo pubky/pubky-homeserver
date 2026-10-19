@@ -237,6 +237,20 @@ for compatibility and expiry behavior.
 await signer.approveAuthRequest("pubkyauth://signin?caps=...&secret=...&relay=...");
 ```
 
+`approveAuthRequest()` approves every requested capability. To approve fewer
+scopes or actions, pass a capabilities string to `approveAuthWithCapabilities()`:
+
+```js
+// The request includes `/pub/example.app/:rwe`; the user approves only read.
+await signer.approveAuthWithCapabilities(authUrl, "/pub/example.app/:r");
+```
+
+See [selecting capabilities on the signing device][select-capabilities] for
+validation rules, empty approvals, and encryption key delivery.
+
+[select-capabilities]:
+  ../../../../docs/scoped-encryption-keys.md#select-capabilities-on-the-signing-device
+
 **Handle a pubkyauth deep link**
 
 General entry point for any supported `pubkyauth://` link. Auth request links
@@ -293,19 +307,31 @@ legacy `callback` parameter is accepted as an `xSuccess` fallback.
 
 #### Resume an auth flow after page refresh
 
-Grant auth flows are resumable by saving the pending flow state before refresh and restoring it afterwards:
+Save pending grant auth state before a refresh, then restore it afterwards.
+The browser example below uses a delegated signing key stored in IndexedDB.
+It requires a secure context with WebCrypto Ed25519 support and IndexedDB.
+
+For signed approvals, saved flow state includes a temporary HPKE private key
+that decrypts the signer's response. The authorization URL carries the matching
+public key in `epk`; a domain-separated hash of that key identifies the relay
+channel. Keep the saved state confidential and delete it when the flow
+completes or is abandoned.
 
 ```js
-const flow = pubky.startGrantAuthFlow(caps, AuthFlowKind.signin(), {
+import { GrantAuthFlow } from "@synonymdev/pubky";
+
+// Before refreshing:
+const flow = await GrantAuthFlow.startDelegated(caps, AuthFlowKind.signin(), {
   clientId: "my-cool-app.example",
   relay,
 });
-sessionStorage.setItem("pubky-grant-auth", flow.save());
+sessionStorage.setItem("pubky-grant-auth", flow.saveDelegated());
 
+// After reloading:
 const saved = sessionStorage.getItem("pubky-grant-auth");
 if (saved) {
   try {
-    const resumed = pubky.resumeGrantAuthFlow(saved);
+    const resumed = await pubky.resumeDelegatedGrantAuthFlow(saved);
     const session = await resumed.awaitApproval();
   } finally {
     sessionStorage.removeItem("pubky-grant-auth");
@@ -313,7 +339,96 @@ if (saved) {
 }
 ```
 
-Legacy cookie auth flows can be resumed with `pubky.resumeCookieAuthFlow(authorizationUrl)`. Store pending auth state in `sessionStorage`, not `localStorage`, and delete it once the flow completes or is abandoned.
+For local signing keys, use `GrantAuthFlow.start()`, `flow.saveLocal()`, and
+`pubky.resumeGrantAuthFlow(saved)`.
+
+Legacy cookie auth flows can be resumed with
+`pubky.resumeCookieAuthFlow(authorizationUrl)`. Store pending auth state in
+`sessionStorage`, not `localStorage`, and delete it once the flow completes or
+is abandoned.
+
+#### Request encryption keys
+
+Apps can also ask the signer for encryption keys scoped to storage paths. Set
+`approvalFormat: "signedApprovalV1"` and add the `e` action to each scope that
+needs keys. Storage actions `r` and `w` don't deliver keys.
+
+Keys stay usable after the grant expires or is revoked, and older homeservers
+reject grants containing `e`. Read the
+[scoped encryption keys guide](../../../../docs/scoped-encryption-keys.md)
+before you use them.
+
+```js
+const flow = await pubky.startGrantAuthFlow("/pub/chat/:rwe", AuthFlowKind.signin(), {
+  clientId: "chat.example",
+  approvalFormat: "signedApprovalV1",
+});
+renderQr(flow.authorizationUrl);
+const session = await flow.awaitApproval();
+
+const keys = session.grant.encryptionKeys; // undefined for bare grants
+let key;
+try {
+  // The signer may narrow scopes or decline `e`.
+  if (!keys.scopes.includes("/pub/chat/")) {
+    throw new Error("The signer didn't approve chat keys.");
+  }
+  key = await keys.deriveCryptoKeyForPath("/pub/chat/message");
+} finally {
+  keys.free(); // The CryptoKey stays usable.
+}
+
+const iv = crypto.getRandomValues(new Uint8Array(12)); // Fresh IV every time.
+const ciphertext = await crypto.subtle.encrypt(
+  { name: "AES-GCM", iv }, key, new TextEncoder().encode("Hello"),
+);
+```
+
+`EncryptionKeys` has these members:
+
+| API | Returns |
+| --- | --- |
+| `keys.scopes` | Approved scope paths as `string[]` |
+| `keys.deriveForPath(path)` | Raw key bytes as `Uint8Array`. Clear them after use. |
+| `await keys.deriveCryptoKeyForPath(path)` | Non-extractable AES-GCM-256 `CryptoKey`. Requires WebCrypto in a secure context. |
+
+Both derivation methods take a canonical file path and reject directories and
+paths outside the approved scopes. Each read of `session.grant.encryptionKeys`
+returns a separate copy; call `free()` when you're done with it. Signed
+approvals without `e` scopes return an object with empty scopes.
+
+`exportLocalSecret()` and `browserSessionStore.save()` keep the keys. The
+browser store saves them as plaintext in IndexedDB, readable by any script on
+the same origin. You can recover keys offline, even after the grant expires or
+is revoked. Recovery creates no session:
+
+```js
+import { EncryptionKeys } from "@synonymdev/pubky";
+
+const recovered = EncryptionKeys.fromLocalSecret(savedToken);
+if (recovered) {
+  try {
+    if (recovered.publicKey !== expectedUser.z32() ||
+        recovered.grantId !== expectedGrantId) {
+      throw new Error("This backup belongs to a different account or grant");
+    }
+    const key = await recovered.keys.deriveCryptoKeyForPath("/pub/chat/message");
+    // Use key with WebCrypto for locally saved ciphertext.
+  } finally {
+    recovered.keys.free();
+  }
+}
+```
+
+`fromLocalSecret()` returns `{ publicKey, grantId, keys }`, or `undefined` for
+bare-grant tokens. `publicKey` is the authenticated account's z-base-32 key.
+Compare it with the account you expect; also check `grantId` when restoring a
+specific grant. Callers that previously received keys directly must now read
+`recovered.keys` after checking the identity.
+
+For a browser record, use
+`await pubky.browserSessionStore.restoreEncryptionKeys(storedId)`. It checks
+the account and grant against the record ID and returns the keys directly.
 
 #### Validate and normalize capabilities
 
@@ -472,6 +587,15 @@ await signer.pkdns.publishHomeserverForce(/* optional override homeserver*/);
 await signer.pkdns.getHomeserver();
 ```
 
+### Custom proofs
+
+Use `session.grant.createCustomPop(data)` to sign JSON and return both the proof
+and its root-signed grant. Use `verifyCustomGrantPop(credentials)` to verify the bundle
+offline.
+
+See [Sign and verify custom data](https://github.com/pubky/pubky-homeserver/blob/main/docs/CUSTOM_POP.md) for Rust and
+JavaScript examples and the verification contract.
+
 ## Logging
 
 The SDK ships with a WASM logger that bridges Rust `log` output into the browser or Node console. Call `setLogLevel` **once at application start**, before constructing `Pubky` or other SDK actors, to choose how verbose the logs should be.
@@ -515,6 +639,7 @@ All async methods throw a structured `PubkyError`:
 interface PubkyError extends Error {
   name:
     | "RequestError" // network/server/validation/JSON
+    | "CredentialRefreshError" // grant refresh request failed
     | "InvalidInput"
     | "AuthenticationError"
     | "PkarrError"
@@ -523,6 +648,12 @@ interface PubkyError extends Error {
   data?: unknown; // structured context when available (e.g. { statusCode: number })
 }
 ```
+
+`CredentialRefreshError` represents secret-safe refresh request failures. It
+includes `data: { statusCode: number }` when the refresh endpoint responded, while
+transport failures omit `data`. Local authentication, resolution, parsing, and
+build failures keep their normal error names. This distinguishes unavailable
+grant refresh from a failure returned by the requested storage operation.
 
 Example:
 

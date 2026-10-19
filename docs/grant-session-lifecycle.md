@@ -13,9 +13,11 @@ shared browser session.
 
 - Tabs share one bearer for each stored grant. Opening, closing, duplicating or
   reloading tabs reuses the saved bearer while it is valid.
-- IndexedDB stores the grant restore material and current bearer. Delegated
-  WebCrypto private keys remain non-extractable. Treat the stored bearer as a
-  credential; do not log or export the browser record.
+- IndexedDB stores the restore material and the bearer. Delegated signing keys
+  remain non-extractable, but the rest of the restore material, including any
+  encryption keys, is stored as plaintext. IndexedDB is the trust boundary. Don't
+  log or export browser records. See [persistence and offline
+  recovery][key-persistence] for what the restore material contains.
 - Authenticated requests hold shared Web Locks until response headers arrive.
   Refresh takes an exclusive lock and saves its result before releasing it.
   Requests can run concurrently; a slow request can delay refresh. Response
@@ -58,6 +60,31 @@ Existing grant records remain readable. On first restore, the SDK exchanges the
 grant once and saves a shared bearer in the existing record. Concurrent restores
 reuse that bearer. Reload older app tabs so they participate in the SDK's locks.
 The shared bearer remains saved when every tab closes.
+
+### Records for signed approvals
+
+Session records have their own version, separate from the approval format. See
+[versions][key-versions].
+
+All session records live in `storedSessions`. Bare grants use
+`pubky-session-v1`; signed approvals use `pubky-session-v2`, even when the
+signer declined `e`. `delegatedGrantKeys` holds only browser signing keys.
+The database version stays at 1. `clear` removes sessions and their signing
+keys; `clearAll` also removes unrelated signing keys.
+
+Older SDKs cannot safely share V2 session records.
+
+### Add encryption keys to an existing session
+
+1. Request a new signed approval with `e`, even for the same `clientId`. A new
+   bare grant doesn't carry keys.
+2. Save the new session and use its new record ID. The old grant keeps its
+   original permissions.
+3. To replace the old session, sign it out. Deleting its local record doesn't
+   revoke the grant.
+
+[key-persistence]: scoped-encryption-keys.md#persistence-and-offline-recovery
+[key-versions]: scoped-encryption-keys.md#versions
 
 ## Protocol and compatibility
 

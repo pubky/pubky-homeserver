@@ -1,6 +1,10 @@
 use std::{future::Future, sync::Arc};
 
-use crate::persistence::files::{events::EventsService, layer_domain_error::LayerDomainError};
+use crate::persistence::files::{
+    events::EventsService,
+    layer_domain_error::LayerDomainError,
+    staged_publish_layer::{live_generation, under_expected_generation, ExpectedGeneration},
+};
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
@@ -8,7 +12,7 @@ use opendal::raw::*;
 use opendal::Result;
 use tracing::Instrument;
 
-use super::{WriteFinalizationDeleter, WriteFinalizationWriter};
+use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
 
 /// Keeps file entries, events, and user quotas in sync with blob writes and deletes.
 ///
@@ -97,17 +101,58 @@ pub(super) fn already_closed(subject: &str) -> opendal::Error {
 /// [`files`](crate::persistence::files) module docs.
 ///
 /// The task runs in the caller's tracing span, so whatever the finalization
-/// logs still carries the request's context.
+/// logs still carries the request's context. The lock the caller runs under is
+/// carried over the same way, see [`write_lock`].
 pub(super) async fn spawn_finalization<T: Send + 'static>(
     finalization: impl Future<Output = Result<T>> + Send + 'static,
 ) -> Result<T> {
-    match tokio::spawn(finalization.in_current_span()).await {
+    match tokio::spawn(write_lock::carry(finalization).in_current_span()).await {
         Ok(result) => result,
         Err(error) => Err(opendal::Error::new(
             opendal::ErrorKind::Unexpected,
             "Finalization task did not complete",
         )
         .set_source(error)),
+    }
+}
+
+/// The generation the object at `entry_path` has now, for a publish or
+/// delete under it, read inside the finalization transaction with the
+/// transaction proven alive after the read.
+///
+/// The user row the transaction holds keeps every other change to the path
+/// out until the transaction ends. A generation read while the transaction
+/// lives therefore predates any change a later holder makes, and a publish
+/// under it cannot replace one. The proof is a round trip on the
+/// transaction's own connection, which fails if the transaction has died
+/// meanwhile: without it, a lookup still pending when the transaction died
+/// could return the generation of a later holder's write and let the
+/// publish replace it. `None` on a backend without generations.
+pub(super) async fn generation_under_lock<A: Access>(
+    backend: &A,
+    entry_path: &EntryPath,
+    executor: &mut UnifiedExecutor<'_>,
+) -> Result<Option<ExpectedGeneration>> {
+    let generation = live_generation(backend, entry_path.as_str()).await?;
+    let lost = |error| {
+        unexpected(
+            format!("Finalization transaction of {entry_path} lost after reading the generation"),
+            error,
+        )
+    };
+    let con = executor.get_con().await.map_err(lost)?;
+    sqlx::query("SELECT 1").execute(con).await.map_err(lost)?;
+    Ok(generation)
+}
+
+/// Run `request`, a publish or delete, under `generation` if there is one.
+pub(super) async fn under_generation<T>(
+    generation: Option<ExpectedGeneration>,
+    request: impl Future<Output = T>,
+) -> T {
+    match generation {
+        Some(generation) => under_expected_generation(generation, request).await,
+        None => request.await,
     }
 }
 
@@ -169,9 +214,9 @@ where
 {
     type Inner = A;
     type Reader = A::Reader;
-    type Writer = WriteFinalizationWriter<A::Writer>;
+    type Writer = WriteFinalizationWriter<A::Writer, A>;
     type Lister = A::Lister;
-    type Deleter = WriteFinalizationDeleter<A::Deleter>;
+    type Deleter = WriteFinalizationDeleter<A::Deleter, A>;
     type Copier = A::Copier;
 
     fn inner(&self) -> &Self::Inner {
@@ -194,7 +239,12 @@ where
         let (rp, writer) = self.inner.write(entry_path.as_str(), args).await?;
         Ok((
             rp,
-            WriteFinalizationWriter::new(writer, self.finalizer.clone(), entry_path),
+            WriteFinalizationWriter::new(
+                writer,
+                self.inner.clone(),
+                self.finalizer.clone(),
+                entry_path,
+            ),
         ))
     }
 
@@ -228,7 +278,7 @@ where
         let (rp, deleter) = self.inner.delete().await?;
         Ok((
             rp,
-            WriteFinalizationDeleter::new(deleter, self.finalizer.clone()),
+            WriteFinalizationDeleter::new(deleter, self.inner.clone(), self.finalizer.clone()),
         ))
     }
 
@@ -276,7 +326,7 @@ impl Finalizer {
 }
 
 #[cfg(test)]
-pub(super) mod test_support {
+pub(crate) mod test_support {
     use std::future::Future;
     use std::time::Duration;
 
@@ -312,7 +362,22 @@ pub(super) mod test_support {
         (test_operator_over(db, backend), tmp_dir)
     }
 
-    fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {
+    /// A backend without generations, for a finalization under test.
+    pub(in super::super) fn memory_backend() -> Arc<Accessor> {
+        Arc::new(get_memory_operator().into_inner())
+    }
+
+    /// Like [`test_operator`], with the backend it writes to, for a
+    /// finalization under test that must find the files the operator wrote.
+    pub(in super::super) fn test_operator_with_backend(
+        db: &SqlDb,
+    ) -> (opendal::Operator, Arc<Accessor>) {
+        let backend = get_memory_operator();
+        let store = Arc::new(backend.clone().into_inner());
+        (test_operator_over(db, backend), store)
+    }
+
+    pub(crate) fn test_operator_over(db: &SqlDb, backend: opendal::Operator) -> opendal::Operator {
         backend.layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
@@ -336,7 +401,7 @@ pub(super) mod test_support {
         UserService::new(db.clone())
     }
 
-    pub(in super::super) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
+    pub(crate) async fn create_user(db: &SqlDb) -> pubky_common::crypto::PublicKey {
         let pubkey = Keypair::random().public_key();
         let user_service = test_user_service(db);
         user_service.create(&pubkey).await.unwrap();
@@ -444,11 +509,114 @@ pub(super) mod test_support {
 #[cfg(test)]
 mod tests {
     use crate::persistence::files::events::EventType;
+    use crate::persistence::files::opendal::opendal_test_operators::{get_fs_operator, Versioned};
+    use crate::persistence::files::staged_publish_layer::StagedPublishLayer;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
+    use tempfile::TempDir;
 
-    use super::test_support::{all_events, create_user, test_operator, user_usage};
+    use super::test_support::{
+        all_events, create_user, test_operator, test_operator_over, user_usage,
+    };
+
+    /// The finalization over a staged publish on a versioned backend, which
+    /// is returned to steer it, with the backend's directory.
+    fn staged_operator(db: &SqlDb) -> (opendal::Operator, opendal::Operator, Versioned, TempDir) {
+        let (fs, tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let backend = fs.layer(versioned.clone()).layer(StagedPublishLayer);
+        (
+            test_operator_over(db, backend.clone()),
+            backend,
+            versioned,
+            tmp_dir,
+        )
+    }
+
+    /// End every other connection to the test database: the finalization's
+    /// transaction among them.
+    async fn kill_other_connections(db: &SqlDb) {
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = current_database() AND pid <> pg_backend_pid()",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    /// The race the generation read guards against: the finalization's
+    /// transaction dies while the generation lookup is pending, the lock
+    /// passes to someone who writes, and the lookup returns their generation.
+    /// A publish under it would replace their write and pass the condition.
+    /// The finalization must find its transaction gone before publishing.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn write_whose_transaction_died_during_the_generation_read_is_refused() {
+        let db = SqlDb::test().await;
+        let (operator, _backend, versioned, _tmp_dir) = staged_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/pub/a.txt").unwrap());
+
+        let release = versioned.stall_next_stat();
+        let write = tokio::spawn({
+            let (operator, entry_path) = (operator.clone(), entry_path.clone());
+            async move { operator.write(entry_path.as_str(), b"late".to_vec()).await }
+        });
+        versioned.until_stat_stalled().await;
+        kill_other_connections(&db).await;
+        release.send(()).unwrap();
+
+        write
+            .await
+            .unwrap()
+            .expect_err("the write must be refused once its transaction is gone");
+        assert!(
+            versioned.seen.lock().unwrap().is_empty(),
+            "nothing may be published under a generation read after the transaction died"
+        );
+        assert!(!operator.exists(entry_path.as_str()).await.unwrap());
+        assert!(matches!(
+            EntryRepository::get_by_path(&entry_path, &mut db.pool().into()).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+    }
+
+    /// The same ordering on the delete path: the blob removal's transaction
+    /// dies during the generation lookup. The blob must be left alone.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn blob_removal_whose_transaction_died_during_the_generation_read_is_refused() {
+        let db = SqlDb::test().await;
+        let (operator, backend, versioned, _tmp_dir) = staged_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/pub/a.txt").unwrap());
+        operator
+            .write(entry_path.as_str(), b"kept".to_vec())
+            .await
+            .unwrap();
+
+        let release = versioned.stall_next_stat();
+        let delete = tokio::spawn({
+            let (operator, entry_path) = (operator.clone(), entry_path.clone());
+            async move { operator.delete(entry_path.as_str()).await }
+        });
+        versioned.until_stat_stalled().await;
+        kill_other_connections(&db).await;
+        release.send(()).unwrap();
+
+        delete
+            .await
+            .unwrap()
+            .expect_err("the removal must be refused once its transaction is gone");
+        assert_eq!(
+            versioned.seen.lock().unwrap().len(),
+            1,
+            "only the publish was sent; no delete under a stale generation"
+        );
+        assert!(backend.exists(entry_path.as_str()).await.unwrap());
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]

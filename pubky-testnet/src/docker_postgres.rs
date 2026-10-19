@@ -21,15 +21,15 @@ static SHARED_PG: OnceCell<DockerPostgres> = OnceCell::const_new();
 /// Container ID of the shared instance, used by the `atexit` handler.
 static SHARED_CONTAINER_ID: OnceLock<String> = OnceLock::new();
 
-/// `atexit` handler: forcefully removes the shared container on normal process exit.
+/// `atexit` handler: removes the shared container and its anonymous volumes on exit.
 ///
 /// This is necessary because Rust never drops statics, so the `ContainerAsync`
-/// destructor won't run for `SHARED_PG`. We shell out to `docker rm -f`
+/// destructor won't run for `SHARED_PG`. We shell out to `docker rm -fv`
 /// synchronously since async is not available in atexit handlers.
 extern "C" fn cleanup_shared_container() {
     if let Some(id) = SHARED_CONTAINER_ID.get() {
         let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", id])
+            .args(["rm", "-f", "-v", id])
             .output();
     }
 }
@@ -131,6 +131,7 @@ mod tests {
     use pubky_common::auth::jws::ClientId;
 
     const CONTAINER_ID_PREFIX: &str = "CONTAINER_ID=";
+    const VOLUME_NAME_PREFIX: &str = "VOLUME_NAME=";
 
     /// Poll `docker inspect` until the container no longer exists, or panic
     /// after `max_attempts` tries (each separated by 1 second).
@@ -150,14 +151,13 @@ mod tests {
         panic!("Container {container_id} still exists after {max_attempts} attempts");
     }
 
-    /// Extract the container ID printed by the subprocess using the
-    /// `CONTAINER_ID=<id>` delimiter, so we don't accidentally match
-    /// other hex in the test harness output.
-    fn extract_container_id(s: &str) -> Option<String> {
+    /// Extract a value printed by the subprocess using a dedicated prefix,
+    /// so we don't accidentally match other test harness output.
+    fn extract_child_value(s: &str, prefix: &str) -> Option<String> {
         s.lines()
-            .find_map(|line| line.trim().strip_prefix(CONTAINER_ID_PREFIX))
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty())
+            .find_map(|line| line.trim().strip_prefix(prefix))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     }
 
     /// Basic integration test: start a testnet with docker postgres + http relay,
@@ -233,20 +233,41 @@ mod tests {
         wait_for_container_removal(&container_id, 15).await;
     }
 
-    /// Verify that the shared instance's container is cleaned up on normal process exit.
+    /// Verify that the shared container and its data volumes are removed on normal exit.
     ///
     /// This re-executes the test binary as a subprocess with a sentinel env var.
-    /// The subprocess starts a shared `DockerPostgres`, prints its container ID,
-    /// and exits normally. The parent then verifies the container was removed by
-    /// the `atexit` hook.
+    /// The subprocess starts a shared `DockerPostgres`, prints its container ID
+    /// and volume names, and exits normally. The parent verifies all were removed
+    /// by the `atexit` hook.
     #[tokio::test]
     async fn test_shared_container_cleaned_up_on_normal_exit() {
         const SENTINEL: &str = "__DOCKER_PG_PRINT_CONTAINER_ID";
 
-        // When invoked as the subprocess, start shared postgres, print ID, and exit.
+        // Capture volume names while the subprocess's container still exists.
         if std::env::var(SENTINEL).is_ok() {
             let pg = DockerPostgres::shared().await;
+            let output = std::process::Command::new("docker")
+                .args([
+                    "inspect",
+                    "--format",
+                    r#"{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}"#,
+                    pg.container_id(),
+                ])
+                .output()
+                .expect("docker inspect failed");
+            assert!(
+                output.status.success(),
+                "docker inspect failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             println!("{}{}", CONTAINER_ID_PREFIX, pg.container_id());
+            for name in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                println!("{}{}", VOLUME_NAME_PREFIX, name);
+            }
             return;
         }
 
@@ -267,11 +288,38 @@ mod tests {
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let container_id = extract_container_id(&stdout)
+        let container_id = extract_child_value(&stdout, CONTAINER_ID_PREFIX)
             .unwrap_or_else(|| panic!("Child did not print a container ID. stdout: {stdout}"));
+        let volume_names: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(VOLUME_NAME_PREFIX))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(
+            !volume_names.is_empty(),
+            "Child did not print any volume names. stdout: {stdout}"
+        );
 
         // Poll until Docker confirms the container is gone.
         wait_for_container_removal(&container_id, 15).await;
+
+        let output = std::process::Command::new("docker")
+            .args(["volume", "ls", "--quiet"])
+            .output()
+            .expect("docker volume ls failed");
+        assert!(
+            output.status.success(),
+            "docker volume ls failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let remaining_volumes = String::from_utf8_lossy(&output.stdout);
+        for volume_name in volume_names {
+            assert!(
+                !remaining_volumes.lines().any(|name| name == volume_name),
+                "Volume {volume_name} still exists after normal process exit"
+            );
+        }
     }
 
     /// Verify that `shared()` returns the same instance (same container) on repeated calls.

@@ -26,6 +26,10 @@ info:
 
     Private reads and all writes are capability-gated. Capabilities use
     `<scope>:<actions>`, for example `/priv/app/:rw`; `/:rw` covers both roots.
+    `r` authorizes storage reads and `w` authorizes writes. The `e` action
+    authorizes scoped content key delivery by the signer in approval V1; it
+    grants no HTTP storage access. For example `/priv/app/:rwe` includes keys,
+    while a V1 backup app can request `/:rw` without receiving any keys.
 
     ## Write Path Restriction
 
@@ -66,6 +70,15 @@ info:
     and the server keeps that lock alive until the write ends, so a lock cannot
     expire under a slow upload. Its expiry may therefore end up later than the
     last granted `Timeout`.
+
+    On an object store backend every publish and delete is conditional on the
+    exact file version it was prepared against, read by the server as it
+    finalizes the request, so a change the backend executes late can never
+    replace a newer write. A holder's `PUT` wins over such a late change,
+    unless the change lands after the server read the version: then the `PUT`
+    returns `409`, and the client reads the file again and retries. A `DELETE`
+    is done once the entry is removed; a blob the backend refuses to remove
+    stays until the next write or delete on the path.
   version: 0.9.0
   license:
     name: MIT
@@ -602,7 +615,7 @@ paths:
             capability for the path, the path is outside `pub/` and `priv/`,
             or the user account is disabled.
         '409':
-          description: File/folder path collision.
+          description: File/folder path collision, or the file changed since the write was prepared (see Locking); read it again and retry.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
         '423':
@@ -885,7 +898,7 @@ paths:
             Session user does not match target tenant, path is outside `/pub/` and
             `/priv/`, session lacks write capability for path, or user account is disabled.
         '409':
-          description: File/folder path collision
+          description: File/folder path collision, or the file changed since the write was prepared (see Locking)
         '412':
           description: The `If` header names a token that is not the live lock on this path
         '423':

@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Response, StatusCode};
 
 use crate::{
@@ -8,6 +8,41 @@ use crate::{
     client::core::DEFAULT_MAX_ERROR_BODY_BYTES,
     errors::{Error, RequestError, Result},
 };
+
+/// Failure to receive a complete response within the caller's byte limit.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResponseBodyError {
+    #[error("Response body exceeds the byte limit")]
+    TooLarge,
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+}
+
+/// Read a complete response within `max_bytes`, rejecting oversized declarations
+/// and enforcing the limit incrementally. Dropping the stream on failure cancels
+/// the unread browser `ReadableStream` as well as native response consumption.
+pub(crate) async fn read_response_body(
+    response: Response,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, ResponseBodyError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        drop(response.bytes_stream());
+        return Err(ResponseBodyError::TooLarge);
+    }
+
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.try_next().await? {
+        if chunk.len() > max_bytes - body.len() {
+            return Err(ResponseBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
 
 impl PubkyHttpClient {
     pub(crate) async fn check_http_status(

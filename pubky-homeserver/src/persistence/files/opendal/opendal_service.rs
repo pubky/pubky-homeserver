@@ -5,8 +5,8 @@ use crate::AppContext;
 use crate::{
     persistence::{
         files::{
-            events::EventsService, write_finalization_layer::WriteFinalizationLayer,
-            write_path_layer::WritePathLayer,
+            events::EventsService, staged_publish_layer::StagedPublishLayer,
+            write_finalization_layer::WriteFinalizationLayer, write_path_layer::WritePathLayer,
         },
         sql::SqlDb,
     },
@@ -21,6 +21,8 @@ use opendal::Buffer;
 use opendal::Operator;
 
 use super::super::{FileIoError, FileStream, WriteStreamError};
+#[cfg(feature = "storage-gcs")]
+use super::gcs_precondition;
 
 /// Build storage operators with one transactional finalization layer and an
 /// app-facing operator that additionally enforces write paths and collisions.
@@ -28,6 +30,13 @@ use super::super::{FileIoError, FileStream, WriteStreamError};
 /// Both operators share the same underlying storage backend, which is
 /// important for backends like `InMemory` where separate instances would
 /// have independent data.
+///
+/// A remote backend publishes and deletes under a generation condition
+/// through [`StagedPublishLayer`], so a request it executes late is refused
+/// rather than landing on a newer write. Every call to it is bounded by
+/// [`BACKEND_IO_TIMEOUT`], so a hung request cannot hold a finalization, and
+/// the user row with it, forever. A local backend's calls are not bounded:
+/// abandoning a filesystem rename would not stop it, only lose track of it.
 pub fn build_storage_operators(
     storage_config: &StorageToml,
     data_directory: &Path,
@@ -61,8 +70,7 @@ pub fn build_storage_operators(
                 "Store files in a Google Cloud Storage bucket: {}",
                 config.bucket_name
             );
-            let builder = config.to_builder()?;
-            opendal::Operator::new(builder)?.finish()
+            gcs_backend_operator(config)?
         }
         #[cfg(any(feature = "storage-memory", test))]
         StorageConfigToml::InMemory => {
@@ -93,6 +101,48 @@ pub fn build_storage_operators(
     Ok((operator, admin_operator))
 }
 
+/// Longest any one call to the remote backend may take before it is
+/// abandoned: a read or write of a chunk, a part upload, a list, a stat, the
+/// close that finishes an upload, the copy that publishes it, or a delete.
+/// Before this, a call to the bucket could hang for good.
+#[cfg(feature = "storage-gcs")]
+const BACKEND_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The Google Cloud Storage backend: its calls bounded, its publishes and
+/// deletes conditional on the object's generation, see [`StagedPublishLayer`].
+#[cfg(feature = "storage-gcs")]
+fn gcs_backend_operator(
+    config: &crate::data_directory::storage_config::GoogleBucketConfig,
+) -> Result<Operator, FileIoError> {
+    gcs_operator(config.to_builder()?)
+}
+
+/// The operator stack over a GCS service, see [`gcs_backend_operator`].
+#[cfg(feature = "storage-gcs")]
+pub(super) fn gcs_operator(builder: opendal::services::Gcs) -> Result<Operator, FileIoError> {
+    Ok(gcs_conditional_backend(builder)?.layer(StagedPublishLayer))
+}
+
+/// The GCS service under [`gcs_operator`]'s staging: its calls bounded, and
+/// its copies and deletes conditional on the generation the task runs under.
+#[cfg(feature = "storage-gcs")]
+pub(super) fn gcs_conditional_backend(
+    builder: opendal::services::Gcs,
+) -> Result<Operator, FileIoError> {
+    let http_client = opendal::raw::HttpClient::with(gcs_precondition::PreconditionFetcher::new(
+        reqwest::Client::new(),
+    ));
+    let operator = opendal::Operator::new(builder)?
+        .layer(opendal::layers::HttpClientLayer::new(http_client))
+        .finish()
+        .layer(
+            opendal::layers::TimeoutLayer::new()
+                .with_timeout(BACKEND_IO_TIMEOUT)
+                .with_io_timeout(BACKEND_IO_TIMEOUT),
+        );
+    Ok(operator)
+}
+
 /// Build the storage operators from an `AppContext` (test-only convenience).
 #[cfg(test)]
 pub fn build_storage_operators_from_context(
@@ -106,13 +156,6 @@ pub fn build_storage_operators_from_context(
         context.user_service.clone(),
     )
 }
-
-/// The chunk size to use for reading and writing files.
-/// This is used to avoid reading and writing the entire file at once.
-/// Important: Not all opendal providers will respect this chunk size.
-/// For example, Google Cloud Buckets will deliver chunks anything from
-/// 200B to 16KB but max CHUNK_SIZE.
-const CHUNK_SIZE: usize = 16 * 1024;
 
 /// The service to write and read files to and from the configured opendal storage.
 #[derive(Debug, Clone)]
@@ -188,20 +231,28 @@ impl OpendalService {
 
     /// The size of the stored blob and a stream of its bytes.
     ///
-    /// One `stat` sizes both: opendal would otherwise `stat` on its own to
-    /// bound an open-ended chunked read, and a second observation could see a
-    /// blob that an overwrite published in between.
+    /// The stream is one read of the backend, streamed as it arrives. Setting
+    /// a chunk size would split it into one read per chunk, issued one after
+    /// another, and on an object store each of those is a round trip.
+    ///
+    /// The length comes from a `stat`, and on a backend that returns an ETag
+    /// the read is conditional on it, so the length and the bytes are of the
+    /// same version: if an overwrite landed in between, the read is refused.
+    /// Once open, the read keeps delivering the version it opened, even if an
+    /// overwrite lands mid-stream: an object store serves a GET from one
+    /// generation, and the filesystem backend's open file outlives the rename
+    /// that an overwrite publishes with.
     pub async fn get_sized_stream(
         &self,
         path: &EntryPath,
     ) -> Result<(u64, FileStream), FileIoError> {
-        let length = self.blob_length(path).await?;
-        let reader = self
-            .operator
-            .reader_with(path.as_str())
-            .chunk(CHUNK_SIZE)
-            .await?;
-        let stream = reader.into_bytes_stream(0..length).await?;
+        let metadata = self.operator.stat(path.as_str()).await?;
+        let length = metadata.content_length();
+        let mut reader = self.operator.reader_with(path.as_str());
+        if let Some(etag) = metadata.etag() {
+            reader = reader.if_match(etag);
+        }
+        let stream = reader.await?.into_bytes_stream(0..length).await?;
         Ok((length, Box::new(stream)))
     }
 
@@ -236,7 +287,6 @@ impl OpendalService {
     }
 
     /// Get the content of a file as a stream of bytes.
-    /// The stream is chunked by the CHUNK_SIZE.
     pub async fn get_stream(&self, path: &EntryPath) -> Result<FileStream, FileIoError> {
         Ok(self.get_sized_stream(path).await?.1)
     }
@@ -275,8 +325,91 @@ impl OpendalService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::files::opendal::opendal_test_operators::OpendalTestOperators;
+    use crate::persistence::files::opendal::opendal_test_operators::{
+        get_fs_operator, get_memory_operator, CountingReads, OpendalTestOperators, Versioned,
+    };
     use crate::shared::webdav::StoragePath;
+
+    /// A size for test data that spans several stream items.
+    const TEST_CHUNK_SIZE: usize = 16 * 1024;
+
+    /// A read whose blob is replaced after it was sized is refused rather
+    /// than served from the new version, whose length may differ.
+    #[tokio::test]
+    async fn read_of_a_blob_replaced_after_its_stat_is_refused() {
+        let (fs, _tmp_dir) = get_fs_operator();
+        let versioned = Versioned::new("7");
+        let service = OpendalService::new_from_operator(fs.layer(versioned.clone()));
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/a.bin").unwrap(),
+        );
+        service
+            .write(&path, vec![1u8; 3 * TEST_CHUNK_SIZE])
+            .await
+            .unwrap();
+
+        let (length, mut stream) = service.get_sized_stream(&path).await.unwrap();
+        assert_eq!(length as usize, 3 * TEST_CHUNK_SIZE);
+
+        // The blob is replaced before the read is opened.
+        versioned.set_generation("8");
+        stream
+            .next()
+            .await
+            .unwrap()
+            .expect_err("a read of another version of the blob is refused");
+    }
+
+    /// An overwrite landing mid-download does not mix the two versions: the
+    /// download completes the version it opened.
+    #[tokio::test]
+    async fn an_overwrite_mid_download_does_not_mix_versions() {
+        let (fs, _tmp_dir) = get_fs_operator();
+        let service = OpendalService::new_from_operator(fs);
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/a.bin").unwrap(),
+        );
+        // Larger than the filesystem backend's 2 MiB read buffer, so the
+        // download is more than one stream item.
+        let length = 3 * 1024 * 1024;
+        service.write(&path, vec![1u8; length]).await.unwrap();
+
+        let (_, mut stream) = service.get_sized_stream(&path).await.unwrap();
+        let mut delivered = stream.next().await.unwrap().unwrap().to_vec();
+        assert!(delivered.len() < length, "the download is still going");
+
+        service.write(&path, vec![2u8; length]).await.unwrap();
+        while let Some(chunk) = stream.next().await {
+            delivered.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(delivered, vec![1u8; length]);
+        assert_eq!(
+            service.get(&path).await.unwrap().to_vec(),
+            vec![2u8; length]
+        );
+    }
+
+    /// A download is one read of the backend, whatever the blob's size. On
+    /// an object store every read is a round trip, so reading a blob in small
+    /// pieces one after another made a download as slow as its piece count.
+    #[tokio::test]
+    async fn a_download_is_one_backend_read() {
+        let counting = CountingReads::default();
+        let service =
+            OpendalService::new_from_operator(get_memory_operator().layer(counting.clone()));
+        let path = EntryPath::new(
+            pubky_common::crypto::Keypair::random().public_key(),
+            StoragePath::new("/pub/large.bin").unwrap(),
+        );
+        let test_data = vec![9u8; 10 * TEST_CHUNK_SIZE];
+        service.write(&path, test_data.clone()).await.unwrap();
+
+        let reads_before = counting.reads();
+        assert_eq!(service.get(&path).await.unwrap().to_vec(), test_data);
+        assert_eq!(counting.reads() - reads_before, 1);
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]
@@ -343,10 +476,11 @@ mod tests {
         );
     }
 
-    /// Test the chunked reading of a file.
-    #[tokio::test]
+    /// Test the streamed reading of a file.
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
-    async fn test_get_content_chunked() {
+    async fn test_get_content_streamed() {
         let operators = OpendalTestOperators::new();
         for (_scheme, operator) in operators.operators() {
             let file_service = OpendalService::new_from_operator(operator);
@@ -354,42 +488,14 @@ mod tests {
             let pubkey = pubky_common::crypto::Keypair::random().public_key();
             let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
 
-            // Write a 10KB file filled with test data
-            let should_chunk_count = 5;
-            let test_data = vec![42u8; should_chunk_count * CHUNK_SIZE];
+            let test_data = vec![42u8; 5 * TEST_CHUNK_SIZE];
             file_service.write(&path, test_data.clone()).await.unwrap();
 
-            // Read the content back using the chunked stream
             let mut stream = file_service.get_stream(&path).await.unwrap();
-
             let mut collected_data = Vec::new();
-            let mut count = 0;
             while let Some(chunk_result) = stream.next().await {
-                count += 1;
-                let chunk = chunk_result.unwrap();
-                collected_data.extend_from_slice(&chunk);
+                collected_data.extend_from_slice(&chunk_result.unwrap());
             }
-
-            // Verify the data matches what we wrote
-            assert_eq!(
-                collected_data.len(),
-                test_data.len(),
-                "Total size should be 10KB"
-            );
-            assert_eq!(
-                collected_data, test_data,
-                "Content should match original data"
-            );
-
-            // Verify that we received multiple chunks according to the chunk count
-            assert!(count >= should_chunk_count, "Should have received x chunks");
-
-            // Verify that the chunks are of the correct size
-            assert_eq!(
-                collected_data.len(),
-                should_chunk_count * CHUNK_SIZE,
-                "Total size should be 10KB"
-            );
             assert_eq!(
                 collected_data, test_data,
                 "Content should match original data"
@@ -408,7 +514,8 @@ mod tests {
 
     /// The length and the stream come from the same `stat`, and a missing
     /// blob fails before a reader is opened.
-    #[tokio::test]
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
     async fn test_get_sized_stream() {
         let operators = OpendalTestOperators::new();
@@ -422,7 +529,7 @@ mod tests {
                 Err(FileIoError::NotFound)
             ));
 
-            let test_data = vec![7u8; CHUNK_SIZE + 1];
+            let test_data = vec![7u8; TEST_CHUNK_SIZE + 1];
             file_service.write(&path, test_data.clone()).await.unwrap();
 
             let (length, mut stream) = file_service.get_sized_stream(&path).await.unwrap();
@@ -437,7 +544,98 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
+    /// `GCS_BUCKET` are set: a path with characters that URLs percent-encode
+    /// is stored under its own name, below and above the 5 MiB multipart
+    /// threshold, so it can be read back.
+    ///
+    /// opendal 0.57 percent-encodes the name of an upload twice, and an
+    /// object uploaded straight to such a path lands under the path encoded
+    /// once, where nothing finds it, see
+    /// [`gcs_name_repair`](super::super::gcs_name_repair). Uploads go to a
+    /// staging name without such characters and are published by a copy,
+    /// which encodes the name once.
+    // Multi-threaded for the cleaner, which deletes the test root on drop.
+    #[cfg(feature = "storage-gcs")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gcs_stores_paths_with_special_characters_under_their_own_name() {
+        use async_dropper::AsyncDropper;
+
+        use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
+        use crate::persistence::files::staged_publish_layer::{
+            under_expected_generation, ExpectedGeneration, STAGING_PREFIX,
+        };
+
+        let (Ok(bucket), Ok(credentials)) = (
+            std::env::var("GCS_BUCKET"),
+            std::env::var("GOOGLE_APPLICATION_CREDENTIALS"),
+        ) else {
+            eprintln!("GCS_BUCKET or GOOGLE_APPLICATION_CREDENTIALS not set; skipping");
+            return;
+        };
+        let root = format!("test_{}", uuid::Uuid::new_v4());
+        let builder = || {
+            opendal::services::Gcs::default()
+                .bucket(&bucket)
+                .credential_path(&credentials)
+                .root(&root)
+        };
+        let service = OpendalService::new_from_operator(gcs_operator(builder()).unwrap());
+        // The bare backend, to see the names the objects are stored under.
+        let backend = opendal::Operator::new(builder())
+            .unwrap()
+            .layer(opendal::layers::HttpClientLayer::new(
+                opendal::raw::HttpClient::with(reqwest::Client::new()),
+            ))
+            .finish();
+        // Removes the test root from the bucket on drop.
+        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        let small = 1024;
+        let large = 6 * 1024 * 1024;
+        let files = [
+            ("/pub/plain.txt", small),
+            ("/pub/Teest%20share/.keep", small),
+            ("/pub/a b+c#d%e.txt", small),
+            ("/pub/\u{fc}\u{b7}~!'()*.txt", small),
+            ("/pub/big%20file \u{fc}.bin", large),
+        ]
+        .map(|(path, size)| {
+            let path = EntryPath::new(pubkey.clone(), StoragePath::new(path).unwrap());
+            (path, size)
+        });
+
+        for (path, size) in &files {
+            // What the finalization does for a new file.
+            let write = service.operator.write(path.as_str(), vec![7u8; *size]);
+            under_expected_generation(ExpectedGeneration::Absent, write)
+                .await
+                .unwrap();
+            assert_eq!(service.blob_length(path).await.unwrap(), *size as u64);
+            assert_eq!(service.get(path).await.unwrap().len(), *size, "{path}");
+        }
+
+        let mut stored: Vec<String> = backend
+            .list_with("")
+            .recursive(true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.metadata().is_file())
+            .map(|entry| entry.path().to_string())
+            .filter(|name| !name.starts_with(STAGING_PREFIX))
+            .collect();
+        stored.sort();
+        let mut expected: Vec<String> = files
+            .iter()
+            .map(|(path, _)| path.as_str().to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(stored, expected);
+    }
+
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
     #[pubky_test_utils::test]
     async fn test_write_content_stream() {
         let operators = OpendalTestOperators::new();
@@ -454,7 +652,7 @@ mod tests {
 
             // Create chunks with different patterns to verify order
             for i in 0..chunk_count {
-                let chunk_data = vec![i as u8; CHUNK_SIZE];
+                let chunk_data = vec![i as u8; TEST_CHUNK_SIZE];
                 test_data.extend_from_slice(&chunk_data);
                 chunks.push(Ok(Bytes::from(chunk_data)));
             }
