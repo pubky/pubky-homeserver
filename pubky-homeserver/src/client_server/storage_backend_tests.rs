@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::http::{header, StatusCode};
-use axum_test::TestServer;
+use axum_test::{TestRequest, TestServer};
 use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
 
 use crate::{
@@ -38,7 +38,7 @@ async fn gcs_serves_files_through_the_api() {
     let bucket = TestBucket::from_env();
     let user = Keypair::random();
     // The homeserver stores in the bucket's root, under its users' keys.
-    let _cleaner = bucket.cleaner_of_user(&user.public_key());
+    let _cleaner = bucket.user_cleaner(&user.public_key());
     let context = AppContext::test_with_config(|c| {
         c.storage.backend = StorageConfigToml::GoogleBucket(bucket.config());
     })
@@ -48,67 +48,93 @@ async fn gcs_serves_files_through_the_api() {
 }
 
 /// Writes a small file and a multipart one, the second under a name that
-/// URLs percent-encode, reads both back, overwrites one, and deletes both.
+/// URLs percent-encode, reads both back, overwrites the small one, and
+/// deletes both.
 async fn serves_files_through_the_api(context: Arc<AppContext>, user: &Keypair) {
     let server = TestServer::new(ClientServer::create_router(context).unwrap());
-    let cookie = signup_cookie(&server, user).await;
-    let public_key = user.public_key().z32();
-    let files = [
-        ("/pub/smoke/small.txt", vec![1u8; 1024]),
-        ("/pub/smoke/a%20b%20%C3%BC.bin", vec![2u8; MULTIPART_SIZE]),
-    ];
-    let url = |path: &str| format!("/storage/{public_key}{path}");
+    let user = SignedUpUser::sign_up(&server, user).await;
+    let small_path = "/pub/smoke/small.txt";
+    let small = vec![1u8; 1024];
+    let multipart_path = "/pub/smoke/a%20b%20%C3%BC.bin";
+    let multipart = vec![2u8; MULTIPART_SIZE];
 
-    for (path, body) in &files {
-        server
-            .put(&url(path))
-            .add_header("pubky-host", public_key.clone())
-            .add_header(header::COOKIE, cookie.clone())
-            .bytes(body.clone().into())
-            .expect_success()
-            .await;
-        let read = server.get(&url(path)).expect_success().await;
-        assert_eq!(read.as_bytes().as_ref(), body.as_slice(), "{path}");
-    }
+    user.put(small_path, &small).await;
+    user.put(multipart_path, &multipart).await;
+    assert_eq!(user.get(small_path).await, small);
+    assert_eq!(user.get(multipart_path).await, multipart);
 
-    let (path, _) = &files[0];
     let overwrite = vec![3u8; 10];
-    server
-        .put(&url(path))
-        .add_header("pubky-host", public_key.clone())
-        .add_header(header::COOKIE, cookie.clone())
-        .bytes(overwrite.clone().into())
-        .expect_success()
-        .await;
-    let read = server.get(&url(path)).expect_success().await;
-    assert_eq!(read.as_bytes().as_ref(), overwrite.as_slice());
+    user.put(small_path, &overwrite).await;
+    assert_eq!(user.get(small_path).await, overwrite);
 
-    for (path, _) in &files {
-        server
-            .delete(&url(path))
-            .add_header("pubky-host", public_key.clone())
-            .add_header(header::COOKIE, cookie.clone())
-            .expect_success()
-            .await;
-        server
-            .get(&url(path))
-            .await
-            .assert_status(StatusCode::NOT_FOUND);
+    for path in [small_path, multipart_path] {
+        user.delete(path).await;
+        user.get_missing(path).await;
     }
 }
 
-async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
-    let auth_token = AuthToken::sign(keypair, vec![Capability::root()]);
-    let response = server
-        .post("/signup")
-        .add_header("host", keypair.public_key().z32())
-        .bytes(auth_token.serialize().into())
-        .expect_success()
-        .await;
-    response
-        .headers()
-        .get(header::SET_COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .expect("signup returns a session cookie")
-        .to_string()
+/// A user signed up on the test server, sending its requests with its
+/// session cookie.
+struct SignedUpUser<'a> {
+    server: &'a TestServer,
+    public_key: String,
+    cookie: String,
+}
+
+impl<'a> SignedUpUser<'a> {
+    async fn sign_up(server: &'a TestServer, keypair: &Keypair) -> Self {
+        let auth_token = AuthToken::sign(keypair, vec![Capability::root()]);
+        let response = server
+            .post("/signup")
+            .add_header("host", keypair.public_key().z32())
+            .bytes(auth_token.serialize().into())
+            .expect_success()
+            .await;
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("signup returns a session cookie")
+            .to_string();
+        Self {
+            server,
+            public_key: keypair.public_key().z32(),
+            cookie,
+        }
+    }
+
+    async fn put(&self, path: &str, body: &[u8]) {
+        self.authorized(self.server.put(&self.url(path)))
+            .bytes(body.to_vec().into())
+            .expect_success()
+            .await;
+    }
+
+    async fn get(&self, path: &str) -> Vec<u8> {
+        let response = self.server.get(&self.url(path)).expect_success().await;
+        response.as_bytes().to_vec()
+    }
+
+    async fn get_missing(&self, path: &str) {
+        self.server
+            .get(&self.url(path))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    async fn delete(&self, path: &str) {
+        self.authorized(self.server.delete(&self.url(path)))
+            .expect_success()
+            .await;
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("/storage/{}{path}", self.public_key)
+    }
+
+    fn authorized(&self, request: TestRequest) -> TestRequest {
+        request
+            .add_header("pubky-host", self.public_key.clone())
+            .add_header(header::COOKIE, self.cookie.clone())
+    }
 }

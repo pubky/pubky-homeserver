@@ -341,8 +341,6 @@ mod tests {
     /// A size for test data that spans several stream items.
     const TEST_CHUNK_SIZE: usize = 16 * 1024;
 
-    storage_contract_tests!(get_content_streamed, get_sized_stream, write_content_stream);
-
     /// A read whose blob is replaced after it was sized is refused rather
     /// than served from the new version, whose length may differ.
     #[tokio::test]
@@ -486,6 +484,9 @@ mod tests {
         );
     }
 
+    // The cases below run on every backend, see `storage_contract_tests`.
+    storage_contract_tests!(get_content_streamed, get_sized_stream, write_content_stream);
+
     /// Test the streamed reading of a file.
     async fn get_content_streamed(operator: Operator) {
         let file_service = OpendalService::new_from_operator(operator);
@@ -542,6 +543,55 @@ mod tests {
         file_service.delete(&path).await.unwrap();
     }
 
+    /// A stream of several chunks is stored in order.
+    async fn write_content_stream(operator: Operator) {
+        let file_service = OpendalService::new_from_operator(operator);
+
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
+
+        // Create test data - multiple chunks to test streaming
+        let chunk_count = 3;
+        let mut test_data = Vec::new();
+        let mut chunks = Vec::new();
+
+        // Create chunks with different patterns to verify order
+        for i in 0..chunk_count {
+            let chunk_data = vec![i as u8; TEST_CHUNK_SIZE];
+            test_data.extend_from_slice(&chunk_data);
+            chunks.push(Ok(Bytes::from(chunk_data)));
+        }
+
+        // Create a stream from the chunks
+        let stream = futures_util::stream::iter(chunks);
+
+        // Write the stream to storage
+        file_service.write_stream(&path, stream).await.unwrap();
+
+        // Read the content back and verify it matches
+        let read_content = file_service.get(&path).await.unwrap();
+
+        assert_eq!(
+            read_content.len(),
+            test_data.len(),
+            "Content length should match"
+        );
+        assert_eq!(
+            read_content.to_vec(),
+            test_data,
+            "Content should match original data"
+        );
+
+        file_service
+            .delete(&path)
+            .await
+            .expect("Should delete file");
+        assert!(
+            !file_service.exists(&path).await.unwrap(),
+            "File should not exist after deletion"
+        );
+    }
+
     /// Against the real bucket, see
     /// [`gcs_test_bucket`](super::super::gcs_test_bucket): a path with
     /// characters that URLs percent-encode is stored under its own name,
@@ -563,11 +613,13 @@ mod tests {
         };
 
         let bucket = TestBucket::from_env();
-        let _cleaner = bucket.cleaner();
-        let service = OpendalService::new_from_operator(gcs_operator(bucket.builder()).unwrap());
+        let _cleaner = bucket.test_root_cleaner();
+        let service =
+            OpendalService::new_from_operator(gcs_operator(bucket.test_root_builder()).unwrap());
         // The bare backend, to upload straight to a path and to see the names
         // the objects are stored under.
-        let backend = with_own_http_client(opendal::Operator::new(bucket.builder()).unwrap());
+        let backend =
+            with_own_http_client(opendal::Operator::new(bucket.test_root_builder()).unwrap());
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         let small = 1024;
         let large = 6 * 1024 * 1024;
@@ -651,11 +703,11 @@ mod tests {
         };
 
         let bucket = TestBucket::from_env();
-        let _cleaner = bucket.cleaner();
+        let _cleaner = bucket.test_root_cleaner();
         // The production stack, and the backend under its staged publish,
         // through which the late requests below are sent.
-        let operator = gcs_operator(bucket.builder()).unwrap();
-        let backend = gcs_unstaged_backend(bucket.builder()).unwrap();
+        let operator = gcs_operator(bucket.test_root_builder()).unwrap();
+        let backend = gcs_unstaged_backend(bucket.test_root_builder()).unwrap();
         let entry_path = EntryPath::new(
             pubky_common::crypto::Keypair::random().public_key(),
             StoragePath::new("/pub/a.bin").unwrap(),
@@ -774,54 +826,5 @@ mod tests {
             .unwrap();
         assert!(!operator.exists(path).await.unwrap());
         assert_eq!(staging_objects(&operator).await, 0);
-    }
-
-    /// A stream of several chunks is stored in order.
-    async fn write_content_stream(operator: Operator) {
-        let file_service = OpendalService::new_from_operator(operator);
-
-        let pubkey = pubky_common::crypto::Keypair::random().public_key();
-        let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
-
-        // Create test data - multiple chunks to test streaming
-        let chunk_count = 3;
-        let mut test_data = Vec::new();
-        let mut chunks = Vec::new();
-
-        // Create chunks with different patterns to verify order
-        for i in 0..chunk_count {
-            let chunk_data = vec![i as u8; TEST_CHUNK_SIZE];
-            test_data.extend_from_slice(&chunk_data);
-            chunks.push(Ok(Bytes::from(chunk_data)));
-        }
-
-        // Create a stream from the chunks
-        let stream = futures_util::stream::iter(chunks);
-
-        // Write the stream to storage
-        file_service.write_stream(&path, stream).await.unwrap();
-
-        // Read the content back and verify it matches
-        let read_content = file_service.get(&path).await.unwrap();
-
-        assert_eq!(
-            read_content.len(),
-            test_data.len(),
-            "Content length should match"
-        );
-        assert_eq!(
-            read_content.to_vec(),
-            test_data,
-            "Content should match original data"
-        );
-
-        file_service
-            .delete(&path)
-            .await
-            .expect("Should delete file");
-        assert!(
-            !file_service.exists(&path).await.unwrap(),
-            "File should not exist after deletion"
-        );
     }
 }

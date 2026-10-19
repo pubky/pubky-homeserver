@@ -5,7 +5,6 @@
 //! layers that make a local backend behave like, or report on, an object
 //! store.
 
-use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -75,19 +74,31 @@ macro_rules! storage_contract_tests {
 }
 pub(crate) use storage_contract_tests;
 
-/// A backend the storage contract runs on. Holds what the backend stores in
-/// until the test ends, then removes it.
+/// A backend the storage contract runs on. Dropping it at the end of the
+/// test removes what the test stored.
 pub(crate) struct TestStorage {
     pub(crate) operator: Operator,
-    /// Kept for its drop: the temporary directory, or the bucket cleaner.
-    _cleanup: Box<dyn Any>,
+    _cleanup: Cleanup,
+}
+
+/// What a backend removes once the test is done, by being dropped.
+enum Cleanup {
+    /// The memory backend goes with its operator.
+    Nothing,
+    FileSystem {
+        _directory: TempDir,
+    },
+    #[cfg(feature = "storage-gcs")]
+    Bucket {
+        _test_root: async_dropper::AsyncDropper<super::gcs_test_bucket::BucketCleaner>,
+    },
 }
 
 impl TestStorage {
     pub(crate) fn memory() -> Self {
         Self {
             operator: get_memory_operator(),
-            _cleanup: Box::new(()),
+            _cleanup: Cleanup::Nothing,
         }
     }
 
@@ -97,7 +108,9 @@ impl TestStorage {
         let (operator, directory) = get_fs_operator();
         Self {
             operator,
-            _cleanup: Box::new(directory),
+            _cleanup: Cleanup::FileSystem {
+                _directory: directory,
+            },
         }
     }
 
@@ -114,11 +127,13 @@ impl TestStorage {
     #[cfg(feature = "storage-gcs")]
     pub(crate) fn gcs() -> Self {
         let bucket = super::gcs_test_bucket::TestBucket::from_env();
-        let operator = super::opendal_service::gcs_unstaged_backend(bucket.builder())
+        let operator = super::opendal_service::gcs_unstaged_backend(bucket.test_root_builder())
             .expect("the bucket builder is valid");
         Self {
             operator,
-            _cleanup: Box::new(bucket.cleaner()),
+            _cleanup: Cleanup::Bucket {
+                _test_root: bucket.test_root_cleaner(),
+            },
         }
     }
 }

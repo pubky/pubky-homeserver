@@ -20,7 +20,7 @@ use opendal::Operator;
 use pubky_common::crypto::PublicKey;
 use uuid::Uuid;
 
-use super::opendal_service::with_own_http_client;
+use super::opendal_service::gcs_unstaged_backend;
 use crate::data_directory::storage_config::{GoogleBucketConfig, GoogleServiceAccountKeyConfig};
 
 const BUCKET_VAR: &str = "GCS_BUCKET";
@@ -30,7 +30,7 @@ const CREDENTIALS_VAR: &str = "GOOGLE_APPLICATION_CREDENTIALS";
 pub(crate) struct TestBucket {
     bucket: String,
     credentials: String,
-    root: String,
+    test_root: String,
 }
 
 impl TestBucket {
@@ -48,18 +48,18 @@ impl TestBucket {
         Self {
             bucket: var(BUCKET_VAR),
             credentials: var(CREDENTIALS_VAR),
-            root: test_root(),
+            test_root: new_test_root(),
         }
     }
 
     /// A builder for the bucket under the test root.
-    pub(crate) fn builder(&self) -> opendal::services::Gcs {
-        self.bucket_builder().root(&self.root)
+    pub(crate) fn test_root_builder(&self) -> opendal::services::Gcs {
+        self.bucket_root_builder().root(&self.test_root)
     }
 
     /// The homeserver's config for the bucket. It has no root, so a
     /// homeserver stores its entries in the bucket's root, under the keys of
-    /// its users: delete those with [`Self::cleaner_of_user`].
+    /// its users: delete those with [`Self::user_cleaner`].
     pub(crate) fn config(&self) -> GoogleBucketConfig {
         GoogleBucketConfig {
             bucket_name: self.bucket.clone(),
@@ -68,26 +68,28 @@ impl TestBucket {
     }
 
     /// Deletes the test root from the bucket when dropped.
-    pub(crate) fn cleaner(&self) -> AsyncDropper<BucketCleaner> {
-        self.cleaner_of(&self.root)
+    pub(crate) fn test_root_cleaner(&self) -> AsyncDropper<BucketCleaner> {
+        self.prefix_cleaner(&self.test_root)
     }
 
-    /// Deletes everything stored for `user` when dropped.
-    pub(crate) fn cleaner_of_user(&self, user: &PublicKey) -> AsyncDropper<BucketCleaner> {
-        self.cleaner_of(&user.z32())
+    /// Deletes everything a homeserver stored for `user` when dropped.
+    pub(crate) fn user_cleaner(&self, user: &PublicKey) -> AsyncDropper<BucketCleaner> {
+        self.prefix_cleaner(&user.z32())
     }
 
-    fn cleaner_of(&self, prefix: &str) -> AsyncDropper<BucketCleaner> {
-        let bucket = with_own_http_client(
-            opendal::Operator::new(self.bucket_builder()).expect("the bucket builder is valid"),
-        );
+    fn prefix_cleaner(&self, prefix: &str) -> AsyncDropper<BucketCleaner> {
         AsyncDropper::new(BucketCleaner {
-            bucket: Some(bucket),
+            bucket: Some(self.bucket_root()),
             prefix: format!("{prefix}/"),
         })
     }
 
-    fn bucket_builder(&self) -> opendal::services::Gcs {
+    /// The bucket without a root.
+    fn bucket_root(&self) -> Operator {
+        gcs_unstaged_backend(self.bucket_root_builder()).expect("the bucket builder is valid")
+    }
+
+    fn bucket_root_builder(&self) -> opendal::services::Gcs {
         opendal::services::Gcs::default()
             .bucket(&self.bucket)
             .credential_path(&self.credentials)
@@ -97,11 +99,11 @@ impl TestBucket {
 /// `ci/<run id>/<uuid>` in a GitHub Actions run, so a leftover can be traced
 /// to its run, and `test_<uuid>` otherwise. A lifecycle rule on the bucket
 /// deletes what a killed test leaves.
-fn test_root() -> String {
-    let test = Uuid::new_v4();
+fn new_test_root() -> String {
+    let test_id = Uuid::new_v4();
     match std::env::var("GITHUB_RUN_ID") {
-        Ok(run) => format!("ci/{run}/{test}"),
-        Err(_) => format!("test_{test}"),
+        Ok(run_id) => format!("ci/{run_id}/{test_id}"),
+        Err(_) => format!("test_{test_id}"),
     }
 }
 
@@ -140,15 +142,14 @@ mod tests {
     async fn gcs_cleaner_removes_the_test_root() {
         let bucket = TestBucket::from_env();
         {
-            let _cleaner = bucket.cleaner();
-            let operator = with_own_http_client(opendal::Operator::new(bucket.builder()).unwrap());
-            operator.write("a/test.txt", "test").await.unwrap();
+            let _cleaner = bucket.test_root_cleaner();
+            let test_root = gcs_unstaged_backend(bucket.test_root_builder()).unwrap();
+            test_root.write("a/test.txt", "test").await.unwrap();
         }
 
-        let unrooted =
-            with_own_http_client(opendal::Operator::new(bucket.bucket_builder()).unwrap());
-        let left = unrooted
-            .list_with(&format!("{}/", bucket.root))
+        let left = bucket
+            .bucket_root()
+            .list_with(&format!("{}/", bucket.test_root))
             .recursive(true)
             .await
             .unwrap();

@@ -1401,12 +1401,12 @@ mod tests {
         use crate::persistence::files::opendal::gcs_test_bucket::TestBucket;
 
         let bucket = TestBucket::from_env();
-        let _cleaner = bucket.cleaner();
-        let operator = gcs_operator(bucket.builder()).unwrap();
+        let _cleaner = bucket.test_root_cleaner();
+        let operator = gcs_operator(bucket.test_root_builder()).unwrap();
         // The backend without the staged publish, to store objects under
         // the names an affected version gave them. Those names are pinned
         // against a real bucket by `misnamed_object_name_is_the_name_gcs_stored`.
-        let backend = gcs_unstaged_backend(bucket.builder()).unwrap();
+        let backend = gcs_unstaged_backend(bucket.test_root_builder()).unwrap();
         let db = SqlDb::test().await;
         let user = UserService::new(db.clone())
             .create(&Keypair::random().public_key())
@@ -1458,7 +1458,7 @@ mod tests {
             .unwrap();
 
         let repair = GcsNameRepair {
-            operator: gcs_unstaged_backend(bucket.builder()).unwrap(),
+            operator: gcs_unstaged_backend(bucket.test_root_builder()).unwrap(),
             sql_db: db.clone(),
         };
         assert_eq!(

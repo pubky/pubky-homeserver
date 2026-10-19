@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  credentials:
+  gcs-credentials:
     runs-on: ubuntu-latest
     outputs:
       available: ${{ steps.check.outputs.available }}
@@ -36,8 +36,8 @@ jobs:
           fi
 
   test-gcs:
-    needs: credentials
-    if: needs.credentials.outputs.available == 'true'
+    needs: gcs-credentials
+    if: needs.gcs-credentials.outputs.available == 'true'
     services:
       postgres:
         image: postgres:18-alpine
