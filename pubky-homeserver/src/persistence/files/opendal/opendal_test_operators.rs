@@ -1,13 +1,14 @@
-//! Module for testing the opendal operators.
-//! Allows to easily test all our storage options.
-//! This is normally not necessary but helps to find subtle differences
-//! in the opendal operators.
+//! Operators and test backends for the storage tests.
+//!
+//! [`storage_contract_tests`] runs one case as a test of its own on each
+//! backend the homeserver supports. [`Versioned`] and [`CountingReads`] are
+//! layers that make a local backend behave like, or report on, an object
+//! store.
 
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use async_dropper::{AsyncDrop, AsyncDropper};
-use async_trait::async_trait;
 use opendal::raw::oio::{self, Copy as _, Delete as _};
 use opendal::raw::{
     Layer, OpCompose, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
@@ -18,139 +19,106 @@ use opendal::{
 };
 use tempfile::TempDir;
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
-use super::opendal_service::with_own_http_client;
 use crate::persistence::files::staged_publish_layer::{ExpectedGeneration, STAGING_PREFIX};
 
-/// A provider of operators for testing.
+/// Runs each storage contract case as a test of its own on each backend:
+/// `memory::<case>`, `file_system::<case>` and `gcs::<case>`. A case is an
+/// `async fn(Operator)` in the calling module.
 ///
-/// Provides:
-/// - A filesystem operator
-/// - A memory operator
-/// - A GCS operator (if the environment variables are set)
+/// The `gcs` tests run against the real bucket and are ignored unless asked
+/// for, see [`gcs_test_bucket`](super::gcs_test_bucket).
 ///
-/// The GCS operator is only available if the required environment variables are set.
-/// GCS environment variables:
-/// - GOOGLE_APPLICATION_CREDENTIALS: The path to the GCS credentials file.
-/// - GCS_BUCKET: The name of the GCS bucket.
-///
-/// Example:
 /// ```ignore
-/// // Multi-threaded for the GCS cleaner, which blocks on its async drop.
-/// #[tokio::test(flavor = "multi_thread")]
-/// async fn test_ensure_valid_path() {
-///     // Iterate over all operators.
-///     for (_scheme, operator) in OpendalTestOperators::new().operators() {
-///         // Add a layer to the operator if needed.
-///         let operator = operator.layer(MyStorageLayer::new());
-///         // Perform tests
-///         operator.write("1234567890/test.txt", vec![0; 10]).await.expect_err("Should fail because the path doesn't start with a pubkey");
-///         // No need to clean up the operator as it is automatically cleaned up when OpendalTestOperators is dropped.
-///     };
-/// }
+/// async fn reads_back_what_was_written(operator: Operator) { /* ... */ }
+///
+/// storage_contract_tests!(reads_back_what_was_written);
 /// ```
-pub struct OpendalTestOperators {
-    pub fs_operator: Operator,
-    /// The temporary directory for the fs operator.
-    #[allow(dead_code)]
-    fs_tmp_dir: Arc<TempDir>,
-    pub gcs_operator: Option<Operator>,
-    pub memory_operator: Operator,
-    #[allow(dead_code)]
-    /// Cleaner will remove the gcp bucket when dropped
-    gcp_cleaner: Option<Arc<AsyncDropper<OpendalGcpCleaner>>>,
+macro_rules! storage_contract_tests {
+    ($($case:ident),+ $(,)?) => {
+        mod memory {
+            use $crate::persistence::files::opendal::opendal_test_operators::TestStorage;
+            $(
+                #[tokio::test]
+                async fn $case() {
+                    let storage = TestStorage::memory();
+                    super::$case(storage.operator.clone()).await;
+                }
+            )+
+        }
+
+        mod file_system {
+            use $crate::persistence::files::opendal::opendal_test_operators::TestStorage;
+            $(
+                #[tokio::test]
+                async fn $case() {
+                    let storage = TestStorage::file_system();
+                    super::$case(storage.operator.clone()).await;
+                }
+            )+
+        }
+
+        #[cfg(feature = "storage-gcs")]
+        mod gcs {
+            use $crate::persistence::files::opendal::opendal_test_operators::TestStorage;
+            $(
+                // Multi-threaded for the cleaner, which blocks on its async drop.
+                #[tokio::test(flavor = "multi_thread")]
+                #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
+                async fn $case() {
+                    let storage = TestStorage::gcs();
+                    super::$case(storage.operator.clone()).await;
+                }
+            )+
+        }
+    };
+}
+pub(crate) use storage_contract_tests;
+
+/// A backend the storage contract runs on. Holds what the backend stores in
+/// until the test ends, then removes it.
+pub(crate) struct TestStorage {
+    pub(crate) operator: Operator,
+    /// Kept for its drop: the temporary directory, or the bucket cleaner.
+    _cleanup: Box<dyn Any>,
 }
 
-impl OpendalTestOperators {
-    /// Create a new instance of the OperatorTestProviders.
-    pub fn new() -> Self {
-        let (fs_operator, fs_tmp_dir) = get_fs_operator();
-        let gcs_operator = get_gcs_operator(true).expect("GCS operator should be available");
-        let gcp_cleaner = gcs_operator.as_ref().map(|operator| {
-            Arc::new(AsyncDropper::new(OpendalGcpCleaner::new(Some(
-                operator.clone(),
-            ))))
-        });
+impl TestStorage {
+    pub(crate) fn memory() -> Self {
         Self {
-            fs_operator,
-            fs_tmp_dir: Arc::new(fs_tmp_dir),
-            gcs_operator,
-            memory_operator: get_memory_operator(),
-            gcp_cleaner,
+            operator: get_memory_operator(),
+            _cleanup: Box::new(()),
         }
     }
 
-    /// Get all operators.
-    pub fn operators(&self) -> Vec<(&'static str, Operator)> {
-        let mut operators = vec![
-            (self.fs_operator.info().scheme(), self.fs_operator.clone()),
-            (
-                self.memory_operator.info().scheme(),
-                self.memory_operator.clone(),
-            ),
-        ];
-        if let Some(gcs_operator) = &self.gcs_operator {
-            operators.push((gcs_operator.info().scheme(), gcs_operator.clone()));
+    /// The filesystem backend configured like production, in a temporary
+    /// directory.
+    pub(crate) fn file_system() -> Self {
+        let (operator, directory) = get_fs_operator();
+        Self {
+            operator,
+            _cleanup: Box::new(directory),
         }
-        operators
     }
 
-    /// Check if the GCS operator is available.
-    /// This depends on the environment variables being set. See OpendalProviders docs for more details.
-    pub fn is_gcs_available(&self) -> bool {
-        self.gcs_operator.is_some()
-    }
-}
-
-/// Helper struct to clean up the GCS operator after the test.
-/// Important: This requires the tokio::test(flavor = "multi_thread") attribute,
-/// Otherwise the test will panic when the gcp cleaner is dropped
-#[derive(Default)]
-pub(crate) struct OpendalGcpCleaner {
-    pub gcs_operator: Option<Operator>,
-}
-
-impl OpendalGcpCleaner {
-    pub fn new(gcs_operator: Option<Operator>) -> Self {
-        Self { gcs_operator }
-    }
-}
-
-#[async_trait]
-impl AsyncDrop for OpendalGcpCleaner {
-    async fn async_drop(&mut self) {
-        let gcs_operator = match &self.gcs_operator {
-            Some(operator) => operator,
-            None => return,
-        };
-        // Delete all files in the GCS root directory that are related to the test.
-        let test_root_dir = gcs_operator.info().root();
-        let base_gcs_operator = match get_gcs_operator(false) {
-            Ok(Some(operator)) => operator,
-            Ok(None) => {
-                return;
-            }
-            Err(e) => {
-                println!(
-                    "Failed to cleanup the GCP test bucket. Directory: {}, Error: {}",
-                    test_root_dir, e
-                );
-                return;
-            }
-        };
-        match base_gcs_operator
-            .delete_with(&test_root_dir)
-            .recursive(true)
-            .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                println!(
-                    "Failed to cleanup the GCP test bucket. Directory: {}, Error: {}",
-                    test_root_dir, e
-                );
-            }
+    /// The GCS backend in the bucket from the environment, under a root of
+    /// the test's own. Without the staged publish on top, which refuses a
+    /// write or delete that the finalization did not give a generation; the
+    /// GCS tests of the staged publish cover it.
+    ///
+    /// # Panics
+    ///
+    /// If the bucket isn't configured, see [`TestBucket::from_env`].
+    ///
+    /// [`TestBucket::from_env`]: super::gcs_test_bucket::TestBucket::from_env
+    #[cfg(feature = "storage-gcs")]
+    pub(crate) fn gcs() -> Self {
+        let bucket = super::gcs_test_bucket::TestBucket::from_env();
+        let operator = super::opendal_service::gcs_unstaged_backend(bucket.builder())
+            .expect("the bucket builder is valid");
+        Self {
+            operator,
+            _cleanup: Box::new(bucket.cleaner()),
         }
     }
 }
@@ -170,32 +138,6 @@ pub(crate) fn get_fs_operator() -> (Operator, TempDir) {
         .atomic_write_dir(staging.to_str().unwrap());
     let operator = opendal::Operator::new(builder).unwrap();
     (operator, tmp_dir)
-}
-
-/// Creates a GCS operator if the required environment variables are set.
-/// GCS environment variables:
-/// - GOOGLE_APPLICATION_CREDENTIALS: The path to the GCS credentials file.
-/// - GCS_BUCKET: The name of the GCS bucket.
-///
-/// Set `test_root_dir` to true to create a random directory that the operator
-/// lives in. This is useful to avoid conflicts with other tests.
-pub(crate) fn get_gcs_operator(test_root_dir: bool) -> anyhow::Result<Option<Operator>> {
-    let credential_path = match std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
-    let bucket_name = match std::env::var("GCS_BUCKET") {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
-    let mut builder = opendal::services::Gcs::default()
-        .bucket(&bucket_name)
-        .credential_path(&credential_path);
-    if test_root_dir {
-        builder = builder.root(&format!("test_{}", Uuid::new_v4()));
-    }
-    let operator = with_own_http_client(opendal::Operator::new(builder)?);
-    Ok(Some(operator))
 }
 
 pub(crate) fn get_memory_operator() -> Operator {
@@ -720,58 +662,5 @@ impl oio::Read for CountingReader {
     async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.read(range).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use opendal::Buffer;
-
-    use super::*;
-
-    // Multi-threaded for the cleaner, which blocks on its async drop.
-    #[tokio::test(flavor = "multi_thread")]
-    #[pubky_test_utils::test]
-    async fn test_operator_test_providers() {
-        let providers = OpendalTestOperators::new();
-        let operators = providers.operators();
-        if providers.is_gcs_available() {
-            assert!(
-                operators.len() == 3,
-                "Expected 3 operators, got {}",
-                operators.len()
-            );
-            println!("GCS operator is available"); // Log to make it clear that GCS is included in the tests.
-        } else {
-            assert!(
-                operators.len() == 2,
-                "Expected 2 operators, got {}",
-                operators.len()
-            );
-            println!("GCS operator is NOT available"); // Log to make it clear that GCS is NOT included in the tests.
-        }
-    }
-
-    // Multi-threaded for the cleaner, which blocks on its async drop.
-    #[tokio::test(flavor = "multi_thread")]
-    #[pubky_test_utils::test]
-    async fn test_gcs_cleanup() {
-        let test_root_dir = {
-            let operators = OpendalTestOperators::new();
-            if !operators.is_gcs_available() {
-                // GCS not configured. Skip test.
-                return;
-            }
-            let gcs_operator = operators.gcs_operator.as_ref().unwrap().clone();
-            gcs_operator
-                .write("test.txt", Buffer::from("test"))
-                .await
-                .unwrap();
-            gcs_operator.info().root()
-        };
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Sleep to ensure the Drop impl is executed in the background.
-        let base_gcs_operator = get_gcs_operator(false).unwrap().unwrap();
-        let exists = base_gcs_operator.exists(&test_root_dir).await.unwrap();
-        assert!(!exists, "Test root directory should not exist anymore as it should have been deleted by the Drop impl");
     }
 }

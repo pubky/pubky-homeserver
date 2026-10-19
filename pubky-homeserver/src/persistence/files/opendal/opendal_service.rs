@@ -142,7 +142,7 @@ pub(super) fn gcs_unstaged_backend(
 /// their own. The production GCS operator gets one too, through
 /// [`gcs_unstaged_backend`], so it runs on the client the real-bucket tests
 /// check. One client per operator costs nothing there.
-#[cfg(any(feature = "storage-gcs", test))]
+#[cfg(feature = "storage-gcs")]
 pub(super) fn with_own_http_client(operator: Operator) -> Operator {
     let transport = opendal_http_transport_reqwest::ReqwestTransport::new(reqwest::Client::new());
     operator.with_context(
@@ -334,12 +334,14 @@ impl OpendalService {
 mod tests {
     use super::*;
     use crate::persistence::files::opendal::opendal_test_operators::{
-        get_fs_operator, get_memory_operator, CountingReads, OpendalTestOperators, Versioned,
+        get_fs_operator, get_memory_operator, storage_contract_tests, CountingReads, Versioned,
     };
     use crate::shared::webdav::StoragePath;
 
     /// A size for test data that spans several stream items.
     const TEST_CHUNK_SIZE: usize = 16 * 1024;
+
+    storage_contract_tests!(get_content_streamed, get_sized_stream, write_content_stream);
 
     /// A read whose blob is replaced after it was sized is refused rather
     /// than served from the new version, whose length may differ.
@@ -485,114 +487,87 @@ mod tests {
     }
 
     /// Test the streamed reading of a file.
-    // Multi-threaded for the cleaner, which blocks on its async drop.
-    #[tokio::test(flavor = "multi_thread")]
-    #[pubky_test_utils::test]
-    async fn test_get_content_streamed() {
-        let operators = OpendalTestOperators::new();
-        for (_scheme, operator) in operators.operators() {
-            let file_service = OpendalService::new_from_operator(operator);
+    async fn get_content_streamed(operator: Operator) {
+        let file_service = OpendalService::new_from_operator(operator);
 
-            let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        let path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
 
-            let test_data = vec![42u8; 5 * TEST_CHUNK_SIZE];
-            file_service.write(&path, test_data.clone()).await.unwrap();
+        let test_data = vec![42u8; 5 * TEST_CHUNK_SIZE];
+        file_service.write(&path, test_data.clone()).await.unwrap();
 
-            let mut stream = file_service.get_stream(&path).await.unwrap();
-            let mut collected_data = Vec::new();
-            while let Some(chunk_result) = stream.next().await {
-                collected_data.extend_from_slice(&chunk_result.unwrap());
-            }
-            assert_eq!(
-                collected_data, test_data,
-                "Content should match original data"
-            );
-
-            file_service
-                .delete(&path)
-                .await
-                .expect("Should delete file");
-            assert!(
-                !file_service.exists(&path).await.unwrap(),
-                "File should not exist after deletion"
-            );
+        let mut stream = file_service.get_stream(&path).await.unwrap();
+        let mut collected_data = Vec::new();
+        while let Some(chunk_result) = stream.next().await {
+            collected_data.extend_from_slice(&chunk_result.unwrap());
         }
+        assert_eq!(
+            collected_data, test_data,
+            "Content should match original data"
+        );
+
+        file_service
+            .delete(&path)
+            .await
+            .expect("Should delete file");
+        assert!(
+            !file_service.exists(&path).await.unwrap(),
+            "File should not exist after deletion"
+        );
     }
 
     /// The length and the stream come from the same `stat`, and a missing
     /// blob fails before a reader is opened.
-    // Multi-threaded for the cleaner, which blocks on its async drop.
-    #[tokio::test(flavor = "multi_thread")]
-    #[pubky_test_utils::test]
-    async fn test_get_sized_stream() {
-        let operators = OpendalTestOperators::new();
-        for (_scheme, operator) in operators.operators() {
-            let file_service = OpendalService::new_from_operator(operator);
-            let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, StoragePath::new("/sized.bin").unwrap());
+    async fn get_sized_stream(operator: Operator) {
+        let file_service = OpendalService::new_from_operator(operator);
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        let path = EntryPath::new(pubkey, StoragePath::new("/sized.bin").unwrap());
 
-            assert!(matches!(
-                file_service.get_sized_stream(&path).await,
-                Err(FileIoError::NotFound)
-            ));
+        assert!(matches!(
+            file_service.get_sized_stream(&path).await,
+            Err(FileIoError::NotFound)
+        ));
 
-            let test_data = vec![7u8; TEST_CHUNK_SIZE + 1];
-            file_service.write(&path, test_data.clone()).await.unwrap();
+        let test_data = vec![7u8; TEST_CHUNK_SIZE + 1];
+        file_service.write(&path, test_data.clone()).await.unwrap();
 
-            let (length, mut stream) = file_service.get_sized_stream(&path).await.unwrap();
-            let mut collected_data = Vec::new();
-            while let Some(chunk_result) = stream.next().await {
-                collected_data.extend_from_slice(&chunk_result.unwrap());
-            }
-            assert_eq!(length, test_data.len() as u64);
-            assert_eq!(collected_data, test_data);
-
-            file_service.delete(&path).await.unwrap();
+        let (length, mut stream) = file_service.get_sized_stream(&path).await.unwrap();
+        let mut collected_data = Vec::new();
+        while let Some(chunk_result) = stream.next().await {
+            collected_data.extend_from_slice(&chunk_result.unwrap());
         }
+        assert_eq!(length, test_data.len() as u64);
+        assert_eq!(collected_data, test_data);
+
+        file_service.delete(&path).await.unwrap();
     }
 
-    /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
-    /// `GCS_BUCKET` are set: a path with characters that URLs percent-encode
-    /// is stored under its own name, below and above the 5 MiB multipart
-    /// threshold, so it can be read back. That holds for a write through the
+    /// Against the real bucket, see
+    /// [`gcs_test_bucket`](super::super::gcs_test_bucket): a path with
+    /// characters that URLs percent-encode is stored under its own name,
+    /// below and above the 5 MiB multipart threshold, so it can be read back. That holds for a write through the
     /// staged publish and for an upload straight to the path.
     ///
     /// Up to opendal 0.57, an upload straight to such a path landed under
     /// the path percent-encoded once, where nothing finds it, see
     /// [`gcs_name_repair`](super::super::gcs_name_repair). opendal 0.58.1
     /// encodes the name of an upload once.
-    // Multi-threaded for the cleaner, which deletes the test root on drop.
+    // Multi-threaded for the cleaner, which blocks on its async drop.
     #[cfg(feature = "storage-gcs")]
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
     async fn gcs_stores_paths_with_special_characters_under_their_own_name() {
-        use async_dropper::AsyncDropper;
-
-        use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
+        use crate::persistence::files::opendal::gcs_test_bucket::TestBucket;
         use crate::persistence::files::staged_publish_layer::{
             under_expected_generation, ExpectedGeneration, STAGING_PREFIX,
         };
 
-        let (Ok(bucket), Ok(credentials)) = (
-            std::env::var("GCS_BUCKET"),
-            std::env::var("GOOGLE_APPLICATION_CREDENTIALS"),
-        ) else {
-            eprintln!("GCS_BUCKET or GOOGLE_APPLICATION_CREDENTIALS not set; skipping");
-            return;
-        };
-        let root = format!("test_{}", uuid::Uuid::new_v4());
-        let builder = || {
-            opendal::services::Gcs::default()
-                .bucket(&bucket)
-                .credential_path(&credentials)
-                .root(&root)
-        };
-        let service = OpendalService::new_from_operator(gcs_operator(builder()).unwrap());
+        let bucket = TestBucket::from_env();
+        let _cleaner = bucket.cleaner();
+        let service = OpendalService::new_from_operator(gcs_operator(bucket.builder()).unwrap());
         // The bare backend, to upload straight to a path and to see the names
         // the objects are stored under.
-        let backend = with_own_http_client(opendal::Operator::new(builder()).unwrap());
-        // Removes the test root from the bucket on drop.
-        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
+        let backend = with_own_http_client(opendal::Operator::new(bucket.builder()).unwrap());
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         let small = 1024;
         let large = 6 * 1024 * 1024;
@@ -653,8 +628,9 @@ mod tests {
         assert_eq!(stored, expected);
     }
 
-    /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
-    /// `GCS_BUCKET` are set, the production stack end to end:
+    /// Against the real bucket, see
+    /// [`gcs_test_bucket`](super::super::gcs_test_bucket), the production
+    /// stack end to end:
     ///
     /// 1. Writes land through staging, below and above the 5 MiB multipart
     ///    threshold, and leave no staging object behind.
@@ -663,38 +639,23 @@ mod tests {
     ///    stays.
     /// 3. A read returns one version of the object or fails, never bytes of
     ///    two: an overwrite between two chunks ends the stream.
-    // Multi-threaded for the cleaner, which deletes the test root on drop.
+    // Multi-threaded for the cleaner, which blocks on its async drop.
     #[cfg(feature = "storage-gcs")]
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
     async fn gcs_refuses_stale_changes_and_mixed_reads() {
-        use async_dropper::AsyncDropper;
-
         use crate::persistence::files::layer_domain_error::LayerDomainError;
-        use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
+        use crate::persistence::files::opendal::gcs_test_bucket::TestBucket;
         use crate::persistence::files::staged_publish_layer::{
             live_generation, staging_objects, under_expected_generation, ExpectedGeneration,
         };
 
-        let (Ok(bucket), Ok(credentials)) = (
-            std::env::var("GCS_BUCKET"),
-            std::env::var("GOOGLE_APPLICATION_CREDENTIALS"),
-        ) else {
-            eprintln!("GCS_BUCKET or GOOGLE_APPLICATION_CREDENTIALS not set; skipping");
-            return;
-        };
-        let root = format!("test_{}", uuid::Uuid::new_v4());
-        let builder = || {
-            opendal::services::Gcs::default()
-                .bucket(&bucket)
-                .credential_path(&credentials)
-                .root(&root)
-        };
+        let bucket = TestBucket::from_env();
+        let _cleaner = bucket.cleaner();
         // The production stack, and the backend under its staged publish,
         // through which the late requests below are sent.
-        let operator = gcs_operator(builder()).unwrap();
-        let backend = gcs_unstaged_backend(builder()).unwrap();
-        // Removes the test root from the bucket on drop.
-        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
+        let operator = gcs_operator(bucket.builder()).unwrap();
+        let backend = gcs_unstaged_backend(bucket.builder()).unwrap();
         let entry_path = EntryPath::new(
             pubky_common::crypto::Keypair::random().public_key(),
             StoragePath::new("/pub/a.bin").unwrap(),
@@ -815,57 +776,52 @@ mod tests {
         assert_eq!(staging_objects(&operator).await, 0);
     }
 
-    // Multi-threaded for the cleaner, which blocks on its async drop.
-    #[tokio::test(flavor = "multi_thread")]
-    #[pubky_test_utils::test]
-    async fn test_write_content_stream() {
-        let operators = OpendalTestOperators::new();
-        for (_scheme, operator) in operators.operators() {
-            let file_service = OpendalService::new_from_operator(operator);
+    /// A stream of several chunks is stored in order.
+    async fn write_content_stream(operator: Operator) {
+        let file_service = OpendalService::new_from_operator(operator);
 
-            let pubkey = pubky_common::crypto::Keypair::random().public_key();
-            let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        let path = EntryPath::new(pubkey, StoragePath::new("/test_stream.txt").unwrap());
 
-            // Create test data - multiple chunks to test streaming
-            let chunk_count = 3;
-            let mut test_data = Vec::new();
-            let mut chunks = Vec::new();
+        // Create test data - multiple chunks to test streaming
+        let chunk_count = 3;
+        let mut test_data = Vec::new();
+        let mut chunks = Vec::new();
 
-            // Create chunks with different patterns to verify order
-            for i in 0..chunk_count {
-                let chunk_data = vec![i as u8; TEST_CHUNK_SIZE];
-                test_data.extend_from_slice(&chunk_data);
-                chunks.push(Ok(Bytes::from(chunk_data)));
-            }
-
-            // Create a stream from the chunks
-            let stream = futures_util::stream::iter(chunks);
-
-            // Write the stream to storage
-            file_service.write_stream(&path, stream).await.unwrap();
-
-            // Read the content back and verify it matches
-            let read_content = file_service.get(&path).await.unwrap();
-
-            assert_eq!(
-                read_content.len(),
-                test_data.len(),
-                "Content length should match"
-            );
-            assert_eq!(
-                read_content.to_vec(),
-                test_data,
-                "Content should match original data"
-            );
-
-            file_service
-                .delete(&path)
-                .await
-                .expect("Should delete file");
-            assert!(
-                !file_service.exists(&path).await.unwrap(),
-                "File should not exist after deletion"
-            );
+        // Create chunks with different patterns to verify order
+        for i in 0..chunk_count {
+            let chunk_data = vec![i as u8; TEST_CHUNK_SIZE];
+            test_data.extend_from_slice(&chunk_data);
+            chunks.push(Ok(Bytes::from(chunk_data)));
         }
+
+        // Create a stream from the chunks
+        let stream = futures_util::stream::iter(chunks);
+
+        // Write the stream to storage
+        file_service.write_stream(&path, stream).await.unwrap();
+
+        // Read the content back and verify it matches
+        let read_content = file_service.get(&path).await.unwrap();
+
+        assert_eq!(
+            read_content.len(),
+            test_data.len(),
+            "Content length should match"
+        );
+        assert_eq!(
+            read_content.to_vec(),
+            test_data,
+            "Content should match original data"
+        );
+
+        file_service
+            .delete(&path)
+            .await
+            .expect("Should delete file");
+        assert!(
+            !file_service.exists(&path).await.unwrap(),
+            "File should not exist after deletion"
+        );
     }
 }

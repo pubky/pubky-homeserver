@@ -68,5 +68,7 @@ pub use file::file_io_error::{FileIoError, WriteStreamError};
 pub(crate) use file::file_metadata::{FileMetadata, FileMetadataBuilder};
 pub use file::file_service::FileService;
 pub use file::file_stream_type::FileStream;
+#[cfg(all(test, feature = "storage-gcs"))]
+pub(crate) use opendal::gcs_test_bucket;
 pub use opendal::opendal_service::OpendalService;
 pub(crate) use storage_repair::StorageRepair;

@@ -1389,38 +1389,24 @@ mod tests {
         assert!(migrator.is_applied(FINISHED_MARKER).await.unwrap());
     }
 
-    /// Against a real bucket, when `GOOGLE_APPLICATION_CREDENTIALS` and
-    /// `GCS_BUCKET` are set: the objects an affected version misnamed are
-    /// moved to their entry's path, and nothing else is touched.
-    // Multi-threaded for the cleaner, which deletes the test root on drop.
+    /// Against the real bucket, see
+    /// [`gcs_test_bucket`](super::super::gcs_test_bucket): the objects an
+    /// affected version misnamed are moved to their entry's path, and
+    /// nothing else is touched.
+    // Multi-threaded for the cleaner, which blocks on its async drop.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
     #[pubky_test_utils::test]
     async fn repair_moves_misnamed_objects_to_their_entry_path() {
-        use async_dropper::AsyncDropper;
+        use crate::persistence::files::opendal::gcs_test_bucket::TestBucket;
 
-        use crate::persistence::files::opendal::opendal_test_operators::OpendalGcpCleaner;
-
-        let (Ok(bucket), Ok(credentials)) = (
-            std::env::var("GCS_BUCKET"),
-            std::env::var("GOOGLE_APPLICATION_CREDENTIALS"),
-        ) else {
-            eprintln!("GCS_BUCKET or GOOGLE_APPLICATION_CREDENTIALS not set; skipping");
-            return;
-        };
-        let root = format!("test_{}", uuid::Uuid::new_v4());
-        let builder = || {
-            opendal::services::Gcs::default()
-                .bucket(&bucket)
-                .credential_path(&credentials)
-                .root(&root)
-        };
-        let operator = gcs_operator(builder()).unwrap();
+        let bucket = TestBucket::from_env();
+        let _cleaner = bucket.cleaner();
+        let operator = gcs_operator(bucket.builder()).unwrap();
         // The backend without the staged publish, to store objects under
         // the names an affected version gave them. Those names are pinned
         // against a real bucket by `misnamed_object_name_is_the_name_gcs_stored`.
-        let backend = gcs_unstaged_backend(builder()).unwrap();
-        // Removes the test root from the bucket on drop.
-        let _cleaner = AsyncDropper::new(OpendalGcpCleaner::new(Some(backend.clone())));
+        let backend = gcs_unstaged_backend(bucket.builder()).unwrap();
         let db = SqlDb::test().await;
         let user = UserService::new(db.clone())
             .create(&Keypair::random().public_key())
@@ -1472,7 +1458,7 @@ mod tests {
             .unwrap();
 
         let repair = GcsNameRepair {
-            operator: gcs_unstaged_backend(builder()).unwrap(),
+            operator: gcs_unstaged_backend(bucket.builder()).unwrap(),
             sql_db: db.clone(),
         };
         assert_eq!(

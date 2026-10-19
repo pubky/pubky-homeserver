@@ -97,6 +97,56 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
   cargo test -p e2e
 ```
 
+## Storage Backend Tests
+
+Most tests run on the in-memory storage backend. Two kinds of tests cover the
+backends a homeserver runs on in production:
+
+- **Storage contract:** each case runs as a test of its own on every backend,
+  named `memory::<case>`, `file_system::<case>`, and `gcs::<case>`. Add a case
+  with `storage_contract_tests!` in
+  [`opendal_service.rs`](../pubky-homeserver/src/persistence/files/opendal/opendal_service.rs).
+- **Backend smoke tests:** the client API on a homeserver configured with
+  `file_system` or `google_bucket` storage, in
+  [`storage_backend_tests.rs`](../pubky-homeserver/src/client_server/storage_backend_tests.rs).
+
+### Google Cloud Storage
+
+The GCS tests run against a real bucket. They are marked `#[ignore]`, so
+`cargo test` stays offline, and each has `gcs` in its name. To run them, set
+both environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to a service account JSON key |
+| `GCS_BUCKET` | Name of the bucket |
+
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json \
+GCS_BUCKET=my-test-bucket \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
+  cargo nextest run -p pubky-homeserver --all-features \
+    --run-ignored only -E 'test(/gcs/)'
+```
+
+A GCS test fails if a variable is missing, rather than passing without the
+bucket. Each test works under a prefix of its own and deletes it when it
+finishes, so tests can share a bucket and run in parallel. The prefix is
+`ci/<run id>/<uuid>` in GitHub Actions and `test_<uuid>` otherwise.
+
+Use a dedicated bucket. Give the service account only the
+**Storage Object User** role on that bucket. Add lifecycle rules that delete
+objects and incomplete multipart uploads older than one day, so that what a
+killed test leaves behind is removed.
+
+In CI, the [GCS Tests](../.github/workflows/gcs-tests.yml) workflow runs them
+on pull requests, on pushes to `main`, and nightly. It reads the key from the
+`GCS_CI_CREDENTIALS` secret and the bucket name from the `GCS_CI_BUCKET`
+variable. Pull requests from forks and Dependabot don't get the secret, so
+the workflow skips the tests with a warning; the nightly run covers the
+dependency bumps after they merge. On `main` and nightly, a missing secret
+fails the workflow.
+
 ## Docker Build Options
 
 The root [Dockerfile](../Dockerfile) builds either a homeserver or a testnet image. Run the commands below from the repository root.
