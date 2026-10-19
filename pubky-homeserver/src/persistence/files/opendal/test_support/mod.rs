@@ -1,6 +1,9 @@
 //! Test-only helpers for the storage layer: the backends the storage
 //! contract runs on, the real GCS bucket, and layers that make a local
 //! backend behave like, or report on, an object store.
+//!
+//! The contract itself is in `storage_contract.rs`; the client API tests on
+//! each backend are in `client_server/file_api_backend_tests.rs`.
 
 mod counting_reads;
 #[cfg(feature = "storage-gcs")]

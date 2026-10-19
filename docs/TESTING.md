@@ -109,11 +109,11 @@ backends a homeserver runs on in production:
   production puts on it. The tests are named `memory::<case>`,
   `file_system::<case>`, and `gcs::<case>`. To add a case, list it in
   `storage_contract_tests!` in
-  [`opendal_service.rs`](../pubky-homeserver/src/persistence/files/opendal/opendal_service.rs).
-- **Backend smoke tests:** the client API on a homeserver configured with
+  [`storage_contract.rs`](../pubky-homeserver/src/persistence/files/opendal/storage_contract.rs).
+- **Client API tests:** the client API on a homeserver configured with
   `file_system` or `google_bucket` storage, named `file_system::<test>` and
   `gcs::<test>`, in
-  [`storage_backend_tests.rs`](../pubky-homeserver/src/client_server/storage_backend_tests.rs).
+  [`file_api_backend_tests.rs`](../pubky-homeserver/src/client_server/file_api_backend_tests.rs).
 
 The tests need PostgreSQL, see [PostgreSQL for Tests](#postgresql-for-tests).
 To run the tests of one backend, filter by its name. Use `memory` or

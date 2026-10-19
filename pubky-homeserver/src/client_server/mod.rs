@@ -8,11 +8,11 @@ mod app;
 pub(crate) mod app_state;
 pub(crate) mod auth;
 pub(crate) mod cache_policy;
+#[cfg(test)]
+mod file_api_backend_tests;
 mod middleware;
 mod query_params;
 pub(crate) mod routes;
-#[cfg(test)]
-mod storage_backend_tests;
 
 pub use app::create_app;
 pub use app::{ClientServer, ClientServerBuildError};
