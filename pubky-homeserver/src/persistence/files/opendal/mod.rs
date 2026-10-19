@@ -6,8 +6,6 @@
 
 #[cfg(feature = "storage-gcs")]
 pub(crate) mod gcs_name_repair;
-#[cfg(all(test, feature = "storage-gcs"))]
-pub(crate) mod gcs_test_bucket;
 pub mod opendal_service;
 #[cfg(test)]
-pub(crate) mod opendal_test_operators;
+pub(crate) mod test_support;

@@ -209,9 +209,7 @@ impl<R: oio::Delete> oio::Delete for WritePathDeleter<R> {
 mod tests {
     use opendal::raw::oio::Delete;
 
-    use crate::persistence::files::opendal::opendal_test_operators::{
-        get_fs_operator, get_memory_operator,
-    };
+    use crate::persistence::files::test_support::{get_fs_operator, get_memory_operator};
     use crate::persistence::files::{
         events::EventsService, write_finalization_layer::WriteFinalizationLayer,
     };

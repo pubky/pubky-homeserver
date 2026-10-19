@@ -721,7 +721,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn a_complete_run_is_marked_and_not_repeated() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -760,7 +760,7 @@ mod tests {
     async fn a_run_that_failed_on_an_entry_runs_again() {
         use std::sync::atomic::Ordering;
 
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -815,7 +815,7 @@ mod tests {
     /// refused, as GCS refuses a copy whose source or destination changed.
     async fn repair_with_a_write_before_the_copy(
         repair: &GcsNameRepair,
-        versioned: &super::super::opendal_test_operators::Versioned,
+        versioned: &crate::persistence::files::test_support::Versioned,
         write_meanwhile: impl std::future::Future<Output = ()>,
     ) -> Summary {
         use std::sync::atomic::Ordering;
@@ -835,7 +835,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn a_write_of_the_entry_content_before_the_copy_leaves_a_leftover_to_remove() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -878,7 +878,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn an_unreferenced_object_landing_before_the_copy_keeps_the_misnamed_one() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -924,7 +924,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn a_write_to_the_misnamed_name_before_the_copy_is_not_copied() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -962,7 +962,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn an_object_another_homeserver_moved_before_the_copy_is_in_place() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -1016,7 +1016,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn an_object_another_homeserver_moved_during_the_content_check_is_in_place() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -1065,7 +1065,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn entries_over_several_batches_are_each_moved_once() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -1115,7 +1115,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn identical_content_under_colliding_names_is_placed_for_both() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         for space_first in [true, false] {
             let db = SqlDb::test().await;
@@ -1170,7 +1170,7 @@ mod tests {
     async fn an_entry_whose_copy_is_always_refused_fails() {
         use std::sync::atomic::Ordering;
 
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -1210,7 +1210,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn a_misnamed_object_of_an_older_version_is_a_kept_mismatch() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -1253,7 +1253,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn another_entry_object_under_the_misnamed_name_is_no_mismatch() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -1287,7 +1287,7 @@ mod tests {
     async fn a_misnamed_object_removed_meanwhile_counts_as_deleted() {
         use std::sync::atomic::Ordering;
 
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         let (fs, _tmp_dir) = get_fs_operator();
         let versioned = Versioned::new("7");
@@ -1323,7 +1323,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn a_misnamed_name_that_is_another_entry_path_loses_no_content() {
-        use super::super::opendal_test_operators::{get_fs_operator, Versioned};
+        use crate::persistence::files::test_support::{get_fs_operator, Versioned};
 
         for space_first in [true, false] {
             let db = SqlDb::test().await;
@@ -1374,7 +1374,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn marking_an_already_finished_repair_succeeds() {
-        use super::super::opendal_test_operators::get_fs_operator;
+        use crate::persistence::files::test_support::get_fs_operator;
 
         let db = SqlDb::test().await;
         let (fs, _tmp_dir) = get_fs_operator();
@@ -1390,7 +1390,7 @@ mod tests {
     }
 
     /// Against the real bucket, see
-    /// [`gcs_test_bucket`](super::super::gcs_test_bucket): the objects an
+    /// [`gcs_test_bucket`](crate::persistence::files::test_support::gcs_test_bucket): the objects an
     /// affected version misnamed are moved to their entry's path, and
     /// nothing else is touched.
     // Multi-threaded for the cleaner, which blocks on its async drop.
@@ -1398,7 +1398,7 @@ mod tests {
     #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
     #[pubky_test_utils::test]
     async fn repair_moves_misnamed_objects_to_their_entry_path() {
-        use crate::persistence::files::opendal::gcs_test_bucket::TestBucket;
+        use crate::persistence::files::test_support::TestBucket;
 
         let bucket = TestBucket::from_env();
         let _cleaner = bucket.test_root_cleaner();

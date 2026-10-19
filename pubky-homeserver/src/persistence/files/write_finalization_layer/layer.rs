@@ -378,7 +378,7 @@ pub(crate) mod test_support {
 
     use crate::persistence::files::{
         events::{EventEntity, EventRepository, EventVisibility},
-        opendal::opendal_test_operators::{get_fs_operator, get_memory_operator},
+        test_support::{get_fs_operator, get_memory_operator},
     };
     use crate::persistence::sql::SqlDb;
 
@@ -551,8 +551,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use crate::persistence::files::events::EventType;
-    use crate::persistence::files::opendal::opendal_test_operators::{get_fs_operator, Versioned};
     use crate::persistence::files::staged_publish_layer::StagedPublishLayer;
+    use crate::persistence::files::test_support::{get_fs_operator, Versioned};
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};

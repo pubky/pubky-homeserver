@@ -26,14 +26,14 @@ async fn file_system_serves_files_through_the_api() {
 }
 
 /// Against the real bucket, see
-/// [`gcs_test_bucket`](crate::persistence::files::gcs_test_bucket).
+/// [`gcs_test_bucket`](crate::persistence::files::test_support::gcs_test_bucket).
 // Multi-threaded for the cleaner, which blocks on its async drop.
 #[cfg(feature = "storage-gcs")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
 #[pubky_test_utils::test]
 async fn gcs_serves_files_through_the_api() {
-    use crate::persistence::files::gcs_test_bucket::TestBucket;
+    use crate::persistence::files::test_support::TestBucket;
 
     let bucket = TestBucket::from_env();
     let user = Keypair::random();

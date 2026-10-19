@@ -20,7 +20,7 @@ use opendal::Operator;
 use pubky_common::crypto::PublicKey;
 use uuid::Uuid;
 
-use super::opendal_service::gcs_unstaged_backend;
+use super::super::opendal_service::gcs_unstaged_backend;
 use crate::data_directory::storage_config::{GoogleBucketConfig, GoogleServiceAccountKeyConfig};
 
 const BUCKET_VAR: &str = "GCS_BUCKET";

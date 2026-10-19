@@ -333,7 +333,7 @@ impl OpendalService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::files::opendal::opendal_test_operators::{
+    use crate::persistence::files::test_support::{
         get_fs_operator, get_memory_operator, storage_contract_tests, CountingReads, Versioned,
     };
     use crate::shared::webdav::StoragePath;
@@ -593,7 +593,7 @@ mod tests {
     }
 
     /// Against the real bucket, see
-    /// [`gcs_test_bucket`](super::super::gcs_test_bucket): a path with
+    /// [`gcs_test_bucket`](crate::persistence::files::test_support::gcs_test_bucket): a path with
     /// characters that URLs percent-encode is stored under its own name,
     /// below and above the 5 MiB multipart threshold, so it can be read back. That holds for a write through the
     /// staged publish and for an upload straight to the path.
@@ -607,10 +607,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
     async fn gcs_stores_paths_with_special_characters_under_their_own_name() {
-        use crate::persistence::files::opendal::gcs_test_bucket::TestBucket;
         use crate::persistence::files::staged_publish_layer::{
             under_expected_generation, ExpectedGeneration, STAGING_PREFIX,
         };
+        use crate::persistence::files::test_support::TestBucket;
 
         let bucket = TestBucket::from_env();
         let _cleaner = bucket.test_root_cleaner();
@@ -681,7 +681,7 @@ mod tests {
     }
 
     /// Against the real bucket, see
-    /// [`gcs_test_bucket`](super::super::gcs_test_bucket), the production
+    /// [`gcs_test_bucket`](crate::persistence::files::test_support::gcs_test_bucket), the production
     /// stack end to end:
     ///
     /// 1. Writes land through staging, below and above the 5 MiB multipart
@@ -697,10 +697,10 @@ mod tests {
     #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
     async fn gcs_refuses_stale_changes_and_mixed_reads() {
         use crate::persistence::files::layer_domain_error::LayerDomainError;
-        use crate::persistence::files::opendal::gcs_test_bucket::TestBucket;
         use crate::persistence::files::staged_publish_layer::{
             live_generation, staging_objects, under_expected_generation, ExpectedGeneration,
         };
+        use crate::persistence::files::test_support::TestBucket;
 
         let bucket = TestBucket::from_env();
         let _cleaner = bucket.test_root_cleaner();

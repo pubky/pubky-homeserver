@@ -97,7 +97,7 @@ mod tests {
     use opendal::raw::oio::Write as _;
     use opendal::{ErrorKind, MetadataBuilder, Operator};
 
-    use crate::persistence::files::opendal::opendal_test_operators::get_fs_operator;
+    use crate::persistence::files::test_support::get_fs_operator;
 
     use super::*;
 
