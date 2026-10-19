@@ -14,6 +14,23 @@ info:
     Deprecated owner-relative routes resolve the owner from `pubky-host`, then
     `Host`, then `?pubky-host=`.
 
+    ## Websites
+
+    When `/info` lists `websites`, a GET or HEAD with `Host: <user-key>` serves
+    the user's static site from `/pub/website/_/`, and `Host:
+    <label>.<user-key>` serves `/pub/website/<label>/`. OpenAPI cannot route by
+    `Host`, so this is described here; see `docs/WEBSITES.md`.
+
+    Paths whose first segment is `auth`, `events`, `events-stream`, `info`,
+    `priv`, `pub`, `session`, `signup`, `signup_tokens` or `storage` stay on the
+    API. Other paths serve the site: folders serve `index.html`, `/dir`
+    redirects with `301` to `/dir/` when only `dir/index.html` exists, and a
+    missing file returns `404` with the site's `404.html` when present. Folders
+    are never listed. Responses carry `Cache-Control: no-cache` and
+    `X-Content-Type-Options: nosniff`, honour `If-None-Match` and
+    `If-Modified-Since`, and ignore cookies and `pubky-host`. An unknown user
+    returns `404`, a disabled user `403`, and an invalid path `400`.
+
     ## Authentication
 
     Two authentication methods exist:
@@ -106,7 +123,9 @@ paths:
       tags:
       - General
       summary: Server info
-      description: Basic health check / server identification.
+      description: |-
+        Basic health check / server identification. On a website `Host`, `/`
+        serves the site's `index.html` instead (see Websites above).
       operationId: getRoot
       responses:
         '200':
@@ -141,6 +160,7 @@ paths:
                 features:
                 - path-addressed-storage
                 - webdav-locks
+                - websites
   "/signup_tokens/{token}":
     get:
       tags:

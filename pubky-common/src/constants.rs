@@ -25,6 +25,9 @@ pub mod features {
     /// Homeserver supports WebDAV `LOCK`/`UNLOCK` on storage files and honours
     /// lock tokens in the `If` header on `PUT` and `DELETE`.
     pub const WEBDAV_LOCKS: &str = "webdav-locks";
+    /// Homeserver serves each user's static websites from `/pub/website/`
+    /// when the `Host` is `<user-key>` or `<label>.<user-key>`.
+    pub const WEBSITES: &str = "websites";
 }
 
 /// Local test network's hardcoded port numbers for local development.

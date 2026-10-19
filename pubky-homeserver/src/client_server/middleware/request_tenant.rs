@@ -115,6 +115,15 @@ impl RequestTenant {
             storage_path: None,
         }
     }
+
+    /// A request that targets `storage_path` without naming it in the URL,
+    /// such as a website page.
+    pub(crate) fn mapped(public_key: PublicKey, storage_path: StoragePath) -> Self {
+        Self {
+            public_key,
+            storage_path: Some(storage_path),
+        }
+    }
 }
 
 impl<S> FromRequestParts<S> for RequestTenant

@@ -69,6 +69,8 @@ pub struct DriveToml {
     pub icann_listen_socket: SocketAddr,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
+    /// Serve users' static websites from `/pub/website/` by `Host`.
+    pub websites: bool,
 }
 
 /// Admin server configuration

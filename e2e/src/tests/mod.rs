@@ -7,6 +7,7 @@ mod metrics;
 mod private_data;
 mod rate_limiting;
 mod storage;
+mod website;
 
 async fn build_full_testnet() -> pubky_testnet::EphemeralTestnet {
     pubky_testnet::EphemeralTestnet::builder()

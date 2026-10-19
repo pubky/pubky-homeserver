@@ -36,7 +36,7 @@ use super::middleware::{
     request_tenant::RequestTenant,
     trace::with_trace_layer,
 };
-use super::routes::{events, info, root, signup_tokens, tenants};
+use super::routes::{events, info, root, signup_tokens, tenants, website};
 
 /// Errors that can occur when building a `HomeserverCore`.
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +203,8 @@ impl Drop for ClientServer {
     }
 }
 
+/// A new top-level GET route also needs its first path segment in
+/// `website::API_SEGMENTS`, or website Hosts serve a site page instead.
 fn base() -> Router<AppState> {
     Router::new()
         .route("/", get(root::handler))
@@ -234,21 +236,29 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         .layer(CookieManagerLayer::new())
         .layer(request_rate_limit_layer)
         .layer(AuthenticationLayer::new(auth_state.clone()))
-        .layer(BandwidthQuotaLimitLayer::from_context(&state.context));
+        .layer(BandwidthQuotaLimitLayer::from_context(&state.context))
+        // Last, so website requests marked by `website::resolve` pass every layer
+        // above. Inert for other requests.
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            website::serve,
+        ));
 
     let app = base()
         .merge(tenants::router(state.context.metrics.clone()))
-        .with_state(state)
+        .with_state(state.clone())
         .merge(auth::base_router(auth_state.clone()))
         .merge(auth::tenant_router(auth_state))
         .layer(middleware)
         // Keep feature discovery independent of authentication and database-backed quotas.
-        .route("/info", get(info::get));
+        .route("/info", get(info::get).with_state(state.clone()));
 
     // Resolve the target before tracing and authentication. Valid `/storage/...`
-    // requests are therefore logged using their Pubky URL.
+    // requests are therefore logged using their Pubky URL, and website requests
+    // using their site file's (`website::resolve` replaces the tenant).
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
     Ok(with_trace_layer(app)
+        .layer(axum_middleware::from_fn_with_state(state, website::resolve))
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
         .layer(CorsLayer::very_permissive().expose_headers([
             RETRY_AFTER,
@@ -341,7 +351,7 @@ mod tests {
         response.assert_header(header::CONTENT_TYPE, "application/json");
         response.assert_header(header::CACHE_CONTROL, "no-store");
         response.assert_json(&serde_json::json!({
-            "features": ["path-addressed-storage", "grant-proof-logout", "webdav-locks"]
+            "features": ["path-addressed-storage", "grant-proof-logout", "webdav-locks", "websites"]
         }));
     }
 

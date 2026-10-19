@@ -102,35 +102,8 @@ pub async fn get(
         .get_info(&entry_path, &mut state.context.sql_db.pool().into())
         .await?;
 
-    // Per RFC 7232 §3: If-None-Match has precedence over If-Modified-Since.
-    if let Some(request_etag) = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|h| h.to_str().ok())
-    {
-        let current_etag = format!(
-            "\"{}\"",
-            base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                entry.content_hash.as_bytes()
-            )
-        );
-        if request_etag
-            .trim()
-            .split(',')
-            .map(|s| s.trim())
-            .any(|tag| tag == current_etag)
-        {
-            return not_modified_response(&entry);
-        }
-    } else if let Some(condition_http_date) = headers
-        .get(header::IF_MODIFIED_SINCE)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| HttpDate::from_str(s).ok())
-    {
-        let entry_http_date: HttpDate = to_http_date(&entry.modified_at);
-        if condition_http_date >= entry_http_date {
-            return not_modified_response(&entry);
-        }
+    if is_not_modified(&headers, &entry) {
+        return not_modified_response(&entry);
     }
 
     let (blob_length, stream) = state
@@ -212,8 +185,35 @@ fn parse_cursor(cursor: Option<String>) -> anyhow::Result<Option<EntryPath>> {
     Ok(Some(path))
 }
 
+/// Whether the request's validators match `entry`, so `304 Not Modified` applies.
+pub(crate) fn is_not_modified(headers: &HeaderMap, entry: &EntryEntity) -> bool {
+    // Per RFC 7232 §3: If-None-Match has precedence over If-Modified-Since.
+    if let Some(request_etag) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok())
+    {
+        let current_etag = format!(
+            "\"{}\"",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                entry.content_hash.as_bytes()
+            )
+        );
+        return request_etag
+            .trim()
+            .split(',')
+            .map(|s| s.trim())
+            .any(|tag| tag == current_etag);
+    }
+    headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| HttpDate::from_str(s).ok())
+        .is_some_and(|condition_http_date| condition_http_date >= to_http_date(&entry.modified_at))
+}
+
 /// Creates the Not Modified response based on the entry data.
-fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<Body>> {
+pub(crate) fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<Body>> {
     Ok(Response::builder()
         .status(StatusCode::NOT_MODIFIED)
         .header(
