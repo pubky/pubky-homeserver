@@ -10,7 +10,7 @@ use wasm_bindgen::describe::WasmDescribe;
 use wasm_bindgen::prelude::*;
 
 use pkarr::errors::PublicKeyError;
-use pubky::errors::{BuildError, RequestError};
+use pubky::errors::{BuildError, RequestError, RequestErrorKind};
 use pubky_common::auth::Error as AuthTokenError;
 use pubky_common::capabilities::{CapabilitiesParseError, CapabilityParseError};
 use pubky_common::recovery_file::Error as RecoveryFileError;
@@ -48,7 +48,7 @@ where
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub enum PubkyErrorName {
-    /// A network or server request failed. Check the network connection or retry.
+    /// A request failed. Inspect its reason and status; retry safety is operation-specific.
     RequestError,
     /// A grant credential refresh request failed while preparing or retrying a request.
     CredentialRefreshError,
@@ -89,7 +89,7 @@ impl Display for PubkyErrorName {
 ///
 /// @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
 /// @property message - A human-readable, descriptive error message suitable for logging.
-/// @property data - An optional payload containing structured context for an error. For a `RequestError`, this may contain an object with the HTTP status code, e.g., `{ statusCode: 404 }`.
+/// @property data - Optional structured context. Request errors include `reason` and, when available, `statusCode`, e.g., `{ reason: "Http", statusCode: 404 }`. A reason describes the failure, not whether retrying is safe.
 ///
 /// @example
 /// ```typescript
@@ -122,6 +122,24 @@ pub struct PubkyError {
 
 // --- Constructors for Ergonomics ---
 impl PubkyError {
+    pub(crate) fn request(message: impl Display, kind: RequestErrorKind) -> Self {
+        let reason = match kind {
+            RequestErrorKind::Http { .. } => "Http",
+            RequestErrorKind::Timeout => "Timeout",
+            RequestErrorKind::Connection => "Connection",
+            RequestErrorKind::Body => "Body",
+            RequestErrorKind::Decode => "Decode",
+            RequestErrorKind::InvalidRequest => "InvalidRequest",
+            _ => "Other",
+        };
+        let result =
+            Self::new(PubkyErrorName::RequestError, message).with_data(json!({ "reason": reason }));
+        match kind {
+            RequestErrorKind::Http { status } => result.with_status(status),
+            _ => result,
+        }
+    }
+
     /// Creates a new error with a name and message.
     pub fn new<T: Display>(name: PubkyErrorName, message: T) -> Self {
         Self {
@@ -167,7 +185,7 @@ const TS_PUBKY_ERROR: &str = r#"/**
  *
  * @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
  * @property message - A human-readable, descriptive error message suitable for logging.
- * @property data - An optional payload containing structured context for an error. For a `RequestError`, this may contain an object with the HTTP status code, e.g., `{ statusCode: 404 }`.
+ * @property data - Optional structured context. Request errors include `reason` and, when available, `statusCode`, e.g., `{ reason: "Http", statusCode: 404 }`. A reason describes the failure, not whether retrying is safe.
  *
  * @example
  * ```typescript
@@ -198,6 +216,9 @@ export interface PubkyError extends Error {
 /// Converts a native `pubky::Error` into a `PubkyError`.
 impl From<pubky::Error> for PubkyError {
     fn from(err: pubky::Error) -> Self {
+        if let pubky::Error::Request(request) = &err {
+            return Self::request(&err, request.kind());
+        }
         let name = match &err {
             pubky::Error::Request(_) => PubkyErrorName::RequestError,
             pubky::Error::CredentialRefresh(_) => PubkyErrorName::CredentialRefreshError,
@@ -322,16 +343,7 @@ impl From<serde_wasm_bindgen::Error> for PubkyError {
 /// Converts a `reqwest::Error` into a `PubkyError`.
 impl From<reqwest::Error> for PubkyError {
     fn from(err: reqwest::Error) -> Self {
-        // Try to propagate status when present
-        if let Some(status) = err.status() {
-            PubkyError::new_with_status(
-                PubkyErrorName::RequestError,
-                err.to_string(),
-                status.as_u16(),
-            )
-        } else {
-            PubkyError::new(PubkyErrorName::RequestError, err.to_string())
-        }
+        Self::request(&err, RequestErrorKind::from_transport(&err))
     }
 }
 
@@ -385,6 +397,120 @@ impl WasmDescribe for PubkyError {
 mod tests {
     use super::*;
     use pubky::custom_pop::CustomPopError;
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(inline_js = r#"
+        export function failingBodyFetch() {
+            const original = globalThis.fetch;
+            globalThis.fetch = (input, init) => {
+                if (input.url === 'https://pubky.invalid/body-error') {
+                    const response = new Response(new ReadableStream({
+                        start(controller) { controller.error(new TypeError('body interrupted')); }
+                    }));
+                    Object.defineProperty(response, 'url', { value: input.url });
+                    return Promise.resolve(response);
+                }
+                return original.call(globalThis, input, init);
+            };
+            return () => { globalThis.fetch = original; };
+        }
+    "#)]
+    extern "C" {
+        #[wasm_bindgen(js_name = failingBodyFetch)]
+        fn failing_body_fetch() -> js_sys::Function;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn direct_body_errors_preserve_the_decode_category() {
+        for text in [false, true] {
+            let restore = failing_body_fetch();
+            let response = reqwest::Client::new()
+                .get("https://pubky.invalid/body-error")
+                .send()
+                .await;
+            restore.call0(&JsValue::UNDEFINED).unwrap();
+            let response = response.unwrap();
+            let source = if text {
+                response.text().await.unwrap_err()
+            } else {
+                response.bytes().await.unwrap_err()
+            };
+            let message = source.to_string();
+            let error = PubkyError::from(source);
+            assert_eq!(error.name.as_str(), "RequestError");
+            assert_eq!(error.message, message);
+            assert_eq!(error.data, Some(json!({ "reason": "Decode" })));
+            let value = JsValue::from(error);
+            let data = Reflect::get(&value, &JsValue::from_str("data")).unwrap();
+            let data: Value = serde_wasm_bindgen::from_value(data).unwrap();
+            assert_eq!(data, json!({ "reason": "Decode" }));
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn request_metadata_covers_all_categories() {
+        for (kind, reason) in [
+            (RequestErrorKind::Timeout, "Timeout"),
+            (RequestErrorKind::Connection, "Connection"),
+            (RequestErrorKind::Body, "Body"),
+            (RequestErrorKind::Decode, "Decode"),
+            (RequestErrorKind::InvalidRequest, "InvalidRequest"),
+            (RequestErrorKind::Other, "Other"),
+        ] {
+            let error = PubkyError::request("request failed", kind);
+            assert_eq!(error.name.as_str(), "RequestError");
+            assert_eq!(error.message, "request failed");
+            assert_eq!(error.data, Some(json!({ "reason": reason })));
+        }
+        let source = reqwest::Client::new().get("not a URL").build().unwrap_err();
+        let message = source.to_string();
+        let error = PubkyError::from(source);
+        assert_eq!(error.name.as_str(), "RequestError");
+        assert_eq!(error.message, message);
+        assert_eq!(error.data, Some(json!({ "reason": "InvalidRequest" })));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn request_errors_preserve_names_status_and_categories() {
+        for (error, expected) in [
+            (
+                RequestError::Server {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    message: "unavailable".into(),
+                },
+                json!({ "reason": "Http", "statusCode": 503 }),
+            ),
+            (
+                RequestError::Validation {
+                    message: "invalid path".into(),
+                },
+                json!({ "reason": "InvalidRequest" }),
+            ),
+            (
+                RequestError::DecodeJson {
+                    message: "invalid response".into(),
+                },
+                json!({ "reason": "Decode" }),
+            ),
+        ] {
+            let source = pubky::Error::Request(error);
+            let message = source.to_string();
+            let actual = PubkyError::from(source);
+            assert_eq!(actual.name.as_str(), "RequestError");
+            assert_eq!(actual.message, message);
+            assert_eq!(actual.data, Some(expected.clone()));
+            #[cfg(target_arch = "wasm32")]
+            {
+                let value = JsValue::from(actual);
+                let data = Reflect::get(&value, &JsValue::from_str("data")).unwrap();
+                let data: Value = serde_wasm_bindgen::from_value(data).unwrap();
+                assert_eq!(data, expected);
+            }
+        }
+    }
 
     #[test]
     fn custom_proof_errors_preserve_javascript_names_and_reasons() {

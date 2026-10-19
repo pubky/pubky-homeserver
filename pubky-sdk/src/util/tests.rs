@@ -1,4 +1,7 @@
-use crate::{Error, PubkyHttpClient, errors::RequestError};
+use crate::{
+    Error, PubkyHttpClient,
+    errors::{RequestError, RequestErrorKind},
+};
 use reqwest::{Response, StatusCode};
 use std::{fmt::Write, time::Duration};
 use tokio::{
@@ -56,7 +59,62 @@ async fn server_error(response: Response, client: PubkyHttpClient) -> (StatusCod
     let Error::Request(RequestError::Server { status, message }) = error else {
         panic!("unexpected error: {error:?}");
     };
+    assert_eq!(
+        RequestError::Server {
+            status,
+            message: message.clone()
+        }
+        .kind(),
+        RequestErrorKind::Http {
+            status: status.as_u16()
+        }
+    );
     (status, message)
+}
+
+#[tokio::test]
+async fn request_categories_preserve_transport_causes() {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(100))
+        .build()
+        .unwrap();
+    let invalid = client.get("not a URL").build().unwrap_err();
+    assert_eq!(
+        RequestErrorKind::from_transport(&invalid),
+        RequestErrorKind::InvalidRequest
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let refused = client
+        .get(format!("http://{address}/"))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        RequestErrorKind::from_transport(&refused),
+        RequestErrorKind::Connection
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let request = client.get(format!("http://{address}/")).send();
+    let (error, accepted) = tokio::join!(request, listener.accept());
+    let _socket = accepted.unwrap();
+    assert_eq!(
+        RequestErrorKind::from_transport(&error.unwrap_err()),
+        RequestErrorKind::Timeout
+    );
+
+    let (response, socket) = serve_response(200, "Content-Length: 10\r\n", b"x").await;
+    drop(socket);
+    let error = response.bytes().await.unwrap_err();
+    assert_eq!(
+        RequestErrorKind::from_transport(&error),
+        RequestErrorKind::Decode
+    );
 }
 
 #[tokio::test]
