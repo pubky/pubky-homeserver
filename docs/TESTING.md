@@ -99,21 +99,15 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
 
 ## Storage Backend Tests
 
-Most tests run on the in-memory storage backend. Two kinds of tests cover the
-backends a homeserver runs on in production:
-
-- **Storage contract:** what the file service promises on every backend, such
-  as overwrites, deletes, names that URLs percent-encode, empty files,
-  multipart-sized writes, broken uploads, and downloads during an overwrite.
-  Each case runs as a test of its own on each backend, under the layers
-  production puts on it. The tests are named `memory::<case>`,
-  `file_system::<case>`, and `gcs::<case>`. To add a case, list it in
-  `storage_contract_tests!` in
-  [`storage_contract.rs`](../pubky-homeserver/src/persistence/files/opendal/storage_contract.rs).
-- **Client API tests:** the client API on a homeserver configured with
-  `file_system` or `google_bucket` storage, named `file_system::<test>` and
-  `gcs::<test>`, in
-  [`file_api_backend_tests.rs`](../pubky-homeserver/src/client_server/file_api_backend_tests.rs).
+Most tests run on the in-memory storage backend. The storage contract covers
+the backends a homeserver runs on in production: what the file service
+promises on every backend, such as overwrites, deletes, names that URLs
+percent-encode, empty files, multipart-sized writes, broken uploads, and
+downloads during an overwrite. Each case runs as a test of its own on each
+backend, under the layers production puts on it. The tests are named
+`memory::<case>`, `file_system::<case>`, and `gcs::<case>`. To add a case,
+list it in `storage_contract_tests!` in
+[`storage_contract.rs`](../pubky-homeserver/src/persistence/files/opendal/storage_contract.rs).
 
 The tests need PostgreSQL, see [PostgreSQL for Tests](#postgresql-for-tests).
 To run the tests of one backend, filter by its name. Use `memory` or
@@ -152,8 +146,9 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
 A GCS test fails if a variable is missing, rather than passing without the
 bucket. Each test works under a prefix of its own and deletes it when it
 finishes, so tests can share a bucket and run in parallel. The prefix is
-`ci/<run id>/<uuid>` in GitHub Actions and `test_<uuid>` otherwise. The API
-tests work in the bucket's root instead, under their user's key.
+`ci/<run id>/<uuid>` in GitHub Actions and `test_<uuid>` otherwise. The test
+of the `google_bucket` config works in the bucket's root instead, under its
+user's key, because the config has no root of its own.
 
 Use a dedicated bucket. Give the service account only the
 **Storage Object User** role on that bucket. Add lifecycle rules that delete

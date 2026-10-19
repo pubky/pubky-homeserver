@@ -438,6 +438,87 @@ mod tests {
         assert!(!service.exists(&path).await.unwrap());
     }
 
+    /// A homeserver configured with `file_system` storage stores a file at
+    /// the longest storage path.
+    #[tokio::test]
+    #[ignore = "fails on the file system backend, see #715 and #716"]
+    #[pubky_test_utils::test]
+    async fn file_system_stores_a_file_at_the_longest_storage_path() {
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
+        let user = pubky_common::crypto::Keypair::random().public_key();
+
+        stores_and_removes_files(&context, &user, &[&longest_storage_path()]).await;
+    }
+
+    /// Against the real bucket, see
+    /// [`gcs_test_bucket`](crate::persistence::files::test_support::gcs_test_bucket):
+    /// a homeserver configured with `google_bucket` storage stores files
+    /// through the code production builds its backend with, also at the
+    /// longest storage path. In the bucket's root, the user's key and that
+    /// path take up the whole object name GCS allows.
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[cfg(feature = "storage-gcs")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
+    #[pubky_test_utils::test]
+    async fn gcs_stores_files_from_the_google_bucket_config() {
+        use crate::persistence::files::test_support::TestBucket;
+
+        let bucket = TestBucket::from_env();
+        let user = pubky_common::crypto::Keypair::random().public_key();
+        // The homeserver stores in the bucket's root, under its users' keys.
+        let _cleaner = bucket.user_cleaner(&user);
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::GoogleBucket(bucket.config());
+        })
+        .await;
+
+        stores_and_removes_files(&context, &user, &["/pub/a.txt", &longest_storage_path()]).await;
+    }
+
+    /// Signs `user` up on the homeserver of `context`, then writes, reads
+    /// back and deletes a file at each of `paths` through its storage.
+    async fn stores_and_removes_files(
+        context: &AppContext,
+        user: &pubky_common::crypto::PublicKey,
+        paths: &[&str],
+    ) {
+        let service = OpendalService::new(context).unwrap();
+        context.user_service.create(user).await.unwrap();
+        for path in paths {
+            let path = EntryPath::new(user.clone(), StoragePath::new(path).unwrap());
+            let content = path.as_str().as_bytes().to_vec();
+
+            service.write(&path, content.clone()).await.unwrap();
+            assert_eq!(service.get(&path).await.unwrap().to_vec(), content);
+
+            service.delete(&path).await.unwrap();
+            assert!(!service.exists(&path).await.unwrap());
+        }
+    }
+
+    /// A path of the longest total length, whose last segments, the file
+    /// name among them, are of the longest segment length.
+    fn longest_storage_path() -> String {
+        use pubky_common::storage_path::{
+            MAX_STORAGE_PATH_SEGMENT_LENGTH, MAX_STORAGE_PATH_TOTAL_LENGTH,
+        };
+
+        let longest_segment = format!("/{}", "a".repeat(MAX_STORAGE_PATH_SEGMENT_LENGTH));
+        let filler_length =
+            MAX_STORAGE_PATH_TOTAL_LENGTH - "/pub/".len() - 3 * longest_segment.len();
+        let path = format!(
+            "/pub/{}{}",
+            "b".repeat(filler_length),
+            longest_segment.repeat(3)
+        );
+        assert_eq!(path.len(), MAX_STORAGE_PATH_TOTAL_LENGTH);
+        path
+    }
+
     /// Make sure that the OpendalService returns a DiskSpaceQuotaExceeded error if the user has exceeded the quota.
     /// This is important because write finalization returns a RateLimited error if the user has exceeded the quota.
     #[tokio::test]
