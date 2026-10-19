@@ -110,8 +110,20 @@ backends a homeserver runs on in production:
   case with `storage_contract_tests!` in
   [`opendal_service.rs`](../pubky-homeserver/src/persistence/files/opendal/opendal_service.rs).
 - **Backend smoke tests:** the client API on a homeserver configured with
-  `file_system` or `google_bucket` storage, in
+  `file_system` or `google_bucket` storage, named `file_system::<test>` and
+  `gcs::<test>`, in
   [`storage_backend_tests.rs`](../pubky-homeserver/src/client_server/storage_backend_tests.rs).
+
+Run the tests of one backend by its name:
+
+```bash
+cargo nextest run -p pubky-homeserver --all-features -E 'test(/::file_system::/)'
+```
+
+In CI, the [Storage Backends](../.github/workflows/storage-backends.yml)
+workflow runs them as one check per backend: `storage (memory)`,
+`storage (file_system)`, and `storage (gcs)`. It runs on pull requests, on
+pushes to `main`, and on demand.
 
 ### Google Cloud Storage
 
@@ -142,12 +154,11 @@ Use a dedicated bucket. Give the service account only the
 objects and incomplete multipart uploads older than one day, so that what a
 killed test leaves behind is removed.
 
-In CI, the [GCS Tests](../.github/workflows/gcs-tests.yml) workflow runs them
-on pull requests, on pushes to `main`, and on demand. It reads the key from
-the `GCS_CI_CREDENTIALS` secret and the bucket name from the `GCS_CI_BUCKET`
-variable. Pull requests from forks and Dependabot don't get the secret, so
-the workflow skips the tests with a warning; the push to `main` runs them
-after the merge. On `main`, a missing secret fails the workflow.
+In CI, `storage (gcs)` reads the key from the `GCS_CI_CREDENTIALS` secret and
+the bucket name from the `GCS_CI_BUCKET` variable. Pull requests from forks
+and Dependabot don't get the secret, so the check is skipped with a warning;
+the push to `main` runs it after the merge. On `main`, a missing secret fails
+the workflow.
 
 ## Docker Build Options
 

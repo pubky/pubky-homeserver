@@ -7,44 +7,53 @@ use axum::http::{header, StatusCode};
 use axum_test::{TestRequest, TestServer};
 use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
 
-use crate::{
-    app_context::AppContext, client_server::ClientServer, storage_config::StorageConfigToml,
-};
+use crate::{app_context::AppContext, client_server::ClientServer};
 
 /// Above the 5 MiB from which GCS uploads in parts.
 const MULTIPART_SIZE: usize = 6 * 1024 * 1024;
 
-#[tokio::test]
-#[pubky_test_utils::test]
-async fn file_system_serves_files_through_the_api() {
-    let context = AppContext::test_with_config(|c| {
-        c.storage.backend = StorageConfigToml::FileSystem;
-    })
-    .await;
+mod file_system {
+    use pubky_common::crypto::Keypair;
 
-    serves_files_through_the_api(context, &Keypair::random()).await;
+    use crate::{app_context::AppContext, storage_config::StorageConfigToml};
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn serves_files_through_the_api() {
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::FileSystem;
+        })
+        .await;
+
+        super::serves_files_through_the_api(context, &Keypair::random()).await;
+    }
 }
 
 /// Against the real bucket, see
 /// [`gcs_test_bucket`](crate::persistence::files::test_support::gcs_test_bucket).
-// Multi-threaded for the cleaner, which blocks on its async drop.
 #[cfg(feature = "storage-gcs")]
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
-#[pubky_test_utils::test]
-async fn gcs_serves_files_through_the_api() {
+mod gcs {
+    use pubky_common::crypto::Keypair;
+
     use crate::persistence::files::test_support::TestBucket;
+    use crate::{app_context::AppContext, storage_config::StorageConfigToml};
 
-    let bucket = TestBucket::from_env();
-    let user = Keypair::random();
-    // The homeserver stores in the bucket's root, under its users' keys.
-    let _cleaner = bucket.user_cleaner(&user.public_key());
-    let context = AppContext::test_with_config(|c| {
-        c.storage.backend = StorageConfigToml::GoogleBucket(bucket.config());
-    })
-    .await;
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
+    #[pubky_test_utils::test]
+    async fn serves_files_through_the_api() {
+        let bucket = TestBucket::from_env();
+        let user = Keypair::random();
+        // The homeserver stores in the bucket's root, under its users' keys.
+        let _cleaner = bucket.user_cleaner(&user.public_key());
+        let context = AppContext::test_with_config(|c| {
+            c.storage.backend = StorageConfigToml::GoogleBucket(bucket.config());
+        })
+        .await;
 
-    serves_files_through_the_api(context, &user).await;
+        super::serves_files_through_the_api(context, &user).await;
+    }
 }
 
 /// Writes a small file and a multipart one, the second under a name that
