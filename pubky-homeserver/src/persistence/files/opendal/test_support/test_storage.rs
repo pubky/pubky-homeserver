@@ -10,6 +10,8 @@ use tempfile::TempDir;
 use super::super::opendal_service::{
     backend_operator, layer_storage_operators, OpendalService, FILE_SYSTEM_STAGING_DIR,
 };
+use crate::persistence::files::FileIoError;
+use crate::persistence::sql::entry::EntryRepository;
 use crate::shared::webdav::{EntryPath, StoragePath};
 use crate::storage_config::StorageConfigToml;
 use crate::AppContext;
@@ -77,7 +79,7 @@ pub(crate) struct TestStorage {
     user: PublicKey,
     backend: Backend,
     /// Holds the test database the finalization writes to.
-    _context: Arc<AppContext>,
+    context: Arc<AppContext>,
 }
 
 /// The backend under a [`TestStorage`], with where it stages uploads and
@@ -156,7 +158,7 @@ impl TestStorage {
             },
             user,
             backend,
-            _context: context,
+            context,
         }
     }
 
@@ -166,6 +168,29 @@ impl TestStorage {
             self.user.clone(),
             StoragePath::new(path).expect("the test uses a valid storage path"),
         )
+    }
+
+    /// Asserts that the entry of `path` describes the stored file, with its
+    /// length and hash, and that there is no entry when no file is stored.
+    pub(crate) async fn assert_entry_matches_file(&self, path: &EntryPath) {
+        let entry =
+            EntryRepository::get_by_path(path, &mut self.context.sql_db.pool().into()).await;
+        match self.service.get(path).await {
+            Ok(content) => {
+                let entry = entry.expect("a stored file has an entry");
+                assert_eq!(entry.content_length, content.len() as u64, "{path}");
+                assert_eq!(
+                    entry.content_hash,
+                    pubky_common::crypto::hash(&content),
+                    "{path}"
+                );
+            }
+            Err(FileIoError::NotFound) => assert!(
+                matches!(entry, Err(sqlx::Error::RowNotFound)),
+                "{path} has an entry but no file: {entry:?}"
+            ),
+            Err(error) => panic!("{path} can't be read: {error}"),
+        }
     }
 
     /// Whether no upload is left staged: each one was published or removed.

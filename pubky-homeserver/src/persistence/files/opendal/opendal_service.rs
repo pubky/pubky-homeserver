@@ -465,6 +465,7 @@ mod tests {
         overwrite_replaces_content_and_length,
         delete_removes_the_file,
         stores_names_that_urls_percent_encode,
+        stores_an_empty_file,
         streams_a_multipart_sized_write,
         broken_stream_keeps_the_old_file,
         overwrite_mid_download_does_not_mix_versions,
@@ -473,8 +474,8 @@ mod tests {
     /// Above the 5 MiB from which GCS uploads in parts.
     const MULTIPART_SIZE: usize = 6 * 1024 * 1024;
 
-    /// A file reads back with its length, streamed in several items, and
-    /// nothing is left staged.
+    /// A file reads back with its length, streamed in several items, its
+    /// entry describes it, and nothing is left staged.
     async fn reads_back_what_was_written(storage: &TestStorage) {
         let path = storage.path("/pub/a.bin");
         let content = vec![1u8; 5 * TEST_CHUNK_SIZE];
@@ -488,6 +489,7 @@ mod tests {
         }
         assert_eq!(length, content.len() as u64);
         assert_eq!(read, content);
+        storage.assert_entry_matches_file(&path).await;
         assert!(storage.staging_is_empty().await);
     }
 
@@ -517,10 +519,12 @@ mod tests {
             storage.service.get(&path).await.unwrap().to_vec(),
             vec![2u8; 10]
         );
+        storage.assert_entry_matches_file(&path).await;
         assert!(storage.staging_is_empty().await);
     }
 
-    /// A deleted file is gone, and deleting a missing file succeeds.
+    /// A deleted file is gone with its entry, and deleting a missing file
+    /// succeeds.
     async fn delete_removes_the_file(storage: &TestStorage) {
         let path = storage.path("/pub/a.bin");
         storage.service.write(&path, vec![1u8; 10]).await.unwrap();
@@ -528,6 +532,7 @@ mod tests {
         storage.service.delete(&path).await.unwrap();
 
         assert!(!storage.service.exists(&path).await.unwrap());
+        storage.assert_entry_matches_file(&path).await;
         storage
             .service
             .delete(&path)
@@ -557,6 +562,7 @@ mod tests {
                 name.as_bytes(),
                 "{name}"
             );
+            storage.assert_entry_matches_file(&path).await;
         }
         let decoded = storage.path("/pub/Teest share/.keep");
         assert!(!storage.service.exists(&decoded).await.unwrap());
@@ -578,12 +584,29 @@ mod tests {
             storage.service.get(&path).await.unwrap().to_vec(),
             chunks.concat()
         );
+        storage.assert_entry_matches_file(&path).await;
+        assert!(storage.staging_is_empty().await);
+    }
+
+    /// An empty file is stored, with an entry of length zero.
+    async fn stores_an_empty_file(storage: &TestStorage) {
+        let path = storage.path("/pub/empty");
+
+        storage
+            .service
+            .write(&path, Vec::<u8>::new())
+            .await
+            .unwrap();
+
+        assert_eq!(storage.service.blob_length(&path).await.unwrap(), 0);
+        assert!(storage.service.get(&path).await.unwrap().is_empty());
+        storage.assert_entry_matches_file(&path).await;
         assert!(storage.staging_is_empty().await);
     }
 
     /// A body that breaks mid-stream is aborted: the caller gets the stream
-    /// error rather than a cleanup error, the old file stays, and nothing is
-    /// left staged.
+    /// error rather than a cleanup error, the old file and its entry stay,
+    /// and nothing is left staged.
     async fn broken_stream_keeps_the_old_file(storage: &TestStorage) {
         let path = storage.path("/pub/a.txt");
         storage.service.write(&path, b"old".to_vec()).await.unwrap();
@@ -599,6 +622,7 @@ mod tests {
             storage.service.get(&path).await.unwrap(),
             Bytes::from_static(b"old")
         );
+        storage.assert_entry_matches_file(&path).await;
         assert!(storage.staging_is_empty().await);
     }
 
@@ -646,6 +670,7 @@ mod tests {
             storage.service.get(&path).await.unwrap().to_vec(),
             vec![2u8; length]
         );
+        storage.assert_entry_matches_file(&path).await;
     }
 
     /// Against the real bucket, see

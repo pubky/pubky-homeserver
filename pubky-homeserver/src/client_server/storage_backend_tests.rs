@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use axum::http::{header, StatusCode};
 use axum_test::{TestRequest, TestServer};
+use pubky_common::storage_path::{MAX_STORAGE_PATH_SEGMENT_LENGTH, MAX_STORAGE_PATH_TOTAL_LENGTH};
 use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
 
 use crate::{app_context::AppContext, client_server::ClientServer};
@@ -13,6 +14,8 @@ use crate::{app_context::AppContext, client_server::ClientServer};
 const MULTIPART_SIZE: usize = 6 * 1024 * 1024;
 
 mod file_system {
+    use std::sync::Arc;
+
     use pubky_common::crypto::Keypair;
 
     use crate::{app_context::AppContext, storage_config::StorageConfigToml};
@@ -20,12 +23,22 @@ mod file_system {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn serves_files_through_the_api() {
-        let context = AppContext::test_with_config(|c| {
+        super::serves_files_through_the_api(homeserver().await, &Keypair::random()).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "fails on the file system backend, see #715 and #716"]
+    #[pubky_test_utils::test]
+    async fn stores_a_file_at_the_longest_storage_path() {
+        super::stores_a_file_at_the_longest_storage_path(homeserver().await, &Keypair::random())
+            .await;
+    }
+
+    async fn homeserver() -> Arc<AppContext> {
+        AppContext::test_with_config(|c| {
             c.storage.backend = StorageConfigToml::FileSystem;
         })
-        .await;
-
-        super::serves_files_through_the_api(context, &Keypair::random()).await;
+        .await
     }
 }
 
@@ -33,9 +46,12 @@ mod file_system {
 /// [`gcs_test_bucket`](crate::persistence::files::test_support::gcs_test_bucket).
 #[cfg(feature = "storage-gcs")]
 mod gcs {
+    use std::sync::Arc;
+
+    use async_dropper::AsyncDropper;
     use pubky_common::crypto::Keypair;
 
-    use crate::persistence::files::test_support::TestBucket;
+    use crate::persistence::files::test_support::gcs_test_bucket::{BucketCleaner, TestBucket};
     use crate::{app_context::AppContext, storage_config::StorageConfigToml};
 
     // Multi-threaded for the cleaner, which blocks on its async drop.
@@ -43,16 +59,30 @@ mod gcs {
     #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
     #[pubky_test_utils::test]
     async fn serves_files_through_the_api() {
+        let (context, user, _cleaner) = homeserver().await;
+        super::serves_files_through_the_api(context, &user).await;
+    }
+
+    // Multi-threaded for the cleaner, which blocks on its async drop.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS"]
+    #[pubky_test_utils::test]
+    async fn stores_a_file_at_the_longest_storage_path() {
+        let (context, user, _cleaner) = homeserver().await;
+        super::stores_a_file_at_the_longest_storage_path(context, &user).await;
+    }
+
+    /// A homeserver storing in the bucket's root, under its users' keys, and
+    /// a user whose files the returned cleaner deletes when dropped.
+    async fn homeserver() -> (Arc<AppContext>, Keypair, AsyncDropper<BucketCleaner>) {
         let bucket = TestBucket::from_env();
         let user = Keypair::random();
-        // The homeserver stores in the bucket's root, under its users' keys.
-        let _cleaner = bucket.user_cleaner(&user.public_key());
+        let cleaner = bucket.user_cleaner(&user.public_key());
         let context = AppContext::test_with_config(|c| {
             c.storage.backend = StorageConfigToml::GoogleBucket(bucket.config());
         })
         .await;
-
-        super::serves_files_through_the_api(context, &user).await;
+        (context, user, cleaner)
     }
 }
 
@@ -80,6 +110,37 @@ async fn serves_files_through_the_api(context: Arc<AppContext>, user: &Keypair) 
         user.delete(path).await;
         user.get_missing(path).await;
     }
+}
+
+/// A file at the longest storage path is written, read and deleted. In the
+/// bucket's root, the user's key and that path take up the whole object
+/// name GCS allows. Not part of the storage contract: under the root of a
+/// test, the name would be longer than any a homeserver stores.
+async fn stores_a_file_at_the_longest_storage_path(context: Arc<AppContext>, user: &Keypair) {
+    let server = TestServer::new(ClientServer::create_router(context).unwrap());
+    let user = SignedUpUser::sign_up(&server, user).await;
+    let path = longest_storage_path();
+    let content = b"longest".to_vec();
+
+    user.put(&path, &content).await;
+    assert_eq!(user.get(&path).await, content);
+
+    user.delete(&path).await;
+    user.get_missing(&path).await;
+}
+
+/// A path of the longest total length, whose last segments, the file name
+/// among them, are of the longest segment length.
+fn longest_storage_path() -> String {
+    let longest_segment = format!("/{}", "a".repeat(MAX_STORAGE_PATH_SEGMENT_LENGTH));
+    let filler_length = MAX_STORAGE_PATH_TOTAL_LENGTH - "/pub/".len() - 3 * longest_segment.len();
+    let path = format!(
+        "/pub/{}{}",
+        "b".repeat(filler_length),
+        longest_segment.repeat(3)
+    );
+    assert_eq!(path.len(), MAX_STORAGE_PATH_TOTAL_LENGTH);
+    path
 }
 
 /// A user signed up on the test server, sending its requests with its
