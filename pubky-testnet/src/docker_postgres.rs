@@ -233,24 +233,24 @@ mod tests {
         wait_for_container_removal(&container_id, 15).await;
     }
 
-    /// Verify that the shared container and its data volume are removed on normal exit.
+    /// Verify that the shared container and its data volumes are removed on normal exit.
     ///
     /// This re-executes the test binary as a subprocess with a sentinel env var.
     /// The subprocess starts a shared `DockerPostgres`, prints its container ID
-    /// and volume name, and exits normally. The parent verifies both were removed
+    /// and volume names, and exits normally. The parent verifies all were removed
     /// by the `atexit` hook.
     #[tokio::test]
     async fn test_shared_container_cleaned_up_on_normal_exit() {
         const SENTINEL: &str = "__DOCKER_PG_PRINT_CONTAINER_ID";
 
-        // Capture the volume name while the subprocess's container still exists.
+        // Capture volume names while the subprocess's container still exists.
         if std::env::var(SENTINEL).is_ok() {
             let pg = DockerPostgres::shared().await;
             let output = std::process::Command::new("docker")
                 .args([
                     "inspect",
                     "--format",
-                    r#"{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}"#,
+                    r#"{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}"#,
                     pg.container_id(),
                 ])
                 .output()
@@ -261,11 +261,13 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             println!("{}{}", CONTAINER_ID_PREFIX, pg.container_id());
-            println!(
-                "{}{}",
-                VOLUME_NAME_PREFIX,
-                String::from_utf8_lossy(&output.stdout).trim()
-            );
+            for name in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                println!("{}{}", VOLUME_NAME_PREFIX, name);
+            }
             return;
         }
 
@@ -288,8 +290,16 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let container_id = extract_child_value(&stdout, CONTAINER_ID_PREFIX)
             .unwrap_or_else(|| panic!("Child did not print a container ID. stdout: {stdout}"));
-        let volume_name = extract_child_value(&stdout, VOLUME_NAME_PREFIX)
-            .unwrap_or_else(|| panic!("Child did not print a volume name. stdout: {stdout}"));
+        let volume_names: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(VOLUME_NAME_PREFIX))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(
+            !volume_names.is_empty(),
+            "Child did not print any volume names. stdout: {stdout}"
+        );
 
         // Poll until Docker confirms the container is gone.
         wait_for_container_removal(&container_id, 15).await;
@@ -303,12 +313,13 @@ mod tests {
             "docker volume ls failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(
-            !String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|name| name == volume_name),
-            "Volume {volume_name} still exists after normal process exit"
-        );
+        let remaining_volumes = String::from_utf8_lossy(&output.stdout);
+        for volume_name in volume_names {
+            assert!(
+                !remaining_volumes.lines().any(|name| name == volume_name),
+                "Volume {volume_name} still exists after normal process exit"
+            );
+        }
     }
 
     /// Verify that `shared()` returns the same instance (same container) on repeated calls.
