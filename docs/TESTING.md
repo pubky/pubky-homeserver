@@ -103,21 +103,26 @@ Most tests run on the in-memory storage backend. Two kinds of tests cover the
 backends a homeserver runs on in production:
 
 - **Storage contract:** what the file service promises on every backend, such
-  as overwrites, deletes, names that URLs percent-encode, multipart-sized
-  writes, broken uploads, and downloads during an overwrite. Each case runs
-  as a test of its own on each backend, under the layers production puts on
-  it, named `memory::<case>`, `file_system::<case>`, and `gcs::<case>`. Add a
-  case with `storage_contract_tests!` in
+  as overwrites, deletes, names that URLs percent-encode, empty files,
+  multipart-sized writes, broken uploads, and downloads during an overwrite.
+  Each case runs as a test of its own on each backend, under the layers
+  production puts on it. The tests are named `memory::<case>`,
+  `file_system::<case>`, and `gcs::<case>`. To add a case, list it in
+  `storage_contract_tests!` in
   [`opendal_service.rs`](../pubky-homeserver/src/persistence/files/opendal/opendal_service.rs).
 - **Backend smoke tests:** the client API on a homeserver configured with
   `file_system` or `google_bucket` storage, named `file_system::<test>` and
   `gcs::<test>`, in
   [`storage_backend_tests.rs`](../pubky-homeserver/src/client_server/storage_backend_tests.rs).
 
-Run the tests of one backend by its name:
+The tests need PostgreSQL, see [PostgreSQL for Tests](#postgresql-for-tests).
+To run the tests of one backend, filter by its name. Use `memory` or
+`file_system`; the GCS tests need a bucket, see
+[Google Cloud Storage](#google-cloud-storage).
 
 ```bash
-cargo nextest run -p pubky-homeserver --all-features -E 'test(/::file_system::/)'
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
+  cargo nextest run -p pubky-homeserver --all-features -E 'test(/::file_system::/)'
 ```
 
 In CI, the [Storage Backends](../.github/workflows/storage-backends.yml)
@@ -147,7 +152,8 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
 A GCS test fails if a variable is missing, rather than passing without the
 bucket. Each test works under a prefix of its own and deletes it when it
 finishes, so tests can share a bucket and run in parallel. The prefix is
-`ci/<run id>/<uuid>` in GitHub Actions and `test_<uuid>` otherwise.
+`ci/<run id>/<uuid>` in GitHub Actions and `test_<uuid>` otherwise. The API
+tests work in the bucket's root instead, under their user's key.
 
 Use a dedicated bucket. Give the service account only the
 **Storage Object User** role on that bucket. Add lifecycle rules that delete
@@ -157,8 +163,8 @@ killed test leaves behind is removed.
 In CI, `storage (gcs)` reads the key from the `GCS_CI_CREDENTIALS` secret and
 the bucket name from the `GCS_CI_BUCKET` variable. Pull requests from forks
 and Dependabot don't get the secret, so the check is skipped with a warning;
-the push to `main` runs it after the merge. On `main`, a missing secret fails
-the workflow.
+the push to `main` runs it after the merge. Outside pull requests, a missing
+secret fails the workflow.
 
 ## Docker Build Options
 
