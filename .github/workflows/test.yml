@@ -214,7 +214,7 @@ jobs:
         run: cat testnet.log
 
   docker-postgres-test:
-    name: docker postgres
+    name: pubky-testnet (docker-postgres)
     # This job tests the docker-postgres feature WITHOUT an external postgres service
     # to verify that the Docker-managed postgres works as a standalone solution
     runs-on: ubuntu-latest
