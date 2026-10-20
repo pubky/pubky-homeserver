@@ -95,8 +95,53 @@ jobs:
             fi
           fi
 
+  wasm-unit-test:
+    name: wasm (unit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+          target: wasm32-unknown-unknown
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run wasm-pack unit tests
+        working-directory: pubky-sdk/bindings/js
+        run: wasm-pack test --node
+
+  # Each JS test suite runs on a runner of its own, against a testnet of its
+  # own, so the suites run at the same time.
   wasm-test:
-    name: wasm
+    name: wasm (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: node
+            command: npm run test-nodejs
+            electron: false
+          - suite: browser
+            command: xvfb-run -a npm run test-browser:ci
+            electron: true
+          - suite: session-tabs
+            command: xvfb-run -a npm run test-browser:tabs -- --no-sandbox
+            electron: true
     services:
       postgres:
         image: postgres:18-alpine          # official image
@@ -142,13 +187,22 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
+          workspaces: |
+            . -> target
+            . -> target-testnet
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Run wasm-pack unit tests
-        working-directory: pubky-sdk/bindings/js
-        run: wasm-pack test --node
+      # The testnet builds while the WASM bindings build. Its own target
+      # directory keeps the two builds from waiting for each other's lock.
+      - name: Run the testnet
+        working-directory: pubky-sdk/bindings/js/pkg
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target-testnet
+        run: npm run testnet > testnet.log 2>&1 &
+
 
       - name: Install Electron/X deps
+        if: matrix.electron
         run: |
           set -eux
           sudo apt-get update
@@ -170,6 +224,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends libasound2
 
       - name: Sanity Check (Electron works)
+        if: matrix.electron
         run: xvfb-run -a npx electron --no-sandbox --version
 
       - name: Build WASM
@@ -177,9 +232,6 @@ jobs:
         run: |
           npm run build
 
-      - name: Run the testnet
-        working-directory: pubky-sdk/bindings/js/pkg
-        run: npm run testnet > testnet.log 2>&1 &
 
       - name: Wait for testnet homeserver and HTTP relay
         run: |
@@ -208,18 +260,11 @@ jobs:
           done
           echo "HTTP relay is ready."
 
-      - name: Node tests
-        working-directory: pubky-sdk/bindings/js/pkg
-        run: npm run test-nodejs
-
-      - name: Browser tests (Electron under Xvfb)
+      - name: Run the ${{ matrix.suite }} tests
         working-directory: pubky-sdk/bindings/js/pkg
         env:
           ELECTRON_DISABLE_SANDBOX: "1" # CI-safe
-        run: |
-          npx electron --version || true
-          xvfb-run -a npm run test-browser:ci
-          xvfb-run -a npm run test-browser:tabs -- --no-sandbox
+        run: ${{ matrix.command }}
 
       - name: Show testnet logs if tests fail
         working-directory: pubky-sdk/bindings/js/pkg
