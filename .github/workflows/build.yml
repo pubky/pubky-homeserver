@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
 
+# The Rust caches are saved only on main. Pull requests restore them without
+# saving, so they don't evict the caches of main from the repository's cache.
 jobs:
   doc:
     name: docs (${{ matrix.crate }})
@@ -21,6 +23,9 @@ jobs:
           toolchain: "1.91"
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.crate }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build docs
         run: cargo doc -p ${{ matrix.crate }} --all-features --no-deps
 
@@ -35,6 +40,8 @@ jobs:
           toolchain: "1.91"
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cargo check examples
         run: |
           cargo check -p pubky-homeserver-examples --all-features --bins

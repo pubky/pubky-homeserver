@@ -8,6 +8,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  # Line tables keep file and line numbers in backtraces, but make the builds
+  # and their caches much smaller than full debug info.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+# The Rust caches are saved only on main. Pull requests restore them without
+# saving, so they don't evict the caches of main from the repository's cache.
 jobs:
   test:
     name: ${{ matrix.crate }}
@@ -51,6 +58,10 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Each crate builds different tests, so each needs a cache of its own.
+          shared-key: test-${{ matrix.crate }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Wait for PostgreSQL
         run: |
           for i in {1..10}; do
@@ -130,6 +141,8 @@ jobs:
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run wasm-pack unit tests
         working-directory: pubky-sdk/bindings/js
@@ -226,6 +239,8 @@ jobs:
           toolchain: "1.91"
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run docker postgres tests
         run: |
           cargo test -p pubky-testnet \
@@ -267,6 +282,10 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # The pubky-homeserver job builds the same tests and saves the cache.
+          shared-key: test-pubky-homeserver
+          save-if: false
       - name: Run the ${{ matrix.backend }} tests
         run: |
           cargo nextest run -p pubky-homeserver --all-features \
@@ -323,6 +342,10 @@ jobs:
       - name: Cache
         if: steps.credentials.outputs.available == 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          # The pubky-homeserver job builds the same tests and saves the cache.
+          shared-key: test-pubky-homeserver
+          save-if: false
       - name: Configure the GCS test bucket
         if: steps.credentials.outputs.available == 'true'
         env:

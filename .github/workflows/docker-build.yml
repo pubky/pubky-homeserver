@@ -54,6 +54,7 @@ jobs:
           PUBLISH: ${{ inputs.publish }}
           ARCHITECTURE: ${{ inputs.architecture }}
           CACHE_SCOPE: docker-${{ inputs.build_profile }}-${{ matrix.target }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$PUBLISH" == "true" ]]; then
             # Publishing imports native caches from main without exporting.
@@ -65,6 +66,12 @@ jobs:
               *) echo "Unsupported architecture: $ARCHITECTURE" >&2; exit 1 ;;
             esac
             cache_to="type=gha,scope=${CACHE_SCOPE}-${ARCHITECTURE},mode=max"
+          fi
+
+          # Pull requests import the cache of main without exporting, so their
+          # caches don't evict the ones of main.
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            cache_to=''
           fi
 
           platforms=''

@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
 
+# The Rust caches are saved only on main. Pull requests restore them without
+# saving, so they don't evict the caches of main from the repository's cache.
 jobs:
   msrv:
     name: msrv
@@ -18,6 +20,8 @@ jobs:
           toolchain: "1.91"
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify MSRV
         run: cargo check --workspace --all-features
 
@@ -46,6 +50,8 @@ jobs:
           components: clippy
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Lint host crates and all Cargo targets
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
@@ -68,6 +74,8 @@ jobs:
           components: rustfmt, clippy
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check excluded helper crates
         run: |
           set -e
