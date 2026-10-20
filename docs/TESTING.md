@@ -207,9 +207,14 @@ Checks use native runners: `ubuntu-24.04` for AMD64 and `ubuntu-24.04-arm` for A
 ARM64 is checked only after merging to `main`. Publishing runs on `ubuntu-latest`
 with ARM64 emulation.
 
-Caches use the scope `docker-<profile>-<target>-<architecture>`. Checks import and
-update their cache, with debug builds on `main` warming caches for PRs. Publishing
-imports both architecture-specific release caches from `main` without exporting.
+The [Dockerfile](../Dockerfile) builds the dependencies with
+[cargo-chef](https://github.com/LukeMathWalker/cargo-chef) in a layer of their
+own, so a build with cached dependencies compiles only the workspace crates.
+
+Caches use the scope `docker-<profile>-<target>-<architecture>`. Checks on `main`
+import and update their cache, and the debug builds on `main` warm the caches for
+PRs. PRs import the cache without exporting. Publishing imports both
+architecture-specific release caches from `main` without exporting.
 
 ## Common Commands
 

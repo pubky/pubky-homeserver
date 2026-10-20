@@ -1,7 +1,7 @@
 # ========================
-# Build Stage
+# Toolchain Stage
 # ========================
-FROM rust:1.91.1-alpine3.20 AS builder
+FROM rust:1.91.1-alpine3.20 AS chef
 
 # Build platform argument (x86_64 or aarch64) (default: x86_64)
 RUN echo "TARGETARCH: $TARGETARCH"
@@ -24,14 +24,26 @@ ENV OPENSSL_STATIC=yes
 ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 
+# cargo-chef builds the dependencies in a layer of their own, so a change to
+# the source code reuses the cached dependencies and rebuilds only the
+# workspace crates.
+RUN cargo install cargo-chef --locked --version 0.1.78
+
 # Set the working directory
 WORKDIR /usr/src/app
 
-# Copy over Cargo.toml and Cargo.lock for dependency caching
-COPY Cargo.toml Cargo.lock ./
-
-# Copy over all the source code
+# ========================
+# Recipe Stage
+# ========================
+# The recipe lists the dependencies, so it changes only when they do.
+FROM chef AS planner
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ========================
+# Build Stage
+# ========================
+FROM chef AS builder
 
 # Add build argument for binary selection (homeserver or testnet)
 ARG BUILD_TARGET=homeserver
@@ -41,11 +53,23 @@ ARG BUILD_PROFILE=release
 
 # Cargo calls the debug profile "dev", but writes its artifacts to target/debug.
 RUN case "$BUILD_PROFILE" in \
-      release) cargo build --release --bin "pubky-$BUILD_TARGET" && \
-               strip "target/release/pubky-$BUILD_TARGET" ;; \
-      debug) cargo build --bin "pubky-$BUILD_TARGET" ;; \
+      release) echo release ;; \
+      debug) echo dev ;; \
       *) echo "Invalid BUILD_PROFILE: $BUILD_PROFILE (expected debug or release)" >&2; exit 1 ;; \
-    esac && \
+    esac > /cargo-profile
+
+# Build the dependencies of the binary. The recipe leaves out the crates the
+# workspace excludes, but cargo still reads the test utilities the workspace
+# crates depend on.
+COPY --from=planner /usr/src/app/recipe.json recipe.json
+COPY test_utils test_utils
+RUN cargo chef cook --profile "$(cat /cargo-profile)" --bin "pubky-$BUILD_TARGET" \
+      --recipe-path recipe.json
+
+# Copy over all the source code and build the binary
+COPY . .
+RUN cargo build --profile "$(cat /cargo-profile)" --bin "pubky-$BUILD_TARGET" && \
+    if [ "$BUILD_PROFILE" = release ]; then strip "target/release/pubky-$BUILD_TARGET"; fi && \
     mkdir -p /out && \
     cp "target/$BUILD_PROFILE/pubky-$BUILD_TARGET" /out/homeserver
 
