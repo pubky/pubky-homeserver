@@ -8,6 +8,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A new push to a pull request cancels its older runs. Runs on main finish, so
+# they save the caches that pull requests restore.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Line tables keep file and line numbers in backtraces, but make the builds
   # and their caches much smaller than full debug info.

@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
 
+# A new push to a pull request cancels its older runs. Runs on main finish, so
+# they save the caches that pull requests restore.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The Rust caches are saved only on main. Pull requests restore them without
 # saving, so they don't evict the caches of main from the repository's cache.
 jobs:
