@@ -119,10 +119,9 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
   cargo nextest run -p pubky-homeserver --all-features -E 'test(/::file_system::/)'
 ```
 
-In CI, the [Storage Backends](../.github/workflows/storage-backends.yml)
-workflow runs them as one check per backend: `storage (memory)`,
-`storage (file_system)`, and `storage (gcs)`. It runs on pull requests, on
-pushes to `main`, and on demand.
+In CI, the [Test](../.github/workflows/test.yml) workflow runs them as one
+check per backend: `storage (memory)`, `storage (file_system)`, and
+`storage (gcs)`. It runs on pull requests, on pushes to `main`, and on demand.
 
 ### Google Cloud Storage
 
@@ -157,9 +156,9 @@ killed test leaves behind is removed.
 
 In CI, `storage (gcs)` reads the key from the `GCS_CI_CREDENTIALS` secret and
 the bucket name from the `GCS_CI_BUCKET` variable. Pull requests from forks
-and Dependabot don't get the secret, so the check is skipped with a warning;
-the push to `main` runs it after the merge. Outside pull requests, a missing
-secret fails the workflow.
+and Dependabot don't get the secret, so the check passes with a warning
+without running the tests; the push to `main` runs them after the merge.
+Outside pull requests, a missing secret fails the check.
 
 ## Docker Build Options
 
@@ -196,7 +195,7 @@ to build both `homeserver` and `testnet` images.
 
 | Workflow | Trigger | Profile | Platforms | Publishes images |
 | --- | --- | --- | --- | --- |
-| [PR Check](../.github/workflows/pr-check.yml) | Pull requests and pushes to `main` | `debug` | `linux/amd64` (native runner) | No |
+| [Build](../.github/workflows/build.yml) | Pull requests and pushes to `main` | `debug` | `linux/amd64` (native runner) | No |
 | [Release Docker check](../.github/workflows/docker-check.yml) | Pushes to `main` | `release` | `linux/amd64`, `linux/arm64` (native runners) | No |
 | [Docker publishing](../.github/workflows/docker.yml) | Tags matching `v*` | `release` | `linux/amd64`, `linux/arm64` | Yes |
 

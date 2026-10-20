@@ -1,82 +1,16 @@
-name: PR Check
+name: Test
 
+# The tests of each crate, the WASM bindings, and each storage backend, see
+# docs/TESTING.md.
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up MSRV toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Verify MSRV
-        run: cargo check --workspace --all-features
-
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-          components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --check
-
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-          components: clippy
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Lint host crates and all Cargo targets
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Install WASM compilation target
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Lint WASM bindings and tests
-        run: cargo clippy -p pubky-wasm --lib --tests --target wasm32-unknown-unknown -- -D warnings
-
-  helper-crates:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-          components: rustfmt, clippy
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Check excluded helper crates
-        run: |
-          set -e
-          for manifest in \
-            test_utils/drop_db_helper/Cargo.toml \
-            test_utils/test_macro/Cargo.toml \
-            test_utils/pubky_test/Cargo.toml
-          do
-            cargo fmt --check --manifest-path "$manifest"
-            cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
-            cargo test --manifest-path "$manifest"
-          done
-
   test:
+    name: ${{ matrix.crate }}
     services:
       postgres:
         image: postgres:18-alpine          # official image
@@ -150,37 +84,8 @@ jobs:
             fi
           fi
 
-  doc:
-    strategy:
-      matrix:
-        crate: [pubky, pubky-testnet]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build docs
-        run: cargo doc -p ${{ matrix.crate }} --all-features --no-deps
-
-  examples:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Cargo check examples
-        run: |
-          cargo check -p pubky-homeserver-examples --all-features --bins
-
   wasm-test:
+    name: wasm
     services:
       postgres:
         image: postgres:18-alpine          # official image
@@ -309,6 +214,7 @@ jobs:
         run: cat testnet.log
 
   docker-postgres-test:
+    name: docker postgres
     # This job tests the docker-postgres feature WITHOUT an external postgres service
     # to verify that the Docker-managed postgres works as a standalone solution
     runs-on: ubuntu-latest
@@ -327,7 +233,112 @@ jobs:
             docker_postgres \
             -- --test-threads=1
 
-  docker-build:
-    uses: ./.github/workflows/docker-build.yml
-    with:
-      build_profile: debug
+  # The storage tests of each backend, one check per backend. The memory and
+  # file system tests also run in the pubky-homeserver job.
+  storage:
+    name: storage (${{ matrix.backend }})
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [memory, file_system]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+          POSTGRES_DB: postgres
+        ports: ['127.0.0.1:5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U test_user"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      TEST_PUBKY_CONNECTION_STRING: postgres://test_user:test_pass@localhost:5432/postgres
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+      - name: Install Nextest
+        uses: taiki-e/install-action@nextest
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run the ${{ matrix.backend }} tests
+        run: |
+          cargo nextest run -p pubky-homeserver --all-features \
+            -E 'test(/::${{ matrix.backend }}::/)' \
+            --retries 2 --no-fail-fast
+
+  # Pull requests from forks and Dependabot get no secrets: the job then
+  # passes with a warning. Outside pull requests, a missing secret fails it.
+  storage-gcs:
+    name: storage (gcs)
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+          POSTGRES_DB: postgres
+        ports: ['127.0.0.1:5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U test_user"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      TEST_PUBKY_CONNECTION_STRING: postgres://test_user:test_pass@localhost:5432/postgres
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for the GCS credentials
+        id: credentials
+        env:
+          # Secrets can't be checked in an `if`.
+          HAS_GCS: ${{ secrets.GCS_CI_CREDENTIALS != '' }}
+        run: |
+          echo "available=$HAS_GCS" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_GCS" = "true" ]; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::warning::This pull request gets no GCS credentials; the GCS tests are skipped."
+          else
+            echo "::error::The GCS_CI_CREDENTIALS secret is missing."
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        if: steps.credentials.outputs.available == 'true'
+      - name: Set up Rust
+        if: steps.credentials.outputs.available == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+      - name: Install Nextest
+        if: steps.credentials.outputs.available == 'true'
+        uses: taiki-e/install-action@nextest
+      - name: Cache
+        if: steps.credentials.outputs.available == 'true'
+        uses: Swatinem/rust-cache@v2
+      - name: Configure the GCS test bucket
+        if: steps.credentials.outputs.available == 'true'
+        env:
+          GCS_CI_CREDENTIALS: ${{ secrets.GCS_CI_CREDENTIALS }}
+          GCS_CI_BUCKET: ${{ vars.GCS_CI_BUCKET }}
+        run: |
+          credentials="$RUNNER_TEMP/gcs-credentials.json"
+          printf '%s' "$GCS_CI_CREDENTIALS" > "$credentials"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$credentials" >> "$GITHUB_ENV"
+          echo "GCS_BUCKET=$GCS_CI_BUCKET" >> "$GITHUB_ENV"
+      - name: Run the gcs tests
+        if: steps.credentials.outputs.available == 'true'
+        # The GCS tests are ignored unless asked for. Each works under a
+        # prefix of its own and deletes it when done. A lifecycle rule on the
+        # bucket deletes what a killed test leaves.
+        run: |
+          cargo nextest run -p pubky-homeserver --all-features \
+            --run-ignored only -E 'test(/gcs/)' \
+            --retries 2 --no-fail-fast

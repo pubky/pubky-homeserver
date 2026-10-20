@@ -26,6 +26,7 @@ permissions:
 
 jobs:
   build:
+    name: ${{ matrix.target }}
     runs-on: ${{ inputs.publish && 'ubuntu-latest' || inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 150
     strategy:

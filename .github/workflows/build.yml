@@ -1,0 +1,46 @@
+name: Build
+
+# Documentation, examples and Docker images.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  doc:
+    name: docs (${{ matrix.crate }})
+    strategy:
+      matrix:
+        crate: [pubky, pubky-testnet]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build docs
+        run: cargo doc -p ${{ matrix.crate }} --all-features --no-deps
+
+  examples:
+    name: examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Cargo check examples
+        run: |
+          cargo check -p pubky-homeserver-examples --all-features --bins
+
+  docker-build:
+    name: docker
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      build_profile: debug

@@ -52,7 +52,8 @@ for PostgreSQL setup and database cleanup with `#[pubky_testnet::test]`.
 Use `pubky-testnet` for integration tests; cover bug reproductions and relevant
 failure paths. For SDK changes, check native and WASM behavior using the
 [JS bindings guide](pubky-sdk/bindings/js/README.md) and applicable
-[CI checks](.github/workflows/pr-check.yml).
+CI checks: [Lint](.github/workflows/lint.yml),
+[Build](.github/workflows/build.yml), and [Test](.github/workflows/test.yml).
 
 Review the diff. Report what you tested, what changed for callers, and anything
 you couldn't verify.

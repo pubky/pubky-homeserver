@@ -1,0 +1,82 @@
+name: Lint
+
+# Formatting, lints and the minimum supported Rust version.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up MSRV toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Verify MSRV
+        run: cargo check --workspace --all-features
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+          components: clippy
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Lint host crates and all Cargo targets
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Install WASM compilation target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Lint WASM bindings and tests
+        run: cargo clippy -p pubky-wasm --lib --tests --target wasm32-unknown-unknown -- -D warnings
+
+  helper-crates:
+    name: helper crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+          components: rustfmt, clippy
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Check excluded helper crates
+        run: |
+          set -e
+          for manifest in \
+            test_utils/drop_db_helper/Cargo.toml \
+            test_utils/test_macro/Cargo.toml \
+            test_utils/pubky_test/Cargo.toml
+          do
+            cargo fmt --check --manifest-path "$manifest"
+            cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
+            cargo test --manifest-path "$manifest"
+          done
