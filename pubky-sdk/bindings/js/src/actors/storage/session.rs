@@ -180,23 +180,7 @@ impl SessionStorage {
         #[wasm_bindgen(unchecked_param_type = "Path")] path: String,
         body: &web_sys::Blob,
     ) -> JsResult<()> {
-        if !body.is_instance_of::<web_sys::Blob>() {
-            return Err(PubkyError::new(
-                PubkyErrorName::InvalidInput,
-                "body must be a Blob or File",
-            ));
-        }
-        let mut retried = false;
-        loop {
-            let (request, limit, lease) = self.0.prepare_blob_put(path.as_str()).await?;
-            let response = super::utils::send_blob_put(&request, body).await?;
-            drop(lease);
-            if !retried && response.status() == 401 && self.0.retry_blob_put(&request).await? {
-                retried = true;
-                continue;
-            }
-            return super::utils::check_web_http_status(response, limit).await;
-        }
+        self.put_blob_inner(&path, body, None).await
     }
 
     /// Create or replace a file with text at an absolute session path.
@@ -246,5 +230,33 @@ impl SessionStorage {
     ) -> JsResult<()> {
         self.0.delete(path).await?;
         Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl SessionStorage {
+    pub(super) async fn put_blob_inner(
+        &self,
+        path: &str,
+        body: &web_sys::Blob,
+        if_header: Option<&str>,
+    ) -> JsResult<()> {
+        if !body.is_instance_of::<web_sys::Blob>() {
+            return Err(PubkyError::new(
+                PubkyErrorName::InvalidInput,
+                "body must be a Blob or File",
+            ));
+        }
+        let mut retried = false;
+        loop {
+            let (request, limit, lease) = self.0.prepare_blob_put(path).await?;
+            let response = super::utils::send_blob_put(&request, body, if_header).await?;
+            drop(lease);
+            if !retried && response.status() == 401 && self.0.retry_blob_put(&request).await? {
+                retried = true;
+                continue;
+            }
+            return super::utils::check_web_http_status(response, limit).await;
+        }
     }
 }

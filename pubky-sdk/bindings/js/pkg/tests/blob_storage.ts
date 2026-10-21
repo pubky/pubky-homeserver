@@ -1,5 +1,5 @@
 import test from "tape";
-import { Client, Keypair, Pubky, PublicKey, type Path } from "../index.js";
+import { Client, Keypair, Pubky, PublicKey, type Path, type StorageLock } from "../index.js";
 import {
   type Assert,
   type IsExact,
@@ -14,6 +14,7 @@ const PATH: Path = "/priv/blob-upload/value.bin";
 
 type Session = Awaited<ReturnType<ReturnType<Pubky["signer"]>["signin"]>>;
 type _PutBlob = Assert<IsExact<Parameters<Session["storage"]["putBlob"]>, [Path, Blob]>>;
+type _PutBlobLocked = Assert<IsExact<Parameters<Session["storage"]["putBlobLocked"]>, [StorageLock, Blob]>>;
 
 for (const credential of ["cookie", "grant"]) {
   test(`putBlob uploads Blob and File with ${credential} authentication`, async (t) => {
@@ -90,6 +91,62 @@ for (const credential of ["cookie", "grant"]) {
     } finally {
       globalThis.fetch = originalFetch;
     }
+    t.end();
+  });
+
+  test(`putBlobLocked uploads under a file lock with ${credential} authentication`, async (t) => {
+    const sdk = Pubky.testnet();
+    const signer = sdk.signer(Keypair.random());
+    const token = await createSignupToken();
+    const cookie = credential === "cookie" ? await signer.signupCookie(HOMESERVER, token) : undefined;
+    if (credential === "grant") await signer.signup(HOMESERVER, token);
+    const session = cookie ?? await signer.signin("blob-upload.test");
+    const storage = session.storage;
+    const lock = await storage.lock(PATH, 30);
+
+    await storage.putBlob(PATH, new Blob(["unlocked write"])).then(
+      () => t.fail("plain Blob upload to a locked path must reject"),
+      (error) => { assertPubkyError(t, error); t.equal(getStatusCode(error), 423); },
+    );
+    for (const body of [
+      new Blob([new Uint8Array([0, 128, 255])]),
+      new File(["file contents"], "value.bin"),
+      new Blob([]),
+    ]) {
+      await storage.putBlobLocked(lock, body);
+      t.deepEqual(
+        await storage.getBytes(PATH),
+        new Uint8Array(await body.arrayBuffer()),
+        "locked upload preserves contents",
+      );
+    }
+
+    await storage.putTextLocked(lock, "original contents");
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = (...args) => { requests++; return originalFetch(...args); };
+    try {
+      for (const body of [undefined, null, "not a Blob", new Uint8Array([1]), {}]) {
+        // @ts-expect-error Exercise runtime validation for invalid JavaScript inputs.
+        await storage.putBlobLocked(lock, body).then(
+          () => t.fail("non-Blob body must reject"),
+          (error) => { assertPubkyError(t, error); t.equal(error.name, "InvalidInput"); },
+        );
+      }
+      t.equal(requests, 0, "invalid bodies never send a request");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    t.equal(await storage.getText(PATH), "original contents", "invalid bodies preserve the file");
+
+    await storage.unlock(lock);
+    await storage.putBlobLocked(lock, new Blob(["stale write"])).then(
+      () => t.fail("released lock must reject"),
+      (error) => { assertPubkyError(t, error); t.equal(getStatusCode(error), 412); },
+    );
+    t.equal(await storage.getText(PATH), "original contents", "stale lock preserves the file");
+    await storage.delete(PATH);
+    await session.signout();
     t.end();
   });
 }

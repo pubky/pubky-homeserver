@@ -79,6 +79,7 @@ pub(crate) fn response_to_web_response(resp: reqwest::Response) -> JsResult<Resp
 pub(crate) async fn send_blob_put(
     request: &reqwest::Request,
     body: &web_sys::Blob,
+    if_header: Option<&str>,
 ) -> JsResult<Response> {
     let headers = Headers::new()?;
     for (name, value) in request.headers() {
@@ -86,6 +87,9 @@ pub(crate) async fn send_blob_put(
             .to_str()
             .map_err(|error| PubkyError::new(PubkyErrorName::RequestError, error))?;
         headers.append(name.as_str(), value)?;
+    }
+    if let Some(value) = if_header {
+        headers.set("If", value)?;
     }
     let init = RequestInit::new();
     init.set_method("PUT");

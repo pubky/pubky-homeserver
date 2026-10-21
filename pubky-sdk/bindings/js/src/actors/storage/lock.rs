@@ -146,6 +146,31 @@ impl SessionStorage {
         Ok(())
     }
 
+    /// Upload a Blob or File to a locked path without copying its contents into
+    /// WASM memory.
+    ///
+    /// @param {StorageLock} lock A lock you hold. The upload uses the lock's path.
+    /// @param {Blob} body A Blob or File to upload.
+    /// @returns {Promise<void>}
+    /// @throws {PubkyError} An expired or released lock rejects with status `412`.
+    /// A file that changed since the write was prepared rejects with status `409`.
+    /// See {@link SessionStorage.putBytesLocked} for recovery and
+    /// {@link SessionStorage.putBlob} for input validation and shared errors.
+    /// @example
+    /// const lock = await session.storage.lock("/pub/example.com/file.bin", 30);
+    /// try {
+    ///   await session.storage.putBlobLocked(lock, file);
+    /// } finally {
+    ///   await session.storage.unlock(lock);
+    /// }
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = "putBlobLocked")]
+    pub async fn put_blob_locked(&self, lock: &StorageLock, body: &web_sys::Blob) -> JsResult<()> {
+        let lock = lock.inner();
+        self.put_blob_inner(lock.path().as_str(), body, Some(&lock.if_header()))
+            .await
+    }
+
     /// `PUT` text to the path of a lock this client holds.
     ///
     /// @param {StorageLock} lock A lock this client holds.
