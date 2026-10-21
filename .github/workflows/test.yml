@@ -341,7 +341,7 @@ jobs:
         run: |
           cargo nextest run -p pubky-homeserver --all-features \
             -E 'test(/::${{ matrix.backend }}::/)' \
-            --retries 2 --no-fail-fast
+            --no-fail-fast
 
   # Pull requests from forks and Dependabot get no secrets: the job then
   # passes with a warning. Outside pull requests, a missing secret fails it.
@@ -415,4 +415,4 @@ jobs:
         run: |
           cargo nextest run -p pubky-homeserver --all-features \
             --run-ignored only -E 'test(/gcs/)' \
-            --retries 2 --no-fail-fast
+            --no-fail-fast
