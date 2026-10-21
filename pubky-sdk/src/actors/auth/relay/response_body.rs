@@ -84,15 +84,16 @@ mod tests {
         let mut wire = format!("{:x}\r\n", body.len()).into_bytes();
         wire.extend_from_slice(&body);
         wire.extend_from_slice(b"\r\n0\r\n\r\n");
-        let (response, _socket) =
+        let (response, _connection) =
             serve_response(200, "Transfer-Encoding: chunked\r\n", &wire).await;
         assert_eq!(read_relay_body(response).await.unwrap(), body);
     }
 
     #[tokio::test]
     async fn truncated_bodies_preserve_transport_errors() {
-        let (response, socket) = serve_response(200, "Content-Length: 100\r\n", b"partial").await;
-        drop(socket);
+        let (response, connection) =
+            serve_response(200, "Content-Length: 100\r\n", b"partial").await;
+        drop(connection);
         assert!(matches!(
             read_relay_body(response).await,
             Err(Error::Request(_))
@@ -123,7 +124,7 @@ mod tests {
             ("Transfer-Encoding: chunked\r\n", chunked.as_slice()),
             ("Connection: close\r\n", body.as_slice()),
         ] {
-            let (response, _socket) = serve_response(200, framing, wire).await;
+            let (response, _connection) = serve_response(200, framing, wire).await;
             let error = tokio::time::timeout(Duration::from_secs(2), read_relay_body(response))
                 .await
                 .expect("reader must stop before EOF")

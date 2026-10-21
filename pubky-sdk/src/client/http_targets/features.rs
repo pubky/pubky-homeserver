@@ -176,7 +176,7 @@ mod tests {
     async fn limits_info_response_body() {
         for size in [MAX_INFO_BYTES - 1, MAX_INFO_BYTES, MAX_INFO_BYTES + 1] {
             let body = vec![b'x'; size];
-            let (response, _socket) = crate::util::tests::serve_response(
+            let (response, _connection) = crate::util::tests::serve_response(
                 200,
                 &format!("Content-Length: {size}\r\n"),
                 &body,
