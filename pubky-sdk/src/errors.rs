@@ -164,14 +164,18 @@ pub enum AuthError {
 pub enum RequestErrorKind {
     /// A non-success HTTP response was received.
     Http {
-        /// The received HTTP response status code.
+        /// The received HTTP response status code, always within `100..=999`
+        /// (the range the HTTP status parser accepts; codes above 599 are
+        /// non-standard but possible).
         status: u16,
     },
     /// A transport deadline expired, including during response-body consumption.
     Timeout,
     /// The native transport identified a connection failure, including TLS setup.
     Connection,
-    /// Sending or receiving an HTTP body failed.
+    /// Sending or receiving an HTTP body failed; the transport does not say why.
+    /// Response reads report their failures as [`Self::Decode`], so in practice
+    /// this covers request-body (upload) failures.
     Body,
     /// Response decoding failed, including incomplete HTTP framing. This does
     /// not establish that the stored application payload is corrupt.
