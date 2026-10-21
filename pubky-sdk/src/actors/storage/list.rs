@@ -176,7 +176,7 @@ impl<'a> ListBuilder<'a> {
                 &storage.client,
                 storage
                     .client
-                    .cross_request(Method::GET, url.clone())
+                    .cross_request_anonymous(Method::GET, url.clone())
                     .await?
                     .send()
                     .await?,

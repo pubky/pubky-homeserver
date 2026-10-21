@@ -34,6 +34,7 @@ use super::{
 };
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::credential::{SessionCredential, credential_session_missing};
+use crate::client::without_cookies;
 use crate::{
     PubkyHttpClient,
     actors::session::SessionInfo,
@@ -55,6 +56,12 @@ pub(crate) fn now_unix() -> u64 {
         .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .expect("System time duration_since should always valid")
+}
+
+/// Authenticate a request with a grant bearer token and no ambient cookies,
+/// so a legacy cookie session for the same homeserver never rides along.
+pub(crate) fn with_bearer(rb: RequestBuilder, bearer: &str) -> RequestBuilder {
+    without_cookies(rb.bearer_auth(bearer))
 }
 
 /// Mutable grant credential state. Always wrapped in `Arc<Mutex<...>>`.
@@ -548,6 +555,7 @@ impl GrantCredential {
         client
             .cross_request_via_homeserver(method, &homeserver, &user, GRANT_SESSION_PATH)
             .await
+            .map(without_cookies)
     }
 }
 
@@ -602,7 +610,7 @@ impl SessionCredential for GrantCredential {
         // Older servers only understand bearer-authenticated logout.
         let request = match proof {
             Some(proof) => request.json(&proof),
-            None => request.bearer_auth(self.current_bearer().await),
+            None => with_bearer(request, &self.current_bearer().await),
         };
         let response = request.send().await?;
         client.check_http_status(response).await?;
@@ -634,7 +642,7 @@ impl SessionCredential for GrantCredential {
             self.refresh(client).await?;
         }
         let bearer = self.state.lock().await.bearer.clone();
-        Ok(rb.bearer_auth(bearer))
+        Ok(with_bearer(rb, &bearer))
     }
 
     async fn can_attach_to(&self, homeserver: &PublicKey) -> bool {
@@ -661,8 +669,7 @@ impl SessionCredential for GrantCredential {
                 result => result?,
             }
         } else {
-            request
-                .bearer_auth(self.current_bearer().await)
+            with_bearer(request, &self.current_bearer().await)
                 .send()
                 .await?
         };

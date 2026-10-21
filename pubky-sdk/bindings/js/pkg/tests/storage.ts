@@ -511,6 +511,54 @@ test("not found", async (t) => {
   t.end();
 });
 
+test("grant sign-in, session and public storage omit ambient cookies", async (t) => {
+  const sdk = Pubky.testnet();
+
+  const signer = sdk.signer(Keypair.random());
+  const signupToken = await createSignupToken();
+  const path: Path = "/pub/example.com/credentials.txt";
+
+  const originalFetch = globalThis.fetch;
+  const homeserverRequests: Request[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const { pathname } = new URL(request.url);
+    if (pathname.startsWith("/storage/") || pathname.startsWith("/auth/grant/")) {
+      homeserverRequests.push(request);
+    }
+    return originalFetch(input as RequestInfo | URL, init);
+  }) as typeof fetch;
+
+  try {
+    await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+    const session = await signer.signin("storage-credentials.test");
+    await session.storage.putText(path, "bearer only");
+    t.equal(await session.storage.getText(path), "bearer only", "session round trip");
+    const addr = toAddress(session.info.publicKey.z32(), path);
+    t.equal(await sdk.publicStorage.getText(addr), "bearer only", "public read");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const describe = (request: Request) =>
+    `${request.method} ${new URL(request.url).pathname.split("/").slice(0, 4).join("/")}`;
+  const signup = homeserverRequests.filter((r) => r.url.includes("/auth/grant/signup"));
+  const exchange = homeserverRequests.filter((r) => r.url.includes("/auth/grant/session"));
+  const storage = homeserverRequests.filter((r) => r.url.includes("/storage/"));
+  t.equal(signup.length, 1, "grant signup reached the homeserver");
+  t.ok(exchange.length >= 1, "grant exchange reached the homeserver");
+  t.equal(storage.length, 3, "session PUT, session GET and public GET reached storage");
+  t.deepEqual(
+    storage.map((r) => r.headers.get("authorization")?.startsWith("Bearer ") ?? false),
+    [true, true, false],
+    "only session requests carry the bearer",
+  );
+  for (const request of homeserverRequests) {
+    t.equal(request.credentials, "omit", `${describe(request)} omits ambient cookies`);
+  }
+  t.end();
+});
+
 test("unauthorized (no cookie) PUT returns 401", async (t) => {
   const sdk = Pubky.testnet();
 

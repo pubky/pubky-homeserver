@@ -12,6 +12,17 @@ pub mod native;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
+/// Omit ambient browser cookies from a request.
+///
+/// Only legacy cookie sessions need them; sending `credentials: "include"`
+/// otherwise makes browsers require `Access-Control-Allow-Credentials` from
+/// the homeserver. No-op outside browsers.
+pub(crate) fn without_cookies(rb: RequestBuilder) -> RequestBuilder {
+    #[cfg(target_arch = "wasm32")]
+    let rb = rb.fetch_credentials_omit();
+    rb
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TransportHost {
     PubkyQname(PublicKey),

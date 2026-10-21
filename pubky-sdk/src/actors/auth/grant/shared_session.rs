@@ -8,7 +8,9 @@ use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    credential::{GrantCredential, GrantCredentialState, REFRESH_SLACK_SECS, now_unix},
+    credential::{
+        GrantCredential, GrantCredentialState, REFRESH_SLACK_SECS, now_unix, with_bearer,
+    },
     grant_exchange::refresh_grant_session,
 };
 use crate::{PubkyHttpClient, Result, errors::AuthError};
@@ -161,7 +163,7 @@ impl GrantCredential {
                 continue;
             }
             let retry = request.try_clone();
-            let response = request.bearer_auth(&bearer).send().await?;
+            let response = with_bearer(request, &bearer).send().await?;
             drop(lease);
             // A delayed exchange from a closed tab can still replace our bearer.
             // Only retry a replayable request rejected before authentication.

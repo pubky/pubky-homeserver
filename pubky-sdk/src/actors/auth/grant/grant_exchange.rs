@@ -20,6 +20,7 @@ use super::{
     pop_signer::GrantPopSigner,
 };
 use crate::PubkyHttpClient;
+use crate::client::without_cookies;
 use crate::errors::{CredentialRefreshError, Error, RequestError, Result};
 
 /// Establish a grant-backed session by exchanging a user-signed grant for
@@ -77,9 +78,7 @@ pub(crate) async fn signup_account_from_grant(
     if let Some(token) = signup_token {
         url.query_pairs_mut().append_pair("signup_token", token);
     }
-    let resp = client
-        .cross_request(Method::POST, url)
-        .await?
+    let resp = without_cookies(client.cross_request(Method::POST, url).await?)
         .json(&body)
         .send()
         .await?;
@@ -171,15 +170,13 @@ async fn post_grant_session_response(
     let pop_jws = sign_pop_for_grant(client_signer, homeserver_pk, &grant_claims.jti).await?;
     let body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
 
-    Ok(client
+    let request = client
         .cross_request_via_homeserver(
             Method::POST,
             homeserver_pk,
             &grant_claims.iss,
             "/auth/grant/session",
         )
-        .await?
-        .json(&body)
-        .send()
-        .await?)
+        .await?;
+    Ok(without_cookies(request).json(&body).send().await?)
 }
