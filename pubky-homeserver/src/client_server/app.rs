@@ -270,6 +270,12 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
 }
 
 /// Allows browser apps on every origin to call the homeserver.
+///
+/// Credentials are allowed only for deprecated cookie sessions and browser
+/// apps on SDK 0.16 and earlier. Browsers ignore `*` in
+/// `Access-Control-Expose-Headers` when credentials are allowed, so the
+/// headers are named. Once cookie sessions are removed, drop the credentials
+/// and expose `*` instead.
 fn cors_layer() -> CorsLayer {
     CorsLayer::very_permissive().expose_headers([
         RETRY_AFTER,

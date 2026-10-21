@@ -127,3 +127,13 @@ To let nginx handle CORS:
 
    The response includes
    `Access-Control-Expose-Headers: Retry-After, Lock-Token, Timeout`.
+
+## Simplify once credentials are gone
+
+`Access-Control-Allow-Credentials` is only needed while browser apps send
+credentials: apps that use the deprecated cookie session, and apps on SDK
+0.16 and earlier. Browsers don't accept wildcards together with credentials,
+which is why the headers above mirror the origin and name each exposed
+header. Once those apps are gone, the homeserver will drop
+`Allow-Credentials`. Your proxy can then send
+`Access-Control-Allow-Origin: *` and `Access-Control-Expose-Headers: *`.
