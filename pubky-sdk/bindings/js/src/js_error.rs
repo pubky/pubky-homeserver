@@ -89,7 +89,7 @@ impl Display for PubkyErrorName {
 ///
 /// @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
 /// @property message - A human-readable, descriptive error message suitable for logging.
-/// @property data - Optional structured context. Request errors carry `reason` and, for HTTP failures, `statusCode`, e.g. `{ reason: "Http", statusCode: 404 }`.
+/// @property data - Optional structured context. For a `RequestError` it is a {@link RequestErrorData}, e.g. `{ reason: "Http", statusCode: 404 }`.
 ///
 /// @example
 /// ```typescript
@@ -97,14 +97,11 @@ impl Display for PubkyErrorName {
 ///   await client.signup(...);
 /// } catch (e) {
 ///   const error = e as PubkyError;
-///   if (
-///     error.name === 'RequestError' &&
-///     typeof error.data === 'object' &&
-///     error.data !== null &&
-///     'statusCode' in error.data &&
-///     (error.data as { statusCode?: number }).statusCode === 404
-///   ) {
-///     // Handle not found...
+///   if (error.name === 'RequestError') {
+///     const data = error.data as RequestErrorData;
+///     if (data.statusCode === 404) {
+///       // Handle not found...
+///     }
 ///   }
 /// }
 /// ```
@@ -185,7 +182,7 @@ const TS_PUBKY_ERROR: &str = r#"/**
  *
  * @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
  * @property message - A human-readable, descriptive error message suitable for logging.
- * @property data - Optional structured context. Request errors carry `reason` and, for HTTP failures, `statusCode`, e.g. `{ reason: "Http", statusCode: 404 }`.
+ * @property data - Optional structured context. For a `RequestError` it is a {@link RequestErrorData}, e.g. `{ reason: "Http", statusCode: 404 }`.
  *
  * @example
  * ```typescript
@@ -193,14 +190,11 @@ const TS_PUBKY_ERROR: &str = r#"/**
  *   await client.signup(...);
  * } catch (e) {
  *   const error = e as PubkyError;
- *   if (
- *     error.name === "RequestError" &&
- *     typeof error.data === "object" &&
- *     error.data !== null &&
- *     "statusCode" in error.data &&
- *     (error.data as { statusCode?: number }).statusCode === 404
- *   ) {
- *     // Handle not found...
+ *   if (error.name === "RequestError") {
+ *     const data = error.data as RequestErrorData;
+ *     if (data.statusCode === 404) {
+ *       // Handle not found...
+ *     }
  *   }
  * }
  * ```
@@ -209,6 +203,27 @@ export interface PubkyError extends Error {
   name: PubkyErrorName;
   message: string;
   data?: unknown;
+}
+
+/** The classified cause of a `RequestError`, carried in `PubkyError.data.reason`. */
+export type RequestErrorReason =
+  | "Http"
+  | "Timeout"
+  | "Connection"
+  | "Body"
+  | "Decode"
+  | "InvalidRequest"
+  | "Other";
+
+/**
+ * `PubkyError.data` for a `RequestError`.
+ *
+ * `statusCode` is present when `reason` is `"Http"`. A reason describes the
+ * failure, not whether retrying is safe.
+ */
+export interface RequestErrorData {
+  reason: RequestErrorReason;
+  statusCode?: number;
 }"#;
 
 // --- Rust-to-JavaScript pubky::Error Conversion Pipeline ---
