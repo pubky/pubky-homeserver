@@ -12,7 +12,6 @@ const DEFAULT_USER_AGENT: &str = concat!("pubky.org", "@", env!("CARGO_PKG_VERSI
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Default)]
 struct NativeHttpConfig {
-    request_timeout: Option<Duration>,
     read_timeout: Option<Duration>,
     pool_max_idle_per_host: Option<usize>,
     extra_trust_anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
@@ -74,9 +73,8 @@ pub struct PubkyHttpClientBuilder {
     #[cfg(not(target_arch = "wasm32"))]
     native_http: NativeHttpConfig,
 
-    /// Total deadline applied to each HTTP request (WASM only; native keeps it
-    /// in [`NativeHttpConfig`] and applies it on the reqwest client).
-    #[cfg(target_arch = "wasm32")]
+    /// Total deadline for each HTTP request. Native applies it on the reqwest
+    /// client; WASM sets it on each request (see `http_targets::wasm`).
     request_timeout: Option<Duration>,
 
     /// The hostname to use for testnet URL transformations (WASM only).
@@ -234,6 +232,17 @@ impl PubkyHttpClientBuilder {
         self
     }
 
+    /// Set a total deadline for each HTTP request.
+    ///
+    /// The deadline starts when the request begins connecting (native) or is
+    /// dispatched (browser) and lasts until the response body finishes. It also
+    /// ends long-lived responses such as event streams; on the browser the
+    /// `fetch` is aborted when it expires.
+    pub fn request_timeout(&mut self, timeout: Duration) -> &mut Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
     /// Build a [`PubkyHttpClient`].
     ///
     /// # Errors
@@ -264,7 +273,7 @@ impl PubkyHttpClientBuilder {
         cross_log!(
             info,
             "Building PubkyHttpClient (request_timeout: {:?}, read_timeout: {:?}, user_agent: {}, pool_max_idle_per_host: {:?})",
-            self.native_http.request_timeout,
+            self.request_timeout,
             self.native_http.read_timeout,
             user_agent,
             self.native_http.pool_max_idle_per_host
@@ -291,10 +300,8 @@ impl PubkyHttpClientBuilder {
                 &self.native_http.extra_trust_anchors,
             ));
 
-        // reqwest's browser backend has no client-wide timeout, so WASM applies
-        // `request_timeout` to each request instead (see `http_targets::wasm`).
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(timeout) = self.native_http.request_timeout {
+        if let Some(timeout) = self.request_timeout {
             http_builder = http_builder.timeout(timeout);
             icann_http_builder = icann_http_builder.timeout(timeout);
         }
@@ -311,9 +318,6 @@ impl PubkyHttpClientBuilder {
             icann_http_builder = icann_http_builder.pool_max_idle_per_host(max);
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let features = HomeserverFeatures::new(self.native_http.request_timeout);
-        #[cfg(target_arch = "wasm32")]
         let features = HomeserverFeatures::new(self.request_timeout);
 
         Ok(PubkyHttpClient {
@@ -375,15 +379,6 @@ impl PubkyHttpClientBuilder {
         Ok(self)
     }
 
-    /// Set a total deadline for each HTTP request.
-    ///
-    /// The deadline starts when the request begins connecting and lasts until
-    /// the response body finishes.
-    pub fn request_timeout(&mut self, timeout: Duration) -> &mut Self {
-        self.native_http.request_timeout = Some(timeout);
-        self
-    }
-
     /// Set the maximum duration of each HTTP read operation.
     ///
     /// The duration resets after every successful read. This detects stalled
@@ -402,16 +397,6 @@ impl PubkyHttpClientBuilder {
 
 #[cfg(target_arch = "wasm32")]
 impl PubkyHttpClientBuilder {
-    /// Set a total deadline for each HTTP request.
-    ///
-    /// The deadline starts when the request is dispatched and lasts until the
-    /// response body finishes. The browser `fetch` is aborted when it expires,
-    /// which also ends long-lived responses such as event streams.
-    pub fn request_timeout(&mut self, timeout: Duration) -> &mut Self {
-        self.request_timeout = Some(timeout);
-        self
-    }
-
     /// Set the maximum duration of each HTTP read operation.
     ///
     /// # Deprecated
@@ -717,10 +702,10 @@ mod test {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_timeouts_are_opt_in() {
-        let config = NativeHttpConfig::default();
+        let builder = PubkyHttpClient::builder();
 
-        assert_eq!(config.request_timeout, None);
-        assert_eq!(config.read_timeout, None);
+        assert_eq!(builder.request_timeout, None);
+        assert_eq!(builder.native_http.read_timeout, None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -734,7 +719,7 @@ mod test {
             .request_timeout(request_timeout)
             .read_timeout(read_timeout);
 
-        assert_eq!(builder.native_http.request_timeout, Some(request_timeout));
+        assert_eq!(builder.request_timeout, Some(request_timeout));
         assert_eq!(builder.native_http.read_timeout, Some(read_timeout));
     }
 
