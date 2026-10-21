@@ -50,7 +50,8 @@ pub(crate) struct Website {
     root: String,
     /// The normalized request path.
     path: StoragePath,
-    /// The storage path the request names inside `root`.
+    /// The file the request names inside `root`. A folder path names its
+    /// `index.html`.
     target: StoragePath,
 }
 
@@ -82,7 +83,14 @@ impl Website {
         let path = StoragePath::normalize(&decoded)
             .map_err(|error| format!("Invalid website path: {error}"))?;
         let root = format!("/pub/website/{label}/");
-        let target = StoragePath::new(&format!("{root}{}", &path.as_str()[1..]))
+        // Name a folder's `index.html` here, so rate limits for that file also
+        // cover requests for the folder.
+        let index = if path.is_directory() {
+            "index.html"
+        } else {
+            ""
+        };
+        let target = StoragePath::new(&format!("{root}{}{index}", &path.as_str()[1..]))
             .map_err(|error| format!("Invalid website path: {error}"))?;
 
         Ok(Some(Self {
@@ -95,18 +103,13 @@ impl Website {
 
     async fn respond(&self, state: &AppState, request: &Parts) -> HttpResult<Response> {
         let target = self.target.as_str();
-        let page = if self.path.is_directory() {
-            format!("{target}index.html")
-        } else {
-            target.to_string()
-        };
         // Check the owner while looking up the page.
         let (_, page) = tokio::try_join!(
             state
                 .context
                 .user_service
                 .get_or_http_error(&self.owner, true),
-            self.entry(state, &page),
+            self.entry(state, target),
         )?;
         if let Some(page) = page {
             return file(state, request, StatusCode::OK, page).await;
@@ -389,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             classify(Method::GET, "/signup-page/"),
-            Ok(Some("/pub/website/blog/signup-page/".into()))
+            Ok(Some("/pub/website/blog/signup-page/index.html".into()))
         );
         for path in [
             "/session",
@@ -565,7 +568,7 @@ mod tests {
     async fn rate_limits_match_the_site_path_and_metrics_skip_websites() {
         let site = Site::start(|config| {
             config.drive.rate_limits = vec![PathLimit {
-                path: GlobPattern::new("/pub/website/**"),
+                path: GlobPattern::new("/pub/website/_/index.html"),
                 method: HttpMethod(Method::GET),
                 quota: "1r/m".parse().unwrap(),
                 key: LimitKeyType::User,
@@ -588,8 +591,9 @@ mod tests {
         };
         let before = storage_samples();
 
+        // `/` serves `index.html`, so both paths share the file's limit.
         site.get(&key, "/").await.assert_status_ok();
-        site.get(&key, "/")
+        site.get(&key, "/index.html")
             .await
             .assert_status(StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(storage_samples(), before);

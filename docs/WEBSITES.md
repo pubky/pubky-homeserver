@@ -48,8 +48,10 @@ use these as top-level folders. Nested folders such as `/blog/pub/` are fine.
   upload.
 - An unknown user returns `404` and a disabled user `403`.
 - Path rate limits match the site file's storage path, so a
-  `/pub/website/**` rule applies to website requests. Website requests are not
-  counted in the [storage-addressing metric](STORAGE_ADDRESSING_MIGRATION.md).
+  `/pub/website/**` rule applies to website requests. A folder request matches
+  the folder's `index.html`, so a rule for `/pub/website/_/index.html` also
+  limits `/`. Website requests are not counted in the
+  [storage-addressing metric](STORAGE_ADDRESSING_MIGRATION.md).
 
 ## Limitations
 
