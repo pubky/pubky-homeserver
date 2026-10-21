@@ -15,8 +15,7 @@ const HOMESERVER_PUBLICKEY = PublicKey.from(
  * PKDNS: operational resolution failures reject.
  * Flow:
  *  - facade -> read-only pkdns resolver
- *  - generate keypair without publishing any record
- *  - the isolated testnet cannot resolve the key
+ *  - simulate a relay transport failure
  *  - resolver rejects instead of treating the failure as an absent record
  */
 test("pkdns: getHomeserver rejects resolution failures", async (t) => {
@@ -26,8 +25,11 @@ test("pkdns: getHomeserver rejects resolution failures", async (t) => {
     IsExact<Awaited<ReturnType<Sdk["getHomeserverOf"]>>, PublicKey | undefined>
   > = true;
 
-  const fresh = Keypair.random();
-  const pubkey = fresh.publicKey;
+  const pubkey = Keypair.random().publicKey;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new TypeError("simulated relay transport failure");
+  };
 
   try {
     await sdk.getHomeserverOf(pubkey);
@@ -39,6 +41,27 @@ test("pkdns: getHomeserver rejects resolution failures", async (t) => {
       error.message.includes("no responses"),
       "error preserves the resolution failure",
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  t.end();
+});
+
+test("pkdns: getHomeserver returns undefined when the relay reports not found", async (t) => {
+  const sdk = Pubky.testnet();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const response = new Response(null, { status: 404 });
+    Object.defineProperty(response, "url", { value: request.url });
+    return response;
+  };
+
+  try {
+    const homeserver = await sdk.getHomeserverOf(Keypair.random().publicKey);
+    t.equal(homeserver, undefined, "a missing record is a valid absence");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
   t.end();
 });

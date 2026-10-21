@@ -6,7 +6,10 @@
 //! 1. **[`write_path_layer`]** — enforces per-user allowed write paths (outermost, runs first).
 //! 2. **[`write_finalization_layer`]** — atomically finalizes collision checks,
 //!    entry metadata, events, and quota accounting around backend writes.
-//! 3. **OpenDAL base** — physical storage I/O.
+//! 3. **[`staged_publish_layer`]** (object store backends only) — stages the
+//!    upload and publishes it by a copy conditional on the object's
+//!    generation, so a stale publish or delete is refused by the backend.
+//! 4. **OpenDAL base** — physical storage I/O.
 //!
 //! # Write lifecycle
 //!
@@ -14,23 +17,38 @@
 //! backend publishes on close, and the filesystem backend does so by staging
 //! the upload in `data/files-tmp` and renaming it into place. An upload that is
 //! rejected by quota or a collision, breaks mid-stream, or loses its client is
-//! aborted instead, leaving the existing blob untouched.
+//! aborted instead, leaving the existing blob untouched. On Google Cloud
+//! Storage the upload is staged under `.staging/` in the bucket and published
+//! by a copy; lifecycle rules deleting that prefix, and aborting incomplete
+//! multipart uploads, after a day sweep what a crash leaves there.
 //!
 //! Finalizing a write publishes the blob and then commits the entry row;
-//! finalizing a delete commits the row removal and then removes the blob. Blob
+//! finalizing a delete commits the row removal and then removes the blob,
+//! unless a write has put the file back in between. Blob
 //! storage cannot join the database transaction, so the two can diverge if the
 //! database update fails after publication or the process dies between the
 //! steps: the blob then holds new content while the entry describes the old,
-//! or no entry exists, or an unreferenced blob remains after a delete. A client
-//! disconnect cannot cause this: the finalization layer runs every
-//! finalization on its own task, so dropping the request, or any other user of
-//! the operator, cannot stop it halfway. A writer dropped before it closes, as
-//! a disconnect mid-upload does, discards its staged bytes the same way.
+//! or no entry exists, or an unreferenced blob remains after a delete. The
+//! same first divergence follows a publish the object store executes late,
+//! after its finalization was reported failed and rolled back, on a path
+//! nothing has written to since: the blob holds the failed write's bytes
+//! under the old entry, with no event. The next write on the path heals it.
+//! A client disconnect cannot cause any of this: the finalization layer runs
+//! every finalization on its own task, so dropping the request, or any other
+//! user of the operator, cannot stop it halfway. A writer dropped before it
+//! closes, as a disconnect mid-upload does, discards its staged bytes the
+//! same way.
 //!
-//! Two limits of that task: a disconnect also drops the request's lock
-//! keep-alive, so a lock can expire while its finalization is still running;
-//! and a runtime shutdown that cancels the task leaves the staged upload
-//! neither published nor aborted.
+//! A disconnect also drops the request's lock keep-alive, so a lock can expire
+//! before its write is finalized. The finalization then refuses the write,
+//! see [`write_finalization_layer::write_lock`]. A publish the backend
+//! executes late, after the lock has moved on, is refused by the backend's
+//! own condition unless nothing has been written since, see
+//! [`staged_publish_layer`]: a locked write is never replaced by one that
+//! was prepared against an older file.
+//!
+//! One limit of that task: a runtime shutdown that cancels it leaves the
+//! staged upload neither published nor aborted.
 //!
 //! [`file`] provides the high-level [`FileService`](file::file_service::FileService)
 //! used by route handlers.
@@ -38,8 +56,11 @@
 mod file;
 mod layer_domain_error;
 mod opendal;
+mod write_check;
 
 pub(crate) mod events;
+pub(crate) mod staged_publish_layer;
+mod storage_repair;
 pub(crate) mod tenant_scope_layer;
 pub(crate) mod write_finalization_layer;
 pub(crate) mod write_path_layer;
@@ -49,3 +70,4 @@ pub(crate) use file::file_metadata::{FileMetadata, FileMetadataBuilder};
 pub use file::file_service::FileService;
 pub use file::file_stream_type::FileStream;
 pub use opendal::opendal_service::OpendalService;
+pub(crate) use storage_repair::StorageRepair;

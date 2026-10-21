@@ -6,6 +6,7 @@
 //! - [`root`]: Server info endpoint.
 //! - [`signup_tokens`]: Signup token validation.
 //! - [`tenants`]: Per-user data routes (read, write).
+//! - [`website`]: Users' static websites, selected by `Host`.
 //!
 //! Auth routes (signup, signin, session management) live in [`crate::client_server::auth::routes`].
 
@@ -15,3 +16,4 @@ pub(crate) mod info;
 pub(crate) mod root;
 pub(crate) mod signup_tokens;
 pub(crate) mod tenants;
+pub(crate) mod website;

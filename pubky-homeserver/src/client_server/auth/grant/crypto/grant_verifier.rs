@@ -21,10 +21,16 @@ use super::jws_crypto::{self, JwsCompact};
 /// 3. Grant has not expired
 /// 4. All required fields are present and valid
 pub fn verify_grant(compact: &JwsCompact) -> Result<GrantClaims, Error> {
+    let claims = verify_grant_for_revocation(compact)?;
+    check_expiry(&claims)?;
+    Ok(claims)
+}
+
+/// Verify the grant's signature and header, allowing expired grants for revocation.
+pub fn verify_grant_for_revocation(compact: &JwsCompact) -> Result<GrantClaims, Error> {
     let issuer_key = extract_issuer_key(compact.as_str())?;
     let claims = verify_signature(compact.as_str(), &issuer_key)?;
     check_header_type(compact.as_str())?;
-    check_expiry(&claims)?;
     Ok(claims)
 }
 
@@ -154,8 +160,9 @@ mod tests {
 
         // Sign with wrong key but claim iss is user_kp
         let compact = sign_raw_grant(&wrong_kp, &raw);
-        let result = verify_grant(&compact);
-        assert!(matches!(result, Err(Error::InvalidSignature)));
+        for verify in [verify_grant, verify_grant_for_revocation] {
+            assert!(matches!(verify(&compact), Err(Error::InvalidSignature)));
+        }
     }
 
     #[test]
@@ -168,6 +175,7 @@ mod tests {
         let compact = sign_raw_grant(&user_kp, &raw);
         let result = verify_grant(&compact);
         assert!(matches!(result, Err(Error::Expired)));
+        assert_eq!(verify_grant_for_revocation(&compact).unwrap().jti, raw.jti);
     }
 
     #[test]
@@ -182,7 +190,8 @@ mod tests {
         let compact =
             JwsCompact::parse(&jsonwebtoken::encode(&header, &raw, &enc).unwrap()).unwrap();
 
-        let result = verify_grant(&compact);
-        assert!(matches!(result, Err(Error::InvalidHeaderType)));
+        for verify in [verify_grant, verify_grant_for_revocation] {
+            assert!(matches!(verify(&compact), Err(Error::InvalidHeaderType)));
+        }
     }
 }

@@ -35,3 +35,9 @@ npm run dev
 Removing or clearing records is local-only. It does not revoke the remote grant on the homeserver.
 
 The demo does not persist root keypairs. If a saved grant expires or is revoked, that generated account is disposable and cannot be recovered from this app.
+
+## Multiple tabs
+
+Tabs on the same origin share one bearer per grant, including after reloads.
+The SDK coordinates requests and refreshes with Web Locks. Signing out revokes
+the grant for every tab. Other apps should authenticate with their own grants.

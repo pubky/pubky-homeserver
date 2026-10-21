@@ -104,13 +104,20 @@ pub async fn get_session(
 
 /// `DELETE /auth/grant/session` — idempotently revokes the grant (if any).
 ///
+/// Clients may send grant + PoP JSON to revoke without a live bearer.
 /// Takes `Option<AuthSession>` rather than `AuthSession` so a second signout with an
 /// already-revoked bearer is a 200 no-op rather than a 401.
 pub async fn signout(
     State(state): State<AuthState>,
     auth: Option<AuthSession>,
+    proof: Option<Json<CreateGrantSessionRequest>>,
 ) -> HttpResult<impl IntoResponse> {
-    if let Some(AuthSession::Grant(session)) = auth {
+    if let Some(Json(proof)) = proof {
+        state
+            .grant_auth_service
+            .signout_with_proof(&proof.grant, &proof.pop)
+            .await?;
+    } else if let Some(AuthSession::Grant(session)) = auth {
         state
             .grant_auth_service
             .signout_grant_session(&session)

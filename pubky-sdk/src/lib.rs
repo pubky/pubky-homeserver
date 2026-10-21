@@ -15,6 +15,7 @@ mod pubky;
 
 mod actors;
 mod client;
+pub mod custom_pop;
 pub mod errors;
 mod macros;
 
@@ -60,7 +61,7 @@ pub use actors::{PublicStorage, SessionStorage};
 
 // Error and global client
 #[doc(inline)]
-pub use errors::{BuildError, Error, Result};
+pub use errors::{BuildError, CredentialRefreshError, Error, Result};
 
 // Export common types and constants
 #[doc(inline)]
@@ -81,7 +82,7 @@ pub use actors::pkdns::DEFAULT_STALE_AFTER;
 #[doc(inline)]
 pub use actors::{DEFAULT_HTTP_RELAY_INBOX, EncryptedHttpRelayInboxChannel, HttpRelayInboxChannel};
 #[doc(hidden)]
-pub use actors::{DelegatedSignFn, delegated_sign_callback};
+pub use actors::{DelegatedSignFn, GrantSigningError, delegated_sign_callback};
 #[doc(inline)]
 pub use pkarr;
 
@@ -107,3 +108,8 @@ pub use reqwest::{Method, StatusCode};
 
 #[cfg(test)]
 use pubky_testnet as _; // Used in docstring tests.
+
+#[doc(hidden)]
+pub use actors::auth::grant::shared_session::{
+    GrantSessionCoordinator, GrantSessionLease, SharedGrantSession,
+};

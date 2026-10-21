@@ -36,7 +36,9 @@ JavaScript's `getHomeserverOf()` return type is unchanged, but its promise now r
 
 ## Storage Transport Compatibility
 
-v0.10 represents public resources as `/storage/{owner}/...` transport URLs. The Rust storage APIs and JavaScript `Client.fetch` query the homeserver's `/info` endpoint and fall back to the legacy path plus `pubky-host` header when `path-addressed-storage` is unavailable. Storage requests made through these APIs remain compatible with v0.9 homeservers.
+This section applies when upgrading further to SDK [v0.12.0](https://github.com/pubky/pubky-homeserver/releases/tag/v0.12.0) or later. See the [storage-addressing migration guide](../STORAGE_ADDRESSING_MIGRATION.md) for the compatibility timeline.
+
+These SDK versions represent public resources as `/storage/{owner}/...` transport URLs. The Rust storage APIs and JavaScript `Client.fetch` query the homeserver's `/info` endpoint and fall back to the legacy path plus `pubky-host` header when `path-addressed-storage` is unavailable. Storage requests made through these APIs remain compatible with v0.9 homeservers.
 
 Send URLs from `resolve_pubky` or `PubkyResource::to_transport_url` with `PubkyHttpClient::request_async`. It handles storage compatibility and native transport resolution. `prepare_request` remains available for callers that resolve transport themselves. A different HTTP client can use the canonical URL only with a homeserver that advertises `path-addressed-storage`.
 

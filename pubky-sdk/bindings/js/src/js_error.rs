@@ -50,6 +50,8 @@ where
 pub enum PubkyErrorName {
     /// A network or server request failed. Check the network connection or retry.
     RequestError,
+    /// A grant credential refresh request failed while preparing or retrying a request.
+    CredentialRefreshError,
     /// The error was caused by invalid user input, such as a malformed URL.
     InvalidInput,
     /// An error occurred during login, signup, or session validation.
@@ -66,6 +68,7 @@ impl PubkyErrorName {
     fn as_str(&self) -> &'static str {
         match self {
             PubkyErrorName::RequestError => "RequestError",
+            PubkyErrorName::CredentialRefreshError => "CredentialRefreshError",
             PubkyErrorName::InvalidInput => "InvalidInput",
             PubkyErrorName::AuthenticationError => "AuthenticationError",
             PubkyErrorName::PkarrError => "PkarrError",
@@ -197,17 +200,61 @@ impl From<pubky::Error> for PubkyError {
     fn from(err: pubky::Error) -> Self {
         let name = match &err {
             pubky::Error::Request(_) => PubkyErrorName::RequestError,
+            pubky::Error::CredentialRefresh(_) => PubkyErrorName::CredentialRefreshError,
             pubky::Error::Parse(_) => PubkyErrorName::InvalidInput,
             pubky::Error::Authentication(_) => PubkyErrorName::AuthenticationError,
             pubky::Error::Pkarr(_) => PubkyErrorName::PkarrError,
             pubky::Error::Build(_) => PubkyErrorName::InternalError,
         };
 
-        // If this was a server error, attach status_code; else leave it None.
-        if let pubky::Error::Request(RequestError::Server { status, .. }) = &err {
-            return Self::new_with_status(name, &err, status.as_u16());
+        // Only errors that carry an HTTP status populate `data.statusCode`.
+        let status = match &err {
+            pubky::Error::Request(RequestError::Server { status, .. })
+            | pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
+                status: Some(status),
+            }) => Some(status.as_u16()),
+            _ => None,
+        };
+        match status {
+            Some(status) => Self::new_with_status(name, &err, status),
+            None => Self::new(name, err),
         }
-        Self::new(name, err)
+    }
+}
+
+/// Preserve custom proof errors independently of general auth errors.
+impl From<pubky::custom_pop::CustomPopError> for PubkyError {
+    fn from(error: pubky::custom_pop::CustomPopError) -> Self {
+        use pubky::custom_pop::CustomPopError as Error;
+        let reason = match error {
+            Error::GrantExpired => "GrantExpired",
+            Error::InvalidGrant(_) => "InvalidGrant",
+            Error::SigningKeyUnavailable(_) => "SigningKeyUnavailable",
+            Error::SigningFailed(_) => "SigningFailed",
+            Error::SessionState(source) => return Self::from(*source),
+        };
+        Self::new(PubkyErrorName::AuthenticationError, error).with_data(json!({ "reason": reason }))
+    }
+}
+
+/// Preserve verifier failures as machine-readable authentication errors.
+impl From<pubky::custom_pop::CustomPopVerificationError> for PubkyError {
+    fn from(error: pubky::custom_pop::CustomPopVerificationError) -> Self {
+        use pubky::custom_pop::CustomPopVerificationError as Error;
+        let reason = match &error {
+            Error::MalformedCredential => "MalformedCredential",
+            Error::UnsupportedHeader => "UnsupportedHeader",
+            Error::InvalidGrantSignature => "InvalidGrantSignature",
+            Error::InvalidProofSignature => "InvalidProofSignature",
+            Error::InvalidGrant => "InvalidGrant",
+            Error::GrantExpired => "GrantExpired",
+            Error::GrantNotYetValid => "GrantNotYetValid",
+            Error::ProofNotYetValid => "ProofNotYetValid",
+            Error::ProofOutsideGrantValidity => "ProofOutsideGrantValidity",
+            Error::InvalidClock => "InvalidClock",
+            Error::GrantMismatch => "GrantMismatch",
+        };
+        Self::new(PubkyErrorName::AuthenticationError, error).with_data(json!({ "reason": reason }))
     }
 }
 
@@ -331,5 +378,76 @@ impl IntoWasmAbi for PubkyError {
 impl WasmDescribe for PubkyError {
     fn describe() {
         JsValue::describe();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pubky::custom_pop::CustomPopError;
+
+    #[test]
+    fn custom_proof_errors_preserve_javascript_names_and_reasons() {
+        for (error, name, reason) in [
+            (
+                CustomPopError::GrantExpired,
+                "AuthenticationError",
+                "GrantExpired",
+            ),
+            (
+                CustomPopError::InvalidGrant("binding mismatch".into()),
+                "AuthenticationError",
+                "InvalidGrant",
+            ),
+            (
+                CustomPopError::SigningKeyUnavailable("deleted".into()),
+                "AuthenticationError",
+                "SigningKeyUnavailable",
+            ),
+            (
+                CustomPopError::SigningFailed("WebCrypto failure".into()),
+                "AuthenticationError",
+                "SigningFailed",
+            ),
+        ] {
+            let expected_message = error.to_string();
+            let actual = PubkyError::from(error);
+            assert_eq!(actual.name.as_str(), name);
+            assert_eq!(actual.message, expected_message);
+            assert_eq!(actual.data, Some(json!({ "reason": reason })));
+        }
+    }
+
+    #[test]
+    fn custom_proof_session_state_preserves_the_original_error_shape() {
+        let source = pubky::errors::AuthError::Validation("Browser session was removed".into());
+        let actual = PubkyError::from(CustomPopError::SessionState(Box::new(source.into())));
+        assert_eq!(actual.name.as_str(), "AuthenticationError");
+        assert_eq!(
+            actual.message,
+            "Authentication error: General authentication error: Browser session was removed"
+        );
+        assert_eq!(actual.data, None);
+    }
+
+    #[test]
+    fn credential_refresh_errors_preserve_provenance_and_status() {
+        let server = PubkyError::from(pubky::Error::CredentialRefresh(
+            pubky::CredentialRefreshError::Request {
+                status: Some(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            },
+        ));
+        assert_eq!(server.name.as_str(), "CredentialRefreshError");
+        assert_eq!(
+            server.message,
+            "Credential refresh failed: Grant credential refresh request failed"
+        );
+        assert_eq!(server.data, Some(json!({ "statusCode": 503 })));
+
+        let transport = PubkyError::from(pubky::Error::CredentialRefresh(
+            pubky::CredentialRefreshError::Request { status: None },
+        ));
+        assert_eq!(transport.name.as_str(), "CredentialRefreshError");
+        assert_eq!(transport.data, None);
     }
 }

@@ -89,6 +89,46 @@ impl EntryRepository {
         Ok(entry)
     }
 
+    /// List the entries whose path matches the PostgreSQL regular expression
+    /// `pattern`, in id order, starting after the entry with id `after_id`.
+    /// The executor can either be db.pool() or a transaction.
+    pub async fn list_by_path_pattern<'a>(
+        pattern: &str,
+        after_id: i64,
+        limit: u64,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<EntryEntity>, sqlx::Error> {
+        let statement = Query::select()
+            .from(ENTRY_TABLE)
+            .columns([
+                (ENTRY_TABLE, EntryIden::Id),
+                (ENTRY_TABLE, EntryIden::User),
+                (ENTRY_TABLE, EntryIden::Path),
+                (ENTRY_TABLE, EntryIden::ContentHash),
+                (ENTRY_TABLE, EntryIden::ContentLength),
+                (ENTRY_TABLE, EntryIden::ContentType),
+                (ENTRY_TABLE, EntryIden::ModifiedAt),
+                (ENTRY_TABLE, EntryIden::CreatedAt),
+            ])
+            .column((USER_TABLE, UserIden::PublicKey))
+            .left_join(
+                USER_TABLE,
+                Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
+            )
+            .and_where(Expr::cust_with_values(
+                "entries.path ~ $1",
+                vec![sea_query::Value::from(pattern)],
+            ))
+            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Id)).gt(after_id))
+            .order_by((ENTRY_TABLE, EntryIden::Id), Order::Asc)
+            .limit(limit)
+            .to_owned();
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        let entries: Vec<EntryEntity> = sqlx::query_as_with(&query, values).fetch_all(con).await?;
+        Ok(entries)
+    }
+
     pub async fn update<'a>(
         entry: &EntryEntity,
         executor: &mut UnifiedExecutor<'a>,
@@ -204,11 +244,7 @@ impl EntryRepository {
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<bool, sqlx::Error> {
         let path_str = path.path().as_str();
-        let descendant_prefix = if path_str.ends_with('/') {
-            path_str.to_string()
-        } else {
-            format!("{path_str}/")
-        };
+        let (descendants_after, descendants_before) = Self::descendant_path_bounds(path_str);
         let mut ancestor_paths = Self::ancestor_file_paths(path_str);
         // If the path ends with a trailing slash (a directory-style path),
         // also reject.
@@ -221,31 +257,41 @@ impl EntryRepository {
         // Reject both collision directions for the same user:
         // - existing descendants under `path/`
         // - existing exact-file ancestors of `path`
+        //
+        // Each direction is its own lookup, so both are seeks on the
+        // (user, path) index however large the user's tree is.
         let con = executor.get_con().await?;
         sqlx::query_scalar(
             r#"
             SELECT EXISTS (
                 SELECT 1
                 FROM entries
-                JOIN users
-                  ON users.id = entries."user"
-                WHERE users.public_key = $1
-                  AND (
-                    (
-                      entries.path <> $3
-                      AND substr(entries.path, 1, length($2)) = $2
-                    )
-                    OR entries.path = ANY($4::text[])
-                  )
+                WHERE entries."user" = (SELECT id FROM users WHERE public_key = $1)
+                  AND entries.path COLLATE "C" > $2
+                  AND entries.path COLLATE "C" < $3
+            ) OR EXISTS (
+                SELECT 1
+                FROM entries
+                WHERE entries."user" = (SELECT id FROM users WHERE public_key = $1)
+                  AND entries.path = ANY($4::text[])
             )
             "#,
         )
         .bind(path.pubkey().z32())
-        .bind(descendant_prefix)
-        .bind(path_str)
+        .bind(descendants_after)
+        .bind(descendants_before)
         .bind(ancestor_paths)
         .fetch_one(con)
         .await
+    }
+
+    /// The exclusive bounds, in byte order, of every path below the folder `path`.
+    ///
+    /// Such a path starts with `path/`, so it sorts after `path/` and before
+    /// `path0`, `0` being the byte that follows `/`.
+    fn descendant_path_bounds(path: &str) -> (String, String) {
+        let folder = path.strip_suffix('/').unwrap_or(path);
+        (format!("{folder}/"), format!("{folder}0"))
     }
 
     fn ancestor_file_paths(path: &str) -> Vec<String> {
@@ -612,6 +658,60 @@ mod tests {
                 .unwrap();
 
         assert!(!has_collision);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_file_folder_collision_when_writing_directory_over_existing_descendant() {
+        let db = SqlDb::test().await;
+        let user_pubkey = Keypair::random().public_key();
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
+            .await
+            .unwrap();
+        create_entry_for_path(&db, user.id, "/test/sub1/1.txt").await;
+
+        let target = EntryPath::new(user_pubkey, StoragePath::new("/test/sub1/").unwrap());
+        let has_collision =
+            EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
+                .await
+                .unwrap();
+
+        assert!(has_collision);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_file_folder_collision_matches_exactly_the_descendants() {
+        let db = SqlDb::test().await;
+        // `.` is the byte before `/` and `0` the byte after it, so these are
+        // the paths closest to either end of the descendants of `/test/sub1`.
+        let cases = [
+            ("/test/sub1/!", true),
+            ("/test/sub1/Z", true),
+            // Sorts after every character of the basic multilingual plane.
+            ("/test/sub1/\u{1F600}", true),
+            ("/test/sub1.", false),
+            ("/test/sub10", false),
+            ("/test/SUB1/1.txt", false),
+        ];
+
+        for (existing_path, expected) in cases {
+            let user_pubkey = Keypair::random().public_key();
+            let user = UserService::new(db.clone())
+                .create(&user_pubkey)
+                .await
+                .unwrap();
+            create_entry_for_path(&db, user.id, existing_path).await;
+
+            let target = EntryPath::new(user_pubkey, StoragePath::new("/test/sub1").unwrap());
+            let has_collision =
+                EntryRepository::has_file_folder_collision(&target, &mut db.pool().into())
+                    .await
+                    .unwrap();
+
+            assert_eq!(has_collision, expected, "existing entry {existing_path}");
+        }
     }
 
     #[tokio::test]

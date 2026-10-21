@@ -11,6 +11,7 @@ use crate::persistence::sql::{
         M20260325CreateGrantSessionsMigration, M20260327AddQuotaColumnsMigration,
         M20260507AddAllowedWritePathsMigration, M20260609AddSignupCodeUsedAtMigration,
         M20260723SanitizeCapabilitiesMigration, M20260921CreateEntryLocksMigration,
+        M20261002EntryPathCCollationMigration,
     },
     sql_db::SqlDb,
 };
@@ -46,6 +47,7 @@ impl<'a> Migrator<'a> {
             Box::new(M20260609AddSignupCodeUsedAtMigration),
             Box::new(M20260723SanitizeCapabilitiesMigration),
             Box::new(M20260921CreateEntryLocksMigration),
+            Box::new(M20261002EntryPathCCollationMigration),
         ]
     }
 
@@ -143,6 +145,15 @@ impl<'a> Migrator<'a> {
             .collect();
 
         Ok(migration_names)
+    }
+
+    /// Whether the migration `name` is marked as done.
+    pub async fn is_applied(&self, name: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .get_applied_migrations()
+            .await?
+            .iter()
+            .any(|applied| applied == name))
     }
 
     /// Marks a migration as done.

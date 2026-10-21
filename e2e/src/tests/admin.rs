@@ -426,6 +426,35 @@ async fn allowed_write_paths_enforced_via_http() {
         "Expected 403 FORBIDDEN but got: {err:?}"
     );
 
+    // Empty write to disallowed path → 403, and nothing is stored. With no
+    // body, the path is checked only when the upload closes.
+    let err = session
+        .storage()
+        .put("/pub/other/empty.json", Vec::<u8>::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Request(RequestError::Server { status, .. })
+                if status == StatusCode::FORBIDDEN
+        ),
+        "Expected 403 FORBIDDEN on an empty write but got: {err:?}"
+    );
+    let err = session
+        .storage()
+        .get("/pub/other/empty.json")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Request(RequestError::Server { status, .. })
+                if status == StatusCode::NOT_FOUND
+        ),
+        "Expected 404 NOT_FOUND after a refused empty write but got: {err:?}"
+    );
+
     // Read from allowed path still works
     let resp = session.storage().get("/pub/tokens/foo.json").await.unwrap();
     let body = resp.bytes().await.unwrap();

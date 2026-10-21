@@ -7,6 +7,8 @@ use url::Url;
 
 use crate::{PubkyHttpClient, cross_log};
 
+use super::response_body::read_relay_body;
+
 /// Default HTTP relay inbox base when none is supplied.
 pub const DEFAULT_HTTP_RELAY_INBOX: &str = "https://httprelay.pubky.app/inbox";
 
@@ -140,6 +142,7 @@ impl HttpRelayInboxChannel {
     ///
     /// # Errors
     /// Returns an error after 3 consecutive non-timeout failures.
+    /// Responses exceeding 1 MiB (including encryption) fail without retry.
     pub async fn poll(
         &self,
         client: &PubkyHttpClient,
@@ -164,7 +167,7 @@ impl HttpRelayInboxChannel {
                         "Received response for http relay inbox channel polling attempt {attempt}: status {}",
                         response.status()
                     );
-                    return Ok(Some(response.bytes().await?.to_vec()));
+                    return Ok(Some(read_relay_body(response).await?));
                 }
                 Err(e) => match e {
                     PollError::Timeout => {
@@ -321,10 +324,19 @@ impl FromStr for HttpRelayInboxChannel {
 
 /// An encrypted HTTP relay inbox channel that encrypts/decrypts messages
 /// using a shared secret, with store-and-forward semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncryptedHttpRelayInboxChannel {
     channel: HttpRelayInboxChannel,
     secret: [u8; 32],
+}
+
+impl std::fmt::Debug for EncryptedHttpRelayInboxChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedHttpRelayInboxChannel")
+            .field("channel", &self.channel)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl EncryptedHttpRelayInboxChannel {

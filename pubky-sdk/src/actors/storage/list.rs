@@ -170,13 +170,15 @@ impl<'a> ListBuilder<'a> {
             }
         }
 
-        // 2) Build request per scope
-        let (client, rb) = match self.scope {
+        // 2) Send with the scope's credentials.
+        let (client, resp) = match self.scope {
             ListScope::Public(storage) => (
                 &storage.client,
                 storage
                     .client
                     .cross_request(Method::GET, url.clone())
+                    .await?
+                    .send()
                     .await?,
             ),
             ListScope::Session(storage) => {
@@ -184,12 +186,11 @@ impl<'a> ListBuilder<'a> {
                     .client
                     .cross_request(Method::GET, url.clone())
                     .await?;
-                (&storage.client, storage.attach_credential(rb).await?)
+                (&storage.client, storage.send(rb).await?)
             }
         };
 
-        // 3) Send and parse
-        let resp = rb.send().await?;
+        // 3) Parse the response.
         cross_log!(
             debug,
             "Request completed with status {} (LIST {})",

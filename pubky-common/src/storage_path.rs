@@ -20,6 +20,11 @@ pub const MAX_STORAGE_PATH_TOTAL_LENGTH: usize = 972;
 pub struct StoragePath(String);
 
 impl StoragePath {
+    /// Return the canonical storage root.
+    pub fn root() -> Self {
+        Self(String::from("/"))
+    }
+
     /// Parse an already-canonical decoded absolute path.
     pub fn new(path: &str) -> Result<Self, StoragePathError> {
         validate_canonical(path)?;
@@ -78,6 +83,16 @@ impl StoragePath {
     /// Return whether this path is file-shaped.
     pub fn is_file(&self) -> bool {
         !self.is_directory()
+    }
+
+    /// Whether this path, used as a scope, covers the requested path.
+    ///
+    /// A directory scope covers itself and descendants. A file scope covers
+    /// only itself. `/pub/app/` covers `/pub/app/file`, but neither `/pub/app`
+    /// nor `/pub/app-evil/file`. The root `/` covers every canonical path.
+    #[must_use]
+    pub fn covers_path(&self, path: &StoragePath) -> bool {
+        self == path || (self.is_directory() && path.as_str().starts_with(self.as_str()))
     }
 
     /// Encode this decoded path for use as an HTTP URL path.
@@ -496,7 +511,7 @@ mod tests {
     fn url_encoding_preserves_only_path_separators_and_unreserved_characters() {
         let decoded = StoragePath::new("/AZaz09-._~/:,?#@/%").unwrap();
         assert_eq!(decoded.url_encode(), "/AZaz09-._~/%3A%2C%3F%23%40/%25");
-        assert_eq!(StoragePath::new("/").unwrap().url_encode(), "/");
+        assert_eq!(StoragePath::root().url_encode(), "/");
         assert_eq!(StoragePath::new("/a/").unwrap().url_encode(), "/a/");
     }
 

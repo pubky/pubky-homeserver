@@ -13,7 +13,7 @@ jobs:
       - name: Set up MSRV toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Verify MSRV
@@ -26,7 +26,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --check
@@ -38,19 +38,19 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
           components: clippy
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Lint (host targets)
-        run: cargo clippy --workspace --all-features --exclude pubky-wasm -- -D warnings
+      - name: Lint host crates and all Cargo targets
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-      - name: Add wasm target
+      - name: Install WASM compilation target
         run: rustup target add wasm32-unknown-unknown
 
-      - name: Lint wasm crate (wasm32)
-        run: cargo clippy -p pubky-wasm --target wasm32-unknown-unknown -- -D warnings
+      - name: Lint WASM bindings and tests
+        run: cargo clippy -p pubky-wasm --lib --tests --target wasm32-unknown-unknown -- -D warnings
 
   helper-crates:
     runs-on: ubuntu-latest
@@ -59,7 +59,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
           components: rustfmt, clippy
       - name: Cache
         uses: Swatinem/rust-cache@v2
@@ -112,7 +112,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
       - name: Install Nextest
         uses: taiki-e/install-action@nextest
       - name: Cache
@@ -160,7 +160,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Build docs
@@ -173,7 +173,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Cargo check examples
@@ -205,7 +205,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
           target: wasm32-unknown-unknown
 
       - name: Setup Node.js
@@ -301,6 +301,7 @@ jobs:
         run: |
           npx electron --version || true
           xvfb-run -a npm run test-browser:ci
+          xvfb-run -a npm run test-browser:tabs -- --no-sandbox
 
       - name: Show testnet logs if tests fail
         working-directory: pubky-sdk/bindings/js/pkg
@@ -316,7 +317,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.91"
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
       - name: Run docker postgres tests

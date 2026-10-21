@@ -239,9 +239,11 @@ impl AppContext {
                 .relays(relays)
                 .expect("parameters are already urls and therefore valid.");
         }
-        if let Some(request_timeout) = &config_toml.pkdns.dht_request_timeout_ms {
-            let duration = Duration::from_millis(request_timeout.get());
-            builder.request_timeout(duration);
+        if let Some(timeout_ms) = config_toml.pkdns.dht_request_timeout_ms {
+            builder.dht_request_timeout(Duration::from_millis(timeout_ms.get()));
+        }
+        if let Some(timeout_ms) = config_toml.pkdns.relay_request_timeout_ms {
+            builder.relay_request_timeout(Duration::from_millis(timeout_ms.get()));
         }
         builder
     }
@@ -250,6 +252,48 @@ impl AppContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pkarr_request_timeouts_are_configured_independently() {
+        let cases = [
+            (
+                "",
+                pkarr::DEFAULT_DHT_REQUEST_TIMEOUT,
+                pkarr::DEFAULT_RELAY_REQUEST_TIMEOUT,
+            ),
+            (
+                "dht_request_timeout_ms = 750",
+                Duration::from_millis(750),
+                pkarr::DEFAULT_RELAY_REQUEST_TIMEOUT,
+            ),
+            (
+                "relay_request_timeout_ms = 1500",
+                pkarr::DEFAULT_DHT_REQUEST_TIMEOUT,
+                Duration::from_millis(1500),
+            ),
+            (
+                "dht_request_timeout_ms = 750\nrelay_request_timeout_ms = 1500",
+                Duration::from_millis(750),
+                Duration::from_millis(1500),
+            ),
+        ];
+
+        for (overrides, dht_timeout, relay_timeout) in cases {
+            let config = ConfigToml::from_str_with_defaults(&format!("[pkdns]\n{overrides}"))
+                .expect("timeout configuration should parse");
+            let builder = AppContext::build_pkarr_builder_from_config(&config);
+            let builder_debug = format!("{builder:?}");
+
+            assert!(
+                builder_debug.contains(&format!("dht_request_timeout: {dht_timeout:?}")),
+                "expected DHT timeout {dht_timeout:?} for overrides {overrides:?}: {builder_debug}"
+            );
+            assert!(
+                builder_debug.contains(&format!("relay_request_timeout: {relay_timeout:?}")),
+                "expected relay timeout {relay_timeout:?} for overrides {overrides:?}: {builder_debug}"
+            );
+        }
+    }
 
     /// Verifies that the test pkarr builder doesn't contact the public DHT
     /// when database_url is None (the default test config).

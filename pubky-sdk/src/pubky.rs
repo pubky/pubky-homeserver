@@ -432,7 +432,8 @@ impl Pubky {
         state: DelegatedGrantCredentialState,
         sign: crate::DelegatedSignFn,
     ) -> Result<PubkySession> {
-        let credential = GrantCredential::import_delegated_state(state, &self.client, sign).await?;
+        let credential =
+            GrantCredential::import_delegated_state(state, &self.client, sign, None).await?;
         Ok(PubkySession::from_grant_credential(
             self.client.clone(),
             credential,

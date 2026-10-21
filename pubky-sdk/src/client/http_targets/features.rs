@@ -4,12 +4,12 @@ use std::{
     time::Duration,
 };
 
-use futures_util::StreamExt;
 use lru::LruCache;
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use web_time::Instant;
 
+use crate::util::read_response_body;
 use crate::{PubkyHttpClient, PublicKey};
 
 const MAX_INFO_BYTES: usize = 16 * 1024;
@@ -59,7 +59,7 @@ impl HomeserverFeatures {
         }
     }
 
-    pub(super) async fn supports(
+    pub(crate) async fn supports(
         &self,
         client: &PubkyHttpClient,
         homeserver: &PublicKey,
@@ -111,27 +111,8 @@ impl HomeserverFeatures {
             return None;
         }
 
-        let mut body = Vec::new();
-        let mut chunks = response.bytes_stream();
-        while let Some(chunk) = chunks.next().await {
-            let Ok(chunk) = chunk else {
-                return None;
-            };
-            if !Self::append_chunk(&mut body, &chunk) {
-                return None;
-            }
-        }
-
+        let body = read_response_body(response, MAX_INFO_BYTES).await.ok()?;
         Self::decode(&body)
-    }
-
-    fn append_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> bool {
-        if body.len().saturating_add(chunk.len()) > MAX_INFO_BYTES {
-            return false;
-        }
-
-        body.extend_from_slice(chunk);
-        true
     }
 
     fn decode(body: &[u8]) -> Option<Vec<String>> {
@@ -141,7 +122,7 @@ impl HomeserverFeatures {
     }
 
     #[cfg(test)]
-    pub(super) fn insert(&self, homeserver: &PublicKey, features: &[&str]) {
+    pub(crate) fn insert(&self, homeserver: &PublicKey, features: &[&str]) {
         let cell = self.cell(homeserver);
         let mut cached = cell
             .try_lock()
@@ -190,13 +171,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn limits_info_response_body() {
-        let mut body = vec![b'x'; MAX_INFO_BYTES - 1];
-
-        assert!(HomeserverFeatures::append_chunk(&mut body, b"x"));
-        assert!(!HomeserverFeatures::append_chunk(&mut body, b"x"));
-        assert_eq!(body.len(), MAX_INFO_BYTES);
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn limits_info_response_body() {
+        for size in [MAX_INFO_BYTES - 1, MAX_INFO_BYTES, MAX_INFO_BYTES + 1] {
+            let body = vec![b'x'; size];
+            let (response, _connection) = crate::util::tests::serve_response(
+                200,
+                &format!("Content-Length: {size}\r\n"),
+                &body,
+            )
+            .await;
+            let result = read_response_body(response, MAX_INFO_BYTES).await;
+            if size <= MAX_INFO_BYTES {
+                assert_eq!(result.unwrap(), body);
+            } else {
+                assert!(matches!(
+                    result.unwrap_err(),
+                    crate::util::ResponseBodyError::TooLarge
+                ));
+            }
+        }
     }
 
     #[test]

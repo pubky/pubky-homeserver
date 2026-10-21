@@ -26,6 +26,7 @@ json = ["reqwest/json"]
 
 [dependencies]
 pubky-common.workspace = true
+hpke.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 # v0.2.0 has a bug where some cases bypass the payload size limit.
@@ -40,9 +41,11 @@ futures-util.workspace = true
 futures-lite.workspace = true
 lru = { version = "0.18", default-features = false }
 serde.workspace = true
-serde_json.workspace = true
+# Parse floats in signed custom proof data exactly, not within 1 ULP.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 httpdate.workspace = true
 web-time = "1"
+zeroize = "1"
 # Cross-target async sync primitives. The `sync` feature is portable to
 # `wasm32-unknown-unknown` (see tokio's platform support docs); the native
 # target adds the full feature set in its own section below.
@@ -71,6 +74,7 @@ wasm-bindgen-futures.workspace = true
 pubky-testnet.workspace = true # used in docstring tests
 httpmock = "0.8"
 http-relay = { workspace = true, features = ["server", "link-compat"] }
+tokio-rustls = "0.26"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -100,6 +104,9 @@ perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
 # nursery = { level = "warn", priority = -1 }
+
+# Reserve must_use for builders and results whose omission can cause mistakes.
+must_use_candidate = "allow"
 
 # Select restriction-group lints for consistency and safety
 allow_attributes_without_reason = "warn"

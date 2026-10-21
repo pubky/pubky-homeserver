@@ -1,10 +1,13 @@
 use super::*;
-use crate::{Keypair, ResourcePath, util::tests::serve_response};
+use crate::{
+    Keypair, ResourcePath,
+    util::tests::{ServedConnection, serve_response},
+};
 use pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH;
 use std::time::Duration;
-use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::io::AsyncReadExt;
 
-async fn response(body: &str) -> (reqwest::Response, TcpStream) {
+async fn response(body: &str) -> (reqwest::Response, ServedConnection) {
     serve_response(
         200,
         "Content-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n",
@@ -27,7 +30,7 @@ async fn response_overflow_releases_connection_and_preserves_prior_event() {
         user.z32(),
         "x".repeat(setting + 1)
     );
-    let (response, mut socket) = response(&body).await;
+    let (response, connection) = response(&body).await;
     let mut events = Box::pin(EventStreamBuilder::response_event_stream(response, setting));
     let event = tokio::time::timeout(Duration::from_secs(2), events.next())
         .await
@@ -46,6 +49,7 @@ async fn response_overflow_releases_connection_and_preserves_prior_event() {
             .contains(&format!("limit of {setting} bytes"))
     );
     // Retain `events`: the decoder itself must close the response on error.
+    let mut socket = connection.into_socket().await;
     let closed = tokio::time::timeout(Duration::from_secs(2), socket.read_u8())
         .await
         .unwrap();
@@ -95,7 +99,7 @@ async fn configured_limit_accepts_maximum_path_cursor_and_hash() {
         user.z32(),
         u64::MAX
     );
-    let (response, _socket) = response(&body).await;
+    let (response, _connection) = response(&body).await;
     let mut events = Box::pin(EventStreamBuilder::response_event_stream(response, 4096));
     let event = tokio::time::timeout(Duration::from_secs(2), events.next())
         .await
@@ -127,7 +131,7 @@ async fn unbounded_default_accepts_legacy_and_large_events() {
             user.z32(),
             u64::MAX
         );
-        let (response, _socket) = response(&body).await;
+        let (response, _connection) = response(&body).await;
         let mut events = Box::pin(EventStreamBuilder::response_event_stream(
             response,
             usize::MAX,

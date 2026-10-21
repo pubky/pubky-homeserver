@@ -498,14 +498,14 @@ impl EventStreamBuilder {
         }
 
         let url = self.build_request_url(&homeserver)?;
-        let mut request = self
+        let request = self
             .client
             .cross_request_anonymous(Method::GET, url)
             .await?;
-        if let Some(credential) = credential {
-            request = credential.attach(request, &self.client).await?;
-        }
-        let response = request.send().await?;
+        let response = match credential {
+            Some(credential) => credential.send(request, &self.client).await?,
+            None => request.send().await?,
+        };
 
         // Surface homeserver rejections (e.g. 401/403/400 for private-path
         // authorization) as a typed `RequestError::Server` carrying the status

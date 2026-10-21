@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use crate::persistence::files::layer_domain_error::LayerDomainError;
+use crate::persistence::files::write_check::{checked_copier, CheckedWriter, WriteCheck};
 use crate::services::user_service::UserService;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::*;
-use opendal::Result;
+use opendal::{Capability, OperationContext, Result};
 
 /// OpenDAL layer that enforces per-user `allowed_write_paths` restrictions.
 ///
@@ -14,7 +15,9 @@ use opendal::Result;
 /// - Reads, stats, and lists pass through unmodified.
 /// - Writes, deletes, copies, renames, and create_dir check the user's
 ///   `allowed_write_paths` and return `PermissionDenied` if the path is not in the allow list.
-#[derive(Clone)]
+///   A write or copy is checked before its first byte, its close, or the
+///   copy reaches the layers underneath, see [`write_check`](super::write_check).
+#[derive(Debug, Clone)]
 pub struct WritePathLayer {
     user_service: UserService,
 }
@@ -25,21 +28,40 @@ impl WritePathLayer {
     }
 }
 
-impl<A: Access> Layer<A> for WritePathLayer {
-    type LayeredAccess = WritePathAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        WritePathAccessor {
-            inner: Arc::new(inner),
+impl Layer for WritePathLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(WritePathService {
+            inner,
             user_service: self.user_service.clone(),
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct WritePathAccessor<A: Access> {
-    inner: Arc<A>,
+pub(crate) struct WritePathService {
+    inner: Servicer,
     user_service: UserService,
+}
+
+impl WritePathService {
+    fn write_path_check(&self, path: &str) -> WritePathCheck {
+        WritePathCheck {
+            user_service: self.user_service.clone(),
+            path: path.to_string(),
+        }
+    }
+}
+
+/// Checks that the user may write to `path`, for a write or copy.
+pub(crate) struct WritePathCheck {
+    user_service: UserService,
+    path: String,
+}
+
+impl WriteCheck for WritePathCheck {
+    async fn check(&self) -> Result<()> {
+        check_write_path_allowed(&self.user_service, &self.path).await
+    }
 }
 
 /// Check whether the user associated with `path` is allowed to write there.
@@ -75,75 +97,91 @@ async fn check_write_path_allowed(user_service: &UserService, path: &str) -> Res
     Ok(())
 }
 
-impl<A: Access> LayeredAccess for WritePathAccessor<A> {
-    type Inner = A;
-    type Reader = A::Reader;
-    type Writer = A::Writer;
-    type Lister = A::Lister;
-    type Deleter = WritePathDeleter<A::Deleter>;
-    type Copier = A::Copier;
+impl Service for WritePathService {
+    type Reader = oio::Reader;
+    type Writer = CheckedWriter<oio::Writer, WritePathCheck>;
+    type Lister = oio::Lister;
+    type Deleter = WritePathDeleter<oio::Deleter>;
+    type Copier = oio::OneShotCopier;
+    type Composer = oio::Composer;
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    async fn create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
-        check_write_path_allowed(&self.user_service, path).await?;
-        self.inner.create_dir(path, args).await
+    fn capability(&self) -> Capability {
+        self.inner.capability()
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        self.inner.read(path, args).await
-    }
-
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        check_write_path_allowed(&self.user_service, path).await?;
-        self.inner.write(path, args).await
-    }
-
-    async fn copy(
+    async fn create_dir(
         &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        check_write_path_allowed(&self.user_service, path).await?;
+        self.inner.create_dir(ctx, path, args).await
+    }
+
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        self.inner.read(ctx, path, args)
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        let writer = self.inner.write(ctx, path, args)?;
+        Ok(CheckedWriter::new(writer, self.write_path_check(path)))
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
         from: &str,
         to: &str,
         args: OpCopy,
-        opts: OpCopier,
-    ) -> Result<(RpCopy, Self::Copier)> {
-        check_write_path_allowed(&self.user_service, to).await?;
-        self.inner.copy(from, to, args, opts).await
+    ) -> Result<Self::Copier> {
+        let check = self.write_path_check(to);
+        Ok(checked_copier(check, &self.inner, ctx, from, to, args))
     }
 
-    async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
         // Rename removes the source file, so both paths require write permission.
         check_write_path_allowed(&self.user_service, from).await?;
         check_write_path_allowed(&self.user_service, to).await?;
-        self.inner.rename(from, to, args).await
+        self.inner.rename(ctx, from, to, args).await
     }
 
-    async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-        self.inner.stat(path, args).await
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
     }
 
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        let (rp, deleter) = self.inner.delete().await?;
-        Ok((
-            rp,
-            WritePathDeleter {
-                inner: deleter,
-                user_service: self.user_service.clone(),
-            },
-        ))
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        Ok(WritePathDeleter {
+            inner: self.inner.delete(ctx)?,
+            user_service: self.user_service.clone(),
+        })
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
     }
 
-    async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
         // Default to checking — only skip for known read-only operations.
-        if !matches!(args.operation(), PresignOperation::Read(_)) {
+        if !matches!(args.operation(), PresignOperation::Read(..)) {
             check_write_path_allowed(&self.user_service, path).await?;
         }
-        self.inner.presign(path, args).await
+        self.inner.presign(ctx, path, args).await
     }
 }
 

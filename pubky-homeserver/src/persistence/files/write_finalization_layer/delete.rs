@@ -9,9 +9,15 @@ use crate::persistence::sql::{
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::{oio, OpDelete};
-use opendal::{Error, Result};
+use opendal::{Error, Operator, Result};
 
-use super::layer::{already_closed, spawn_finalization, unexpected, Finalizer};
+use super::layer::{
+    already_closed, generation_under_lock, spawn_finalization, under_generation, unexpected,
+    Finalizer,
+};
+use super::write_lock;
+use crate::persistence::files::layer_domain_error::LayerDomainError;
+use crate::persistence::files::staged_publish_layer::ExpectedGeneration;
 
 struct StagedDelete {
     user: UserEntity,
@@ -46,10 +52,11 @@ pub struct WriteFinalizationDeleter<R> {
 }
 
 impl<R> WriteFinalizationDeleter<R> {
-    pub(super) fn new(inner: R, finalizer: Arc<Finalizer>) -> Self {
+    pub(super) fn new(inner: R, backend: Operator, finalizer: Arc<Finalizer>) -> Self {
         Self {
             queued: Some(QueuedDeletes {
                 inner,
+                backend,
                 finalizer,
                 delete_queue: Vec::new(),
             }),
@@ -60,6 +67,8 @@ impl<R> WriteFinalizationDeleter<R> {
 /// The deleter's working state, moved whole onto the finalization task.
 struct QueuedDeletes<R> {
     inner: R,
+    /// The backend, to read the blob's generation from before removing it.
+    backend: Operator,
     finalizer: Arc<Finalizer>,
     delete_queue: Vec<PendingDelete>,
 }
@@ -72,7 +81,7 @@ impl<R: oio::Delete> QueuedDeletes<R> {
             self.finalizer.notify_event();
         }
 
-        self.close_blob_deletes(outcome.first_error).await
+        outcome.first_error.map_or(Ok(()), Err)
     }
 
     async fn process_delete_queue(&mut self) -> DeleteQueueOutcome {
@@ -80,7 +89,7 @@ impl<R: oio::Delete> QueuedDeletes<R> {
         let mut failed_deletes = Vec::new();
 
         for pending in take(&mut self.delete_queue) {
-            match self.finalize_and_queue_blob_delete(&pending).await {
+            match self.finalize_and_remove_blob(&pending).await {
                 Ok(DeleteOutcome::Deleted) => outcome.should_notify = true,
                 Ok(DeleteOutcome::NotFound) => {}
                 Err(error) => {
@@ -94,11 +103,8 @@ impl<R: oio::Delete> QueuedDeletes<R> {
         outcome
     }
 
-    async fn finalize_and_queue_blob_delete(
-        &mut self,
-        pending: &PendingDelete,
-    ) -> Result<DeleteOutcome> {
-        // Only forward the blob delete after its database finalization succeeds.
+    async fn finalize_and_remove_blob(&mut self, pending: &PendingDelete) -> Result<DeleteOutcome> {
+        // Only remove the blob after its database finalization succeeds.
         let outcome = match self.finalizer.finalize_delete(&pending.entry_path).await {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -111,34 +117,19 @@ impl<R: oio::Delete> QueuedDeletes<R> {
             }
         };
 
-        self.inner
-            .delete(pending.entry_path.as_str(), pending.args.clone())
+        self.finalizer
+            .remove_blob_if_unreferenced(&mut self.inner, &self.backend, pending)
             .await
             .map_err(|error| {
                 tracing::error!(
                     path = %pending.entry_path,
                     error = %error,
-                    "Failed to queue finalized path for blob deletion"
+                    "Failed to remove the blob of a finalized delete"
                 );
                 error
             })?;
 
         Ok(outcome)
-    }
-
-    async fn close_blob_deletes(&mut self, earlier_error: Option<Error>) -> Result<()> {
-        let close_result = self.inner.close().await;
-        match (earlier_error, close_result) {
-            (Some(error), Err(close_error)) => {
-                tracing::error!(
-                    error = %close_error,
-                    "Failed to close blob deletions after an earlier delete error"
-                );
-                Err(error)
-            }
-            (Some(error), Ok(_)) => Err(error),
-            (None, result) => result,
-        }
     }
 }
 
@@ -206,6 +197,126 @@ impl Finalizer {
         }
     }
 
+    /// Remove the blob of a path whose entry row is gone, unless a write has
+    /// put the file back since.
+    ///
+    /// The row removal is committed before the blob goes, so a failure leaves
+    /// an unreferenced blob rather than a row without one. That opens a gap in
+    /// which a write can land. Holding the user row closes it: every write to
+    /// the path commits its row under that lock, so a path that still has no
+    /// row has no file anyone wrote since. A backend that refuses the removal
+    /// because the blob is not the one it was prepared against has seen a
+    /// late publish land there; the blob stays, unreferenced, for the next
+    /// write or delete on the path to clear. The delete itself is done.
+    async fn remove_blob_if_unreferenced<R: oio::Delete>(
+        &self,
+        backend_deleter: &mut R,
+        backend: &Operator,
+        pending: &PendingDelete,
+    ) -> Result<()> {
+        let mut tx = self
+            .sql_db
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| unexpected("Failed to begin blob removal transaction", error))?;
+
+        let result = {
+            let mut executor = UnifiedExecutor::from_tx(&mut tx);
+            self.remove_blob_in_transaction(backend_deleter, backend, pending, &mut executor)
+                .await
+        };
+
+        // The transaction wrote nothing: it only held the user row.
+        if let Err(rollback_error) = tx.rollback().await {
+            tracing::error!(
+                path = %pending.entry_path,
+                error = %rollback_error,
+                "Failed to end blob removal transaction"
+            );
+        }
+        result
+    }
+
+    async fn remove_blob_in_transaction<R: oio::Delete>(
+        &self,
+        backend_deleter: &mut R,
+        backend: &Operator,
+        pending: &PendingDelete,
+        executor: &mut UnifiedExecutor<'_>,
+    ) -> Result<()> {
+        let entry_path = &pending.entry_path;
+        match self
+            .user_service
+            .get_for_no_key_update(entry_path.pubkey(), executor)
+            .await
+        {
+            // Without a user there is nobody whose write could put the file back.
+            Ok(_) | Err(sqlx::Error::RowNotFound) => {}
+            Err(error) => {
+                return Err(unexpected(
+                    format!("Failed to lock user {}", entry_path.pubkey()),
+                    error,
+                ));
+            }
+        }
+        match EntryRepository::get_by_path(entry_path, executor).await {
+            Ok(_) => return Ok(()),
+            Err(sqlx::Error::RowNotFound) => {}
+            Err(error) => {
+                return Err(unexpected(
+                    format!("Failed to load entry {entry_path}"),
+                    error,
+                ));
+            }
+        }
+
+        self.remove_blob_under_its_generation(backend_deleter, backend, pending, executor)
+            .await
+    }
+
+    /// Remove the blob under the generation it has now. A removal the backend
+    /// refuses on that condition is done with: the blob is left, see
+    /// [`Self::remove_blob_if_unreferenced`].
+    async fn remove_blob_under_its_generation<R: oio::Delete>(
+        &self,
+        backend_deleter: &mut R,
+        backend: &Operator,
+        pending: &PendingDelete,
+        executor: &mut UnifiedExecutor<'_>,
+    ) -> Result<()> {
+        let entry_path = &pending.entry_path;
+        let generation = generation_under_lock(backend, entry_path, executor).await?;
+        if generation == Some(ExpectedGeneration::Absent) {
+            return Ok(());
+        }
+        let removed = under_generation(generation, async {
+            backend_deleter
+                .delete(entry_path.as_str(), pending.args.clone())
+                .await?;
+            // Flushed here: a backend that batches would otherwise remove the
+            // blob after the user row is released.
+            backend_deleter.close().await
+        })
+        .await;
+        match removed {
+            Err(error)
+                if matches!(
+                    LayerDomainError::of(&error),
+                    Some(LayerDomainError::PublishConflict)
+                ) =>
+            {
+                tracing::warn!(
+                    path = %entry_path,
+                    %error,
+                    "Leaving an unreferenced blob: it changed since the delete was prepared"
+                );
+                Ok(())
+            }
+            removed => removed,
+        }
+    }
+
     async fn delete_in_transaction(
         &self,
         entry_path: &EntryPath,
@@ -238,6 +349,8 @@ impl Finalizer {
                 ));
             }
         };
+
+        write_lock::hold(entry_path, executor).await?;
 
         let deleted_entry = match EntryRepository::get_by_path(entry_path, executor).await {
             Ok(entry) => entry,
@@ -305,13 +418,15 @@ mod tests {
     use tokio::sync::Barrier;
 
     use crate::persistence::files::events::EventType;
-    use crate::persistence::sql::{entry::EntryRepository, SqlDb};
+    use crate::persistence::files::FileIoError;
+    use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, create_user, install_events_insert_trigger, install_slow_event_insert,
-        test_finalizer, test_operator, user_usage, wait_for_slow_event_insert, wait_until,
+        all_events, backend_throttle, create_user, install_events_insert_trigger,
+        install_slow_event_insert, test_finalizer, test_operator, test_operator_with_backend,
+        user_usage, wait_for_slow_event_insert, wait_until,
     };
     use super::*;
 
@@ -351,6 +466,53 @@ mod tests {
         assert_eq!(all_events(&db).await.len(), 2);
     }
 
+    /// A delete under a lock that has changed hands must not remove the file
+    /// the new holder is working on. Under the live lock it goes through.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn delete_under_a_lost_lock_is_refused() {
+        let db = SqlDb::test().await;
+        let operator = test_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        operator
+            .write(entry_path.as_str(), b"kept".to_vec())
+            .await
+            .unwrap();
+        EntryLockRepository::acquire(&entry_path, "token-b", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+
+        let rejection = write_lock::run_under(
+            Some("token-a".to_string()),
+            operator.delete(entry_path.as_str()),
+        )
+        .await
+        .expect_err("the delete should be refused under a lock it does not hold");
+
+        assert!(matches!(
+            FileIoError::from(rejection),
+            FileIoError::LockLost
+        ));
+        assert_eq!(
+            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
+            b"kept"
+        );
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect("a refused delete must preserve the entry");
+        assert_eq!(all_events(&db).await.len(), 1);
+
+        write_lock::run_under(
+            Some("token-b".to_string()),
+            operator.delete(entry_path.as_str()),
+        )
+        .await
+        .expect("a delete under its live lock should land");
+        assert!(!operator.exists(entry_path.as_str()).await.unwrap());
+    }
+
     #[derive(Default)]
     struct BatchDelete {
         queued_paths: Vec<String>,
@@ -368,6 +530,151 @@ mod tests {
             self.closed_paths.extend(queued_paths);
             Ok(())
         }
+    }
+
+    /// A backend deleter whose blob deletion is throttled.
+    struct ThrottledDelete;
+
+    impl oio::Delete for ThrottledDelete {
+        async fn delete(&mut self, _path: &str, _args: OpDelete) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Err(backend_throttle())
+        }
+    }
+
+    /// The finalization must hand a backend throttle on unchanged, or the
+    /// client is told the server broke instead of to retry. The row removal
+    /// commits before the blob delete, so it has already happened by then.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn throttled_blob_delete_stays_rate_limited_after_the_row_is_removed() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        let (operator, backend) = test_operator_with_backend(&db);
+        operator
+            .write(entry_path.as_str(), vec![1; 10])
+            .await
+            .unwrap();
+
+        let mut deleter =
+            WriteFinalizationDeleter::new(ThrottledDelete, backend, Arc::new(test_finalizer(&db)));
+        deleter
+            .delete(entry_path.as_str(), OpDelete::default())
+            .await
+            .unwrap();
+        let throttled = deleter
+            .close()
+            .await
+            .expect_err("the backend throttled the blob delete");
+
+        assert!(matches!(
+            FileIoError::from(throttled),
+            FileIoError::BackendRateLimited(_)
+        ));
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect_err("the row removal commits before the blob delete");
+        assert_eq!(user_usage(&db, &pubkey).await, 0);
+        assert_eq!(all_events(&db).await.len(), 2);
+    }
+
+    /// A backend deleter that refuses the blob deletion: the blob is not the
+    /// one the delete was prepared against.
+    struct RefusingDelete;
+
+    impl oio::Delete for RefusingDelete {
+        async fn delete(&mut self, _path: &str, _args: OpDelete) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Err(opendal::Error::new(
+                opendal::ErrorKind::ConditionNotMatch,
+                "412 Precondition Failed",
+            )
+            .set_source(LayerDomainError::PublishConflict))
+        }
+    }
+
+    /// A blob removal the backend refused leaves the blob, unreferenced, and
+    /// the delete is still done: the entry and its event are gone, and the
+    /// client is not told otherwise.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn refused_blob_removal_leaves_the_blob_and_the_delete_done() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        let (operator, backend) = test_operator_with_backend(&db);
+        operator
+            .write(entry_path.as_str(), vec![1; 10])
+            .await
+            .unwrap();
+
+        let mut deleter =
+            WriteFinalizationDeleter::new(RefusingDelete, backend, Arc::new(test_finalizer(&db)));
+        deleter
+            .delete(entry_path.as_str(), OpDelete::default())
+            .await
+            .unwrap();
+        deleter
+            .close()
+            .await
+            .expect("a refused blob removal does not fail the delete");
+
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect_err("the entry is gone");
+        assert_eq!(user_usage(&db, &pubkey).await, 0);
+        assert_eq!(all_events(&db).await.len(), 2);
+    }
+
+    /// A write can land between a delete's commit and its blob removal. The
+    /// removal must then leave the blob alone: it is the new file's.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn blob_removal_spares_a_file_written_since_the_delete() {
+        let db = SqlDb::test().await;
+        let (operator, store) = test_operator_with_backend(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        let finalizer = test_finalizer(&db);
+        let pending = PendingDelete {
+            entry_path: entry_path.clone(),
+            args: OpDelete::default(),
+        };
+        operator
+            .write(entry_path.as_str(), b"old".to_vec())
+            .await
+            .unwrap();
+
+        let outcome = finalizer.finalize_delete(&entry_path).await.unwrap();
+        assert_eq!(outcome, DeleteOutcome::Deleted);
+        operator
+            .write(entry_path.as_str(), b"new".to_vec())
+            .await
+            .unwrap();
+        let mut backend = BatchDelete::default();
+        finalizer
+            .remove_blob_if_unreferenced(&mut backend, &store, &pending)
+            .await
+            .unwrap();
+        assert!(
+            backend.closed_paths.is_empty(),
+            "the blob of a file written since must not be removed"
+        );
+
+        // With the row gone and nothing written since, the blob goes.
+        finalizer.finalize_delete(&entry_path).await.unwrap();
+        finalizer
+            .remove_blob_if_unreferenced(&mut backend, &store, &pending)
+            .await
+            .unwrap();
+        assert_eq!(backend.closed_paths, vec![entry_path.as_str().to_string()]);
     }
 
     async fn fail_all_delete_event_inserts(db: &SqlDb) {
@@ -504,7 +811,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn batched_delete_continues_finalization_after_error() {
         let db = SqlDb::test().await;
-        let operator = test_operator(&db);
+        let (operator, backend) = test_operator_with_backend(&db);
         let pubkey = create_user(&db).await;
         let failing_path =
             EntryPath::new(pubkey.clone(), StoragePath::new("/failing.txt").unwrap());
@@ -522,8 +829,11 @@ mod tests {
 
         fail_delete_event_inserts_for_failing_path(&db).await;
 
-        let mut deleter =
-            WriteFinalizationDeleter::new(BatchDelete::default(), Arc::new(test_finalizer(&db)));
+        let mut deleter = WriteFinalizationDeleter::new(
+            BatchDelete::default(),
+            backend,
+            Arc::new(test_finalizer(&db)),
+        );
         deleter
             .delete(failing_path.as_str(), OpDelete::default())
             .await

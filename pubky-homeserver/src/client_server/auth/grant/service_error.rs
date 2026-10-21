@@ -4,7 +4,7 @@
 //! The HTTP status code mapping lives in [`error_mapping`](super::error_mapping).
 
 use super::crypto::{grant_verifier, pop_verifier};
-use super::persistence::grant::GrantStatus;
+use super::persistence::{grant::GrantStatus, grant_session::SessionIssueError};
 use crate::client_server::auth::SignupServiceError;
 
 /// Domain errors from auth service operations.
@@ -96,6 +96,16 @@ impl From<SignupServiceError> for AuthServiceError {
             SignupServiceError::InvalidSignupToken => Self::InvalidSignupToken,
             SignupServiceError::SignupTokenAlreadyUsed => Self::SignupTokenAlreadyUsed,
             SignupServiceError::Internal(e) => Self::Internal(e),
+        }
+    }
+}
+
+impl From<SessionIssueError> for AuthServiceError {
+    fn from(error: SessionIssueError) -> Self {
+        match error {
+            SessionIssueError::Revoked => Self::GrantRevoked,
+            SessionIssueError::Expired => Self::GrantExpired,
+            SessionIssueError::Database(error) => Self::Internal(error),
         }
     }
 }

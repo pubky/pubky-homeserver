@@ -11,11 +11,14 @@ use crate::persistence::sql::{
 use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::oio;
-use opendal::Result;
+use opendal::{Operator, Result};
 
 use super::{
-    layer::{already_closed, check_no_path_collision, spawn_finalization, unexpected, Finalizer},
-    resolve_storage_max_bytes, would_exceed_limit,
+    layer::{
+        already_closed, check_no_path_collision, generation_under_lock, spawn_finalization,
+        under_generation, unexpected, Finalizer,
+    },
+    resolve_storage_max_bytes, would_exceed_limit, write_lock,
 };
 
 struct PreparedWrite {
@@ -67,15 +70,23 @@ pub struct WriteFinalizationWriter<R: oio::Write + 'static> {
     /// `None` once the backend writer has been handed to the finalization task
     /// or aborted.
     inner: Option<R>,
+    /// The backend, to read the object's generation from before publishing.
+    backend: Operator,
     finalizer: Arc<Finalizer>,
     entry_path: EntryPath,
     metadata_builder: FileMetadataBuilder,
 }
 
 impl<R: oio::Write + 'static> WriteFinalizationWriter<R> {
-    pub(super) fn new(inner: R, finalizer: Arc<Finalizer>, entry_path: EntryPath) -> Self {
+    pub(super) fn new(
+        inner: R,
+        backend: Operator,
+        finalizer: Arc<Finalizer>,
+        entry_path: EntryPath,
+    ) -> Self {
         Self {
             inner: Some(inner),
+            backend,
             finalizer,
             entry_path,
             metadata_builder: FileMetadataBuilder::default(),
@@ -110,11 +121,12 @@ impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
         self.metadata_builder
             .guess_mime_type_from_path(self.entry_path.path().as_str());
         let file_metadata = self.metadata_builder.clone().finalize();
+        let backend = self.backend.clone();
         let finalizer = self.finalizer.clone();
         let entry_path = self.entry_path.clone();
         spawn_finalization(async move {
             match finalizer
-                .finalize_write(&mut inner, &entry_path, &file_metadata)
+                .finalize_write(&mut inner, &backend, &entry_path, &file_metadata)
                 .await
             {
                 Ok(metadata) => Ok(metadata),
@@ -170,6 +182,7 @@ impl Finalizer {
     async fn finalize_write<R: oio::Write>(
         &self,
         backend_writer: &mut R,
+        backend: &Operator,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
     ) -> std::result::Result<opendal::Metadata, WriteFailure> {
@@ -182,8 +195,14 @@ impl Finalizer {
 
         let result = {
             let mut executor = UnifiedExecutor::from_tx(&mut tx);
-            self.write_in_transaction(backend_writer, entry_path, file_metadata, &mut executor)
-                .await
+            self.write_in_transaction(
+                backend_writer,
+                backend,
+                entry_path,
+                file_metadata,
+                &mut executor,
+            )
+            .await
         };
 
         let metadata = match result {
@@ -215,6 +234,7 @@ impl Finalizer {
     async fn write_in_transaction<R: oio::Write>(
         &self,
         backend_writer: &mut R,
+        backend: &Operator,
         entry_path: &EntryPath,
         file_metadata: &FileMetadata,
         executor: &mut UnifiedExecutor<'_>,
@@ -223,8 +243,10 @@ impl Finalizer {
             .prepare_write(entry_path, file_metadata, executor)
             .await
             .map_err(WriteFailure::BeforePublication)?;
-        let backend_metadata = backend_writer
-            .close()
+        let generation = generation_under_lock(backend, entry_path, executor)
+            .await
+            .map_err(WriteFailure::BeforePublication)?;
+        let backend_metadata = under_generation(generation, backend_writer.close())
             .await
             .map_err(WriteFailure::AfterPublication)?;
         self.apply_write_effects(prepared, entry_path, file_metadata, executor)
@@ -249,6 +271,8 @@ impl Finalizer {
                     error,
                 )
             })?;
+
+        write_lock::hold(entry_path, executor).await?;
 
         if self.collision_policy.enforces_collisions() {
             check_no_path_collision(entry_path, executor).await?;
@@ -349,16 +373,68 @@ mod tests {
     use tokio::sync::Barrier;
 
     use crate::persistence::files::FileIoError;
-    use crate::persistence::sql::{entry::EntryRepository, SqlDb};
+    use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
 
     use super::super::layer::test_support::{
-        all_events, create_user, install_events_insert_trigger, install_slow_event_insert,
-        staged_count, test_fs_operator, test_operator, test_user_service, user_usage,
-        wait_for_slow_event_insert, wait_for_staged_count, wait_until,
+        all_events, backend_throttle, create_user, install_events_insert_trigger,
+        install_slow_event_insert, memory_backend, staged_count, test_finalizer, test_fs_operator,
+        test_operator, test_user_service, user_usage, wait_for_slow_event_insert,
+        wait_for_staged_count, wait_until,
     };
     use super::*;
+
+    /// A backend writer whose close is throttled.
+    struct ThrottledWriter;
+
+    impl oio::Write for ThrottledWriter {
+        async fn write(&mut self, _bs: opendal::Buffer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<opendal::Metadata> {
+            Err(backend_throttle())
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The finalization must hand a backend throttle on unchanged, or the
+    /// client is told the server broke instead of to retry. Nothing was
+    /// published, so no entry, event or usage may remain either.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn throttled_backend_close_stays_rate_limited_and_rolls_back() {
+        let db = SqlDb::test().await;
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        let mut writer = WriteFinalizationWriter::new(
+            ThrottledWriter,
+            memory_backend(),
+            Arc::new(test_finalizer(&db)),
+            entry_path.clone(),
+        );
+        oio::Write::write(&mut writer, vec![1u8; 10].into())
+            .await
+            .unwrap();
+
+        let throttled = oio::Write::close(&mut writer)
+            .await
+            .expect_err("the backend throttled the close");
+
+        assert!(matches!(
+            FileIoError::from(throttled),
+            FileIoError::BackendRateLimited(_)
+        ));
+        EntryRepository::get_by_path(&entry_path, &mut db.pool().into())
+            .await
+            .expect_err("entry insert should roll back");
+        assert_eq!(user_usage(&db, &pubkey).await, 0);
+        assert!(all_events(&db).await.is_empty());
+    }
 
     /// A caller that disconnects while the write is being finalized drops the
     /// close future. The finalization must still run to completion, or the
@@ -463,6 +539,96 @@ mod tests {
             operator.read(entry_path.as_str()).await.unwrap().to_vec(),
             b"old"
         );
+    }
+
+    /// A write under a lock whose keep-alive died with its client can reach
+    /// finalization after the lock expired. It must be refused before the
+    /// backend publishes, leaving the old bytes and no staged file.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn write_under_a_lost_lock_is_refused_before_publication() {
+        let db = SqlDb::test().await;
+        let (operator, tmp_dir) = test_fs_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
+        operator
+            .write(entry_path.as_str(), b"old".to_vec())
+            .await
+            .unwrap();
+        EntryLockRepository::acquire(&entry_path, "token-a", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+
+        let mut writer = operator.writer(entry_path.as_str()).await.unwrap();
+        writer.write(b"under lost lock".to_vec()).await.unwrap();
+        // The lock lapses and someone else takes it while the upload is in flight.
+        EntryLockRepository::expire(&entry_path, &mut db.pool().into())
+            .await
+            .unwrap();
+        EntryLockRepository::acquire(&entry_path, "token-b", 60, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the expired lock should be replaceable");
+
+        let rejection = write_lock::run_under(Some("token-a".to_string()), writer.close())
+            .await
+            .expect_err("the write should be refused once its lock is gone");
+
+        assert!(matches!(
+            FileIoError::from(rejection),
+            FileIoError::LockLost
+        ));
+        assert_eq!(staged_count(&tmp_dir), 0);
+        assert_eq!(
+            operator.read(entry_path.as_str()).await.unwrap().to_vec(),
+            b"old"
+        );
+        assert_eq!(all_events(&db).await.len(), 1);
+    }
+
+    /// A finalization can wait a long time for its turn on the user row, and
+    /// the lock can run out meanwhile without anyone else taking it. The write
+    /// must be judged on the time it publishes at, not the time its
+    /// transaction began.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn write_whose_lock_expires_while_its_finalization_waits_is_refused() {
+        let db = SqlDb::test().await;
+        let (operator, tmp_dir) = test_fs_operator(&db);
+        let pubkey = create_user(&db).await;
+        let entry_path = EntryPath::new(pubkey.clone(), StoragePath::new("/test.txt").unwrap());
+        EntryLockRepository::acquire(&entry_path, "token-a", 1, &mut db.pool().into())
+            .await
+            .unwrap()
+            .expect("the lock should be free");
+        let mut writer = operator.writer(entry_path.as_str()).await.unwrap();
+        writer.write(b"too late".to_vec()).await.unwrap();
+
+        // Another finalization of this user holds the user row.
+        let mut other_finalization = db.pool().begin().await.unwrap();
+        test_user_service(&db)
+            .get_for_no_key_update(
+                &pubkey,
+                &mut UnifiedExecutor::from_tx(&mut other_finalization),
+            )
+            .await
+            .unwrap();
+
+        let close = write_lock::run_under(Some("token-a".to_string()), writer.close());
+        let outlast_the_lock = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            other_finalization.commit().await.unwrap();
+        };
+        let (closed, ()) = tokio::join!(close, outlast_the_lock);
+
+        let rejection = closed.expect_err("the write should be refused once its lock ran out");
+        assert!(matches!(
+            FileIoError::from(rejection),
+            FileIoError::LockLost
+        ));
+        assert_eq!(staged_count(&tmp_dir), 0);
+        assert!(!operator.exists(entry_path.as_str()).await.unwrap());
     }
 
     /// The transaction failing to begin happens before the backend publishes,

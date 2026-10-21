@@ -13,14 +13,14 @@ use pubky_common::{
     auth::{grant::GrantClaims, grant_session_responses::GrantSessionResponse},
     crypto::PublicKey,
 };
-use reqwest::Method;
+use reqwest::{Method, Response};
 
 use super::{
     credential::{GrantCredential, sign_pop_for_grant},
     pop_signer::GrantPopSigner,
 };
-use crate::errors::{RequestError, Result};
-use crate::{PubkyHttpClient, cross_log};
+use crate::PubkyHttpClient;
+use crate::errors::{CredentialRefreshError, Error, RequestError, Result};
 
 /// Establish a grant-backed session by exchanging a user-signed grant for
 /// an opaque bearer at the user's homeserver.
@@ -39,12 +39,6 @@ pub(crate) async fn credential_from_grant_exchange(
     client_signer: GrantPopSigner,
     homeserver_pubkey: PublicKey,
 ) -> Result<GrantCredential> {
-    cross_log!(
-        info,
-        "Exchanging grant for grant credential (user={}, hs={})",
-        grant_claims.iss.z32(),
-        homeserver_pubkey.z32()
-    );
     let response = post_grant_session(
         client,
         &grant_jws,
@@ -101,10 +95,83 @@ async fn post_grant_session(
     client_signer: &GrantPopSigner,
     homeserver_pk: &PublicKey,
 ) -> Result<GrantSessionResponse> {
+    let resp = post_grant_session_response(
+        client,
+        grant_jws,
+        grant_claims,
+        client_signer,
+        homeserver_pk,
+    )
+    .await?;
+    let resp = client.check_http_status(resp).await?;
+    let response: GrantSessionResponse =
+        resp.json().await.map_err(|e| RequestError::DecodeJson {
+            message: format!("decoding grant session response: {e}"),
+        })?;
+    Ok(response)
+}
+
+/// Refresh a grant session while redacting HTTP request diagnostics.
+///
+/// HTTP request errors are replaced with their secret-safe refresh category.
+/// Other error categories pass through unchanged.
+pub(crate) async fn refresh_grant_session(
+    client: &PubkyHttpClient,
+    grant_jws: &str,
+    grant_claims: &GrantClaims,
+    client_signer: &GrantPopSigner,
+    homeserver_pk: &PublicKey,
+) -> Result<GrantSessionResponse> {
+    let response = post_grant_session_response(
+        client,
+        grant_jws,
+        grant_claims,
+        client_signer,
+        homeserver_pk,
+    )
+    .await
+    .map_err(redact_refresh_request_error)?;
+    let status = response.status();
+    if !status.is_success() {
+        // Acquiring then dropping the body stream cancels the unread browser
+        // `ReadableStream`; native transports also release the response here.
+        drop(response.bytes_stream());
+        return Err(CredentialRefreshError::Request {
+            status: Some(status),
+        }
+        .into());
+    }
+    response
+        .json()
+        .await
+        .map_err(|_error| CredentialRefreshError::Request {
+            status: Some(status),
+        })
+        .map_err(Into::into)
+}
+
+fn redact_refresh_request_error(error: Error) -> Error {
+    match error {
+        Error::Request(RequestError::Server { status, .. }) => CredentialRefreshError::Request {
+            status: Some(status),
+        }
+        .into(),
+        Error::Request(_) => CredentialRefreshError::Request { status: None }.into(),
+        error => error,
+    }
+}
+
+async fn post_grant_session_response(
+    client: &PubkyHttpClient,
+    grant_jws: &str,
+    grant_claims: &GrantClaims,
+    client_signer: &GrantPopSigner,
+    homeserver_pk: &PublicKey,
+) -> Result<Response> {
     let pop_jws = sign_pop_for_grant(client_signer, homeserver_pk, &grant_claims.jti).await?;
     let body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
 
-    let resp = client
+    Ok(client
         .cross_request_via_homeserver(
             Method::POST,
             homeserver_pk,
@@ -114,12 +181,5 @@ async fn post_grant_session(
         .await?
         .json(&body)
         .send()
-        .await?;
-    let resp = client.check_http_status(resp).await?;
-    resp.json().await.map_err(|e| {
-        RequestError::DecodeJson {
-            message: format!("decoding grant session response: {e}"),
-        }
-        .into()
-    })
+        .await?)
 }

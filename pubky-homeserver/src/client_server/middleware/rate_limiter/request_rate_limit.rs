@@ -3,7 +3,6 @@
 //! Enforces per-path request-count quotas (`[[drive.rate_limits]]` in config).
 //! Each path+method pattern has a governor rate limiter keyed by IP or user.
 
-use axum::http::header::RETRY_AFTER;
 use axum::response::{IntoResponse, Response};
 use axum::{
     body::Body,
@@ -134,12 +133,10 @@ fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Res
                 limit.limit.quota,
             );
 
-            let response = (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(RETRY_AFTER, retry_after_secs)],
-                "Rate limit exceeded",
+            return Err(
+                HttpError::too_many_requests("Rate limit exceeded", retry_after_secs)
+                    .into_response(),
             );
-            return Err(response.into_response());
         }
     }
     Ok(())
@@ -152,7 +149,7 @@ mod tests {
         time::Duration,
     };
 
-    use axum::http::Method;
+    use axum::http::{header::RETRY_AFTER, Method};
     use axum::response::IntoResponse;
     use axum::{
         middleware,

@@ -7,6 +7,7 @@ import {
   resolvePubky,
   type Address,
   type Path,
+  type StorageLock,
 } from "../index.js";
 import {
   Assert,
@@ -29,6 +30,29 @@ type PublicStorageType = Facade["publicStorage"];
 
 type _StorageDelete = Assert<
   IsExact<Parameters<SessionStorageType["delete"]>, [Path]>
+>;
+
+type _StorageLock = Assert<
+  IsExact<Parameters<SessionStorageType["lock"]>, [Path, number]>
+>;
+type _StorageLockPath = Assert<IsExact<StorageLock["path"], Path>>;
+type _StorageRefreshLock = Assert<
+  IsExact<Parameters<SessionStorageType["refreshLock"]>, [StorageLock, number]>
+>;
+type _StorageUnlock = Assert<
+  IsExact<Parameters<SessionStorageType["unlock"]>, [StorageLock]>
+>;
+type _StoragePutTextLocked = Assert<
+  IsExact<Parameters<SessionStorageType["putTextLocked"]>, [StorageLock, string]>
+>;
+type _StoragePutBytesLocked = Assert<
+  IsExact<
+    Parameters<SessionStorageType["putBytesLocked"]>,
+    [StorageLock, Uint8Array]
+  >
+>;
+type _StorageDeleteLocked = Assert<
+  IsExact<Parameters<SessionStorageType["deleteLocked"]>, [StorageLock]>
 >;
 
 const toAddress = (user: string, relPath: Path): Address =>
@@ -744,6 +768,122 @@ test("storage.get streams a Web Response for session/public storage", async (t) 
   }
 
   await session.storage.delete(path);
+
+  t.end();
+});
+
+test("session: lock/refreshLock/unlock and locked writes", async (t) => {
+  const sdk = Pubky.testnet();
+
+  const signer = sdk.signer(Keypair.random());
+  const signupToken = await createSignupToken();
+  await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await signer.signin("storage.test");
+
+  const storage = session.storage;
+  const path: Path = "/pub/example.com/locked.bin";
+
+  const expectStatus = async (
+    promise: Promise<unknown>,
+    status: number,
+    label: string,
+  ) => {
+    try {
+      await promise;
+      t.fail(`${label}: expected status ${status}`);
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "RequestError", `${label}: mapped error name`);
+      t.equal(getStatusCode(error), status, `${label}: status code ${status}`);
+    }
+  };
+
+  await storage.putText(path, "before");
+
+  // The homeserver caps the lifetime and the lock reports what was granted.
+  const lock = await storage.lock(path, 9999);
+  t.equal(lock.path, path, "lock reports its path");
+  t.ok(
+    lock.token.startsWith("opaquelocktoken:"),
+    "lock token is an opaquelocktoken",
+  );
+  t.equal(lock.timeoutSeconds, 60, "homeserver capped the timeout");
+  t.equal(lock.ifHeader(), `(<${lock.token}>)`, "ifHeader presents the token");
+
+  // A plain write, a plain delete and a second lock are refused while it lives.
+  await expectStatus(storage.putText(path, "plain"), 423, "plain write");
+  await expectStatus(storage.delete(path), 423, "plain delete");
+  await expectStatus(storage.lock(path, 5), 423, "second lock");
+
+  // The holder writes under the lock.
+  await storage.putTextLocked(lock, "locked");
+  t.equal(await storage.getText(path), "locked", "locked write landed whole");
+  await storage.putBytesLocked(lock, new Uint8Array([1, 2, 3]));
+  t.deepEqual(
+    Array.from(await storage.getBytes(path)),
+    [1, 2, 3],
+    "locked bytes write landed whole",
+  );
+
+  // Refresh reports the newly granted lifetime.
+  await storage.refreshLock(lock, 10);
+  t.equal(lock.timeoutSeconds, 10, "refreshLock updated the granted timeout");
+
+  // Calls on one lock may overlap: a refresh while a write is in flight, and
+  // reading the lock meanwhile, must not trip wasm-bindgen's borrow check.
+  await Promise.all([
+    storage.refreshLock(lock, 20),
+    storage.putTextLocked(lock, "overlapped"),
+    Promise.resolve(lock.token),
+  ]);
+  t.equal(lock.timeoutSeconds, 20, "overlapping refresh landed");
+  t.equal(await storage.getText(path), "overlapped", "overlapping write landed");
+
+  // A locked delete works and leaves the lock in place.
+  await storage.deleteLocked(lock);
+  await expectStatus(
+    storage.putText(path, "plain"),
+    423,
+    "write after locked delete",
+  );
+
+  // Unlocked: a plain write goes through, and the released lock is useless.
+  await storage.unlock(lock);
+  await storage.putText(path, "free");
+  t.equal(await storage.getText(path), "free", "plain write lands after unlock");
+  await expectStatus(
+    storage.putTextLocked(lock, "stale"),
+    412,
+    "stale locked write",
+  );
+  await expectStatus(storage.deleteLocked(lock), 412, "stale locked delete");
+  await expectStatus(storage.refreshLock(lock, 10), 412, "stale refreshLock");
+  await expectStatus(storage.unlock(lock), 409, "second unlock");
+
+  // Only files can be locked.
+  await expectStatus(
+    storage.lock("/pub/example.com/dir/", 5),
+    400,
+    "directory lock",
+  );
+
+  // Locking a free path reserves it without creating anything.
+  const freePath: Path = "/pub/example.com/reserved.bin";
+  const reservation = await storage.lock(freePath, 5);
+  t.equal(await storage.exists(freePath), false, "lock creates no file");
+  await expectStatus(storage.putText(freePath, "x"), 423, "reserved path");
+  await storage.unlock(reservation);
+
+  // A timeout the SDK cannot express is refused before any request is made.
+  for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    try {
+      await storage.lock(path, timeout);
+      t.fail(`timeout ${timeout} should be refused`);
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "InvalidInput", `timeout ${timeout}: InvalidInput`);
+    }
+  }
 
   t.end();
 });

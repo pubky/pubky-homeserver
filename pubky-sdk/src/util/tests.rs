@@ -3,7 +3,8 @@ use reqwest::{Response, StatusCode};
 use std::{fmt::Write, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
+    task::JoinHandle,
 };
 
 fn client(limit: Option<usize>) -> PubkyHttpClient {
@@ -15,14 +16,36 @@ fn client(limit: Option<usize>) -> PubkyHttpClient {
     builder.build().unwrap()
 }
 
+/// Server side of a [`serve_response`] connection.
+///
+/// The body is written in the background, so the client can read it while it
+/// is sent. Writing it before returning would deadlock once the body outgrows
+/// the loopback socket buffers. Holding this value keeps the connection open;
+/// dropping it closes the connection after the body is written.
+pub(crate) struct ServedConnection(JoinHandle<TcpStream>);
+
+impl ServedConnection {
+    /// Waits until the whole body is written, then returns the server socket.
+    pub(crate) async fn into_socket(self) -> TcpStream {
+        self.0.await.unwrap()
+    }
+}
+
 // Keep the server socket alive after returning headers/body. Tests decide when
 // EOF happens, so a response reader cannot pass by waiting for the whole body.
 pub(crate) async fn serve_response(
     status: u16,
     framing: &str,
     body: &[u8],
-) -> (Response, TcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+) -> (Response, ServedConnection) {
+    let listener_socket = TcpSocket::new_v4().unwrap();
+    // Limit buffering so Linux also exercises backpressure on large bodies.
+    // Linux doubles this requested size to account for kernel overhead.
+    listener_socket.set_send_buffer_size(64 * 1024).unwrap();
+    listener_socket
+        .bind("127.0.0.1:0".parse().unwrap())
+        .unwrap();
+    let listener = listener_socket.listen(1).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let client = reqwest::Client::new();
     let send = client.get(url).send();
@@ -41,11 +64,18 @@ pub(crate) async fn serve_response(
             .write_all(format!("HTTP/1.1 {status} Test\r\n{framing}\r\n").as_bytes())
             .await
             .unwrap();
-        socket.write_all(body).await.unwrap();
         socket
     };
-    let (response, socket) = tokio::join!(send, serve);
-    (response.unwrap(), socket)
+    let (response, mut socket) =
+        tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(send, serve) })
+            .await
+            .expect("serve_response must return before the client consumes the body");
+    let body = body.to_vec();
+    let connection = ServedConnection(tokio::spawn(async move {
+        socket.write_all(&body).await.unwrap();
+        socket
+    }));
+    (response.unwrap(), connection)
 }
 
 async fn server_error(response: Response, client: PubkyHttpClient) -> (StatusCode, String) {
@@ -62,7 +92,7 @@ async fn server_error(response: Response, client: PubkyHttpClient) -> (StatusCod
 #[tokio::test]
 async fn oversized_error_stops_before_eof() {
     let body = format!("1001\r\n{}\r\n", "x".repeat(4097));
-    let (response, _socket) =
+    let (response, _connection) =
         serve_response(500, "Transfer-Encoding: chunked\r\n", body.as_bytes()).await;
     let (status, message) = server_error(response, client(None)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -82,7 +112,7 @@ async fn error_body_limits_follow_client_configuration() {
         let limit = setting.unwrap_or(4096);
         for size in [0, 3, limit - 1, limit, limit + 1] {
             let body = vec![b'x'; size];
-            let (response, _socket) =
+            let (response, _connection) =
                 serve_response(429, &format!("Content-Length: {size}\r\n"), &body).await;
             let (status, message) = server_error(response, client.clone()).await;
             assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -100,7 +130,7 @@ async fn clients_keep_independent_limits_when_cloned() {
     let small = client(Some(3));
     let larger = client(Some(5));
     for (client, limit) in [(small.clone(), 3), (larger, 5), (small, 3)] {
-        let (response, _socket) =
+        let (response, _connection) =
             serve_response(500, "Content-Length: 10\r\n", b"xxxxxxxxxx").await;
         let (_, message) = server_error(response, client).await;
         assert_eq!(
@@ -121,7 +151,7 @@ async fn zero_limit_does_not_wait_for_error_bodies() {
         (500, "Internal Server Error"),
         (599, "Unknown Error"),
     ] {
-        let (response, _socket) =
+        let (response, _connection) =
             serve_response(status, "Content-Length: 1000000000\r\n", b"").await;
         let (actual, message) = server_error(response, client(Some(0))).await;
         assert_eq!(actual.as_u16(), status);
@@ -131,7 +161,7 @@ async fn zero_limit_does_not_wait_for_error_bodies() {
 
 #[tokio::test]
 async fn large_limit_does_not_require_a_large_allocation() {
-    let (response, _socket) = serve_response(500, "Content-Length: 5\r\n", b"short").await;
+    let (response, _connection) = serve_response(500, "Content-Length: 5\r\n", b"short").await;
     let (_, message) = server_error(response, client(Some(usize::MAX))).await;
     assert_eq!(message, "short");
 }
@@ -139,7 +169,7 @@ async fn large_limit_does_not_require_a_large_allocation() {
 #[tokio::test]
 async fn error_limit_is_independent_of_framing_and_chunk_boundaries() {
     for framing in ["", "Content-Length: 1000000000000\r\n"] {
-        let (response, _socket) = serve_response(503, framing, &vec![b'x'; 4097]).await;
+        let (response, _connection) = serve_response(503, framing, &vec![b'x'; 4097]).await;
         let (_, message) = server_error(response, client(None)).await;
         assert_eq!(
             message,
@@ -150,7 +180,8 @@ async fn error_limit_is_independent_of_framing_and_chunk_boundaries() {
         );
     }
 
-    let (response, mut socket) = serve_response(500, "Transfer-Encoding: chunked\r\n", b"").await;
+    let (response, connection) = serve_response(500, "Transfer-Encoding: chunked\r\n", b"").await;
+    let mut socket = connection.into_socket().await;
     let read = tokio::spawn(server_error(response, client(None)));
     for _ in 0..4096 {
         socket.write_all(b"1\r\nx\r\n").await.unwrap();
@@ -169,7 +200,8 @@ async fn error_limit_is_independent_of_framing_and_chunk_boundaries() {
 
 #[tokio::test]
 async fn checked_success_does_not_consume_the_body() {
-    let (response, mut socket) = serve_response(200, "Content-Length: 5\r\n", b"").await;
+    let (response, connection) = serve_response(200, "Content-Length: 5\r\n", b"").await;
+    let mut socket = connection.into_socket().await;
     let response = tokio::time::timeout(
         Duration::from_secs(2),
         client(Some(0)).check_http_status(response),
@@ -190,14 +222,14 @@ async fn error_text_decoding_and_read_failure() {
         (b"bad\xfftext", "bad\u{fffd}text"),
         ("caf\u{e9}".as_bytes(), "caf\u{e9}"),
     ] {
-        let (response, _socket) =
+        let (response, _connection) =
             serve_response(400, &format!("Content-Length: {}\r\n", body.len()), body).await;
         let (_, message) = server_error(response, client(None)).await;
         assert_eq!(message, expected);
     }
     let mut body = vec![b'x'; 4095];
     body.extend_from_slice("\u{20ac}".as_bytes());
-    let (response, _socket) =
+    let (response, _connection) =
         serve_response(400, &format!("Content-Length: {}\r\n", body.len()), &body).await;
     let (_, message) = server_error(response, client(None)).await;
     assert_eq!(
@@ -209,9 +241,9 @@ async fn error_text_decoding_and_read_failure() {
     );
 
     for (status, fallback) in [(500, "Internal Server Error"), (599, "Unknown Error")] {
-        let (response, socket) =
+        let (response, connection) =
             serve_response(status, "Content-Length: 100\r\n", b"partial").await;
-        drop(socket);
+        drop(connection);
         let (actual, message) = server_error(response, client(None)).await;
         assert_eq!(actual.as_u16(), status);
         assert_eq!(message, fallback);

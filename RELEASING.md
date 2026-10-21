@@ -63,8 +63,8 @@ When a `v*` tag is pushed, the [release workflow](.github/workflows/release.yml)
 ## Post-Release Verification
 
 - [ ] [GitHub Releases](https://github.com/pubky/pubky-homeserver/releases) -- new release with artifacts attached
-- [ ] [crates.io](https://crates.io/crates/pubky-sdk) -- new version visible
-- [ ] [npmjs.com](https://www.npmjs.com/package/pubky) -- new version visible
+- [ ] [crates.io](https://crates.io/crates/pubky) -- new version visible
+- [ ] [npmjs.com](https://www.npmjs.com/package/@synonymdev/pubky) -- new version visible
 
 ## Versioning
 

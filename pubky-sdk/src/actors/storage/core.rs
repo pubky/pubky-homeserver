@@ -1,6 +1,6 @@
 use crate::PublicKey;
 use crate::actors::session::credential::SessionCredential;
-use reqwest::{Method, RequestBuilder};
+use reqwest::{Method, RequestBuilder, Response};
 use std::sync::Arc;
 
 use super::resource::{IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath};
@@ -18,8 +18,10 @@ use crate::{
 /// # Request failures
 ///
 /// Invalid paths return [`RequestError::Validation`] inside [`crate::Error::Request`];
-/// URL parsing returns [`crate::Error::Parse`]. Homeserver resolution, credential
-/// preparation or refresh, and transport errors propagate.
+/// URL parsing returns [`crate::Error::Parse`]. Automatic grant refresh failures
+/// return [`crate::Error::CredentialRefresh`]; its secret-safe payload retains
+/// an optional refresh HTTP status. Homeserver resolution, other credential
+/// preparation, and transport errors propagate.
 ///
 /// Non-success HTTP statuses return [`RequestError::Server`] with the status and
 /// server message, including authentication/permission failures (401/403) and 5xx.
@@ -90,9 +92,8 @@ impl SessionStorage {
 
     /// Build a request for this storage.
     ///
-    /// - Paths are **absolute** (session-scoped).
-    /// - The session credential attaches the right authentication header
-    ///   (cookie or bearer token) and refreshes the grant credential proactively if needed.
+    /// Paths are **absolute** (session-scoped).
+    /// Authentication is attached by `send`, after the caller has set the body and headers.
     pub(crate) async fn request<P: IntoResourcePath>(
         &self,
         method: Method,
@@ -102,13 +103,12 @@ impl SessionStorage {
         let resource = PubkyResource::new(self.user.clone(), path.as_str())?;
         let url = resource.to_transport_url()?;
         cross_log!(debug, "Session storage {} request {}", method, url);
-        let rb = self.client.cross_request(method, url).await?;
-        self.attach_credential(rb).await
+        self.client.cross_request(method, url).await
     }
 
-    /// Attach the session credential to a request builder.
-    pub(crate) async fn attach_credential(&self, rb: RequestBuilder) -> Result<RequestBuilder> {
-        self.credential.attach(rb, &self.client).await
+    /// Attach credentials and keep their coordination lock through the send.
+    pub(crate) async fn send(&self, rb: RequestBuilder) -> Result<Response> {
+        self.credential.send(rb, &self.client).await
     }
 }
 

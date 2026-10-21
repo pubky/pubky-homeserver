@@ -29,6 +29,24 @@ async function assertServerError(t: Test, request: Promise<unknown>, message: st
   }
 }
 
+async function assertRefreshError(t: Test, request: Promise<unknown>) {
+  try {
+    await request;
+    t.fail("request must reject failed credential refresh");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.equal(error.name, "CredentialRefreshError", "refresh uses typed error name");
+    t.equal(getStatusCode(error), 500, "refresh status survives");
+    t.equal(
+      error.message,
+      "Credential refresh failed: Grant credential refresh request failed",
+      "refresh diagnostic is secret-safe",
+    );
+    t.notOk(error.message.includes("Internal Server Error"), "status text is redacted");
+    t.notOk(error.message.includes("response body"), "response diagnostic is redacted");
+  }
+}
+
 for (const setting of [undefined, 16, 8192, 0]) {
   const label = setting ?? "default";
   const limit = setting ?? 4096;
@@ -114,6 +132,7 @@ for (const setting of [undefined, 16, 8192, 0]) {
     const originalFetch = globalThis.fetch;
     let exchanges = 0;
     let storageSent = false;
+    let refreshCancelled = false;
     globalThis.fetch = async (input, init) => {
       const request = input instanceof Request ? input : new Request(input, init);
       const path = new URL(request.url).pathname;
@@ -129,18 +148,29 @@ for (const setting of [undefined, 16, 8192, 0]) {
         body.session.token_expires_at = 0;
         response = new Response(JSON.stringify(body), { status: issued.status });
       } else {
-        response = new Response("x".repeat(limit + 1), { status: 500 });
+        response = new Response(new ReadableStream({
+          cancel() {
+            refreshCancelled = true;
+          },
+        }), { status: 500 });
       }
       Object.defineProperty(response, "url", { value: request.url });
       return response;
     };
 
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const session = await signer.signin("bounded-reader.test");
-      await assertServerError(t, session.storage.get(PATH), overflowMessage);
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("refresh reader waited for EOF")), 5000);
+      });
+      await assertRefreshError(t, Promise.race([session.storage.get(PATH), deadline]));
+      await new Promise((resolve) => setTimeout(resolve, 0));
       t.equal(exchanges, 2, "expired bearer triggers a refresh");
       t.notOk(storageSent, "failed refresh prevents the storage GET");
+      t.ok(refreshCancelled, "failed refresh cancels the unread response body");
     } finally {
+      clearTimeout(timer);
       globalThis.fetch = originalFetch;
     }
     t.end();
