@@ -16,8 +16,8 @@
 //! 5. A cookie is set on the response:
 //!    - **Name**: the user's public key in z32 format (`pubkey.z32()`).
 //!    - **Value**: the session secret.
-//!    - **Max-Age**: 365 days, `HttpOnly`.
-//!    - **Secure** / **SameSite=None**: enabled when the host is a pkarr key or FQDN;
+//!    - **Max-Age**: 365 days, `HttpOnly`, `SameSite=Lax`.
+//!    - **Secure**: enabled when the host is a pkarr key or FQDN;
 //!      disabled for localhost / plain IP (development).
 //!
 //! ## Authenticating subsequent requests
