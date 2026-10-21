@@ -32,7 +32,7 @@ websites = true
 # Answer CORS preflights and add CORS headers to responses, so browser apps
 # on any origin can call the homeserver. Set it to false only when a reverse
 # proxy handles CORS; otherwise browsers receive the headers twice and reject
-# the response. See "Handle CORS in a reverse proxy" in the README.
+# the response. See docs/CORS.md.
 cors_enabled = true
 
 # Rate limit endpoints by request count.
