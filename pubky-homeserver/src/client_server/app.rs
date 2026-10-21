@@ -36,7 +36,7 @@ use super::middleware::{
     request_tenant::RequestTenant,
     trace::with_trace_layer,
 };
-use super::routes::{events, info, root, signup_tokens, tenants, website};
+use super::routes::{dav, events, info, root, signup_tokens, tenants, website};
 
 /// Errors that can occur when building a `HomeserverCore`.
 #[derive(Debug, thiserror::Error)]
@@ -249,7 +249,7 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         .with_state(state.clone())
         .merge(auth::base_router(auth_state.clone()))
         .merge(auth::tenant_router(auth_state))
-        .layer(middleware)
+        .layer(middleware.clone())
         // Keep feature discovery independent of authentication and database-backed quotas.
         .route("/info", get(info::get).with_state(state.clone()));
 
@@ -257,15 +257,35 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
     // requests are therefore logged using their Pubky URL, and website requests
     // using their site file's (`website::resolve` replaces the tenant).
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
-    Ok(with_trace_layer(app)
-        .layer(axum_middleware::from_fn_with_state(state, website::resolve))
+    let cors_app = with_trace_layer(app)
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            website::resolve,
+        ))
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
         .layer(CorsLayer::very_permissive().expose_headers([
             RETRY_AFTER,
             // Browsers must be able to read a granted lock.
             HeaderName::from_static("lock-token"),
             HeaderName::from_static("timeout"),
-        ])))
+        ]));
+
+    if !state.context.config_toml.drive.webdav_enabled {
+        return Ok(cors_app);
+    }
+
+    // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
+    // not under them — see `dav_endpoint::router`. It is anonymous, but it
+    // runs behind the REST routes' middleware so the configured request and
+    // bandwidth limits apply to it. Request-count limiters are shared with
+    // REST; bandwidth buckets are per route, so a client's read allowance on
+    // `/dav` is counted separately from its allowance on `/storage`.
+    let dav = dav::router(state).layer(middleware);
+    // No `RequestTenant` here: the endpoint resolves its own tenant from the
+    // URL and nothing on this router reads it.
+    let dav_app = with_trace_layer(dav);
+
+    Ok(cors_app.merge(dav_app))
 }
 
 #[cfg(test)]

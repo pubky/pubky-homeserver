@@ -29,6 +29,10 @@ icann_listen_socket = "127.0.0.1:6286"
 # `<user-key>` or `<label>.<user-key>`. See docs/WEBSITES.md.
 websites = true
 
+# Serve every user's public folder as a read-only WebDAV share at
+# /dav/<public-key>/pub/ on the two sockets above. Default: false
+webdav_enabled = false
+
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE

@@ -1,30 +1,23 @@
 use std::sync::Arc;
 
-use dav_server::{fakels::FakeLs, DavHandler};
-use dav_server_opendalfs::OpendalFs;
-
+use crate::shared::webdav::endpoint::{DavAccess, DavEndpoint};
 use crate::AppContext;
 use crate::ConfigToml;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) context: Arc<AppContext>,
-    pub(crate) inner_dav_handler: DavHandler,
+    /// The operator's view of storage: every drive, read-write.
+    pub(crate) dav: DavEndpoint,
 }
 
 impl AppState {
     pub fn new(context: Arc<AppContext>) -> Self {
-        let webdavfs = OpendalFs::new(context.file_service.opendal.admin_operator.clone());
-        let inner_dav_handler = DavHandler::builder()
-            .filesystem(webdavfs)
-            .locksystem(FakeLs::new())
-            .strip_prefix("/dav")
-            .autoindex(true)
-            .build_handler();
-        Self {
-            inner_dav_handler,
-            context,
-        }
+        let dav = DavEndpoint::new(
+            context.file_service.opendal.admin_operator.clone(),
+            DavAccess::ReadWrite,
+        );
+        Self { dav, context }
     }
 
     pub(crate) fn admin_password(&self) -> &str {

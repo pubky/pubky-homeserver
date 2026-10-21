@@ -61,6 +61,7 @@ mod write_check;
 pub(crate) mod events;
 pub(crate) mod staged_publish_layer;
 mod storage_repair;
+pub(crate) mod tenant_scope_layer;
 pub(crate) mod write_finalization_layer;
 pub(crate) mod write_path_layer;
 

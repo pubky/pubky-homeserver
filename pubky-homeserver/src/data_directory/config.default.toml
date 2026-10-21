@@ -7,6 +7,7 @@ database_url = "postgres://localhost:5432/pubky_homeserver"
 pubky_listen_socket = "127.0.0.1:6287"
 icann_listen_socket = "127.0.0.1:6286"
 websites = true
+webdav_enabled = false
 
 [[drive.rate_limits]]
 path = "/signup_tokens/*"
