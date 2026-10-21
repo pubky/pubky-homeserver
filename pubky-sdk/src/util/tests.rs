@@ -3,7 +3,7 @@ use reqwest::{Response, StatusCode};
 use std::{fmt::Write, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     task::JoinHandle,
 };
 
@@ -20,9 +20,8 @@ fn client(limit: Option<usize>) -> PubkyHttpClient {
 ///
 /// The body is written in the background, so the client can read it while it
 /// is sent. Writing it before returning would deadlock once the body outgrows
-/// the loopback socket buffers (128 KiB on macOS). Holding this value keeps the
-/// connection open; dropping it closes the connection after the body is
-/// written.
+/// the loopback socket buffers. Holding this value keeps the connection open;
+/// dropping it closes the connection after the body is written.
 pub(crate) struct ServedConnection(JoinHandle<TcpStream>);
 
 impl ServedConnection {
@@ -39,7 +38,14 @@ pub(crate) async fn serve_response(
     framing: &str,
     body: &[u8],
 ) -> (Response, ServedConnection) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_socket = TcpSocket::new_v4().unwrap();
+    // Limit buffering so Linux also exercises backpressure on large bodies.
+    // Linux doubles this requested size to account for kernel overhead.
+    listener_socket.set_send_buffer_size(64 * 1024).unwrap();
+    listener_socket
+        .bind("127.0.0.1:0".parse().unwrap())
+        .unwrap();
+    let listener = listener_socket.listen(1).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let client = reqwest::Client::new();
     let send = client.get(url).send();
@@ -60,7 +66,10 @@ pub(crate) async fn serve_response(
             .unwrap();
         socket
     };
-    let (response, mut socket) = tokio::join!(send, serve);
+    let (response, mut socket) =
+        tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(send, serve) })
+            .await
+            .expect("serve_response must return before the client consumes the body");
     let body = body.to_vec();
     let connection = ServedConnection(tokio::spawn(async move {
         socket.write_all(&body).await.unwrap();
