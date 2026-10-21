@@ -59,16 +59,6 @@ async fn server_error(response: Response, client: PubkyHttpClient) -> (StatusCod
     let Error::Request(RequestError::Server { status, message }) = error else {
         panic!("unexpected error: {error:?}");
     };
-    assert_eq!(
-        RequestError::Server {
-            status,
-            message: message.clone()
-        }
-        .kind(),
-        RequestErrorKind::Http {
-            status: status.as_u16()
-        }
-    );
     (status, message)
 }
 

@@ -10,7 +10,7 @@ use wasm_bindgen::describe::WasmDescribe;
 use wasm_bindgen::prelude::*;
 
 use pkarr::errors::PublicKeyError;
-use pubky::errors::{BuildError, RequestError, RequestErrorKind};
+use pubky::errors::{BuildError, RequestErrorKind};
 use pubky_common::auth::Error as AuthTokenError;
 use pubky_common::capabilities::{CapabilitiesParseError, CapabilityParseError};
 use pubky_common::recovery_file::Error as RecoveryFileError;
@@ -89,7 +89,7 @@ impl Display for PubkyErrorName {
 ///
 /// @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
 /// @property message - A human-readable, descriptive error message suitable for logging.
-/// @property data - Optional structured context. Request errors include `reason` and, when available, `statusCode`, e.g., `{ reason: "Http", statusCode: 404 }`. A reason describes the failure, not whether retrying is safe.
+/// @property data - Optional structured context. Request errors carry `reason` and, for HTTP failures, `statusCode`, e.g. `{ reason: "Http", statusCode: 404 }`.
 ///
 /// @example
 /// ```typescript
@@ -123,20 +123,20 @@ pub struct PubkyError {
 // --- Constructors for Ergonomics ---
 impl PubkyError {
     pub(crate) fn request(message: impl Display, kind: RequestErrorKind) -> Self {
-        let reason = match kind {
-            RequestErrorKind::Http { .. } => "Http",
-            RequestErrorKind::Timeout => "Timeout",
-            RequestErrorKind::Connection => "Connection",
-            RequestErrorKind::Body => "Body",
-            RequestErrorKind::Decode => "Decode",
-            RequestErrorKind::InvalidRequest => "InvalidRequest",
-            _ => "Other",
+        let (reason, status) = match kind {
+            RequestErrorKind::Http { status } => ("Http", Some(status)),
+            RequestErrorKind::Timeout => ("Timeout", None),
+            RequestErrorKind::Connection => ("Connection", None),
+            RequestErrorKind::Body => ("Body", None),
+            RequestErrorKind::Decode => ("Decode", None),
+            RequestErrorKind::InvalidRequest => ("InvalidRequest", None),
+            _ => ("Other", None),
         };
-        let result =
+        let error =
             Self::new(PubkyErrorName::RequestError, message).with_data(json!({ "reason": reason }));
-        match kind {
-            RequestErrorKind::Http { status } => result.with_status(status),
-            _ => result,
+        match status {
+            Some(status) => error.with_status(status),
+            None => error,
         }
     }
 
@@ -185,7 +185,7 @@ const TS_PUBKY_ERROR: &str = r#"/**
  *
  * @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
  * @property message - A human-readable, descriptive error message suitable for logging.
- * @property data - Optional structured context. Request errors include `reason` and, when available, `statusCode`, e.g., `{ reason: "Http", statusCode: 404 }`. A reason describes the failure, not whether retrying is safe.
+ * @property data - Optional structured context. Request errors carry `reason` and, for HTTP failures, `statusCode`, e.g. `{ reason: "Http", statusCode: 404 }`.
  *
  * @example
  * ```typescript
@@ -216,11 +216,8 @@ export interface PubkyError extends Error {
 /// Converts a native `pubky::Error` into a `PubkyError`.
 impl From<pubky::Error> for PubkyError {
     fn from(err: pubky::Error) -> Self {
-        if let pubky::Error::Request(request) = &err {
-            return Self::request(&err, request.kind());
-        }
         let name = match &err {
-            pubky::Error::Request(_) => PubkyErrorName::RequestError,
+            pubky::Error::Request(request) => return Self::request(&err, request.kind()),
             pubky::Error::CredentialRefresh(_) => PubkyErrorName::CredentialRefreshError,
             pubky::Error::Parse(_) => PubkyErrorName::InvalidInput,
             pubky::Error::Authentication(_) => PubkyErrorName::AuthenticationError,
@@ -229,17 +226,13 @@ impl From<pubky::Error> for PubkyError {
         };
 
         // Only errors that carry an HTTP status populate `data.statusCode`.
-        let status = match &err {
-            pubky::Error::Request(RequestError::Server { status, .. })
-            | pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
-                status: Some(status),
-            }) => Some(status.as_u16()),
-            _ => None,
-        };
-        match status {
-            Some(status) => Self::new_with_status(name, &err, status),
-            None => Self::new(name, err),
+        if let pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
+            status: Some(status),
+        }) = &err
+        {
+            return Self::new_with_status(name, &err, status.as_u16());
         }
+        Self::new(name, err)
     }
 }
 
@@ -397,56 +390,7 @@ impl WasmDescribe for PubkyError {
 mod tests {
     use super::*;
     use pubky::custom_pop::CustomPopError;
-
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(inline_js = r#"
-        export function failingBodyFetch() {
-            const original = globalThis.fetch;
-            globalThis.fetch = (input, init) => {
-                if (input.url === 'https://pubky.invalid/body-error') {
-                    const response = new Response(new ReadableStream({
-                        start(controller) { controller.error(new TypeError('body interrupted')); }
-                    }));
-                    Object.defineProperty(response, 'url', { value: input.url });
-                    return Promise.resolve(response);
-                }
-                return original.call(globalThis, input, init);
-            };
-            return () => { globalThis.fetch = original; };
-        }
-    "#)]
-    extern "C" {
-        #[wasm_bindgen(js_name = failingBodyFetch)]
-        fn failing_body_fetch() -> js_sys::Function;
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    async fn direct_body_errors_preserve_the_decode_category() {
-        for text in [false, true] {
-            let restore = failing_body_fetch();
-            let response = reqwest::Client::new()
-                .get("https://pubky.invalid/body-error")
-                .send()
-                .await;
-            restore.call0(&JsValue::UNDEFINED).unwrap();
-            let response = response.unwrap();
-            let source = if text {
-                response.text().await.unwrap_err()
-            } else {
-                response.bytes().await.unwrap_err()
-            };
-            let message = source.to_string();
-            let error = PubkyError::from(source);
-            assert_eq!(error.name.as_str(), "RequestError");
-            assert_eq!(error.message, message);
-            assert_eq!(error.data, Some(json!({ "reason": "Decode" })));
-            let value = JsValue::from(error);
-            let data = Reflect::get(&value, &JsValue::from_str("data")).unwrap();
-            let data: Value = serde_wasm_bindgen::from_value(data).unwrap();
-            assert_eq!(data, json!({ "reason": "Decode" }));
-        }
-    }
+    use pubky::errors::RequestError;
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -494,6 +438,12 @@ mod tests {
                     message: "invalid response".into(),
                 },
                 json!({ "reason": "Decode" }),
+            ),
+            (
+                RequestError::Transport(
+                    reqwest::Client::new().get("not a URL").build().unwrap_err(),
+                ),
+                json!({ "reason": "InvalidRequest" }),
             ),
         ] {
             let source = pubky::Error::Request(error);

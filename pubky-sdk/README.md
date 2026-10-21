@@ -524,16 +524,12 @@ panics on grant sessions.
 
 ## Request errors
 
-[`errors::RequestError::kind`] returns a small, context-free classification:
-HTTP status, timeout, connection, body, decoding, invalid request, or other.
-The original error remains available for diagnostics. Native transports expose
-more detail than browser Fetch; unavailable causes remain `Other` rather than
-being inferred from error text. A known HTTP status survives an error-body read
-failure or timeout.
-
-These categories do not decide retry policy. In particular, a timeout does not
-prove that a write failed to commit. Callers must retain their operation's
-idempotency, persistence and recovery requirements.
+[`errors::RequestError::kind`] classifies a failure as an HTTP status, timeout,
+connection, body, decoding or invalid-request error, or `Other` when the
+transport gives no more detail (browser Fetch exposes less than native). The
+category carries no URL, body or credentials; the original error keeps the
+diagnostics. A category describes what was observed, not whether a retry is
+safe: a timeout does not prove a write was not committed.
 
 ## Example code
 

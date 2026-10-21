@@ -649,12 +649,10 @@ interface PubkyError extends Error {
 }
 ```
 
-`RequestError` includes `data.reason`: `Http`, `Timeout`, `Connection`, `Body`,
-`Decode`, `InvalidRequest`, or `Other`. HTTP failures also retain `data.statusCode`.
-These fields contain no URL or response body; the existing diagnostic `message`
-is unchanged. Browser Fetch may expose only `Other` where a native transport
-provides more detail. Handle unknown reasons conservatively. No reason proves
-that retrying a write is safe or that the server did not commit it.
+`RequestError` includes `data.reason` (`Http`, `Timeout`, `Connection`, `Body`,
+`Decode`, `InvalidRequest` or `Other`) and, for HTTP failures, `data.statusCode`.
+Browser Fetch may only report `Other`. A reason describes the failure, not
+whether retrying a write is safe.
 
 `CredentialRefreshError` represents secret-safe refresh request failures. It
 includes `data: { statusCode: number }` when the refresh endpoint responded, while
