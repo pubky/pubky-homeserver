@@ -62,3 +62,12 @@ Verify that port 6287 is open in your firewall and that the homeserver is listen
 ```bash
 sudo ss -tlnp | grep 6287
 ```
+
+### Proxy requests fail or return 502
+
+Check that Caddy sends `proxy_protocol v2` and the homeserver's
+`icann_client_identity` uses `proxy_protocol` mode with the proxy's TCP address
+in `trusted_proxies` (`127.0.0.1/32` for these guides). A missing preface or
+untrusted peer causes `Rejected connection during client identification`.
+HTTP requests without a PROXY preface also fail on this listener.
+Cloudflare Tunnel must instead use `direct` mode.

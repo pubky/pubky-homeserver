@@ -80,6 +80,9 @@ icann_domain = "YOUR_DOMAIN"
 # Pubky TLS is not used with this setup.
 ```
 
+From v0.17.0, visitors share the tunnel's IP-based limits; forwarding headers
+do not restore individual client IPs. User-based limits remain separate.
+
 Restart the homeserver after editing `config.toml`. See [Run](../INSTALL.md#run) in the install guide.
 
 > For the full list of settings, see [`pubky-homeserver/config.sample.toml`](../../pubky-homeserver/config.sample.toml).

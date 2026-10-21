@@ -15,7 +15,7 @@ use governor::{Quota, RateLimiter};
 
 use crate::shared::quota::{BandwidthQuota, LimitKey, LimitKeyType, PathLimit};
 
-use super::extract_ip::extract_ip;
+use super::extract_ip::{extract_ip, MissingClientAddress};
 use super::CLEANUP_INTERVAL_SECS;
 use crate::client_server::middleware::request_tenant::RequestTenant;
 use axum::body::Body;
@@ -83,6 +83,14 @@ pub(super) struct LimitTuple {
     pub limiter: Arc<KeyedRateLimiter>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum LimitKeyExtractionError {
+    #[error(transparent)]
+    MissingClientAddress(#[from] MissingClientAddress),
+    #[error("Request tenant is missing")]
+    MissingRequestTenant,
+}
+
 impl LimitTuple {
     pub fn new(path_limit: PathLimit) -> Result<Self, String> {
         let quota = Quota::try_from(path_limit.clone())?;
@@ -114,15 +122,15 @@ impl LimitTuple {
     ///
     /// The key is either the ip address of the client
     /// or the user pubkey.
-    pub fn extract_key(&self, req: &Request<Body>) -> anyhow::Result<LimitKey> {
+    pub fn extract_key(&self, req: &Request<Body>) -> Result<LimitKey, LimitKeyExtractionError> {
         match self.limit.key {
-            LimitKeyType::Ip => extract_ip(req).map(LimitKey::Ip),
+            LimitKeyType::Ip => Ok(LimitKey::Ip(extract_ip(req)?)),
             LimitKeyType::User => {
                 // Extract the user pubkey from the request.
                 req.extensions()
                     .get::<RequestTenant>()
                     .map(|pk| LimitKey::User(pk.public_key().clone()))
-                    .ok_or(anyhow::anyhow!("Failed to extract user pubkey."))
+                    .ok_or(LimitKeyExtractionError::MissingRequestTenant)
             }
         }
     }

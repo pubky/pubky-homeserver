@@ -8,6 +8,7 @@ Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), 
 
 ## Requirements
 
+- Homeserver **v0.17.0 or later** for PROXY protocol support
 - A server with a **static public IP address**
 - A **domain name** with access to its DNS settings
 - Ports 80, 443, and 6287 available for inbound traffic
@@ -42,7 +43,7 @@ Do **not** expose these ports directly to the internet:
 
 ## Configure the Homeserver
 
-Edit `~/.pubky/config.toml` with the following settings:
+Edit `~/.pubky/config.toml`. Set these values under the corresponding sections:
 
 ```toml
 [drive]
@@ -50,6 +51,9 @@ Edit `~/.pubky/config.toml` with the following settings:
 pubky_listen_socket = "0.0.0.0:6287"
 
 # icann_listen_socket defaults to 127.0.0.1:6286 — no change needed.
+
+# Accept client addresses from the local Caddy proxy.
+icann_client_identity = { mode = "proxy_protocol", trusted_proxies = ["127.0.0.1/32"] }
 
 [pkdns]
 # The public-facing IP of this machine. Published to the DHT so that
@@ -68,7 +72,9 @@ Replace `YOUR_DOMAIN` with your domain name.
 
 > **Important:** Ensure your server has a **static (reserved) public IP**. If your IP changes then the PKARR record (which embeds `public_ip`), your Caddy configuration, and any DNS records will silently point at a dead address.
 
-Restart the homeserver after editing `config.toml` for the changes to take effect. See [Run](../INSTALL.md#run) in the install guide.
+Prepare both the homeserver and Caddy configurations before restarting the
+homeserver and reloading Caddy. Requests fail while their PROXY protocol
+settings differ. See [Run](../INSTALL.md#run) in the install guide.
 
 > For the full list of settings (including `public_pubky_tls_port` and `public_icann_http_port` for non-standard port setups), see [`pubky-homeserver/config.sample.toml`](../../pubky-homeserver/config.sample.toml).
 
@@ -106,13 +112,18 @@ Replace its contents with:
 
 ```
 your_domain.com {
-    reverse_proxy 127.0.0.1:6286
+    reverse_proxy 127.0.0.1:6286 {
+        transport http {
+            proxy_protocol v2
+        }
+    }
 }
 ```
 
 > **Important:** The domain in the Caddyfile must exactly match both your DNS A-record name and the `icann_domain` value in `config.toml`. A mismatch between any of these is a common source of silent failures.
 
-Reload Caddy and check the logs:
+Restart the homeserver with the configuration above, then reload Caddy and
+check the logs:
 
 ```bash
 sudo systemctl reload caddy

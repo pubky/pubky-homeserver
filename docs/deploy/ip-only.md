@@ -8,6 +8,7 @@ Commands and package names assume a Debian-based system (Ubuntu, Debian, etc.), 
 
 ## Requirements
 
+- Homeserver **v0.17.0 or later** for PROXY protocol support
 - A server with a **static public IP address**
 - Ports 80, 443, and 6287 available for inbound traffic
 - **Caddy v2.10.1 or later** (IP address certificates require this version)
@@ -42,7 +43,7 @@ Do **not** expose these ports directly to the internet:
 
 ## Configure the Homeserver
 
-Edit `~/.pubky/config.toml` with the following settings:
+Edit `~/.pubky/config.toml`. Set these values under the corresponding sections:
 
 ```toml
 [drive]
@@ -50,6 +51,9 @@ Edit `~/.pubky/config.toml` with the following settings:
 pubky_listen_socket = "0.0.0.0:6287"
 
 # icann_listen_socket defaults to 127.0.0.1:6286 — no change needed.
+
+# Accept client addresses from the local Caddy proxy.
+icann_client_identity = { mode = "proxy_protocol", trusted_proxies = ["127.0.0.1/32"] }
 
 [pkdns]
 # The public-facing IP of this machine. Published to the DHT so that
@@ -66,7 +70,9 @@ Replace `YOUR_IP` with the public IP of the machine running the homeserver. You 
 
 > **Important:** Ensure your server has a **static (reserved) public IP**. If your IP changes then the PKARR record (which embeds `public_ip`) and your Caddy configuration will silently point at a dead address.
 
-Restart the homeserver after editing `config.toml` for the changes to take effect. See [Run](../INSTALL.md#run) in the install guide.
+Prepare both the homeserver and Caddy configurations before restarting the
+homeserver and reloading Caddy. Requests fail while their PROXY protocol
+settings differ. See [Run](../INSTALL.md#run) in the install guide.
 
 > For the full list of settings (including `public_pubky_tls_port` and `public_icann_http_port` for non-standard port setups), see [`pubky-homeserver/config.sample.toml`](../../pubky-homeserver/config.sample.toml).
 
@@ -97,7 +103,11 @@ YOUR_IP {
             profile shortlived
         }
     }
-    reverse_proxy 127.0.0.1:6286
+    reverse_proxy 127.0.0.1:6286 {
+        transport http {
+            proxy_protocol v2
+        }
+    }
 }
 ```
 
@@ -105,7 +115,8 @@ The `default_sni` line is required because TLS clients don't send SNI when conne
 
 Replace `YOUR_IP` with your server's public IP address (same value as `public_ip` and `icann_domain` in `config.toml`).
 
-Reload Caddy and check the logs:
+Restart the homeserver with the configuration above, then reload Caddy and
+check the logs:
 
 ```bash
 sudo systemctl reload caddy

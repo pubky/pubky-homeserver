@@ -32,3 +32,15 @@ There are three deployment guides depending on your requirements and network lim
 | Extra software | Caddy | Caddy (v2.10.1+) | cloudflared |
 | Best for | Production servers | Quick setup, no domain | Home networks, no static IP |
 
+## Client addresses and rate limits
+
+From v0.17.0, IP-based limits use the TCP client address; HTTP forwarding
+headers such as `X-Forwarded-For` are ignored. Behind a proxy, clients share
+its IP-based limits unless it sends their addresses using PROXY protocol.
+User-based limits remain separate.
+
+The Caddy guides above use the [`reverse_proxy` transport option][caddy-proxy]
+to send PROXY protocol to the homeserver. Cloudflare Tunnel requires `direct`
+mode and shares IP-based limits across visitors.
+
+[caddy-proxy]: https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#the-http-transport
