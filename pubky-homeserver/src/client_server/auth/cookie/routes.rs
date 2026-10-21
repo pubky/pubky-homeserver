@@ -125,8 +125,11 @@ pub(crate) fn configure_session_cookie(cookie: &mut Cookie<'static>, host: &str)
     cookie.set_path("/");
     if is_secure(host) {
         cookie.set_secure(true);
-        cookie.set_same_site(SameSite::None);
     }
+    // The CORS layer allows credentials from every origin, so `SameSite=None`
+    // would let any website make cookie-authenticated requests. `Lax` limits
+    // the cookie to same-site requests and top-level navigations.
+    cookie.set_same_site(SameSite::Lax);
     cookie.set_http_only(true);
 }
 
@@ -162,7 +165,7 @@ mod tests {
         configure_session_cookie(&mut cookie, "example.com");
         assert!(cookie.secure().unwrap_or(false));
         assert!(cookie.http_only().unwrap_or(false));
-        assert_eq!(cookie.same_site(), Some(SameSite::None));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
         assert_eq!(cookie.path(), Some("/"));
     }
 
@@ -172,6 +175,7 @@ mod tests {
         configure_session_cookie(&mut cookie, "localhost");
         assert!(!cookie.secure().unwrap_or(false));
         assert!(cookie.http_only().unwrap_or(false));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
         assert_eq!(cookie.path(), Some("/"));
     }
 

@@ -20,7 +20,9 @@ info:
     - **Grant-based (current):** `Authorization: Bearer <token>` obtained via `POST /auth/grant/session`.
     - **Cookie-based (deprecated):** Session cookie set by `POST /signup` or `POST /session`.
 
-    A resolved bearer session takes precedence over cookie authentication.
+    A request that presents a bearer token is never authenticated by a cookie,
+    even if the token is invalid. Session cookies are `SameSite=Lax`, so
+    browsers only send them on same-site requests and top-level navigations.
 
     ## Capabilities
 

@@ -511,6 +511,51 @@ test("not found", async (t) => {
   t.end();
 });
 
+test("grant sign-in, session and public storage omit ambient cookies", async (t) => {
+  const sdk = Pubky.testnet();
+  const signer = sdk.signer(Keypair.random());
+  const signupToken = await createSignupToken();
+  const path: Path = "/pub/example.com/credentials.txt";
+
+  // Record every homeserver request the SDK sends through `fetch`.
+  const originalFetch = globalThis.fetch;
+  const homeserverRequests: Request[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const { pathname } = new URL(request.url);
+    if (pathname.startsWith("/storage/") || pathname.startsWith("/auth/grant/")) {
+      homeserverRequests.push(request);
+    }
+    return originalFetch(input as RequestInfo | URL, init);
+  }) as typeof fetch;
+
+  try {
+    await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+    const session = await signer.signin("storage-credentials.test");
+    await session.storage.putText(path, "bearer only");
+    t.equal(await session.storage.getText(path), "bearer only", "session round trip");
+    const addr = toAddress(session.info.publicKey.z32(), path);
+    t.equal(await sdk.publicStorage.getText(addr), "bearer only", "public read");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const requestsTo = (endpoint: string) =>
+    homeserverRequests.filter((request) => request.url.includes(endpoint));
+  t.equal(requestsTo("/auth/grant/signup").length, 1, "grant signup reached the homeserver");
+  t.ok(requestsTo("/auth/grant/session").length >= 1, "grant exchange reached the homeserver");
+  t.deepEqual(
+    requestsTo("/storage/").map((request) => request.headers.has("authorization")),
+    [true, true, false],
+    "session PUT and GET carry the bearer, the public GET does not",
+  );
+  for (const request of homeserverRequests) {
+    const { pathname } = new URL(request.url);
+    t.equal(request.credentials, "omit", `${request.method} ${pathname} omits ambient cookies`);
+  }
+  t.end();
+});
+
 test("unauthorized (no cookie) PUT returns 401", async (t) => {
   const sdk = Pubky.testnet();
 

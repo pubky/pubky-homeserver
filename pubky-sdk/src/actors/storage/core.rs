@@ -178,8 +178,7 @@ impl PublicStorage {
         let resource: PubkyResource = addr.into_pubky_resource()?;
         let url = resource.to_transport_url()?;
         cross_log!(debug, "Public storage {} request {}", method, url);
-        let rb = self.client.cross_request(method, url).await?;
-        Ok(rb)
+        self.client.cross_request_anonymous(method, url).await
     }
 }
 

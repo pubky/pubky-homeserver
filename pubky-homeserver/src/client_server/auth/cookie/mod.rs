@@ -16,8 +16,8 @@
 //! 5. A cookie is set on the response:
 //!    - **Name**: the user's public key in z32 format (`pubkey.z32()`).
 //!    - **Value**: the session secret.
-//!    - **Max-Age**: 365 days, `HttpOnly`.
-//!    - **Secure** / **SameSite=None**: enabled when the host is a pkarr key or FQDN;
+//!    - **Max-Age**: 365 days, `HttpOnly`, `SameSite=Lax`.
+//!    - **Secure**: enabled when the host is a pkarr key or FQDN;
 //!      disabled for localhost / plain IP (development).
 //!
 //! ## Authenticating subsequent requests
@@ -26,7 +26,8 @@
 //! as a Tower layer on every request. It:
 //!
 //! 1. Skips if an [`AuthSession`](super::session::AuthSession) was already set by the
-//!    grant middleware (Bearer tokens take priority).
+//!    grant middleware, or if the request presents any Bearer token. Bearer tokens
+//!    take priority and never fall back to cookies, even when invalid.
 //! 2. Reads the cookie whose name matches the request's public key.
 //! 3. Looks up the secret in the `sessions` table and verifies the owning user matches.
 //! 4. On success, inserts `AuthSession::Cookie` into the request extensions so downstream

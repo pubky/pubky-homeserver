@@ -211,6 +211,19 @@ impl PubkyHttpClient {
         )
     }
 
+    /// Native has no ambient browser cookie jar, so this is
+    /// `cross_request_via_homeserver`.
+    pub(crate) async fn cross_request_via_homeserver_anonymous(
+        &self,
+        method: Method,
+        homeserver: &PublicKey,
+        pubky_host: &PublicKey,
+        path: &str,
+    ) -> Result<RequestBuilder> {
+        self.cross_request_via_homeserver(method, homeserver, pubky_host, path)
+            .await
+    }
+
     pub(super) async fn homeserver_info_request(
         &self,
         homeserver: &PublicKey,
