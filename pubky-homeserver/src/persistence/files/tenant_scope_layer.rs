@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use opendal::raw::*;
-use opendal::Result;
+use opendal::{Capability, OperationContext, Result};
 use pubky_common::crypto::PublicKey;
 
 use crate::constants::PUBLIC_ROOT;
@@ -39,20 +39,18 @@ impl TenantScopeLayer {
     }
 }
 
-impl<A: Access> Layer<A> for TenantScopeLayer {
-    type LayeredAccess = TenantScopeAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        TenantScopeAccessor {
-            inner: Arc::new(inner),
+impl Layer for TenantScopeLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(TenantScopeService {
+            inner,
             prefix: Arc::clone(&self.prefix),
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct TenantScopeAccessor<A: Access> {
-    inner: Arc<A>,
+pub struct TenantScopeService {
+    inner: Servicer,
     prefix: Arc<str>,
 }
 
@@ -63,11 +61,10 @@ pub struct TenantScopeAccessor<A: Access> {
 /// it. Keys are compared with any leading slash removed, because a DAV path
 /// arrives absolute while an OpenDAL key is not.
 ///
-/// A `.` or `..` segment is refused wherever it sits. OpenDAL does not resolve
-/// them — it only collapses slashes — but the filesystem backend joins the key
-/// onto its root and the OS then does, so `{key}/pub/../priv/x` would read a
-/// private file while passing a prefix check. Nothing upstream should let one
-/// through; this layer exists for the day something does.
+/// A `.` or `..` segment is refused wherever it sits. A backend that joins the
+/// key onto its root and lets the OS resolve it would read a private file from
+/// `{key}/pub/../priv/x` while the key passes a prefix check. Nothing upstream
+/// should let one through; this layer exists for the day something does.
 fn is_in_scope(prefix: &str, path: &str) -> bool {
     let path = path.trim_start_matches('/');
     let has_dot_segment = path.split('/').any(|segment| matches!(segment, "." | ".."));
@@ -84,75 +81,115 @@ fn check(prefix: &str, path: &str) -> Result<()> {
     ))
 }
 
-impl<A: Access> LayeredAccess for TenantScopeAccessor<A> {
-    type Inner = A;
-    type Reader = A::Reader;
-    type Writer = A::Writer;
-    type Lister = A::Lister;
-    type Deleter = TenantScopeDeleter<A::Deleter>;
-    type Copier = A::Copier;
+impl Service for TenantScopeService {
+    type Reader = oio::Reader;
+    type Writer = oio::Writer;
+    type Lister = oio::Lister;
+    type Deleter = TenantScopeDeleter<oio::Deleter>;
+    type Copier = oio::Copier;
+    type Composer = oio::Composer;
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    async fn create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
-        check(&self.prefix, path)?;
-        self.inner.create_dir(path, args).await
+    fn capability(&self) -> Capability {
+        self.inner.capability()
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        check(&self.prefix, path)?;
-        self.inner.read(path, args).await
-    }
-
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        check(&self.prefix, path)?;
-        self.inner.write(path, args).await
-    }
-
-    async fn copy(
+    async fn create_dir(
         &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        check(&self.prefix, path)?;
+        self.inner.create_dir(ctx, path, args).await
+    }
+
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        check(&self.prefix, path)?;
+        self.inner.stat(ctx, path, args).await
+    }
+
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        check(&self.prefix, path)?;
+        self.inner.read(ctx, path, args)
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        check(&self.prefix, path)?;
+        self.inner.write(ctx, path, args)
+    }
+
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        Ok(TenantScopeDeleter {
+            inner: self.inner.delete(ctx)?,
+            prefix: Arc::clone(&self.prefix),
+        })
+    }
+
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        check(&self.prefix, path)?;
+        self.inner.list(ctx, path, args)
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
         from: &str,
         to: &str,
         args: OpCopy,
-        opts: OpCopier,
-    ) -> Result<(RpCopy, Self::Copier)> {
+    ) -> Result<Self::Copier> {
         check(&self.prefix, from)?;
         check(&self.prefix, to)?;
-        self.inner.copy(from, to, args, opts).await
+        self.inner.copy(ctx, from, to, args)
     }
 
-    async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
-        check(&self.prefix, from)?;
-        check(&self.prefix, to)?;
-        self.inner.rename(from, to, args).await
-    }
-
-    async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
-        check(&self.prefix, path)?;
-        self.inner.stat(path, args).await
-    }
-
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        let (rp, deleter) = self.inner.delete().await?;
-        Ok((
-            rp,
-            TenantScopeDeleter {
-                inner: deleter,
-                prefix: Arc::clone(&self.prefix),
-            },
+    /// Refused: a compose names its sources through the composer it returns,
+    /// past any check made here.
+    fn compose(
+        &self,
+        _ctx: &OperationContext,
+        _to: &str,
+        _args: OpCompose,
+    ) -> Result<Self::Composer> {
+        Err(opendal::Error::new(
+            opendal::ErrorKind::PermissionDenied,
+            "compose is not available on a scoped operator",
         ))
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        check(&self.prefix, path)?;
-        self.inner.list(path, args).await
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
+        check(&self.prefix, from)?;
+        check(&self.prefix, to)?;
+        self.inner.rename(ctx, from, to, args).await
     }
 
-    async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
+    async fn restore(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpRestore,
+    ) -> Result<RpRestore> {
         check(&self.prefix, path)?;
-        self.inner.presign(path, args).await
+        self.inner.restore(ctx, path, args).await
+    }
+
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
+        check(&self.prefix, path)?;
+        self.inner.presign(ctx, path, args).await
     }
 }
 
@@ -345,11 +382,12 @@ mod tests {
             d.scoped.read(&format!("{owner}/priv/s.txt")).await,
             "reading /priv/",
         );
-        // The backend really does resolve `..` — the unscoped operator reads
-        // the private file through the public folder — which is exactly why
-        // the layer refuses the segment rather than trusting the prefix.
+        // The filesystem backend refuses a `..` segment itself since opendal
+        // 0.59 (0.57 resolved it and read the private file through the public
+        // folder). The layer refuses it before the backend sees it, so the
+        // guard does not depend on which backend sits underneath.
         let sneaky = format!("{owner}/pub/../priv/s.txt");
-        assert_eq!(d.unscoped.read(&sneaky).await.unwrap().to_vec(), b"secret");
+        assert!(d.unscoped.read(&sneaky).await.is_err());
         denied(d.scoped.read(&sneaky).await, "dot-dot after the prefix");
         denied(
             d.scoped.stat(&format!("{owner}/priv/s.txt")).await,

@@ -341,7 +341,7 @@ mod tests {
     async fn share(access: DavAccess) -> (TestServer, TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let backend = opendal::services::Fs::default().root(dir.path().to_str().unwrap());
-        let operator = Operator::new(backend).unwrap().finish();
+        let operator = Operator::new(backend).unwrap();
         operator.write("pub/a.txt", "hello").await.unwrap();
         let app = router(access, serve).with_state(DavEndpoint::new(operator, access));
         (TestServer::new(app), dir)
