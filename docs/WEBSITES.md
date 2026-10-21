@@ -57,5 +57,6 @@ use these as top-level folders. Nested folders such as `/blog/pub/` are fine.
 
 - Range requests are not supported, so Safari cannot play `<video>` from a
   site.
-- Browsers reach `<user-key>` hosts only with Pkarr routing and TLS for the
-  user's key, which the homeserver does not provide yet.
+- Opening `https://<user-key>/` requires a key-aware browser and a signed Pkarr
+  record that points the user's key to the homeserver. The SDK doesn't have a
+  helper to publish that record yet.

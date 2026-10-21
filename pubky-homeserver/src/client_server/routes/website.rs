@@ -46,7 +46,7 @@ const API_SEGMENTS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub(crate) struct Website {
     owner: PublicKey,
-    /// The site's storage folder, e.g. `/pub/website/_/`.
+    /// The site's storage folder without a trailing slash, e.g. `/pub/website/_`.
     root: String,
     /// The normalized request path.
     path: StoragePath,
@@ -82,7 +82,7 @@ impl Website {
         // Normalizing before joining keeps `..` inside the site folder.
         let path = StoragePath::normalize(&decoded)
             .map_err(|error| format!("Invalid website path: {error}"))?;
-        let root = format!("/pub/website/{label}/");
+        let root = format!("/pub/website/{label}");
         // Name a folder's `index.html` here, so rate limits for that file also
         // cover requests for the folder.
         let index = if path.is_directory() {
@@ -90,7 +90,7 @@ impl Website {
         } else {
             ""
         };
-        let target = StoragePath::new(&format!("{root}{}{index}", &path.as_str()[1..]))
+        let target = StoragePath::new(&format!("{root}{path}{index}"))
             .map_err(|error| format!("Invalid website path: {error}"))?;
 
         Ok(Some(Self {
@@ -133,7 +133,10 @@ impl Website {
                 .into_response());
         }
 
-        match self.entry(state, &format!("{}404.html", self.root)).await? {
+        match self
+            .entry(state, &format!("{}/404.html", self.root))
+            .await?
+        {
             Some(page) => file(state, request, StatusCode::NOT_FOUND, page).await,
             None => Err(HttpError::not_found()),
         }
@@ -192,7 +195,9 @@ async fn file(
 /// The site owner and label named by `host`, or `None` when it names no website.
 fn parse_host(host: &str, homeserver: &PublicKey) -> Option<(PublicKey, String)> {
     let host = host.to_ascii_lowercase();
-    let host = host.split(':').next().unwrap_or_default();
+    let host = host
+        .split_once(':')
+        .map_or(host.as_str(), |(hostname, _port)| hostname);
     let host = host.strip_suffix('.').unwrap_or(host);
     let (label, key) = match host.rsplit_once('.') {
         Some((label, key)) if is_label(label) => (label, key),
@@ -203,7 +208,10 @@ fn parse_host(host: &str, homeserver: &PublicKey) -> Option<(PublicKey, String)>
     let owner = PublicKey::try_from_z32(key)
         .ok()
         .filter(|owner| owner.z32() == key)?;
-    (owner != *homeserver).then(|| (owner, label.to_string()))
+    if owner == *homeserver {
+        return None;
+    }
+    Some((owner, label.to_string()))
 }
 
 /// A DNS hostname label. Excludes `_pubky`, which the SDK uses as a Host.
