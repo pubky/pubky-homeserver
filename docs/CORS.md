@@ -47,8 +47,7 @@ To let nginx handle CORS:
    cors_enabled = false
    ```
 
-1. Add the CORS headers to your nginx config. The `map` blocks go in the
-   `http` context, next to your `server` block:
+1. Add these `map` blocks to the `http` context, next to your `server` block:
 
    ```nginx
    # Credentials and exposed headers only apply to cross-origin requests.
@@ -61,36 +60,32 @@ To let nginx handle CORS:
        ""      "";
        default "Retry-After, Lock-Token, Timeout";
    }
+   ```
 
-   server {
-       listen 443 ssl;
-       server_name homeserver.example.com;
-       # ssl_certificate and ssl_certificate_key go here.
+1. Add these lines to the `location` that proxies to the homeserver:
 
-       location / {
-           # nginx skips headers with an empty value, so requests without
-           # `Origin` get no CORS headers. `always` adds them to error
-           # responses too.
-           add_header Access-Control-Allow-Origin      $http_origin always;
-           add_header Access-Control-Allow-Credentials $cors_allow_credentials always;
-           add_header Access-Control-Expose-Headers    $cors_expose_headers always;
-           # Only set on preflights, which carry these request headers.
-           add_header Access-Control-Allow-Methods     $http_access_control_request_method always;
-           add_header Access-Control-Allow-Headers     $http_access_control_request_headers always;
-           add_header Vary Origin always;
+   ```nginx
+   # nginx skips headers with an empty value, so requests without `Origin`
+   # get no CORS headers. `always` adds them to error responses too.
+   add_header Access-Control-Allow-Origin      $http_origin always;
+   add_header Access-Control-Allow-Credentials $cors_allow_credentials always;
+   add_header Access-Control-Expose-Headers    $cors_expose_headers always;
+   # Only set on preflights, which carry these request headers.
+   add_header Access-Control-Allow-Methods     $http_access_control_request_method always;
+   add_header Access-Control-Allow-Headers     $http_access_control_request_headers always;
+   add_header Vary "Origin, Access-Control-Request-Method, Access-Control-Request-Headers" always;
 
-           # Answer preflights here, as the homeserver would.
-           if ($request_method = OPTIONS) {
-               return 204;
-           }
-
-           proxy_pass http://127.0.0.1:6286;
-           proxy_set_header Host $host;
-           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-           proxy_set_header X-Forwarded-Proto $scheme;
-       }
+   # Like the homeserver, answer every OPTIONS request as a preflight
+   # without passing it on.
+   if ($request_method = OPTIONS) {
+       return 204;
    }
    ```
+
+   nginx only inherits `add_header` directives from the `server` or `http`
+   context when the `location` has none of its own. If you set other headers
+   at those levels, such as `Strict-Transport-Security`, repeat them in this
+   `location`.
 
    The config mirrors the request's `Origin` instead of sending `*`, because
    browsers reject `Access-Control-Allow-Origin: *` together with

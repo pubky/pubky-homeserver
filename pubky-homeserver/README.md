@@ -109,5 +109,5 @@ never store them:
 Public files remain cacheable. `/storage/{user_z32}/pub/...` responses do not
 vary on `pubky-host`; deprecated `/pub/...` responses still do.
 
-Note: CORS preflight `OPTIONS` is
-handled upstream by the CORS layer and carries no private body.
+Note: CORS preflight `OPTIONS` is handled upstream by the CORS layer or the
+reverse proxy (see [CORS](../docs/CORS.md)) and carries no private body.

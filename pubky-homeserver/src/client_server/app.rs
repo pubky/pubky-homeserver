@@ -262,7 +262,8 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         .layer(axum_middleware::from_fn(RequestTenant::resolve));
 
     if !cors_enabled {
-        // A reverse proxy handles CORS.
+        // A reverse proxy handles CORS. This also drops CORS on the Pubky TLS
+        // listener, which browsers can't reach directly.
         return Ok(app);
     }
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
