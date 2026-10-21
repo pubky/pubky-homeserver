@@ -14,7 +14,10 @@ the minimum migration period and an explicit review.
 
 [Websites](WEBSITES.md) also select the owner by `Host`. Removing legacy
 `Host` addressing must keep website routing, and website requests are not
-counted in the metric below.
+counted in the metric below. Websites can't use some top-level folders, such
+as `auth`, because those paths
+[stay on the API](WEBSITES.md#paths-that-stay-on-the-api). The removal review
+should decide which of them websites can use afterward.
 
 ## Migration metric
 
