@@ -5,9 +5,11 @@
 //! by a prior middleware (e.g. grant).
 //!
 //! - **AuthSession already present** → skips (grant took priority).
+//! - **Bearer token presented, even an invalid one** → skips (no cookie fallback).
 //! - **Valid cookie** → inserts `AuthSession::Cookie`.
 //! - **No cookies or invalid cookie** → forwards without an identity (never rejects).
 
+use crate::client_server::auth::grant::bearer::extract_bearer_token;
 use crate::client_server::auth::AuthSession;
 use crate::client_server::auth::AuthState;
 use crate::client_server::middleware::request_tenant::RequestTenant;
@@ -90,6 +92,11 @@ where
         Box::pin(async move {
             if req.extensions().get::<AuthSession>().is_some() {
                 // Prior middleware already authenticated the request. No need to check cookies.
+                return inner.call(req).await.map_err(|e| match e {});
+            }
+
+            if extract_bearer_token(req.headers()).has_bearer_scheme() {
+                tracing::trace!("Bearer token presented. Skip cookie authentication.");
                 return inner.call(req).await.map_err(|e| match e {});
             }
 

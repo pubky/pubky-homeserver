@@ -7,8 +7,8 @@
 //! `Option<AuthSession>` for lenient).
 //!
 //! - **Bearer token present and valid** → `AuthSession::Grant` (cookie skipped).
-//! - **Bearer token present but invalid** → forwards without identity; cookie
-//!   fallback still runs downstream.
+//! - **Bearer token present but invalid** → forwards without identity; cookies
+//!   are ignored so a rejected bearer never falls back to an ambient cookie.
 //! - **No Bearer, valid cookie** → `AuthSession::Cookie`.
 //! - **No credentials** → forwards without an identity.
 
@@ -150,7 +150,30 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn invalid_bearer_falls_through_to_user_addressed_cookie() {
+    async fn invalid_bearer_disables_valid_cookie() {
+        let context = AppContext::test().await;
+        let keypair = Keypair::random();
+        let state = AuthState::new(&context);
+        let svc = AuthenticationLayer::new(state).layer(assert_handler(false));
+
+        let mut req = Request::builder()
+            .uri("/pub/file.txt")
+            .header("Authorization", "Bearer not-a-valid-jws")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(RequestTenant::legacy(keypair.public_key()));
+        let cookies = Cookies::default();
+        cookies.add(cookie_for_user(&context, &keypair).await);
+        req.extensions_mut().insert(cookies);
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn valid_cookie_without_bearer_authenticates() {
         let context = AppContext::test().await;
         let keypair = Keypair::random();
         let state = AuthState::new(&context);
@@ -158,7 +181,6 @@ mod tests {
 
         let mut req = Request::builder()
             .uri("/pub/file.txt")
-            .header("Authorization", "Bearer not-a-valid-jws")
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()

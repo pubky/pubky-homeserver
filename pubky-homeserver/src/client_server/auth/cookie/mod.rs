@@ -26,7 +26,8 @@
 //! as a Tower layer on every request. It:
 //!
 //! 1. Skips if an [`AuthSession`](super::session::AuthSession) was already set by the
-//!    grant middleware (Bearer tokens take priority).
+//!    grant middleware, or if the request presents any Bearer token (Bearer tokens
+//!    take priority and never fall back to cookies).
 //! 2. Reads the cookie whose name matches the request's public key.
 //! 3. Looks up the secret in the `sessions` table and verifies the owning user matches.
 //! 4. On success, inserts `AuthSession::Cookie` into the request extensions so downstream
