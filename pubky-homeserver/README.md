@@ -109,3 +109,33 @@ vary on `pubky-host`; deprecated `/pub/...` responses still do.
 
 Note: CORS preflight `OPTIONS` is
 handled upstream by the CORS layer and carries no private body.
+
+## Browser Origins and Cookie Sessions
+
+Any web origin may call the homeserver anonymously or with a bearer (grant)
+token. Deprecated cookie sessions only authenticate browser requests from the
+homeserver's own origin or from origins listed in
+`[drive].credentialed_origins` (empty by default):
+
+- A session cookie is ignored on a request whose `Origin` is another, unlisted
+  origin, and on state-changing requests that `Sec-Fetch-Site` marks as
+  cross-origin. Requests without these headers, such as native apps and Pubky
+  Ring, are unaffected.
+- A request that presents a `Bearer` token is never authenticated by a cookie,
+  even when the token is invalid.
+- Session cookies are `SameSite=Lax` (`session_cookie_same_site`). Use `"none"`
+  only when a listed cookie app runs on another site than the homeserver.
+- `cors_credentials` controls `Access-Control-Allow-Credentials`. The default,
+  `"all_origins"`, keeps browser apps on SDK 0.16 and earlier working, because
+  they send `credentials: "include"` on grant sign-in and public reads. It
+  exposes no cookie-authenticated data, since unlisted origins never get cookie
+  authentication. `"credentialed_origins"` sends the header only to listed
+  origins, for deployments whose web apps no longer include credentials on
+  non-cookie requests.
+
+A homeserver that still serves a cookie-based web app on the same site lists
+that app, for example `credentialed_origins = ["https://pubky.app"]`. Apps on
+other sites should move to grant authentication. `"*"` allows every origin
+and is only meant for local development. Test configs
+(`ConfigToml::default_test_config()`) use it so browser test suites keep
+working against testnets.

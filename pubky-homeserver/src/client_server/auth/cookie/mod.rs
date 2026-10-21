@@ -17,7 +17,8 @@
 //!    - **Name**: the user's public key in z32 format (`pubkey.z32()`).
 //!    - **Value**: the session secret.
 //!    - **Max-Age**: 365 days, `HttpOnly`.
-//!    - **Secure** / **SameSite=None**: enabled when the host is a pkarr key or FQDN;
+//!    - **SameSite**: `drive.session_cookie_same_site` (default `Lax`).
+//!    - **Secure**: enabled when the host is a pkarr key or FQDN;
 //!      disabled for localhost / plain IP (development).
 //!
 //! ## Authenticating subsequent requests
@@ -28,9 +29,11 @@
 //! 1. Skips if an [`AuthSession`](super::session::AuthSession) was already set by the
 //!    grant middleware, or if the request presents any Bearer token (Bearer tokens
 //!    take priority and never fall back to cookies).
-//! 2. Reads the cookie whose name matches the request's public key.
-//! 3. Looks up the secret in the `sessions` table and verifies the owning user matches.
-//! 4. On success, inserts `AuthSession::Cookie` into the request extensions so downstream
+//! 2. Skips browser requests from an origin that is neither the homeserver itself
+//!    nor listed in `drive.credentialed_origins`.
+//! 3. Reads the cookie whose name matches the request's public key.
+//! 4. Looks up the secret in the `sessions` table and verifies the owning user matches.
+//! 5. On success, inserts `AuthSession::Cookie` into the request extensions so downstream
 //!    handlers can access the authenticated session.
 //!
 //! ## Signout

@@ -6,6 +6,9 @@ database_url = "postgres://localhost:5432/pubky_homeserver"
 [drive]
 pubky_listen_socket = "127.0.0.1:6287"
 icann_listen_socket = "127.0.0.1:6286"
+credentialed_origins = []
+cors_credentials = "all_origins"
+session_cookie_same_site = "lax"
 
 [[drive.rate_limits]]
 path = "/signup_tokens/*"

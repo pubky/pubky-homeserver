@@ -1,8 +1,9 @@
 //! Auth-specific sub-state for the auth module.
 
 use crate::app_context::AppContext;
+use crate::data_directory::SessionCookieSameSite;
 use crate::observability::Metrics;
-use crate::shared::HttpResult;
+use crate::shared::{CredentialedOrigins, HttpResult};
 
 use super::cookie::service::CookieAuthService;
 use super::{AuthSession, GrantAuthService, RevocationListener};
@@ -16,6 +17,9 @@ pub struct AuthState {
     pub(crate) metrics: Metrics,
     /// Cross-instance signals that close private SSE streams after revocation.
     pub(crate) revocation_listener: RevocationListener,
+    /// Browser origins trusted with cookie credentials.
+    pub(crate) credentialed_origins: CredentialedOrigins,
+    pub(crate) session_cookie_same_site: SessionCookieSameSite,
 }
 
 impl AuthState {
@@ -25,6 +29,10 @@ impl AuthState {
             cookie_auth_service: CookieAuthService::from_context(context),
             metrics: context.metrics.clone(),
             revocation_listener: context.revocation_listener.clone(),
+            credentialed_origins: CredentialedOrigins::new(
+                &context.config_toml.drive.credentialed_origins,
+            ),
+            session_cookie_same_site: context.config_toml.drive.session_cookie_same_site,
         }
     }
 

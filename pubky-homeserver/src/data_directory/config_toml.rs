@@ -8,7 +8,7 @@
 use super::storage_config::StorageConfigToml;
 use super::storage_config::StorageToml;
 use crate::shared::quota::{DefaultQuotasToml, PathLimit};
-use crate::shared::{Domain, DomainPort, SignupMode};
+use crate::shared::{CredentialedOrigin, Domain, DomainPort, SignupMode};
 
 use crate::{
     data_directory::log_level::{LogLevel, TargetLevel},
@@ -69,6 +69,37 @@ pub struct DriveToml {
     pub icann_listen_socket: SocketAddr,
     /// Per-path request-count rate limits.
     pub rate_limits: Vec<PathLimit>,
+    /// Browser origins whose cross-origin requests may be authenticated by a
+    /// session cookie. Empty allows none.
+    pub credentialed_origins: Vec<CredentialedOrigin>,
+    /// Which origins receive `Access-Control-Allow-Credentials: true`.
+    pub cors_credentials: CorsCredentials,
+    /// `SameSite` attribute of session cookies.
+    pub session_cookie_same_site: SessionCookieSameSite,
+}
+
+/// Which origins receive `Access-Control-Allow-Credentials: true`.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CorsCredentials {
+    /// Every origin. Browser SDKs up to 0.16 send `credentials: "include"` on
+    /// grant sign-in and public reads, which fail without this header. Cookies
+    /// from origins outside `credentialed_origins` are ignored either way.
+    AllOrigins,
+    /// Only `credentialed_origins`.
+    CredentialedOrigins,
+}
+
+/// `SameSite` attribute of session cookies.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCookieSameSite {
+    /// Sent on same-site requests and top-level navigations.
+    Lax,
+    /// Sent on same-site requests only.
+    Strict,
+    /// Needed only when a cookie app in `credentialed_origins` is on another site.
+    None,
 }
 
 /// Admin server configuration
@@ -221,6 +252,8 @@ impl ConfigToml {
         // Use ephemeral ports (0) so parallel tests don't collide.
         config.drive.icann_listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
         config.drive.pubky_listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
+        // Browser tests and local apps reach testnets from arbitrary localhost ports.
+        config.drive.credentialed_origins = vec![CredentialedOrigin::Any];
         config.admin.enabled = true; // Enabled for backward compat
         config.admin.listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
         config.pkdns.icann_domain =
@@ -332,6 +365,9 @@ mod tests {
         assert_eq!(c.pkdns.relay_request_timeout_ms, None);
         assert_eq!(c.drive.rate_limits.len(), 1);
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
+        assert!(c.drive.credentialed_origins.is_empty());
+        assert_eq!(c.drive.cors_credentials, CorsCredentials::AllOrigins);
+        assert_eq!(c.drive.session_cookie_same_site, SessionCookieSameSite::Lax);
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());
         assert_eq!(c.storage.default_quota_mb, None);
         assert_eq!(c.storage.backend, StorageConfigToml::FileSystem);
@@ -388,6 +424,39 @@ mod tests {
             module_levels: vec![],
         });
         assert_eq!(merged.logging, expected_logging);
+    }
+
+    #[test]
+    fn credentialed_origins_are_parsed_and_validated() {
+        let s = "[drive]\ncredentialed_origins = [\"https://pubky.app/\", \"*\"]\n";
+        let parsed = ConfigToml::from_str_with_defaults(s).unwrap();
+        assert_eq!(
+            parsed.drive.credentialed_origins,
+            vec![
+                CredentialedOrigin::Origin("https://pubky.app".into()),
+                CredentialedOrigin::Any
+            ]
+        );
+
+        let s = "[drive]\ncredentialed_origins = [\"https://pubky.app/path\"]\n";
+        assert!(ConfigToml::from_str_with_defaults(s).is_err());
+    }
+
+    #[test]
+    fn browser_cookie_settings_are_parsed() {
+        let s = "[drive]\ncors_credentials = \"credentialed_origins\"\nsession_cookie_same_site = \"none\"\n";
+        let parsed = ConfigToml::from_str_with_defaults(s).unwrap();
+        assert_eq!(
+            parsed.drive.cors_credentials,
+            CorsCredentials::CredentialedOrigins
+        );
+        assert_eq!(
+            parsed.drive.session_cookie_same_site,
+            SessionCookieSameSite::None
+        );
+
+        let s = "[drive]\nsession_cookie_same_site = \"never\"\n";
+        assert!(ConfigToml::from_str_with_defaults(s).is_err());
     }
 
     #[test]

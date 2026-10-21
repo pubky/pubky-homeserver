@@ -6,6 +6,7 @@
 //!
 //! - **AuthSession already present** → skips (grant took priority).
 //! - **Bearer token presented, even an invalid one** → skips (no cookie fallback).
+//! - **Browser request from an origin outside `drive.credentialed_origins`** → skips.
 //! - **Valid cookie** → inserts `AuthSession::Cookie`.
 //! - **No cookies or invalid cookie** → forwards without an identity (never rejects).
 
@@ -13,12 +14,38 @@ use crate::client_server::auth::grant::bearer::extract_bearer_token;
 use crate::client_server::auth::AuthSession;
 use crate::client_server::auth::AuthState;
 use crate::client_server::middleware::request_tenant::RequestTenant;
-use axum::{body::Body, http::Request};
+use crate::shared::CredentialedOrigins;
+use axum::{
+    body::Body,
+    http::{header, HeaderName, Request},
+};
 use futures_util::future::BoxFuture;
 use pubky_common::crypto::PublicKey;
 use std::{convert::Infallible, task::Poll};
 use tower::{Layer, Service};
 use tower_cookies::Cookies;
+
+const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
+
+/// Whether a cookie may authenticate this request.
+///
+/// A browser request from another origin must come from a configured
+/// credentialed origin. That covers reads too: browsers attach `Origin` to
+/// cross-origin `fetch` requests, whose responses scripts can read.
+/// Requests without `Origin` are navigations, no-cors subresources, or
+/// non-browser clients such as native apps; only their state-changing
+/// browser requests (flagged by `Sec-Fetch-Site`) are refused.
+fn cookie_allowed_for_request(req: &Request<Body>, origins: &CredentialedOrigins) -> bool {
+    let headers = req.headers();
+    let fetch_site = headers.get(SEC_FETCH_SITE).map(|value| value.as_bytes());
+    if matches!(fetch_site, Some(b"same-origin" | b"none")) {
+        return true;
+    }
+    match headers.get(header::ORIGIN) {
+        Some(origin) => origins.allows(origin),
+        None => req.method().is_safe() || fetch_site.is_none(),
+    }
+}
 
 /// Extracts the session secret from the cookie and looks up the session in the database.
 /// Returns `Some(AuthSession::Cookie)` on success, or `None` if the cookie is missing/invalid.
@@ -97,6 +124,14 @@ where
 
             if extract_bearer_token(req.headers()).has_bearer_scheme() {
                 tracing::trace!("Bearer token presented. Skip cookie authentication.");
+                return inner.call(req).await.map_err(|e| match e {});
+            }
+
+            if !cookie_allowed_for_request(&req, &state.credentialed_origins) {
+                tracing::debug!(
+                    method = %req.method(),
+                    "Browser request from an origin not in drive.credentialed_origins. Skip cookie authentication."
+                );
                 return inner.call(req).await.map_err(|e| match e {});
             }
 
@@ -223,5 +258,56 @@ mod tests {
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn cookie_requests_are_limited_to_trusted_origins() {
+        use crate::shared::CredentialedOrigin;
+        use std::str::FromStr;
+
+        const TRUSTED: &str = "https://app.example";
+        const OTHER: &str = "https://other.example";
+        let trusted = CredentialedOrigins::new(&[CredentialedOrigin::from_str(TRUSTED).unwrap()]);
+        let cases: &[(&str, Option<&str>, Option<&str>, bool)] = &[
+            // Scripts on other origins could read these responses.
+            ("GET", Some(OTHER), Some("cross-site"), false),
+            ("HEAD", Some(OTHER), None, false),
+            ("GET", Some(TRUSTED), Some("same-site"), true),
+            // Navigations and no-cors subresources cannot be read cross-origin.
+            ("GET", None, Some("cross-site"), true),
+            // Native clients send no browser fetch metadata.
+            ("GET", None, None, true),
+            ("PUT", None, None, true),
+            ("PUT", None, Some("same-origin"), true),
+            // Pages served by the homeserver itself.
+            (
+                "DELETE",
+                Some("https://hs.example"),
+                Some("same-origin"),
+                true,
+            ),
+            ("PUT", Some(TRUSTED), Some("same-site"), true),
+            ("PUT", Some(TRUSTED), None, true),
+            ("PUT", Some(OTHER), Some("cross-site"), false),
+            ("DELETE", Some(OTHER), None, false),
+            ("POST", Some("null"), Some("cross-site"), false),
+            ("PUT", None, Some("cross-site"), false),
+            ("LOCK", Some(OTHER), Some("same-site"), false),
+        ];
+        for (method, origin, fetch_site, expected) in cases {
+            let mut builder = Request::builder().method(*method).uri("/pub/file.txt");
+            if let Some(origin) = origin {
+                builder = builder.header(header::ORIGIN, *origin);
+            }
+            if let Some(fetch_site) = fetch_site {
+                builder = builder.header(SEC_FETCH_SITE, *fetch_site);
+            }
+            let req = builder.body(Body::empty()).unwrap();
+            assert_eq!(
+                cookie_allowed_for_request(&req, &trusted),
+                *expected,
+                "{method} origin={origin:?} sec-fetch-site={fetch_site:?}"
+            );
+        }
     }
 }

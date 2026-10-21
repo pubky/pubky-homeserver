@@ -25,6 +25,27 @@ pubky_listen_socket = "127.0.0.1:6287"
 # May be put behind a reverse proxy with TLS enabled.
 icann_listen_socket = "127.0.0.1:6286"
 
+# Browser origins whose cross-origin requests may be authenticated by a
+# deprecated session cookie. A cookie on a browser request from any other
+# origin is ignored. Anonymous and bearer (grant) requests work from every
+# origin regardless, and native clients (no `Origin` header) are unaffected.
+# Each entry is an exact `https://host[:port]` origin (no path or wildcard).
+# "*" allows every origin and is meant for local development only.
+# Example: credentialed_origins = ["https://pubky.app"]
+credentialed_origins = []
+
+# Which origins receive `Access-Control-Allow-Credentials: true`.
+#  - "all_origins": every origin. Browser apps on SDK <= 0.16 send
+#    `credentials: "include"` on grant sign-in and public reads, which fail
+#    without this header. Safe because unlisted origins never get cookie auth.
+#  - "credentialed_origins": only the origins listed above.
+cors_credentials = "all_origins"
+
+# `SameSite` attribute of session cookies: "lax", "strict" or "none".
+# Use "none" only if an origin in `credentialed_origins` is on another site
+# than this homeserver. It requires HTTPS; plain-HTTP hosts fall back to "lax".
+session_cookie_same_site = "lax"
+
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE

@@ -21,7 +21,10 @@ info:
     - **Cookie-based (deprecated):** Session cookie set by `POST /signup` or `POST /session`.
 
     A request that presents a bearer token is never authenticated by a cookie,
-    even if the token is invalid.
+    even if the token is invalid. Session cookies are `SameSite=Lax` by
+    default. A browser request from another origin is cookie-authenticated
+    only if that origin is listed in the homeserver's
+    `[drive].credentialed_origins`.
 
     ## Capabilities
 

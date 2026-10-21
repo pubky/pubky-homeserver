@@ -9,7 +9,8 @@
 //! - **Bearer token present and valid** → `AuthSession::Grant` (cookie skipped).
 //! - **Bearer token present but invalid** → forwards without identity; cookies
 //!   are ignored so a rejected bearer never falls back to an ambient cookie.
-//! - **No Bearer, valid cookie** → `AuthSession::Cookie`.
+//! - **No Bearer, valid cookie** → `AuthSession::Cookie`, unless a browser
+//!   request comes from an origin outside `drive.credentialed_origins`.
 //! - **No credentials** → forwards without an identity.
 
 use crate::client_server::auth::cookie::middleware::{

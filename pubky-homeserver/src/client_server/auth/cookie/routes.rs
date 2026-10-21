@@ -3,6 +3,7 @@
 //! Contains all cookie-specific handlers: signup, signin, get_session, signout.
 //! Each handler is a full axum handler wired directly from `router.rs`.
 
+use crate::data_directory::SessionCookieSameSite;
 use crate::persistence::sql::signup_code::SignupCode;
 use crate::shared::{HttpError, HttpResult};
 use crate::{
@@ -40,7 +41,12 @@ pub async fn signup(
         .signup(&body, signup_token.as_ref())
         .await?;
     state.metrics.record_signup();
-    create_session_cookie_response(cookies, host.hostname(), session)
+    create_session_cookie_response(
+        cookies,
+        host.hostname(),
+        state.session_cookie_same_site,
+        session,
+    )
 }
 
 fn parse_signup_token(token: Option<&String>) -> HttpResult<Option<SignupCode>> {
@@ -54,10 +60,11 @@ fn parse_signup_token(token: Option<&String>) -> HttpResult<Option<SignupCode>> 
 pub(crate) fn create_session_cookie_response(
     cookies: Cookies,
     host: &str,
+    same_site: SessionCookieSameSite,
     session: CookieSessionCreation,
 ) -> HttpResult<impl IntoResponse> {
     let mut cookie = Cookie::new(session.public_key.z32(), session.session_secret.to_string());
-    configure_session_cookie(&mut cookie, host);
+    configure_session_cookie(&mut cookie, host, same_site);
     let one_year = Duration::days(365);
     let expiry = OffsetDateTime::now_utc() + one_year;
     cookie.set_max_age(one_year);
@@ -80,7 +87,12 @@ pub async fn signin(
     body: Bytes,
 ) -> HttpResult<impl IntoResponse> {
     let session = state.cookie_auth_service.signin(&body).await?;
-    create_session_cookie_response(cookies, host.hostname(), session)
+    create_session_cookie_response(
+        cookies,
+        host.hostname(),
+        state.session_cookie_same_site,
+        session,
+    )
 }
 
 /// `GET /session` — returns session info as postcard-serialized binary.
@@ -115,18 +127,33 @@ pub async fn signout(
 
     let mut removal = Cookie::new(tenant.public_key().z32(), String::new());
     removal.make_removal();
-    configure_session_cookie(&mut removal, host.hostname());
+    configure_session_cookie(
+        &mut removal,
+        host.hostname(),
+        state.session_cookie_same_site,
+    );
     cookies.add(removal);
 
     Ok(StatusCode::OK.into_response())
 }
 
-pub(crate) fn configure_session_cookie(cookie: &mut Cookie<'static>, host: &str) {
+pub(crate) fn configure_session_cookie(
+    cookie: &mut Cookie<'static>,
+    host: &str,
+    same_site: SessionCookieSameSite,
+) {
     cookie.set_path("/");
-    if is_secure(host) {
+    let secure = is_secure(host);
+    if secure {
         cookie.set_secure(true);
-        cookie.set_same_site(SameSite::None);
     }
+    cookie.set_same_site(match same_site {
+        SessionCookieSameSite::Lax => SameSite::Lax,
+        SessionCookieSameSite::Strict => SameSite::Strict,
+        SessionCookieSameSite::None if secure => SameSite::None,
+        // Browsers reject `SameSite=None` without `Secure`.
+        SessionCookieSameSite::None => SameSite::Lax,
+    });
     cookie.set_http_only(true);
 }
 
@@ -159,20 +186,39 @@ mod tests {
     #[test]
     fn test_configure_session_cookie_secure() {
         let mut cookie = Cookie::new("key", "value");
-        configure_session_cookie(&mut cookie, "example.com");
+        configure_session_cookie(&mut cookie, "example.com", SessionCookieSameSite::Lax);
         assert!(cookie.secure().unwrap_or(false));
         assert!(cookie.http_only().unwrap_or(false));
-        assert_eq!(cookie.same_site(), Some(SameSite::None));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
         assert_eq!(cookie.path(), Some("/"));
     }
 
     #[test]
     fn test_configure_session_cookie_insecure() {
         let mut cookie = Cookie::new("key", "value");
-        configure_session_cookie(&mut cookie, "localhost");
+        configure_session_cookie(&mut cookie, "localhost", SessionCookieSameSite::Lax);
         assert!(!cookie.secure().unwrap_or(false));
         assert!(cookie.http_only().unwrap_or(false));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
         assert_eq!(cookie.path(), Some("/"));
+    }
+
+    #[test]
+    fn test_configure_session_cookie_same_site_setting() {
+        let cases = [
+            (
+                "example.com",
+                SessionCookieSameSite::Strict,
+                SameSite::Strict,
+            ),
+            ("example.com", SessionCookieSameSite::None, SameSite::None),
+            ("localhost", SessionCookieSameSite::None, SameSite::Lax),
+        ];
+        for (host, setting, expected) in cases {
+            let mut cookie = Cookie::new("key", "value");
+            configure_session_cookie(&mut cookie, host, setting);
+            assert_eq!(cookie.same_site(), Some(expected), "{host} {setting:?}");
+        }
     }
 
     #[test]

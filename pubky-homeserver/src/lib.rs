@@ -31,8 +31,8 @@ pub use client_server::{ClientServer, ClientServerBuildError};
 #[cfg(any(test, feature = "testing"))]
 pub use data_directory::MockDataDir;
 pub use data_directory::{
-    storage_config, AdminToml, ConfigReadError, ConfigToml, DataDir, LoggingToml, MetricsToml,
-    PersistentDataDir,
+    storage_config, AdminToml, ConfigReadError, ConfigToml, CorsCredentials, DataDir, LoggingToml,
+    MetricsToml, PersistentDataDir, SessionCookieSameSite,
 };
 pub use homeserver_app::{HomeserverApp, HomeserverAppBuildError};
 pub use metrics_server::{MetricsServer, MetricsServerBuildError};
@@ -41,4 +41,4 @@ pub use shared::quota::{
     BandwidthQuota, DefaultQuotasToml, GlobPattern, HttpMethod, LimitKey, LimitKeyType, PathLimit,
     RequestCountQuota, TimeUnit,
 };
-pub use shared::{Domain, DomainPort, SignupMode};
+pub use shared::{CredentialedOrigin, Domain, DomainPort, SignupMode};

@@ -1,3 +1,4 @@
+mod credentialed_origin;
 mod domain;
 mod domain_port;
 mod http_error;
@@ -8,6 +9,8 @@ pub(crate) mod toml_merge;
 mod utils;
 pub(crate) mod webdav;
 
+pub use credentialed_origin::CredentialedOrigin;
+pub(crate) use credentialed_origin::CredentialedOrigins;
 pub use domain::Domain;
 pub use domain_port::DomainPort;
 pub(crate) use http_error::{HttpError, HttpResult};

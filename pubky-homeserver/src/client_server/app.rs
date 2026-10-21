@@ -5,6 +5,8 @@ use crate::MockDataDir;
 
 use crate::{
     app_context::{AppContext, AppContextConversionError},
+    data_directory::CorsCredentials,
+    shared::CredentialedOrigins,
     PersistentDataDir,
 };
 use anyhow::Result;
@@ -27,7 +29,7 @@ use axum_server::{
 use std::{net::SocketAddr, sync::Arc};
 use tower::ServiceBuilder;
 use tower_cookies::CookieManagerLayer;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowCredentials, AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use super::auth::{self, AuthenticationLayer};
 use super::cache_policy;
@@ -222,6 +224,10 @@ fn base() -> Router<AppState> {
 
 pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBuildError> {
     let auth_state = state.auth_state.clone();
+    let cors = cors_layer(
+        state.context.config_toml.drive.cors_credentials,
+        auth_state.credentialed_origins.clone(),
+    );
     let request_rate_limit_layer = RequestRateLimitLayer::from_path_limits(
         state.context.config_toml.drive.rate_limits.clone(),
     )
@@ -250,12 +256,31 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
     // Keep CORS outermost so tenant-resolution errors are usable by browsers.
     Ok(with_trace_layer(app)
         .layer(axum_middleware::from_fn(RequestTenant::resolve))
-        .layer(CorsLayer::very_permissive().expose_headers([
+        .layer(cors))
+}
+
+/// Any origin may make anonymous and bearer requests. Session cookies only
+/// authenticate requests from `credentialed_origins` (see the cookie
+/// middleware), so sending `Access-Control-Allow-Credentials` to other origins
+/// exposes no cookie-authenticated data.
+fn cors_layer(mode: CorsCredentials, credentialed_origins: CredentialedOrigins) -> CorsLayer {
+    let allow_credentials = match mode {
+        CorsCredentials::AllOrigins => AllowCredentials::yes(),
+        CorsCredentials::CredentialedOrigins => {
+            AllowCredentials::predicate(move |origin, _| credentialed_origins.allows(origin))
+        }
+    };
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::mirror_request())
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request())
+        .allow_credentials(allow_credentials)
+        .expose_headers([
             RETRY_AFTER,
             // Browsers must be able to read a granted lock.
             HeaderName::from_static("lock-token"),
             HeaderName::from_static("timeout"),
-        ])))
+        ])
 }
 
 #[cfg(test)]
@@ -269,8 +294,11 @@ mod tests {
     use crate::{
         app_context::AppContext,
         client_server::ClientServer,
-        data_directory::{ConfigToml, MockDataDir},
-        shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
+        data_directory::{ConfigToml, CorsCredentials, MockDataDir, SessionCookieSameSite},
+        shared::{
+            quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
+            CredentialedOrigin,
+        },
     };
 
     #[tokio::test]
@@ -422,6 +450,157 @@ mod tests {
         assert!(!output.contains(&unrelated_public_key));
         assert!(!output.contains(storage_path));
         assert!(!output.contains(&cookie));
+    }
+
+    const TRUSTED_ORIGIN: &str = "https://app.example";
+    const OTHER_ORIGIN: &str = "https://other.example";
+
+    async fn server_with(configure: impl FnOnce(&mut ConfigToml)) -> TestServer {
+        let context = AppContext::test_with_config(configure).await;
+        TestServer::new(ClientServer::create_router(context).unwrap())
+    }
+
+    fn trusted_origins() -> Vec<CredentialedOrigin> {
+        vec![TRUSTED_ORIGIN.parse().unwrap()]
+    }
+
+    fn allows_credentials(response: &axum_test::TestResponse) -> bool {
+        response
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn cors_sends_credentials_to_all_origins_by_default() {
+        let server = server_with(|c| {
+            c.drive.credentialed_origins = vec![];
+            c.drive.cors_credentials = ConfigToml::default().drive.cors_credentials;
+        })
+        .await;
+
+        for origin in [TRUSTED_ORIGIN, OTHER_ORIGIN] {
+            let response = server.get("/info").add_header(header::ORIGIN, origin).await;
+            response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+            response.assert_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn cors_can_limit_credentials_to_configured_origins() {
+        let server = server_with(|c| {
+            c.drive.credentialed_origins = trusted_origins();
+            c.drive.cors_credentials = CorsCredentials::CredentialedOrigins;
+        })
+        .await;
+
+        let trusted = server
+            .get("/info")
+            .add_header(header::ORIGIN, TRUSTED_ORIGIN)
+            .await;
+        trusted.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, TRUSTED_ORIGIN);
+        trusted.assert_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+
+        let other = server
+            .get("/info")
+            .add_header(header::ORIGIN, OTHER_ORIGIN)
+            .await;
+        other.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, OTHER_ORIGIN);
+        assert!(!allows_credentials(&other));
+
+        // Bearer clients on any origin can still pass the preflight.
+        let user = Keypair::random().public_key().z32();
+        let preflight = server
+            .method(Method::OPTIONS, &format!("/storage/{user}/priv/file.txt"))
+            .add_header(header::ORIGIN, OTHER_ORIGIN)
+            .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+            .add_header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+            .await;
+        preflight.assert_status_ok();
+        preflight.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, OTHER_ORIGIN);
+        preflight.assert_header(header::ACCESS_CONTROL_ALLOW_METHODS, "PUT");
+        preflight.assert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, "authorization");
+        assert!(!allows_credentials(&preflight));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn session_cookie_same_site_is_lax_by_default_and_configurable() {
+        let server = server_with(|c| {
+            c.drive.session_cookie_same_site = ConfigToml::default().drive.session_cookie_same_site;
+        })
+        .await;
+        let cookie = signup_cookie(&server, &Keypair::random()).await;
+        assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+
+        let server = server_with(|c| {
+            c.drive.session_cookie_same_site = SessionCookieSameSite::None;
+        })
+        .await;
+        let cookie = signup_cookie(&server, &Keypair::random()).await;
+        assert!(cookie.contains("SameSite=None"), "{cookie}");
+        assert!(cookie.contains("Secure"), "{cookie}");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn cookies_only_authenticate_trusted_browser_origins() {
+        let server = server_with(|c| c.drive.credentialed_origins = trusted_origins()).await;
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+        let url = format!("/storage/{}/pub/file.txt", user.public_key().z32());
+
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header(header::ORIGIN, OTHER_ORIGIN)
+            .add_header("sec-fetch-site", "cross-site")
+            .bytes(vec![1].into())
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+        server
+            .delete(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header(header::ORIGIN, OTHER_ORIGIN)
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+        server
+            .get("/session")
+            .add_header("host", user.public_key().z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header(header::ORIGIN, OTHER_ORIGIN)
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header(header::ORIGIN, TRUSTED_ORIGIN)
+            .add_header("sec-fetch-site", "same-site")
+            .bytes(vec![1].into())
+            .expect_success()
+            .await;
+        server
+            .get("/session")
+            .add_header("host", user.public_key().z32())
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header(header::ORIGIN, TRUSTED_ORIGIN)
+            .expect_success()
+            .await;
+        // Native clients send neither `Origin` nor `Sec-Fetch-Site`.
+        server
+            .put(&url)
+            .add_header(header::COOKIE, cookie.clone())
+            .bytes(vec![2].into())
+            .expect_success()
+            .await;
+        server
+            .get("/session")
+            .add_header("host", user.public_key().z32())
+            .add_header(header::COOKIE, cookie)
+            .expect_success()
+            .await;
     }
 
     #[tokio::test]
