@@ -424,6 +424,33 @@ mod tests {
         assert!(!output.contains(&cookie));
     }
 
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn presented_bearer_disables_cookie_authentication() {
+        let server =
+            TestServer::new(ClientServer::create_router(AppContext::test().await).unwrap());
+        let user = Keypair::random();
+        let cookie = signup_cookie(&server, &user).await;
+
+        server
+            .put(&format!(
+                "/storage/{}/pub/file.txt",
+                user.public_key().z32()
+            ))
+            .add_header(header::COOKIE, cookie.clone())
+            .add_header(header::AUTHORIZATION, "Bearer not-a-real-token")
+            .bytes(vec![1].into())
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+        server
+            .get("/session")
+            .add_header("host", user.public_key().z32())
+            .add_header(header::COOKIE, cookie)
+            .add_header(header::AUTHORIZATION, "Bearer not-a-real-token")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
     async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
         let auth_token = AuthToken::sign(keypair, vec![Capability::root()]);
         let body_bytes: axum::body::Bytes = auth_token.serialize().into();
