@@ -71,6 +71,10 @@ pub struct DriveToml {
     pub rate_limits: Vec<PathLimit>,
     /// Serve users' static websites from `/pub/website/` by `Host`.
     pub websites: bool,
+    /// Answer CORS preflights and add CORS headers to responses. Disable it
+    /// when a reverse proxy handles CORS, so browsers don't receive the
+    /// headers twice.
+    pub cors_enabled: bool,
 }
 
 /// Admin server configuration
@@ -324,6 +328,7 @@ mod tests {
             c.admin.listen_socket,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6288))
         );
+        assert!(c.drive.cors_enabled);
         assert_eq!(c.admin.admin_password, "admin");
         assert_eq!(c.pkdns.public_ip, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
         assert_eq!(c.pkdns.public_pubky_tls_port, None);
@@ -375,6 +380,8 @@ mod tests {
         // Other fields that were not set (left empty) should still match the default.
         assert_eq!(parsed.admin, ConfigToml::default().admin);
         assert_eq!(parsed.logging, ConfigToml::default().logging);
+        // Existing configs keep the built-in CORS layer.
+        assert!(parsed.drive.cors_enabled);
     }
 
     #[test]
@@ -398,5 +405,12 @@ mod tests {
         let s = "[general]\nuser_storage_quota_mb = 500\n";
         let parsed = ConfigToml::from_str_with_defaults(s).unwrap();
         assert_eq!(parsed.storage.default_quota_mb, Some(500));
+    }
+
+    #[test]
+    fn test_cors_can_be_disabled() {
+        let s = "[drive]\ncors_enabled = false\n";
+        let parsed = ConfigToml::from_str_with_defaults(s).unwrap();
+        assert!(!parsed.drive.cors_enabled);
     }
 }

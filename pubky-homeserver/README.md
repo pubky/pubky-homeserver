@@ -110,3 +110,26 @@ vary on `pubky-host`; deprecated `/pub/...` responses still do.
 
 Note: CORS preflight `OPTIONS` is
 handled upstream by the CORS layer and carries no private body.
+
+### Handle CORS in a reverse proxy
+
+By default, the homeserver handles CORS itself, so browser apps on any origin
+can call it. It answers preflights, mirrors the request's origin, methods, and
+headers, and sends `Access-Control-Allow-Credentials: true`.
+
+If your reverse proxy also adds CORS headers, browsers receive them twice and
+reject the response. Either remove the CORS headers from the proxy, or set
+`cors_enabled = false` in `[drive]` and let the proxy handle CORS on its own.
+In the second case, the proxy must:
+
+- Answer `OPTIONS` preflights. The homeserver no longer does.
+- Add the CORS headers to every response, including errors. In nginx, use
+  `add_header ... always`.
+- Mirror the request's `Origin` instead of sending `*`. Browsers reject `*`
+  together with credentials.
+- Send `Access-Control-Allow-Credentials: true`. Browser apps on SDK 0.16 and
+  earlier include credentials on grant sign-in and public reads, and these
+  requests fail without it.
+- Expose `Retry-After`, `Lock-Token`, and `Timeout` with
+  `Access-Control-Expose-Headers`, so browser apps can read rate limits and
+  granted locks.
