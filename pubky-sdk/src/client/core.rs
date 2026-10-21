@@ -29,8 +29,7 @@ struct NativeHttpConfig {
 ///
 /// # Defaults
 /// - Pkarr relays: [`crate::pkarr::DEFAULT_RELAYS`]
-/// - HTTP total request timeout (native only): reqwest default (disabled) unless set via
-///   [`Self::request_timeout`]
+/// - HTTP total request timeout: disabled unless set via [`Self::request_timeout`]
 /// - HTTP read timeout (native only): reqwest default (disabled) unless set via
 ///   [`Self::read_timeout`]
 /// - Error-body capture: 4096 bytes; see [`Self::max_error_body_bytes`].
@@ -74,6 +73,11 @@ pub struct PubkyHttpClientBuilder {
 
     #[cfg(not(target_arch = "wasm32"))]
     native_http: NativeHttpConfig,
+
+    /// Total deadline applied to each HTTP request (WASM only; native keeps it
+    /// in [`NativeHttpConfig`] and applies it on the reqwest client).
+    #[cfg(target_arch = "wasm32")]
+    request_timeout: Option<Duration>,
 
     /// The hostname to use for testnet URL transformations (WASM only).
     #[cfg(target_arch = "wasm32")]
@@ -268,7 +272,8 @@ impl PubkyHttpClientBuilder {
         #[cfg(target_arch = "wasm32")]
         cross_log!(
             info,
-            "Building PubkyHttpClient (user_agent: {})",
+            "Building PubkyHttpClient (request_timeout: {:?}, user_agent: {})",
+            self.request_timeout,
             user_agent
         );
 
@@ -286,7 +291,8 @@ impl PubkyHttpClientBuilder {
                 &self.native_http.extra_trust_anchors,
             ));
 
-        // TODO: change this after Reqwest publish a release with timeout in wasm
+        // reqwest's browser backend has no client-wide timeout, so WASM applies
+        // `request_timeout` to each request instead (see `http_targets::wasm`).
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(timeout) = self.native_http.request_timeout {
             http_builder = http_builder.timeout(timeout);
@@ -308,7 +314,7 @@ impl PubkyHttpClientBuilder {
         #[cfg(not(target_arch = "wasm32"))]
         let features = HomeserverFeatures::new(self.native_http.request_timeout);
         #[cfg(target_arch = "wasm32")]
-        let features = HomeserverFeatures::default();
+        let features = HomeserverFeatures::new(self.request_timeout);
 
         Ok(PubkyHttpClient {
             pkarr,
@@ -323,6 +329,9 @@ impl PubkyHttpClientBuilder {
 
             #[cfg(not(target_arch = "wasm32"))]
             transport: super::http_targets::native::TransportResolver::new(),
+
+            #[cfg(target_arch = "wasm32")]
+            request_timeout: self.request_timeout,
 
             #[cfg(target_arch = "wasm32")]
             testnet_host: self.testnet_host.clone(),
@@ -395,14 +404,11 @@ impl PubkyHttpClientBuilder {
 impl PubkyHttpClientBuilder {
     /// Set a total deadline for each HTTP request.
     ///
-    /// # Deprecated
-    /// This setter has never had any effect on WASM: reqwest uses the browser
-    /// `fetch` backend and `build()` does not apply a global HTTP timeout.
-    /// Use [`.pkarr()`](Self::pkarr) to configure Pkarr relay request timeouts instead.
-    #[deprecated(
-        note = "HTTP request timeout is not supported on WASM and has never had any effect; use `.pkarr(|p| p.relay_request_timeout(..))` for Pkarr relay timeouts"
-    )]
-    pub fn request_timeout(&mut self, _timeout: Duration) -> &mut Self {
+    /// The deadline starts when the request is dispatched and lasts until the
+    /// response body finishes. The browser `fetch` is aborted when it expires,
+    /// which also ends long-lived responses such as event streams.
+    pub fn request_timeout(&mut self, timeout: Duration) -> &mut Self {
+        self.request_timeout = Some(timeout);
         self
     }
 
@@ -544,6 +550,10 @@ pub struct PubkyHttpClient {
     /// Resolves and caches per-host transport decisions (`PubkyTLS` vs ICANN fallback).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) transport: super::http_targets::native::TransportResolver,
+
+    /// Total deadline applied to each HTTP request (WASM only).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) request_timeout: Option<Duration>,
 
     /// The hostname to use for testnet URL transformations (WASM only).
     #[cfg(target_arch = "wasm32")]
