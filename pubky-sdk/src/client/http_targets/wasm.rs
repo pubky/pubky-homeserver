@@ -10,10 +10,20 @@ use pkarr::extra::endpoints::Endpoint;
 use reqwest::{IntoUrl, Method, RequestBuilder};
 use url::Url;
 
+/// Whether the browser attaches its cookies to a `fetch` request.
 #[derive(Clone, Copy)]
 enum AmbientCredentials {
     Include,
     Omit,
+}
+
+impl AmbientCredentials {
+    fn apply_to(self, request: RequestBuilder) -> RequestBuilder {
+        match self {
+            Self::Include => request.fetch_credentials_include(),
+            Self::Omit => request.fetch_credentials_omit(),
+        }
+    }
 }
 
 impl PubkyHttpClient {
@@ -45,14 +55,47 @@ impl PubkyHttpClient {
         pubky_host: &PublicKey,
         path: &str,
     ) -> Result<RequestBuilder> {
+        self.cross_request_via_homeserver_with_credentials(
+            method,
+            homeserver,
+            pubky_host,
+            path,
+            AmbientCredentials::Include,
+        )
+        .await
+    }
+
+    /// Like [`Self::cross_request_via_homeserver`], but omits ambient browser cookies.
+    pub(crate) async fn cross_request_via_homeserver_anonymous(
+        &self,
+        method: Method,
+        homeserver: &PublicKey,
+        pubky_host: &PublicKey,
+        path: &str,
+    ) -> Result<RequestBuilder> {
+        self.cross_request_via_homeserver_with_credentials(
+            method,
+            homeserver,
+            pubky_host,
+            path,
+            AmbientCredentials::Omit,
+        )
+        .await
+    }
+
+    async fn cross_request_via_homeserver_with_credentials(
+        &self,
+        method: Method,
+        homeserver: &PublicKey,
+        pubky_host: &PublicKey,
+        path: &str,
+        credentials: AmbientCredentials,
+    ) -> Result<RequestBuilder> {
         let mut url = homeserver_url(homeserver, path)?;
         self.prepare_transport_request(&mut url).await?;
 
-        Ok(self
-            .http
-            .request(method, url.clone())
-            .fetch_credentials_include()
-            .header("pubky-host", pubky_host.z32()))
+        let request = credentials.apply_to(self.http.request(method, url.clone()));
+        Ok(request.header("pubky-host", pubky_host.z32()))
     }
 
     pub(super) async fn homeserver_info_request(
@@ -77,11 +120,7 @@ impl PubkyHttpClient {
 
         let prepared = self.prepare_fetch(&mut url).await?;
 
-        let request = self.http.request(method, url.clone());
-        let request = match credentials {
-            AmbientCredentials::Include => request.fetch_credentials_include(),
-            AmbientCredentials::Omit => request.fetch_credentials_omit(),
-        };
+        let request = credentials.apply_to(self.http.request(method, url.clone()));
 
         Ok(match prepared.pubky_host_header {
             Some(pubky_host) => request.header("pubky-host", pubky_host),

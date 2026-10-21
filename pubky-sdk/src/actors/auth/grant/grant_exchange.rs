@@ -78,7 +78,7 @@ pub(crate) async fn signup_account_from_grant(
         url.query_pairs_mut().append_pair("signup_token", token);
     }
     let resp = client
-        .cross_request(Method::POST, url)
+        .cross_request_anonymous(Method::POST, url)
         .await?
         .json(&body)
         .send()
@@ -172,7 +172,7 @@ async fn post_grant_session_response(
     let body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
 
     Ok(client
-        .cross_request_via_homeserver(
+        .cross_request_via_homeserver_anonymous(
             Method::POST,
             homeserver_pk,
             &grant_claims.iss,
