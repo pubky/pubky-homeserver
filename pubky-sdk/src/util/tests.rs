@@ -292,3 +292,23 @@ async fn small_head_does_not_protect_against_oversized_get_errors() {
         )
     );
 }
+
+#[tokio::test]
+async fn only_known_success_statuses_pass_the_check() {
+    for status in [200, 201, 204] {
+        let (response, _connection) = serve_response(status, "", b"").await;
+        let response = client(None).check_http_status(response).await.unwrap();
+        assert_eq!(response.status().as_u16(), status);
+    }
+
+    // Other 2xx codes do not confirm the operation; they surface like any
+    // other server error, with the bounded body as the message.
+    for status in [202, 203, 205, 206, 207] {
+        let body = b"not confirmed";
+        let (response, _connection) =
+            serve_response(status, &format!("Content-Length: {}\r\n", body.len()), body).await;
+        let (actual, message) = server_error(response, client(None)).await;
+        assert_eq!(actual.as_u16(), status);
+        assert_eq!(message, "not confirmed");
+    }
+}

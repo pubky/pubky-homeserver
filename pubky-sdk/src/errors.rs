@@ -161,7 +161,8 @@ pub enum RequestError {
     #[error("HTTP transport error: {0}")]
     Transport(#[from] reqwest::Error),
 
-    /// The server returned a non-success status. Includes status and bounded diagnostics.
+    /// The server returned a status the SDK does not accept as success (anything
+    /// other than 200, 201 or 204). Includes status and bounded diagnostics.
     #[error("Server responded with an error: {status} - {message}")]
     Server {
         /// The HTTP status code returned by the server.

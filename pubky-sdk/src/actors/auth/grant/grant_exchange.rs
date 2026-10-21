@@ -21,6 +21,7 @@ use super::{
 };
 use crate::PubkyHttpClient;
 use crate::errors::{CredentialRefreshError, Error, RequestError, Result};
+use crate::util::confirms_success;
 
 /// Establish a grant-backed session by exchanging a user-signed grant for
 /// an opaque bearer at the user's homeserver.
@@ -132,7 +133,7 @@ pub(crate) async fn refresh_grant_session(
     .await
     .map_err(redact_refresh_request_error)?;
     let status = response.status();
-    if !status.is_success() {
+    if !confirms_success(status) {
         // Acquiring then dropping the body stream cancels the unread browser
         // `ReadableStream`; native transports also release the response here.
         drop(response.bytes_stream());
