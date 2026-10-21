@@ -29,6 +29,12 @@ icann_listen_socket = "127.0.0.1:6286"
 # `<user-key>` or `<label>.<user-key>`. See docs/WEBSITES.md.
 websites = true
 
+# Answer CORS preflights and add CORS headers to responses, so browser apps
+# on any origin can call the homeserver. Set it to false only when a reverse
+# proxy handles CORS; otherwise browsers receive the headers twice and reject
+# the response. See docs/CORS.md.
+cors_enabled = true
+
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE

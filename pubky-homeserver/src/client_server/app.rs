@@ -224,6 +224,7 @@ fn base() -> Router<AppState> {
 
 pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBuildError> {
     let auth_state = state.auth_state.clone();
+    let cors_enabled = state.context.config_toml.drive.cors_enabled;
     let request_rate_limit_layer = RequestRateLimitLayer::from_path_limits(
         state.context.config_toml.drive.rate_limits.clone(),
     )
@@ -256,16 +257,33 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
     // Resolve the target before tracing and authentication. Valid `/storage/...`
     // requests are therefore logged using their Pubky URL, and website requests
     // using their site file's (`website::resolve` replaces the tenant).
-    // Keep CORS outermost so tenant-resolution errors are usable by browsers.
-    Ok(with_trace_layer(app)
+    let app = with_trace_layer(app)
         .layer(axum_middleware::from_fn_with_state(state, website::resolve))
-        .layer(axum_middleware::from_fn(RequestTenant::resolve))
-        .layer(CorsLayer::very_permissive().expose_headers([
-            RETRY_AFTER,
-            // Browsers must be able to read a granted lock.
-            HeaderName::from_static("lock-token"),
-            HeaderName::from_static("timeout"),
-        ])))
+        .layer(axum_middleware::from_fn(RequestTenant::resolve));
+
+    if !cors_enabled {
+        // A reverse proxy handles CORS. This also drops CORS on the Pubky TLS
+        // listener, which browsers can't reach directly.
+        return Ok(app);
+    }
+    // Keep CORS outermost so tenant-resolution errors are usable by browsers.
+    Ok(app.layer(cors_layer()))
+}
+
+/// Allows browser apps on every origin to call the homeserver.
+///
+/// Credentials are allowed only for deprecated cookie sessions and browser
+/// apps on SDK 0.16 and earlier. Browsers ignore `*` in
+/// `Access-Control-Expose-Headers` when credentials are allowed, so the
+/// headers are named. Once cookie sessions are removed, drop the credentials
+/// and expose `*` instead.
+fn cors_layer() -> CorsLayer {
+    CorsLayer::very_permissive().expose_headers([
+        RETRY_AFTER,
+        // Browsers must be able to read a granted lock.
+        HeaderName::from_static("lock-token"),
+        HeaderName::from_static("timeout"),
+    ])
 }
 
 #[cfg(test)]
@@ -353,6 +371,35 @@ mod tests {
         response.assert_json(&serde_json::json!({
             "features": ["path-addressed-storage", "grant-proof-logout", "webdav-locks", "websites"]
         }));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn cors_headers_follow_the_cors_enabled_setting() {
+        const ORIGIN: &str = "https://app.example";
+
+        for cors_enabled in [true, false] {
+            let context =
+                AppContext::test_with_config(|c| c.drive.cors_enabled = cors_enabled).await;
+            let server = TestServer::new(ClientServer::create_router(context).unwrap());
+
+            let response = server.get("/info").add_header(header::ORIGIN, ORIGIN).await;
+            let preflight = server
+                .method(Method::OPTIONS, "/info")
+                .add_header(header::ORIGIN, ORIGIN)
+                .add_header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .await;
+
+            for response in [response, preflight] {
+                assert_eq!(
+                    response
+                        .headers()
+                        .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                    cors_enabled,
+                    "cors_enabled = {cors_enabled}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

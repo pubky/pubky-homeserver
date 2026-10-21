@@ -31,6 +31,7 @@ ignore unknown identifiers.
 - [PKARR republishing](../docs/REPUBLISHING.md) — cache-first resolution, network fallback, and retry behavior.
 - [Storage-addressing migration](../docs/STORAGE_ADDRESSING_MIGRATION.md) — adoption metrics, migration clock, and legacy-removal review.
 - [Websites](../docs/WEBSITES.md) — static sites served from `/pub/website/` by `Host`.
+- [CORS](../docs/CORS.md) — CORS headers from the homeserver or a reverse proxy, with an nginx example.
 
 ## Library Usage
 
@@ -108,5 +109,5 @@ never store them:
 Public files remain cacheable. `/storage/{user_z32}/pub/...` responses do not
 vary on `pubky-host`; deprecated `/pub/...` responses still do.
 
-Note: CORS preflight `OPTIONS` is
-handled upstream by the CORS layer and carries no private body.
+Note: CORS preflight `OPTIONS` is handled upstream by the CORS layer or the
+reverse proxy (see [CORS](../docs/CORS.md)) and carries no private body.
