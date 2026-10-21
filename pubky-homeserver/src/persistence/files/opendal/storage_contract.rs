@@ -182,7 +182,8 @@ async fn broken_stream_keeps_the_old_file(storage: &TestStorage) {
 
 /// An overwrite landing mid-download does not mix the two versions: the
 /// download delivers only bytes of the version it opened, and either
-/// completes that version or fails.
+/// completes that version or fails. On a backend that delivers a download
+/// in one item, the overwrite lands after it.
 async fn overwrite_mid_download_does_not_mix_versions(storage: &TestStorage) {
     let path = storage.path("/pub/a.bin");
     // More than one stream item of the filesystem backend, which reads
@@ -195,6 +196,9 @@ async fn overwrite_mid_download_does_not_mix_versions(storage: &TestStorage) {
         .unwrap();
     let (_, mut stream) = storage.service.get_sized_stream(&path).await.unwrap();
     let mut delivered = stream.next().await.unwrap().unwrap().to_vec();
+    if storage.downloads_in_several_items() {
+        assert!(delivered.len() < length, "the download is still going");
+    }
 
     storage
         .service

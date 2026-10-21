@@ -193,6 +193,13 @@ impl TestStorage {
         }
     }
 
+    /// Whether a download of a few MiB arrives in more than one stream item,
+    /// so that a write can land between two of them. The memory backend
+    /// delivers a blob in one item.
+    pub(crate) fn downloads_in_several_items(&self) -> bool {
+        !matches!(self.backend, Backend::Memory)
+    }
+
     /// Whether no upload is left staged: each one was published or removed.
     pub(crate) async fn staging_is_empty(&self) -> bool {
         match &self.backend {
