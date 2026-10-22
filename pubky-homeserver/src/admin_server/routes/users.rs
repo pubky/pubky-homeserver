@@ -25,7 +25,8 @@ pub(crate) struct UsersQuery {
     cursor: Option<Z32Pubkey>,
     state: Option<UserListState>,
     sort_by: Option<UserListSortBy>,
-    reverse: Option<bool>,
+    #[serde(default)]
+    reverse: bool,
 }
 
 impl UsersQuery {
@@ -33,7 +34,7 @@ impl UsersQuery {
         UserListQuery {
             state: self.state.unwrap_or_default(),
             sort_by: self.sort_by.unwrap_or_default(),
-            reverse: self.reverse.unwrap_or(false),
+            reverse: self.reverse,
             limit: self.limit.map(NonZeroU16::get),
             cursor: self.cursor.map(|pubkey| pubkey.0),
         }
