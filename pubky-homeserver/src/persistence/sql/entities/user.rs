@@ -5,7 +5,7 @@ use serde::Deserialize;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::persistence::sql::UnifiedExecutor;
-use crate::shared::{effective_list_limit, quota::UserQuota};
+use crate::shared::{effective_list_limit, quota::UserQuota, split_list_page};
 
 pub const USER_TABLE: &str = "users";
 
@@ -234,10 +234,7 @@ impl UserRepository {
 
         if let Some(cursor) = &list_query.cursor {
             let cursor_user = Self::get(cursor, executor).await?;
-            let row = Expr::tuple([
-                Expr::col(list_query.sort_by.column()),
-                Expr::col(UserIden::Id),
-            ]);
+            let row = Expr::tuple([Expr::col(sort_column), Expr::col(UserIden::Id)]);
             let position = Expr::tuple([
                 list_query.sort_by.value(&cursor_user),
                 cursor_user.id.into(),
@@ -255,18 +252,10 @@ impl UserRepository {
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
-        let mut users: Vec<UserEntity> = sqlx::query_as_with(&query, values).fetch_all(con).await?;
-        let next_cursor = if users.len() > limit as usize {
-            users.truncate(limit as usize);
-            users.last().map(|user| user.public_key.clone())
-        } else {
-            None
-        };
+        let users: Vec<UserEntity> = sqlx::query_as_with(&query, values).fetch_all(con).await?;
+        let (items, next_cursor) = split_list_page(users, limit, |user| user.public_key.clone());
 
-        Ok(UserListPage {
-            items: users,
-            next_cursor,
-        })
+        Ok(UserListPage { items, next_cursor })
     }
 
     /// Get the overview of the users.
@@ -417,7 +406,7 @@ impl UserRepository {
 
 /// Iden for the user table.
 /// Basically a list of columns in the user table
-#[derive(Iden)]
+#[derive(Iden, Clone, Copy)]
 pub enum UserIden {
     Id,
     PublicKey,
