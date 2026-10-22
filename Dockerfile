@@ -1,7 +1,7 @@
 # ========================
 # Toolchain Stage
 # ========================
-FROM rust:1.91.1-alpine3.23 AS chef
+FROM rust:1.99.0-alpine3.23 AS chef
 
 # Build platform argument (x86_64 or aarch64) (default: x86_64)
 RUN echo "TARGETARCH: $TARGETARCH"
