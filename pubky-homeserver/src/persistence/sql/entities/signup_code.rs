@@ -10,7 +10,7 @@ use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::{
     persistence::sql::UnifiedExecutor,
-    shared::{effective_list_limit, quota::UserQuota},
+    shared::{effective_list_limit, quota::UserQuota, split_list_page},
 };
 
 pub const SIGNUP_CODE_TABLE: &str = "signup_codes";
@@ -159,19 +159,11 @@ impl SignupCodeRepository {
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
-        let mut codes: Vec<SignupCodeEntity> =
+        let codes: Vec<SignupCodeEntity> =
             sqlx::query_as_with(&query, values).fetch_all(con).await?;
-        let next_cursor = if codes.len() > limit as usize {
-            codes.truncate(limit as usize);
-            codes.last().map(|code| code.id.clone())
-        } else {
-            None
-        };
+        let (items, next_cursor) = split_list_page(codes, limit, |code| code.id.clone());
 
-        Ok(SignupCodeListPage {
-            items: codes,
-            next_cursor,
-        })
+        Ok(SignupCodeListPage { items, next_cursor })
     }
 
     /// Get overview statistics for signup codes.
