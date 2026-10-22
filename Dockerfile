@@ -1,7 +1,7 @@
 # ========================
 # Toolchain Stage
 # ========================
-FROM rust:1.91.1-alpine3.20 AS chef
+FROM rust:1.91.1-alpine3.23 AS chef
 
 # Build platform argument (x86_64 or aarch64) (default: x86_64)
 RUN echo "TARGETARCH: $TARGETARCH"
@@ -76,12 +76,12 @@ RUN cargo build --profile "$(cat /cargo-profile)" --bin "pubky-$BUILD_TARGET" &&
 # ========================
 # Runtime Stage
 # ========================
-FROM alpine:3.20
+FROM alpine:3.23
 
 ARG TARGETARCH
 
 # Install runtime dependencies (only ca-certificates)
-RUN apk add --no-cache ca-certificates
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # Copy the compiled binary from the builder stage
 COPY --from=builder /out/homeserver /usr/local/bin/homeserver
