@@ -81,7 +81,7 @@ FROM alpine:3.23
 ARG TARGETARCH
 
 # Install runtime dependencies (only ca-certificates)
-RUN apk add --no-cache --upgrade ca-certificates ca-certificates-bundle
+RUN apk add --no-cache ca-certificates
 
 # Copy the compiled binary from the builder stage
 COPY --from=builder /out/homeserver /usr/local/bin/homeserver
