@@ -162,7 +162,7 @@ pub enum AuthError {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
 pub enum RequestErrorKind {
-    /// A non-success HTTP response was received.
+    /// The server answered with a status outside the 2xx range.
     Http {
         /// The received HTTP response status code, always within `100..=999`
         /// (the range the HTTP status parser accepts; codes above 599 are
@@ -190,7 +190,10 @@ impl RequestErrorKind {
     /// Classifies a transport error without retaining its potentially sensitive context.
     ///
     /// Timeout takes precedence when the transport also identifies a connection
-    /// or body failure. Browser errors are not parsed to guess native causes.
+    /// or body failure. reqwest's kind records where the failure was noticed,
+    /// while the timeout is the underlying cause in the error's source chain; a
+    /// response body that stalls past the deadline would otherwise be reported
+    /// as [`Self::Decode`]. Browser errors are not parsed to guess native causes.
     pub fn from_transport(error: &reqwest::Error) -> Self {
         if error.is_timeout() {
             return Self::Timeout;
