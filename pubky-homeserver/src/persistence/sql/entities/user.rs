@@ -1,10 +1,11 @@
 use pubky_common::crypto::PublicKey;
-use sea_query::{Expr, ExprTrait, Iden, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query::{Expr, ExprTrait, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
 use sea_query_sqlx::SqlxBinder;
+use serde::Deserialize;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
 use crate::persistence::sql::UnifiedExecutor;
-use crate::shared::quota::UserQuota;
+use crate::shared::{effective_list_limit, quota::UserQuota};
 
 pub const USER_TABLE: &str = "users";
 
@@ -26,6 +27,70 @@ const ALL_USER_COLUMNS: [UserIden; 11] = [
 
 /// Repository that handles all the queries regarding the UserEntity.
 pub(crate) struct UserRepository;
+
+/// Filter for [`UserRepository::list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserListState {
+    #[default]
+    All,
+    Enabled,
+    Disabled,
+}
+
+impl UserListState {
+    /// The `disabled` column value to filter on, or `None` for no filter.
+    fn disabled(self) -> Option<bool> {
+        match self {
+            UserListState::All => None,
+            UserListState::Enabled => Some(false),
+            UserListState::Disabled => Some(true),
+        }
+    }
+}
+
+/// Sort column for [`UserRepository::list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserListSortBy {
+    #[default]
+    CreatedAt,
+    UsedBytes,
+}
+
+impl UserListSortBy {
+    fn column(self) -> UserIden {
+        match self {
+            UserListSortBy::CreatedAt => UserIden::CreatedAt,
+            UserListSortBy::UsedBytes => UserIden::UsedBytes,
+        }
+    }
+
+    /// The sort column's value for `user`, used as the keyset cursor position.
+    fn value(self, user: &UserEntity) -> SimpleExpr {
+        match self {
+            UserListSortBy::CreatedAt => user.created_at.into(),
+            UserListSortBy::UsedBytes => (user.used_bytes as i64).into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UserListQuery {
+    pub state: UserListState,
+    pub sort_by: UserListSortBy,
+    /// Descending order when true.
+    pub reverse: bool,
+    pub limit: Option<u16>,
+    /// Public key of the last user of the previous page.
+    pub cursor: Option<PublicKey>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserListPage {
+    pub items: Vec<UserEntity>,
+    pub next_cursor: Option<PublicKey>,
+}
 
 impl UserRepository {
     /// Create a new user.
@@ -136,6 +201,72 @@ impl UserRepository {
         let con = executor.get_con().await?;
         let users: Vec<UserEntity> = sqlx::query_as_with(&query, values).fetch_all(con).await?;
         Ok(users)
+    }
+
+    /// List users, filtered by state and ordered by the sort column then id.
+    ///
+    /// Keyset pagination: the cursor is the public key of the last user of the
+    /// previous page. Its sort value and id are read back so pages stay stable
+    /// under any sort order, including ties on the sort column.
+    /// Returns `sqlx::Error::RowNotFound` if the cursor user does not exist.
+    pub async fn list<'a>(
+        list_query: UserListQuery,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<UserListPage, sqlx::Error> {
+        let order = if list_query.reverse {
+            Order::Desc
+        } else {
+            Order::Asc
+        };
+        let sort_column = list_query.sort_by.column();
+        let mut statement = Query::select()
+            .from(USER_TABLE)
+            .columns(ALL_USER_COLUMNS)
+            .order_by(sort_column, order.clone())
+            .order_by(UserIden::Id, order)
+            .to_owned();
+
+        if let Some(disabled) = list_query.state.disabled() {
+            statement = statement
+                .and_where(Expr::col(UserIden::Disabled).eq(disabled))
+                .to_owned();
+        }
+
+        if let Some(cursor) = &list_query.cursor {
+            let cursor_user = Self::get(cursor, executor).await?;
+            let row = Expr::tuple([
+                Expr::col(list_query.sort_by.column()),
+                Expr::col(UserIden::Id),
+            ]);
+            let position = Expr::tuple([
+                list_query.sort_by.value(&cursor_user),
+                cursor_user.id.into(),
+            ]);
+            let after_cursor = if list_query.reverse {
+                row.lt(position)
+            } else {
+                row.gt(position)
+            };
+            statement = statement.and_where(after_cursor).to_owned();
+        }
+
+        let limit = effective_list_limit(list_query.limit);
+        statement = statement.limit((limit as u64) + 1).to_owned();
+
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        let mut users: Vec<UserEntity> = sqlx::query_as_with(&query, values).fetch_all(con).await?;
+        let next_cursor = if users.len() > limit as usize {
+            users.truncate(limit as usize);
+            users.last().map(|user| user.public_key.clone())
+        } else {
+            None
+        };
+
+        Ok(UserListPage {
+            items: users,
+            next_cursor,
+        })
     }
 
     /// Get the overview of the users.

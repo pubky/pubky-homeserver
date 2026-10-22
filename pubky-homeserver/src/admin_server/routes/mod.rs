@@ -7,3 +7,4 @@ pub(crate) mod info;
 pub(crate) mod root;
 pub(crate) mod signup_tokens;
 pub(crate) mod user_quota;
+pub(crate) mod users;
