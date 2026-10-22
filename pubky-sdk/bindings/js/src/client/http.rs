@@ -121,7 +121,7 @@ pub(crate) fn map_fetch_error(err: JsValue) -> PubkyError {
             .to_string()
             .as_string()
             .unwrap_or_else(|| "fetch failed".to_string());
-        return PubkyError::new(PubkyErrorName::RequestError, message);
+        return PubkyError::request(message, pubky::errors::RequestErrorKind::Other);
     }
 
     let message = err
@@ -129,7 +129,7 @@ pub(crate) fn map_fetch_error(err: JsValue) -> PubkyError {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "fetch failed".to_string());
 
-    PubkyError::new(PubkyErrorName::RequestError, message)
+    PubkyError::request(message, pubky::errors::RequestErrorKind::Other)
 }
 
 #[wasm_bindgen]
@@ -164,6 +164,20 @@ mod tests {
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn opaque_fetch_failures_preserve_message_and_category() {
+        for (source, message) in [
+            (JsValue::from_str("offline"), "offline"),
+            (js_sys::Error::new("offline").into(), "Error: offline"),
+            (JsValue::UNDEFINED, "fetch failed"),
+        ] {
+            let error = map_fetch_error(source);
+            assert_eq!(error.name.to_string(), "RequestError");
+            assert_eq!(error.message, message);
+            assert_eq!(error.data, Some(serde_json::json!({ "reason": "Other" })));
+        }
+    }
 
     // Missing PKARR endpoints must surface a descriptive error so callers can react.
     #[wasm_bindgen_test(async)]

@@ -649,7 +649,20 @@ interface PubkyError extends Error {
     | "PkarrError"
     | "InternalError";
   message: string;
-  data?: unknown; // structured context when available (e.g. { statusCode: number })
+  data?: unknown; // structured context when available; RequestErrorData for RequestError
+}
+```
+
+`RequestError` carries a `RequestErrorData`: `reason` (`Http`, `Timeout`,
+`Connection`, `Body`, `Decode`, `InvalidRequest` or `Other`) and, for HTTP
+failures, `statusCode`. Browser Fetch may only report `Other`. A reason
+describes the failure, not whether retrying a write is safe.
+
+```ts
+import type { PubkyError, RequestErrorData } from "@synonymdev/pubky";
+
+if (error.name === "RequestError") {
+  const { reason, statusCode } = error.data as RequestErrorData;
 }
 ```
 

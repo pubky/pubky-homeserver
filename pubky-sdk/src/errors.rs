@@ -154,6 +154,71 @@ pub enum AuthError {
 
 // --- Consolidated Request Error ---
 
+/// A request failure category without URLs, response bodies or credentials.
+///
+/// Categories describe the observed failure, not whether retrying is safe. A
+/// timeout or connection failure does not prove that a write was not committed.
+/// Browser transports may expose less detail and return [`Self::Other`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum RequestErrorKind {
+    /// The server answered with a status outside the 2xx range.
+    Http {
+        /// The received HTTP response status code, always within `100..=999`
+        /// (the range the HTTP status parser accepts; codes above 599 are
+        /// non-standard but possible).
+        status: u16,
+    },
+    /// A transport deadline expired, including during response-body consumption.
+    Timeout,
+    /// The native transport identified a connection failure, including TLS setup.
+    Connection,
+    /// Sending or receiving an HTTP body failed; the transport does not say why.
+    /// Response reads report their failures as [`Self::Decode`], so in practice
+    /// this covers request-body (upload) failures.
+    Body,
+    /// Response decoding failed, including incomplete HTTP framing. This does
+    /// not establish that the stored application payload is corrupt.
+    Decode,
+    /// The request could not be constructed or its arguments were invalid.
+    InvalidRequest,
+    /// No more specific category is available from the transport.
+    Other,
+}
+
+impl RequestErrorKind {
+    /// Classifies a transport error without retaining its potentially sensitive context.
+    ///
+    /// Timeout takes precedence when the transport also identifies a connection
+    /// or body failure. reqwest's kind records where the failure was noticed,
+    /// while the timeout is the underlying cause in the error's source chain; a
+    /// response body that stalls past the deadline would otherwise be reported
+    /// as [`Self::Decode`]. Browser errors are not parsed to guess native causes.
+    pub fn from_transport(error: &reqwest::Error) -> Self {
+        if error.is_timeout() {
+            return Self::Timeout;
+        }
+        if let Some(status) = error.status() {
+            return Self::Http {
+                status: status.as_u16(),
+            };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if error.is_connect() {
+            return Self::Connection;
+        }
+        if error.is_body() {
+            Self::Body
+        } else if error.is_decode() {
+            Self::Decode
+        } else if error.is_builder() {
+            Self::InvalidRequest
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// Transport and server-side HTTP errors.
 #[derive(Debug, Error)]
 pub enum RequestError {
@@ -187,6 +252,20 @@ pub enum RequestError {
     },
 }
 
+impl RequestError {
+    /// Returns bounded failure metadata without inferring retry safety.
+    pub fn kind(&self) -> RequestErrorKind {
+        match self {
+            Self::Transport(error) => RequestErrorKind::from_transport(error),
+            Self::Server { status, .. } => RequestErrorKind::Http {
+                status: status.as_u16(),
+            },
+            Self::Validation { .. } => RequestErrorKind::InvalidRequest,
+            Self::DecodeJson { .. } => RequestErrorKind::Decode,
+        }
+    }
+}
+
 /// A specialized `Result` type for `pubky` operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -215,3 +294,36 @@ impl_from_for_error!(pubky_common::crypto::DecryptError, Error::Authentication);
 
 // Request Errors
 impl_from_for_error!(reqwest::Error, Error::Request);
+
+#[cfg(test)]
+mod tests {
+    use super::{RequestError, RequestErrorKind};
+
+    #[test]
+    fn request_categories_do_not_contain_diagnostics() {
+        for (error, expected) in [
+            (
+                RequestError::Server {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    message: "private response".into(),
+                },
+                RequestErrorKind::Http { status: 503 },
+            ),
+            (
+                RequestError::Validation {
+                    message: "private path".into(),
+                },
+                RequestErrorKind::InvalidRequest,
+            ),
+            (
+                RequestError::DecodeJson {
+                    message: "private payload".into(),
+                },
+                RequestErrorKind::Decode,
+            ),
+        ] {
+            assert_eq!(error.kind(), expected);
+            assert!(!format!("{:?}", error.kind()).contains("private"));
+        }
+    }
+}

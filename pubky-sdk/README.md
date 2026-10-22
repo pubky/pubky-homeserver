@@ -522,6 +522,15 @@ panics on grant sessions.
 > capabilities until the grant expires or is revoked. The encryption keys stay
 > usable after that. Store it securely and never log it.
 
+## Request errors
+
+[`errors::RequestError::kind`] classifies a failure as an HTTP status, timeout,
+connection, body, decoding or invalid-request error, or `Other` when the
+transport gives no more detail (browser Fetch exposes less than native). The
+category carries no URL, body or credentials; the original error keeps the
+diagnostics. A category describes what was observed, not whether a retry is
+safe: a timeout does not prove a write was not committed.
+
 ## Example code
 
 Check more [examples](https://github.com/pubky/pubky-homeserver/tree/main/examples) using the Pubky SDK.
