@@ -625,14 +625,14 @@ components:
           description: The signup token string.
         created_at:
           type: string
-          format: date-time
-          description: When the token was created.
+          description: When the token was created, as an ISO 8601 date and time
+            without a UTC offset (e.g. `2026-10-22T10:11:12.123456`).
         used_at:
           type:
           - string
           - 'null'
-          format: date-time
-          description: When the token was used, or `null` if unused.
+          description: When the token was used, in the same format as `created_at`,
+            or `null` if unused.
         used_by:
           type:
           - string
@@ -820,8 +820,8 @@ components:
           description: z-base-32 public key of the user.
         created_at:
           type: string
-          format: date-time
-          description: When the user signed up.
+          description: When the user signed up, as an ISO 8601 date and time
+            without a UTC offset (e.g. `2026-10-22T10:11:12.123456`).
         disabled:
           type: boolean
           description: Whether the account is disabled.
