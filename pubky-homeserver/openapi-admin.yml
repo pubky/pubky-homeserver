@@ -114,7 +114,8 @@ paths:
       - Admin
       summary: List signup tokens
       description: |
-        Paginated list of signup tokens with usage information.
+        Paginated list of signup tokens with usage information and the
+        quota overrides each token was created with.
         Supports filtering by state (`all`, `used`, `unused`).
       operationId: listSignupTokens
       security:
@@ -527,6 +528,7 @@ components:
       - created_at
       - used_at
       - used_by
+      - quota
       properties:
         token:
           type: string
@@ -547,6 +549,12 @@ components:
           - 'null'
           description: z-base-32 public key of the user who used the token, or `null`
             if unused.
+        quota:
+          description: |
+            Quota overrides stored on the token, in the same shape as the
+            `POST /generate_signup_token` body. Fields using the system default are omitted.
+          allOf:
+          - "$ref": "#/components/schemas/UserQuota"
     AdminInfoResponse:
       type: object
       required:

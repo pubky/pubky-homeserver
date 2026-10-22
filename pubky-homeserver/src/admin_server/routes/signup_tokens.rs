@@ -6,7 +6,7 @@ use crate::{
         SignupCode, SignupCodeEntity, SignupCodeListQuery, SignupCodeListState,
         SignupCodeRepository,
     },
-    shared::HttpResult,
+    shared::{quota::UserQuota, HttpResult},
 };
 use axum::{
     extract::{Query, State},
@@ -39,11 +39,16 @@ pub(crate) struct SignupTokenItem {
     created_at: NaiveDateTime,
     used_at: Option<NaiveDateTime>,
     used_by: Option<String>,
+    /// Quota overrides stored on the token, in the same shape as the
+    /// `POST /generate_signup_token` body. Fields using the system default are omitted.
+    quota: UserQuota,
 }
 
 impl From<SignupCodeEntity> for SignupTokenItem {
     fn from(code: SignupCodeEntity) -> Self {
         Self {
+            // Evaluated first, before the fields below move out of `code`.
+            quota: code.quota(),
             token: code.id,
             created_at: code.created_at,
             used_at: code.used_at,
@@ -129,6 +134,58 @@ mod tests {
         assert_eq!(items[0]["token"], token);
         assert_eq!(items[0]["used_by"], used_by.z32());
         assert!(items[0]["used_at"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_list_signup_tokens_returns_quota() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+
+        // Cover both "unlimited" and explicit values on integer and text columns.
+        let custom_quota = serde_json::json!({
+            "storage_quota_mb": "unlimited",
+            "rate_read": "200mb/m",
+            "rate_write": "100mb/m",
+            "rate_read_burst": 50,
+            "rate_write_burst": 10,
+            "allowed_write_paths": ["/pub/tokens/"]
+        });
+        let custom_token = server
+            .post("/generate_signup_token")
+            .admin_auth()
+            .content_type("application/json")
+            .bytes(serde_json::to_vec(&custom_quota).unwrap().into())
+            .expect_success()
+            .await
+            .text();
+        let default_token = server
+            .get("/generate_signup_token")
+            .admin_auth()
+            .expect_success()
+            .await
+            .text();
+
+        let response = server
+            .get("/signup_tokens")
+            .admin_auth()
+            .expect_success()
+            .await;
+        let body: serde_json::Value = response.json();
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+
+        let custom = items
+            .iter()
+            .find(|item| item["token"] == custom_token)
+            .unwrap();
+        assert_eq!(custom["quota"], custom_quota);
+
+        let default = items
+            .iter()
+            .find(|item| item["token"] == default_token)
+            .unwrap();
+        assert_eq!(default["quota"], serde_json::json!({}));
     }
 
     #[tokio::test]
