@@ -133,7 +133,10 @@ impl AuthToken {
 
     /// Parse and verify an AuthToken.
     pub fn verify(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes[74] > CURRENT_VERSION {
+        let version = bytes
+            .get(74)
+            .ok_or(postcard::Error::DeserializeUnexpectedEnd)?;
+        if *version > CURRENT_VERSION {
             return Err(Error::UnknownVersion);
         }
 
@@ -228,6 +231,22 @@ mod tests {
         let verified = AuthToken::verify(serialized).unwrap();
 
         assert_eq!(verified.capabilities, capabilities.into());
+    }
+
+    #[test]
+    fn truncated_token_returns_parsing_error() {
+        let token = AuthToken::sign(&Keypair::random(), vec![Capability::root()]);
+        let serialized = token.serialize();
+
+        for length in 0..serialized.len() {
+            assert!(
+                matches!(
+                    AuthToken::verify(&serialized[..length]),
+                    Err(Error::Parsing(_))
+                ),
+                "expected a parsing error for a token truncated to {length} bytes"
+            );
+        }
     }
 
     #[test]
