@@ -87,7 +87,7 @@ fn public_api_rejects_directory_seeds_even_with_covering_scopes() {
 fn delegated_app_derives_the_same_keys_as_the_signer() {
     let root = root();
     let issued = issue(&[path("/pub/app/")]);
-    let payload = postcard::to_allocvec(&issued).unwrap();
+    let payload = postcard::to_extend(&issued, Vec::new()).unwrap();
     let app: ScopedEncryptionKeyBundle = postcard::from_bytes(&payload).unwrap();
 
     for target in ["/pub/app/file", "/pub/app/sub/file"] {
@@ -253,7 +253,7 @@ fn multiple_scopes_round_trip_in_json_and_postcard() {
     assert_eq!(json["version"], DERIVATION_VERSION);
     assert_eq!(json["keys"].as_array().unwrap().len(), scopes.len());
 
-    let binary = postcard::to_allocvec(&bundle).unwrap();
+    let binary = postcard::to_extend(&bundle, Vec::new()).unwrap();
     let decoded_bundles = [
         serde_json::from_value::<ScopedEncryptionKeyBundle>(json).unwrap(),
         postcard::from_bytes::<ScopedEncryptionKeyBundle>(&binary).unwrap(),
@@ -287,7 +287,7 @@ fn imported_secrets_stay_in_place_when_the_entry_vector_moves() {
         .collect::<Vec<_>>();
     let issued = issue(&scopes);
     let json = Zeroizing::new(serde_json::to_string(&issued).unwrap());
-    let binary = Zeroizing::new(postcard::to_allocvec(&issued).unwrap());
+    let binary = Zeroizing::new(postcard::to_extend(&issued, Vec::new()).unwrap());
     for mut decoded in [
         serde_json::from_str::<ScopedEncryptionKeyBundle>(&json).unwrap(),
         postcard::from_bytes::<ScopedEncryptionKeyBundle>(&binary).unwrap(),
@@ -348,7 +348,7 @@ fn empty_bundle_round_trips() {
         0
     );
 
-    let binary = postcard::to_allocvec(&bundle).unwrap();
+    let binary = postcard::to_extend(&bundle, Vec::new()).unwrap();
     assert_eq!(
         postcard::from_bytes::<ScopedEncryptionKeyBundle>(&binary)
             .unwrap()
@@ -368,7 +368,7 @@ fn postcard_wire_format_is_unchanged() {
     let mut expected = vec![0, 1, 9];
     expected.extend_from_slice(b"/pub/app/");
     expected.extend_from_slice(&[171; 32]);
-    assert_eq!(postcard::to_allocvec(&bundle).unwrap(), expected);
+    assert_eq!(postcard::to_extend(&bundle, Vec::new()).unwrap(), expected);
 }
 
 #[test]
@@ -467,7 +467,7 @@ fn repeated_and_overlapping_requests_preserve_order_and_round_trip() {
     ];
     let bundle = issue(&scopes);
     let json = serde_json::to_value(&bundle).unwrap();
-    let binary = postcard::to_allocvec(&bundle).unwrap();
+    let binary = postcard::to_extend(&bundle, Vec::new()).unwrap();
     for decoded in [
         serde_json::from_value::<ScopedEncryptionKeyBundle>(json).unwrap(),
         postcard::from_bytes::<ScopedEncryptionKeyBundle>(&binary).unwrap(),
@@ -522,7 +522,7 @@ fn inconsistent_overlaps_are_rejected_during_decoding() {
             assert_eq!(error.to_string(), expected_error);
 
             // A tuple has the same field encoding as the bundle in Postcard.
-            let binary = postcard::to_allocvec(&(DerivationVersion::V1, &keys)).unwrap();
+            let binary = postcard::to_extend(&(DerivationVersion::V1, &keys), Vec::new()).unwrap();
             assert!(postcard::from_bytes::<ScopedEncryptionKeyBundle>(&binary).is_err());
         }
     }
