@@ -34,7 +34,7 @@
 //! let approved_keys = ScopedEncryptionKeyBundle::from_identity_secret(&[7; 32], &scopes);
 //!
 //! // Encode/decode the key bundle inside an encrypted, authenticated approval.
-//! let payload = postcard::to_allocvec(&approved_keys)?;
+//! let payload = postcard::to_extend(&approved_keys, Vec::new())?;
 //! let app_keys: ScopedEncryptionKeyBundle = postcard::from_bytes(&payload)?;
 //! let file = StoragePath::new("/pub/app/messages.json")?;
 //! let content_key = app_keys.derive_for_path(&file)?;
