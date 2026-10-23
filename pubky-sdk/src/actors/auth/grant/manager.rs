@@ -11,8 +11,13 @@ use std::sync::Arc;
 
 use crate::actors::session::credential::SessionCredential;
 use crate::client::user_endpoint_url;
-use crate::errors::{RequestError, Result};
+use crate::errors::Result;
+use crate::util::read_json_body;
 use crate::{PubkyHttpClient, PubkySession};
+
+/// Maximum size of a `/auth/grant/sessions` listing. The homeserver returns
+/// every grant in one response, so an overflow fails the whole call.
+const MAX_GRANT_LIST_BYTES: usize = 1024 * 1024;
 
 /// Account-level grant management for a signed-in user.
 ///
@@ -71,10 +76,7 @@ impl GrantManager {
         let rb = self.client.cross_request(Method::GET, url).await?;
         let resp = self.credential.send(rb, &self.client).await?;
         let resp = self.client.check_http_status(resp).await?;
-        let grants: Vec<GrantInfo> = resp.json().await.map_err(|e| RequestError::DecodeJson {
-            message: format!("decoding /auth/grant/sessions response: {e}"),
-        })?;
-        Ok(grants)
+        read_json_body(resp, MAX_GRANT_LIST_BYTES, "/auth/grant/sessions response").await
     }
 
     /// Revoke a specific grant by id, killing all of its sessions.
