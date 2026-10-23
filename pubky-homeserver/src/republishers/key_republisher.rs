@@ -76,7 +76,7 @@ impl HomeserverKeyRepublisher {
         // Start the periodic republish task.
         let signed_packet = signed_packet.clone();
         let handle = tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(60 * 60)); // 1 hour in seconds
+            let mut interval = interval(Duration::from_hours(1));
             interval.tick().await; // This ticks immediatly. Wait for first interval before starting the loop.
             loop {
                 interval.tick().await;

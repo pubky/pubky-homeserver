@@ -53,7 +53,7 @@ impl UserKeysRepublisherJob {
             Self::INITIAL_DELAY_BEFORE_REPUBLISH
         );
 
-        if republish_interval < Duration::from_secs(60 * 60) {
+        if republish_interval < Duration::from_hours(1) {
             tracing::warn!(
                 "User keys republisher interval is less than 60min. This is strongly discouraged "
             );
