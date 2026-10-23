@@ -58,6 +58,7 @@ paths:
         '401':
           description: Missing or invalid admin password
   "/generate_signup_token":
+    description: Authenticated requests using unsupported methods return 405 with Allow set to GET, POST.
     get:
       tags:
       - Admin
@@ -157,6 +158,7 @@ paths:
         '401':
           description: Missing or invalid admin password
   "/events-stream":
+    description: Authenticated requests using unsupported methods return 405 with Allow set to GET.
     get:
       tags:
       - Events

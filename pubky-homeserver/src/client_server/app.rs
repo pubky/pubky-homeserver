@@ -5,6 +5,7 @@ use crate::MockDataDir;
 
 use crate::{
     app_context::{AppContext, AppContextConversionError},
+    shared::reject_allow,
     PersistentDataDir,
 };
 use anyhow::Result;
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::{
-    http::{header::RETRY_AFTER, HeaderName},
+    http::{header::RETRY_AFTER, HeaderName, Method},
     middleware as axum_middleware,
     routing::get,
     Router,
@@ -248,12 +249,19 @@ impl Drop for ClientServer {
 fn base() -> Router<AppState> {
     Router::new()
         .route("/", get(root::handler))
-        .route("/signup_tokens/{token}", get(signup_tokens::get))
+        .route(
+            "/signup_tokens/{token}",
+            get(signup_tokens::get)
+                .head(reject_allow([Method::GET]))
+                .fallback(reject_allow([Method::GET])),
+        )
         // Events
         .route("/events/", get(events::feed))
         .route(
             "/events-stream",
             get(events::feed_stream)
+                .head(reject_allow([Method::GET]))
+                .fallback(reject_allow([Method::GET]))
                 .layer(axum_middleware::from_fn(cache_policy::sse_cache_policy)),
         )
 
@@ -468,6 +476,27 @@ mod tests {
         assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(third, StatusCode::OK);
         server_task.abort();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn signup_token_and_event_stream_reject_unsupported_methods() {
+        let context = AppContext::test().await;
+        let router = ClientServer::create_router(context).unwrap();
+        let server = TestServer::new(router);
+
+        for path in ["/signup_tokens/invalid", "/events-stream"] {
+            for method in [Method::HEAD, Method::DELETE] {
+                let response = server
+                    .method(method, path)
+                    .add_header("host", "localhost")
+                    .await;
+
+                response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
+                assert_eq!(response.headers()[header::ALLOW], "GET");
+                assert!(response.as_bytes().is_empty());
+            }
+        }
     }
 
     #[tokio::test]

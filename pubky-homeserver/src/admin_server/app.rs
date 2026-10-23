@@ -13,9 +13,9 @@ use super::{app_state::AppState, auth_middleware::AdminAuthLayer};
 use crate::AppContext;
 #[cfg(any(test, feature = "testing"))]
 use crate::MockDataDir;
-use crate::{AppContextConversionError, PersistentDataDir};
+use crate::{shared::reject_allow, AppContextConversionError, PersistentDataDir};
 use axum::routing::{any, delete, post};
-use axum::{routing::get, Router};
+use axum::{http::Method, routing::get, Router};
 use axum_server::Handle;
 use tokio::task::JoinHandle;
 use tower_http::cors::CorsLayer;
@@ -26,10 +26,17 @@ fn create_protected_router(password: &str) -> Router<AppState> {
         .route(
             "/generate_signup_token",
             get(generate_signup_token::generate_signup_token)
-                .post(generate_signup_token::generate_signup_token_with_limits),
+                .post(generate_signup_token::generate_signup_token_with_limits)
+                .head(reject_allow([Method::GET, Method::POST]))
+                .fallback(reject_allow([Method::GET, Method::POST])),
         )
         .route("/info", get(info::info))
-        .route("/events-stream", get(admin_events::feed_stream))
+        .route(
+            "/events-stream",
+            get(admin_events::feed_stream)
+                .head(reject_allow([Method::GET]))
+                .fallback(reject_allow([Method::GET])),
+        )
         .route("/signup_tokens", get(signup_tokens::list_signup_tokens))
         .route("/webdav/{*entry_path}", delete(delete_entry::delete_entry))
         .route("/users/{pubkey}/disable", post(disable_user))
@@ -173,7 +180,7 @@ impl Drop for AdminServer {
 mod tests {
     use std::str::FromStr;
 
-    use axum::http::Method;
+    use axum::http::{header::ALLOW, Method, StatusCode};
     use axum_test::TestServer;
     use base64::Engine;
     use pubky_common::crypto::Keypair;
@@ -283,6 +290,46 @@ mod tests {
 
         let response = server.get("/signup_tokens").expect_failure().await;
         response.assert_status_unauthorized();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_event_stream_reject_unsupported_methods() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+
+        for method in [Method::HEAD, Method::DELETE] {
+            server
+                .method(method.clone(), "/events-stream")
+                .await
+                .assert_status_unauthorized();
+
+            let response = server.method(method, "/events-stream").admin_auth().await;
+            response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(response.headers()[ALLOW], "GET");
+            assert!(response.as_bytes().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_generate_signup_token_reject_unsupported_methods() {
+        let context = AppContext::test().await;
+        let server = create_test_server(&context);
+
+        for method in [Method::HEAD, Method::DELETE] {
+            let response = server
+                .method(method, "/generate_signup_token")
+                .admin_auth()
+                .await;
+            response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(response.headers()[ALLOW], "GET, POST");
+        }
+
+        let response = server.get("/signup_tokens").admin_auth().await;
+        response.assert_status_ok();
+        let body: serde_json::Value = response.json();
+        assert!(body["items"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

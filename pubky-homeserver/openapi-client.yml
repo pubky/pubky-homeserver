@@ -162,6 +162,7 @@ paths:
                 - webdav-locks
                 - websites
   "/signup_tokens/{token}":
+    description: Only GET is supported. Unsupported methods return 405 with Allow set to GET.
     get:
       tags:
       - Signup Tokens
@@ -991,6 +992,7 @@ paths:
         '400':
           description: Invalid cursor
   "/events-stream":
+    description: Only GET is supported. Unsupported methods return 405 with Allow set to GET.
     get:
       tags:
       - Events
