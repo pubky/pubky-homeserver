@@ -63,6 +63,10 @@ pub use actors::{PublicStorage, SessionStorage};
 #[doc(inline)]
 pub use errors::{BuildError, CredentialRefreshError, Error, Result};
 
+/// Success-status rule shared with the JavaScript bindings.
+#[doc(hidden)]
+pub use util::confirms_success;
+
 // Export common types and constants
 #[doc(inline)]
 pub use crate::actors::storage::{
