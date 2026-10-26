@@ -30,12 +30,15 @@ use zeroize::Zeroizing;
 use super::shared_session::GrantSessionLease;
 use super::{
     approval::{GrantApproval, SignedApproval, VerifiedApproval},
-    grant_exchange::{credential_from_grant_exchange, refresh_grant_session},
+    grant_exchange::{
+        MAX_GRANT_SESSION_BYTES, credential_from_grant_exchange, refresh_grant_session,
+    },
     pop_signer::{DelegatedSignFn, GrantPopSigner},
     shared_session::GrantSessionCoordinator,
 };
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::credential::{SessionCredential, credential_session_missing};
+use crate::util::read_json_body;
 use crate::{
     PubkyHttpClient,
     actors::session::SessionInfo,
@@ -701,13 +704,12 @@ impl SessionCredential for GrantCredential {
             return Ok(None);
         }
         let response = client.check_http_status(response).await?;
-        let session: GrantSessionInfo =
-            response
-                .json()
-                .await
-                .map_err(|e| RequestError::DecodeJson {
-                    message: format!("decoding /auth/grant/session response: {e}"),
-                })?;
+        let session: GrantSessionInfo = read_json_body(
+            response,
+            MAX_GRANT_SESSION_BYTES,
+            "/auth/grant/session response",
+        )
+        .await?;
         Ok(Some(to_session_info(&session)))
     }
 

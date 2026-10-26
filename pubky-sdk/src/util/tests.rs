@@ -1,3 +1,4 @@
+use super::read_json_body;
 use crate::{
     Error, PubkyHttpClient,
     errors::{RequestError, RequestErrorKind},
@@ -339,4 +340,33 @@ async fn small_head_does_not_protect_against_oversized_get_errors() {
             "x".repeat(4096)
         )
     );
+}
+
+#[tokio::test]
+async fn json_bodies_are_bounded_then_decoded() {
+    let body = b"[1, 2]";
+    let (response, _connection) =
+        serve_response(200, &format!("Content-Length: {}\r\n", body.len()), body).await;
+    let numbers: Vec<u32> = read_json_body(response, 16, "numbers").await.unwrap();
+    assert_eq!(numbers, vec![1, 2]);
+
+    let (response, _connection) = serve_response(200, "Content-Length: 17\r\n", b"").await;
+    let error = read_json_body::<Vec<u32>>(response, 16, "numbers")
+        .await
+        .unwrap_err();
+    let Error::Request(RequestError::DecodeJson { message }) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(message, "numbers exceeds the 16-byte limit");
+
+    let body = b"nope";
+    let (response, _connection) =
+        serve_response(200, &format!("Content-Length: {}\r\n", body.len()), body).await;
+    let error = read_json_body::<Vec<u32>>(response, 16, "numbers")
+        .await
+        .unwrap_err();
+    let Error::Request(RequestError::DecodeJson { message }) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert!(message.starts_with("decoding numbers: "));
 }
