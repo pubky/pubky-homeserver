@@ -50,8 +50,8 @@ impl From<TimeUnit> for Duration {
         match time_unit {
             TimeUnit::Second => Duration::from_secs(1),
             TimeUnit::Minute => Duration::from_secs(60),
-            TimeUnit::Hour => Duration::from_secs(60 * 60),
-            TimeUnit::Day => Duration::from_secs(24 * 60 * 60),
+            TimeUnit::Hour => Duration::from_hours(1),
+            TimeUnit::Day => Duration::from_hours(24),
         }
     }
 }
