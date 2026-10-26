@@ -29,9 +29,10 @@ impl ResponseBodyError {
     }
 }
 
-/// Read a complete response within `max_bytes`, rejecting oversized declarations
-/// and enforcing the limit incrementally. Dropping the stream on failure cancels
-/// the unread browser `ReadableStream` as well as native response consumption.
+/// Read a complete response of at most `max_bytes` (inclusive), rejecting
+/// oversized declarations and enforcing the limit incrementally. Dropping the
+/// stream on failure cancels the unread browser `ReadableStream` as well as
+/// native response consumption.
 pub(crate) async fn read_response_body(
     response: Response,
     max_bytes: usize,
