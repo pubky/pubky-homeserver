@@ -71,24 +71,7 @@ async fn account_requires_root_grant_and_survives_disable() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     // A disabled user can still read their account, and sees why writes fail.
-    let admin_socket = server
-        .admin_server()
-        .expect("admin server should be enabled")
-        .listen_socket();
-    let response = pubky
-        .client()
-        .request(
-            Method::POST,
-            &format!(
-                "http://{admin_socket}/users/{}/disable",
-                keypair.public_key().z32()
-            ),
-        )
-        .header("X-Admin-Password", "admin")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    admin_disable_user(server, &keypair.public_key()).await;
     let response = get_account(pubky.client(), &url, Some(&root_bearer)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json().await.unwrap();

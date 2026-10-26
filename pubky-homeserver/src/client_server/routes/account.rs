@@ -28,31 +28,11 @@ mod tests {
 
     use axum::http::{header, StatusCode};
     use axum_test::TestServer;
-    use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
+    use pubky_common::{capabilities::Capability, crypto::Keypair};
 
     use crate::app_context::AppContext;
+    use crate::client_server::test_utils::signup_cookie;
     use crate::client_server::ClientServer;
-
-    /// Sign up `keypair` with a cookie session holding `capabilities`; returns the cookie.
-    async fn signup_cookie(
-        server: &TestServer,
-        keypair: &Keypair,
-        capabilities: Vec<Capability>,
-    ) -> String {
-        let auth_token = AuthToken::sign(keypair, capabilities);
-        let response = server
-            .post("/signup")
-            .add_header("host", keypair.public_key().z32())
-            .bytes(auth_token.serialize().into())
-            .expect_success()
-            .await;
-        response
-            .headers()
-            .get(header::SET_COOKIE)
-            .and_then(|h| h.to_str().ok())
-            .expect("should return a set-cookie header")
-            .to_string()
-    }
 
     async fn setup() -> (Arc<AppContext>, TestServer) {
         let context = AppContext::test().await;

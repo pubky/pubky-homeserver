@@ -292,6 +292,7 @@ mod tests {
     };
 
     use crate::app_context::AppContext;
+    use crate::client_server::test_utils::signup_cookie;
     use crate::client_server::ClientServer;
 
     async fn create_user_with_capabilities(
@@ -299,23 +300,7 @@ mod tests {
         keypair: &Keypair,
         capabilities: Vec<Capability>,
     ) -> anyhow::Result<String> {
-        let auth_token = AuthToken::sign(keypair, capabilities);
-        let body_bytes: axum::body::Bytes = auth_token.serialize().into();
-        let response = server
-            .post("/signup")
-            .add_header("host", keypair.public_key().to_z32())
-            .bytes(body_bytes)
-            .expect_success()
-            .await;
-
-        let header_value = response
-            .headers()
-            .get(header::SET_COOKIE)
-            .and_then(|h| h.to_str().ok())
-            .expect("should return a set-cookie header")
-            .to_string();
-
-        Ok(header_value)
+        Ok(signup_cookie(server, keypair, capabilities).await)
     }
 
     pub async fn create_root_user(

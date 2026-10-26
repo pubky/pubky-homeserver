@@ -18,12 +18,32 @@ use pubky_testnet::pubky::{
     PubkyGrantAuthFlow, PubkyHttpClient, PubkySession, StatusCode,
 };
 use pubky_testnet::pubky_common::capabilities::{Capabilities, Capability};
+use pubky_testnet::pubky_common::crypto::PublicKey;
 use pubky_testnet::{
-    pubky_homeserver::{ConfigToml, SignupMode},
+    pubky_homeserver::{ConfigToml, HomeserverApp, SignupMode},
     EphemeralTestnet, Testnet,
 };
 use std::str::FromStr;
 use std::time::Duration;
+
+/// Disable `user` through the homeserver's admin API.
+async fn admin_disable_user(server: &HomeserverApp, user: &PublicKey) {
+    let admin_socket = server
+        .admin_server()
+        .expect("admin server should be enabled")
+        .listen_socket();
+    let response = PubkyHttpClient::new()
+        .unwrap()
+        .request(
+            Method::POST,
+            &format!("http://{admin_socket}/users/{}/disable", user.z32()),
+        )
+        .header("X-Admin-Password", "admin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
 
 async fn assert_scoped_write_access(session: &PubkySession) {
     session

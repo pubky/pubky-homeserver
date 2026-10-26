@@ -327,7 +327,7 @@ mod tests {
         Router,
     };
     use axum_test::TestServer;
-    use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
+    use pubky_common::{capabilities::Capability, crypto::Keypair};
     use tcp_client_addr::{IdentityMode, ProxyProtocol};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinHandle;
@@ -342,6 +342,7 @@ mod tests {
     };
 
     use crate::client_server::middleware::rate_limiter::RequestRateLimitLayer;
+    use crate::client_server::test_utils::signup_cookie;
     use crate::{
         app_context::AppContext,
         client_server::ClientServer,
@@ -518,7 +519,7 @@ mod tests {
         let server = TestServer::new(router);
         let user = Keypair::random();
 
-        let cookie = signup_cookie(&server, &user).await;
+        let cookie = signup_cookie(&server, &user, vec![Capability::root()]).await;
 
         server
             .get("/session")
@@ -581,7 +582,7 @@ mod tests {
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router);
         let user = Keypair::random();
-        let cookie = signup_cookie(&server, &user).await;
+        let cookie = signup_cookie(&server, &user, vec![Capability::root()]).await;
         let public_key = user.public_key().z32();
         let unrelated_public_key = Keypair::random().public_key().z32();
         let storage_path = "/pub/metrics-secret.txt";
@@ -649,23 +650,5 @@ mod tests {
         assert!(!output.contains(&unrelated_public_key));
         assert!(!output.contains(storage_path));
         assert!(!output.contains(&cookie));
-    }
-
-    async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
-        let auth_token = AuthToken::sign(keypair, vec![Capability::root()]);
-        let body_bytes: axum::body::Bytes = auth_token.serialize().into();
-        let response = server
-            .post("/signup")
-            .add_header("host", keypair.public_key().z32())
-            .bytes(body_bytes)
-            .expect_success()
-            .await;
-
-        response
-            .headers()
-            .get(header::SET_COOKIE)
-            .and_then(|h| h.to_str().ok())
-            .expect("signup should return a session cookie")
-            .to_string()
     }
 }
