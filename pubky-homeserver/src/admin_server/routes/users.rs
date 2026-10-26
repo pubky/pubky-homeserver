@@ -7,16 +7,11 @@ use axum::{
 };
 use pubky_common::crypto::PublicKey;
 use serde::{Deserialize, Serialize};
-use sqlx::types::chrono::NaiveDateTime;
 
 use super::super::app_state::AppState;
-use super::user_quota::UserQuotaResponse;
 use crate::{
-    persistence::sql::user::{
-        UserEntity, UserListQuery, UserListSortBy, UserListState, UserRepository,
-    },
-    shared::{HttpError, HttpResult, Z32Pubkey},
-    ConfigToml,
+    persistence::sql::user::{UserListQuery, UserListSortBy, UserListState, UserRepository},
+    shared::{HttpError, HttpResult, UserItem, Z32Pubkey},
 };
 
 #[derive(Deserialize)]
@@ -37,29 +32,6 @@ impl UsersQuery {
             reverse: self.reverse,
             limit: self.limit.map(NonZeroU16::get),
             cursor: self.cursor.map(|pubkey| pubkey.0),
-        }
-    }
-}
-
-/// One user, as returned by `GET /users` and `GET /users/{pubkey}`.
-#[derive(Serialize)]
-pub(crate) struct UserItem {
-    pubky: String,
-    created_at: NaiveDateTime,
-    disabled: bool,
-    used_bytes: u64,
-    /// Same shape as `GET /users/{pubkey}/quota`.
-    quota: UserQuotaResponse,
-}
-
-impl UserItem {
-    fn new(user: &UserEntity, config: &ConfigToml) -> Self {
-        Self {
-            pubky: user.public_key.z32(),
-            created_at: user.created_at,
-            disabled: user.disabled,
-            used_bytes: user.used_bytes,
-            quota: UserQuotaResponse::new(user, config),
         }
     }
 }

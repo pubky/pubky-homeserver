@@ -39,7 +39,7 @@ use super::middleware::{
     request_tenant::RequestTenant,
     trace::with_trace_layer,
 };
-use super::routes::{events, info, root, signup_tokens, tenants, website};
+use super::routes::{account, events, info, root, signup_tokens, tenants, website};
 
 /// Errors that can occur when building a `HomeserverCore`.
 #[derive(Debug, thiserror::Error)]
@@ -249,6 +249,7 @@ impl Drop for ClientServer {
 fn base() -> Router<AppState> {
     Router::new()
         .route("/", get(root::handler))
+        .route("/account", get(account::get))
         .route(
             "/signup_tokens/{token}",
             get(signup_tokens::get)

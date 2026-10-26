@@ -30,6 +30,7 @@ use super::tenants::read::{is_not_modified, not_modified_response};
 
 /// First path segments that stay on the client API under a website `Host`.
 const API_SEGMENTS: &[&str] = &[
+    "account",
     "auth",
     "events",
     "events-stream",
@@ -532,6 +533,10 @@ mod tests {
         site.get(&homeserver, "/")
             .await
             .assert_text("Pubky Homeserver");
+        // `/account` is an API route on a site host too, not a site folder.
+        site.get(&key, "/account")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
 
         // The owner comes from `Host` alone, and cookies are neither used nor set.
         let other = Keypair::random().public_key().z32();
