@@ -44,7 +44,7 @@ impl UsersQuery {
 /// One user, as returned by `GET /users` and `GET /users/{pubkey}`.
 #[derive(Serialize)]
 pub(crate) struct UserItem {
-    pubkey: String,
+    pubky: String,
     created_at: NaiveDateTime,
     disabled: bool,
     used_bytes: u64,
@@ -55,7 +55,7 @@ pub(crate) struct UserItem {
 impl UserItem {
     fn new(user: &UserEntity, config: &ConfigToml) -> Self {
         Self {
-            pubkey: user.public_key.z32(),
+            pubky: user.public_key.z32(),
             created_at: user.created_at,
             disabled: user.disabled,
             used_bytes: user.used_bytes,
@@ -141,7 +141,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|item| item["pubkey"].as_str().unwrap().to_string())
+            .map(|item| item["pubky"].as_str().unwrap().to_string())
             .collect()
     }
 
@@ -163,7 +163,7 @@ mod tests {
         let items = body["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         let item = &items[0];
-        assert_eq!(item["pubkey"], pubkey.z32());
+        assert_eq!(item["pubky"], pubkey.z32());
         assert!(item["created_at"].as_str().is_some());
         assert_eq!(item["disabled"], true);
         assert_eq!(item["used_bytes"], 42);

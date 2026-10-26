@@ -811,13 +811,13 @@ components:
     UserItem:
       type: object
       required:
-      - pubkey
+      - pubky
       - created_at
       - disabled
       - used_bytes
       - quota
       properties:
-        pubkey:
+        pubky:
           type: string
           description: z-base-32 public key of the user.
         created_at:
