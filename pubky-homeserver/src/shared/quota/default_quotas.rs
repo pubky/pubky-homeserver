@@ -9,7 +9,7 @@ use super::BandwidthQuota;
 /// Per-user defaults (`rate_read`, `rate_write`) are the system-wide
 /// fallback values used when a user's quota is "Default" (NULL in DB).
 /// Per-user overrides are managed via the admin API:
-///   `PATCH /users/{pubkey}/quota`
+///   `PATCH /users/{user_z32}/quota`
 ///
 /// `unauthenticated_ip_rate_read` is a fixed server-level limit for
 /// anonymous requests (not overridable per-user).

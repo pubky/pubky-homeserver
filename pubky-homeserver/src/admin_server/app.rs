@@ -40,11 +40,11 @@ fn create_protected_router(password: &str) -> Router<AppState> {
         .route("/signup_tokens", get(signup_tokens::list_signup_tokens))
         .route("/webdav/{*entry_path}", delete(delete_entry::delete_entry))
         .route("/users", get(users::list_users))
-        .route("/users/{pubkey}", get(users::get_user))
-        .route("/users/{pubkey}/disable", post(disable_user))
-        .route("/users/{pubkey}/enable", post(enable_user))
+        .route("/users/{user_z32}", get(users::get_user))
+        .route("/users/{user_z32}/disable", post(disable_user))
+        .route("/users/{user_z32}/enable", post(enable_user))
         .route(
-            "/users/{pubkey}/quota",
+            "/users/{user_z32}/quota",
             get(user_quota::get_user_quota).patch(user_quota::patch_user_quota),
         )
         .layer(AdminAuthLayer::new(password.to_string()))

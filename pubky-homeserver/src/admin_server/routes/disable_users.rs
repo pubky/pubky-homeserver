@@ -10,14 +10,18 @@ use axum::{
 ///
 /// # Errors
 ///
-/// - `400` if the pubkey is invalid.
+/// - `400` if `user_z32` is not a valid z-base-32 public key.
 /// - `404` if the user does not exist.
 ///
 pub async fn disable_user(
     State(state): State<AppState>,
-    Path(pubkey): Path<Z32Pubkey>,
+    Path(user_z32): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    state.context.user_service.admin_disable(&pubkey.0).await?;
+    state
+        .context
+        .user_service
+        .admin_disable(&user_z32.0)
+        .await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
@@ -25,14 +29,14 @@ pub async fn disable_user(
 ///
 /// # Errors
 ///
-/// - `400` if the pubkey is invalid.
+/// - `400` if `user_z32` is not a valid z-base-32 public key.
 /// - `404` if the user does not exist.
 ///
 pub async fn enable_user(
     State(state): State<AppState>,
-    Path(pubkey): Path<Z32Pubkey>,
+    Path(user_z32): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
-    state.context.user_service.admin_enable(&pubkey.0).await?;
+    state.context.user_service.admin_enable(&user_z32.0).await?;
     Ok((StatusCode::OK, "Ok"))
 }
 
@@ -63,8 +67,8 @@ mod tests {
         // Setup server
         let app_state = AppState::new(Arc::clone(&context));
         let router = Router::new()
-            .route("/users/{pubkey}/disable", post(disable_user))
-            .route("/users/{pubkey}/enable", post(enable_user))
+            .route("/users/{user_z32}/disable", post(disable_user))
+            .route("/users/{user_z32}/enable", post(enable_user))
             .with_state(app_state);
 
         // Disable the tenant

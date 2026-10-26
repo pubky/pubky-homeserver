@@ -13,7 +13,7 @@ use crate::ConfigToml;
 
 use super::super::app_state::AppState;
 
-/// Response for `GET /users/{pubkey}/quota`.
+/// Response for `GET /users/{user_z32}/quota`.
 ///
 /// Contains both the effective quota (overrides merged with system defaults)
 /// and the raw per-user overrides, so callers can see what applies and what
@@ -40,15 +40,15 @@ impl UserQuotaResponse {
     }
 }
 
-/// GET /users/{pubkey}/quota — return both effective and override quotas.
+/// GET /users/{user_z32}/quota — return both effective and override quotas.
 pub async fn get_user_quota(
     State(state): State<AppState>,
-    Path(pubkey): Path<Z32Pubkey>,
+    Path(user_z32): Path<Z32Pubkey>,
 ) -> HttpResult<impl IntoResponse> {
     let user = state
         .context
         .user_service
-        .get_or_http_error(&pubkey.0, false)
+        .get_or_http_error(&user_z32.0, false)
         .await?;
 
     Ok(Json(UserQuotaResponse::new(
@@ -57,7 +57,7 @@ pub async fn get_user_quota(
     )))
 }
 
-/// PATCH /users/{pubkey}/quota — update per-user custom limits.
+/// PATCH /users/{user_z32}/quota — update per-user custom limits.
 ///
 /// Only fields present in the JSON body are updated; absent fields are left unchanged.
 /// All fields follow the same semantics:
@@ -67,7 +67,7 @@ pub async fn get_user_quota(
 /// - value → explicit custom limit
 pub async fn patch_user_quota(
     State(state): State<AppState>,
-    Path(pubkey): Path<Z32Pubkey>,
+    Path(user_z32): Path<Z32Pubkey>,
     Json(patch): Json<UserQuotaPatch>,
 ) -> HttpResult<impl IntoResponse> {
     patch
@@ -77,7 +77,7 @@ pub async fn patch_user_quota(
     state
         .context
         .user_service
-        .patch_quota(&pubkey.0, &patch)
+        .patch_quota(&user_z32.0, &patch)
         .await?;
 
     Ok(StatusCode::OK)

@@ -15,7 +15,7 @@ use crate::shared::quota::UserQuota;
 ///
 /// Quota changes made via the admin API are **not** actively invalidated in the
 /// cache — they take effect once this TTL expires.
-/// In an emergency there exists the option to use /users/{pubkey}/disable.
+/// In an emergency there exists the option to use /users/{user_z32}/disable.
 const CACHE_TTL: Duration = Duration::from_secs(120); // 2 minutes
 
 /// How long a negative (user-not-found) cache entry lives before re-checking the DB.

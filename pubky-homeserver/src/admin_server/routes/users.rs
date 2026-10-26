@@ -41,14 +41,14 @@ impl UsersQuery {
     }
 }
 
-/// One user, as returned by `GET /users` and `GET /users/{pubkey}`.
+/// One user, as returned by `GET /users` and `GET /users/{user_z32}`.
 #[derive(Serialize)]
 pub(crate) struct UserItem {
     pubky: String,
     created_at: NaiveDateTime,
     disabled: bool,
     used_bytes: u64,
-    /// Same shape as `GET /users/{pubkey}/quota`.
+    /// Same shape as `GET /users/{user_z32}/quota`.
     quota: UserQuotaResponse,
 }
 
@@ -96,15 +96,15 @@ pub async fn list_users(
     ))
 }
 
-/// GET /users/{pubkey} — one user in the same shape as the `GET /users` items.
+/// GET /users/{user_z32} — one user in the same shape as the `GET /users` items.
 pub async fn get_user(
     State(state): State<AppState>,
-    Path(pubkey): Path<Z32Pubkey>,
+    Path(user_z32): Path<Z32Pubkey>,
 ) -> HttpResult<Json<UserItem>> {
     let user = state
         .context
         .user_service
-        .get_or_http_error(&pubkey.0, false)
+        .get_or_http_error(&user_z32.0, false)
         .await?;
     Ok(Json(UserItem::new(&user, &state.context.config_toml)))
 }
@@ -175,7 +175,7 @@ mod tests {
         assert!(item["quota"]["effective"]["rate_read"].as_str().is_some());
         assert!(body["next_cursor"].is_null());
 
-        // GET /users/{pubkey} returns the same item.
+        // GET /users/{user_z32} returns the same item.
         let single: serde_json::Value = server
             .get(&format!("/users/{}", pubkey.z32()))
             .admin_auth()

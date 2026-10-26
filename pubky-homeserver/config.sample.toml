@@ -78,7 +78,7 @@ whitelist = [
 # Per-user defaults (rate_read, rate_write) are the system-wide fallback
 # values used when a user's quota is set to "Default" (NULL in DB).
 # Per-user overrides are managed via the admin API:
-#   PATCH /users/{pubkey}/quota
+#   PATCH /users/{user_z32}/quota
 
 # Default bandwidth limit for user reads (downloads).
 # rate_read = "10mb/s"

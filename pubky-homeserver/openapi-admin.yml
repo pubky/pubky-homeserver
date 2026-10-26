@@ -285,7 +285,7 @@ paths:
         '204':
           description: Entry deleted
         '400':
-          description: Invalid pubkey format
+          description: Invalid entry path or z-base-32 public key
         '401':
           description: Missing or invalid admin password
         '404':
@@ -417,7 +417,7 @@ paths:
             state or sort_by, limit=0)
         '401':
           description: Missing or invalid admin password
-  "/users/{pubkey}":
+  "/users/{user_z32}":
     get:
       tags:
       - Admin
@@ -427,7 +427,7 @@ paths:
       security:
       - adminPassword: []
       parameters:
-      - "$ref": "#/components/parameters/AdminPubkey"
+      - "$ref": "#/components/parameters/AdminUserZ32"
       responses:
         '200':
           description: User
@@ -436,12 +436,12 @@ paths:
               schema:
                 "$ref": "#/components/schemas/UserItem"
         '400':
-          description: Invalid pubkey format
+          description: Invalid z-base-32 public key
         '401':
           description: Missing or invalid admin password
         '404':
           description: User not found
-  "/users/{pubkey}/disable":
+  "/users/{user_z32}/disable":
     post:
       tags:
       - Admin
@@ -450,7 +450,7 @@ paths:
       security:
       - adminPassword: []
       parameters:
-      - "$ref": "#/components/parameters/AdminPubkey"
+      - "$ref": "#/components/parameters/AdminUserZ32"
       responses:
         '200':
           description: User disabled
@@ -460,12 +460,12 @@ paths:
                 type: string
                 example: Ok
         '400':
-          description: Invalid pubkey format
+          description: Invalid z-base-32 public key
         '401':
           description: Missing or invalid admin password
         '404':
           description: User not found
-  "/users/{pubkey}/enable":
+  "/users/{user_z32}/enable":
     post:
       tags:
       - Admin
@@ -474,7 +474,7 @@ paths:
       security:
       - adminPassword: []
       parameters:
-      - "$ref": "#/components/parameters/AdminPubkey"
+      - "$ref": "#/components/parameters/AdminUserZ32"
       responses:
         '200':
           description: User enabled
@@ -484,12 +484,12 @@ paths:
                 type: string
                 example: Ok
         '400':
-          description: Invalid pubkey format
+          description: Invalid z-base-32 public key
         '401':
           description: Missing or invalid admin password
         '404':
           description: User not found
-  "/users/{pubkey}/quota":
+  "/users/{user_z32}/quota":
     get:
       tags:
       - Admin
@@ -501,7 +501,7 @@ paths:
       security:
       - adminPassword: []
       parameters:
-      - "$ref": "#/components/parameters/AdminPubkey"
+      - "$ref": "#/components/parameters/AdminUserZ32"
       responses:
         '200':
           description: User quota
@@ -527,7 +527,7 @@ paths:
                       storage_quota_mb: 500
                       rate_read: 100mb/m
         '400':
-          description: Invalid pubkey format
+          description: Invalid z-base-32 public key
         '401':
           description: Missing or invalid admin password
         '404':
@@ -546,7 +546,7 @@ paths:
       security:
       - adminPassword: []
       parameters:
-      - "$ref": "#/components/parameters/AdminPubkey"
+      - "$ref": "#/components/parameters/AdminUserZ32"
       requestBody:
         required: true
         content:
@@ -570,7 +570,7 @@ paths:
         '200':
           description: Quota updated
         '400':
-          description: Invalid pubkey format
+          description: Invalid z-base-32 public key
         '401':
           description: Missing or invalid admin password
         '404':
@@ -590,8 +590,8 @@ components:
       description: Basic auth for WebDAV endpoints. Username `admin`, password is
         the admin password.
   parameters:
-    AdminPubkey:
-      name: pubkey
+    AdminUserZ32:
+      name: user_z32
       in: path
       required: true
       description: User's z-base-32 encoded public key.
@@ -832,7 +832,7 @@ components:
           format: int64
           description: Bytes of storage currently used.
         quota:
-          description: Same shape as `GET /users/{pubkey}/quota`.
+          description: Same shape as `GET /users/{user_z32}/quota`.
           allOf:
           - "$ref": "#/components/schemas/UserQuotaResponse"
     UserQuotaResponse:
