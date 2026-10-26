@@ -31,7 +31,7 @@ use reqwest::{Method, RequestBuilder, Response};
 
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::credential::{SessionCredential, credential_session_missing};
-use crate::util::{ResponseBodyError, read_response_body};
+use crate::util::read_response_body;
 use crate::{
     Error, PubkyHttpClient,
     actors::session::SessionInfo,
@@ -52,12 +52,12 @@ const MAX_SESSION_BYTES: usize = 64 * 1024;
 async fn read_session_body(response: Response) -> Result<Vec<u8>> {
     read_response_body(response, MAX_SESSION_BYTES)
         .await
-        .map_err(|error| match error {
-            ResponseBodyError::TooLarge => AuthError::Validation(format!(
-                "Session response exceeds the {MAX_SESSION_BYTES}-byte limit"
-            ))
-            .into(),
-            ResponseBodyError::Transport(error) => error.into(),
+        .map_err(|error| {
+            error.into_error(|| {
+                AuthError::Validation(format!(
+                    "Session response exceeds the {MAX_SESSION_BYTES}-byte limit"
+                ))
+            })
         })
 }
 

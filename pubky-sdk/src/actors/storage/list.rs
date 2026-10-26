@@ -6,7 +6,7 @@ use crate::actors::storage::resource::{
     IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath,
 };
 use crate::errors::RequestError;
-use crate::util::{ResponseBodyError, read_response_body};
+use crate::util::read_response_body;
 use crate::{Result, cross_log};
 
 /// Maximum size of a directory listing response. The homeserver returns at
@@ -17,12 +17,10 @@ const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
 async fn read_list_body(response: reqwest::Response) -> Result<Vec<u8>> {
     read_response_body(response, MAX_LIST_BYTES)
         .await
-        .map_err(|error| match error {
-            ResponseBodyError::TooLarge => RequestError::Validation {
+        .map_err(|error| {
+            error.into_error(|| RequestError::Validation {
                 message: format!("List response exceeds the {MAX_LIST_BYTES}-byte limit"),
-            }
-            .into(),
-            ResponseBodyError::Transport(error) => error.into(),
+            })
         })
 }
 

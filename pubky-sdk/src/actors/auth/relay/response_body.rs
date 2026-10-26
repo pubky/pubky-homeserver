@@ -1,5 +1,5 @@
 use crate::errors::{AuthError, Result};
-use crate::util::{ResponseBodyError, read_response_body};
+use crate::util::read_response_body;
 
 /// Maximum wire size for a received auth relay message, including encryption.
 /// Allows larger custom deployments without trusting the relay's upload limit.
@@ -9,12 +9,12 @@ pub(super) const MAX_RELAY_BODY_BYTES: usize = 1024 * 1024;
 pub(super) async fn read_relay_body(response: reqwest::Response) -> Result<Vec<u8>> {
     read_response_body(response, MAX_RELAY_BODY_BYTES)
         .await
-        .map_err(|error| match error {
-            ResponseBodyError::TooLarge => AuthError::Validation(format!(
-                "Auth relay response exceeds the {MAX_RELAY_BODY_BYTES}-byte limit"
-            ))
-            .into(),
-            ResponseBodyError::Transport(error) => error.into(),
+        .map_err(|error| {
+            error.into_error(|| {
+                AuthError::Validation(format!(
+                    "Auth relay response exceeds the {MAX_RELAY_BODY_BYTES}-byte limit"
+                ))
+            })
         })
 }
 

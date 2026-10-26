@@ -21,6 +21,25 @@ use super::{
 };
 use crate::PubkyHttpClient;
 use crate::errors::{CredentialRefreshError, Error, RequestError, Result};
+use crate::util::read_json_body;
+
+/// Maximum size of a `/auth/grant/session` response body: a session id,
+/// expiry and capabilities, the same shape as a cookie session record.
+pub(super) const MAX_GRANT_SESSION_BYTES: usize = 64 * 1024;
+
+/// Decode a refreshed grant session response, redacting every read or decode
+/// failure to its secret-safe refresh category.
+async fn decode_refreshed_grant_session(response: Response) -> Result<GrantSessionResponse> {
+    let status = response.status();
+    read_json_body(response, MAX_GRANT_SESSION_BYTES, "grant session response")
+        .await
+        .map_err(|_error| {
+            CredentialRefreshError::Request {
+                status: Some(status),
+            }
+            .into()
+        })
+}
 
 /// Establish a grant-backed session by exchanging a user-signed grant for
 /// an opaque bearer at the user's homeserver.
@@ -104,11 +123,7 @@ async fn post_grant_session(
     )
     .await?;
     let resp = client.check_http_status(resp).await?;
-    let response: GrantSessionResponse =
-        resp.json().await.map_err(|e| RequestError::DecodeJson {
-            message: format!("decoding grant session response: {e}"),
-        })?;
-    Ok(response)
+    read_json_body(resp, MAX_GRANT_SESSION_BYTES, "grant session response").await
 }
 
 /// Refresh a grant session while redacting HTTP request diagnostics.
@@ -141,13 +156,7 @@ pub(crate) async fn refresh_grant_session(
         }
         .into());
     }
-    response
-        .json()
-        .await
-        .map_err(|_error| CredentialRefreshError::Request {
-            status: Some(status),
-        })
-        .map_err(Into::into)
+    decode_refreshed_grant_session(response).await
 }
 
 fn redact_refresh_request_error(error: Error) -> Error {
@@ -182,4 +191,46 @@ async fn post_grant_session_response(
         .json(&body)
         .send()
         .await?)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod redaction_tests {
+    use super::*;
+    use crate::util::tests::serve_response;
+
+    #[tokio::test]
+    async fn refreshed_grant_session_failures_stay_redacted() {
+        let declared = MAX_GRANT_SESSION_BYTES + 1;
+        let body = b"not json";
+        // Oversized, undecodable, and truncated mid-body (connection dropped).
+        for (framing, wire, drop_connection) in [
+            (
+                format!("Content-Length: {declared}\r\n"),
+                b"".as_slice(),
+                false,
+            ),
+            (
+                format!("Content-Length: {}\r\n", body.len()),
+                body.as_slice(),
+                false,
+            ),
+            (
+                "Content-Length: 100\r\n".to_string(),
+                b"partial".as_slice(),
+                true,
+            ),
+        ] {
+            let (response, connection) = serve_response(200, &framing, wire).await;
+            if drop_connection {
+                drop(connection);
+            }
+            let error = decode_refreshed_grant_session(response).await.unwrap_err();
+            assert!(matches!(
+                error,
+                Error::CredentialRefresh(CredentialRefreshError::Request {
+                    status: Some(reqwest::StatusCode::OK)
+                })
+            ));
+        }
+    }
 }
