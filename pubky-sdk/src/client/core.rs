@@ -234,10 +234,15 @@ impl PubkyHttpClientBuilder {
 
     /// Set a total deadline for each HTTP request.
     ///
-    /// The deadline starts when the request begins connecting (native) or is
-    /// dispatched (browser) and lasts until the response body finishes. It also
-    /// ends long-lived responses such as event streams; on the browser the
-    /// `fetch` is aborted when it expires.
+    /// The timer is armed by the client when the request is sent, before name
+    /// resolution, connecting, or any byte reaches the server, and it runs
+    /// until the response body finishes. It never waits on the server, so a
+    /// peer that withholds its response cannot delay the deadline. It also ends
+    /// long-lived responses such as event streams; on the browser the `fetch`
+    /// is aborted when it expires.
+    ///
+    /// Pkarr endpoint resolution happens before the request is sent and is
+    /// bounded by the pkarr client's own relay and DHT timeouts instead.
     pub fn request_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.request_timeout = Some(timeout);
         self

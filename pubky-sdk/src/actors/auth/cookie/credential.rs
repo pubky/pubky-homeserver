@@ -42,10 +42,10 @@ use crate::{
 
 const SESSION_PATH: &str = "/session";
 
-/// Maximum size of a `/session` or `/signup` response body. A session record
-/// holds a public key and the capabilities from the signed auth token; the
-/// server does not cap those, so this bounds the client rather than mirrors
-/// a server limit.
+/// Maximum size, inclusive, of a `/session` or `/signup` response body. A
+/// session record holds a public key and the capabilities from the signed
+/// auth token; the server does not cap those, so this bounds the client
+/// rather than mirrors a server limit.
 const MAX_SESSION_BYTES: usize = 64 * 1024;
 
 /// Read a session response within [`MAX_SESSION_BYTES`].
