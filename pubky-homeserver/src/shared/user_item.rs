@@ -14,7 +14,8 @@ use crate::ConfigToml;
 #[derive(Debug, Serialize)]
 pub(crate) struct UserQuotaResponse {
     /// The effective quota: overrides merged with system defaults.
-    /// All fields are always present (no fields omitted).
+    /// `storage_quota_mb`, `rate_read` and `rate_write` are always present;
+    /// the burst fields and `allowed_write_paths` only when set.
     pub effective: UserQuota,
     /// Only the per-user overrides. Fields using the system default are omitted.
     pub overrides: UserQuota,

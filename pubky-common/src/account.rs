@@ -42,15 +42,19 @@ pub struct AccountInfo {
 /// A user's quota, both as it applies and as it was customised.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AccountQuota {
-    /// Overrides merged with the homeserver's defaults. Limits the homeserver
-    /// has no default for are reported as unlimited.
+    /// Overrides merged with the homeserver's defaults. `storage_quota_mb`,
+    /// `rate_read` and `rate_write` are always present, as unlimited when the
+    /// homeserver has no default either. The burst fields and
+    /// `allowed_write_paths` have no system default and stay absent unless
+    /// set for the user.
     pub effective: QuotaLimits,
     /// Only the per-user overrides. Limits using the system default are absent.
     pub overrides: QuotaLimits,
 }
 
-/// The individual limits of a quota. An absent limit means "system default"
-/// in `overrides` and never occurs in `effective`.
+/// The individual limits of a quota. In `overrides`, an absent limit means
+/// "system default". In `effective`, the three rate and storage limits are
+/// always present; the rest are absent when nothing applies.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct QuotaLimits {
     /// Storage quota in megabytes.

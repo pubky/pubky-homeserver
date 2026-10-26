@@ -842,8 +842,9 @@ components:
       - overrides
       properties:
         effective:
-          description: Overrides merged with system defaults. All fields are always
-            present.
+          description: Overrides merged with system defaults. `storage_quota_mb`,
+            `rate_read` and `rate_write` are always present; the burst fields and
+            `allowed_write_paths` only when set.
           allOf:
           - "$ref": "#/components/schemas/UserQuota"
         overrides:
