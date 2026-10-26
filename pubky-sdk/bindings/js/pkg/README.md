@@ -182,6 +182,10 @@ const userPk = session.info.publicKey.toString(); // -> pubky<z32> identifier
 const caps = session.info.capabilities; // -> string[] permissions and paths
 
 const storage = session.storage; // -> This User's storage API (absolute paths)
+
+// With a root session: storage used and the quota that applies.
+const account = await session.account();
+console.log(account.usedBytes, account.quota.effective.storageQuotaMb);
 ```
 
 **Persist a grant session**

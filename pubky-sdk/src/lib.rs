@@ -93,6 +93,7 @@ pub use pubky_common::session::CookieSessionRecord;
 #[doc(inline)]
 pub use pubky_common::{
     StoragePath, StoragePathError,
+    account::{AccountInfo, AccountQuota, QuotaLimit, QuotaLimits},
     auth::{
         AuthToken,
         grant::GrantClaims,

@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use pubky_common::account::AccountInfo;
 use pubky_common::crypto::PublicKey;
+use reqwest::Method;
 
 use super::SessionInfo;
 
 use super::credential::SessionCredential;
-use crate::errors::Error;
+use crate::client::user_endpoint_url;
+use crate::errors::{Error, RequestError};
 use crate::{PubkyHttpClient, Result, SessionStorage, cross_log};
 
 /// Your authenticated handle after signing in.
@@ -21,6 +24,7 @@ use crate::{PubkyHttpClient, Result, SessionStorage, cross_log};
 /// - Provides [`storage()`](Self::storage) for path-based CRUD operations as this user.
 /// - Supports session lifecycle: [`revalidate()`](Self::revalidate) and
 ///   [`signout()`](Self::signout).
+/// - Reports the account's storage use and quota via [`account()`](Self::account).
 /// - Offers credential-specific views via [`as_grant()`](Self::as_grant) and
 ///   [`as_cookie()`](Self::as_cookie) for grant management or secret export.
 ///
@@ -125,6 +129,29 @@ impl PubkySession {
         let user = self.info().public_key().clone();
         cross_log!(info, "Revalidating session for {}", user);
         self.credential.revalidate(&self.client, &user).await
+    }
+
+    /// Fetch this user's account: storage used, whether it is disabled, and
+    /// the quota that applies.
+    ///
+    /// Calls `GET /account`. Requires a session with the **root capability**;
+    /// scoped sessions get `403 Forbidden` from the homeserver. A disabled
+    /// user can still read it, which is how they learn why writes fail.
+    ///
+    /// # Errors
+    /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
+    ///   auth or missing root capability).
+    /// - Returns [`RequestError::DecodeJson`] if the response does not parse.
+    pub async fn account(&self) -> Result<AccountInfo> {
+        let user = self.info().public_key().clone();
+        let url = user_endpoint_url(&user, "/account")?;
+        let rb = self.client.cross_request(Method::GET, url).await?;
+        let resp = self.credential.send(rb, &self.client).await?;
+        let resp = self.client.check_http_status(resp).await?;
+        let account: AccountInfo = resp.json().await.map_err(|e| RequestError::DecodeJson {
+            message: format!("decoding /account response: {e}"),
+        })?;
+        Ok(account)
     }
 
     /// Sign out and invalidate this session server-side.
