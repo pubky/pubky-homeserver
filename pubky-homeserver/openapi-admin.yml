@@ -177,7 +177,7 @@ paths:
         Each SSE message has an event type (`PUT` or `DEL`) and multiline data:
         ```
         event: PUT
-        data: pubky://user_pubkey/pub/example.txt
+        data: pubky://o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo/pub/example.txt
         data: cursor: 42
         data: content_hash: r0NJufX5oaagQE3qNtzJSZvLJcmtwRK3zJqTyuQfMmI=
         ```
@@ -278,7 +278,7 @@ paths:
       - name: entry_path
         in: path
         required: true
-        description: 'Full path: `{pubkey}/path` (e.g. `o1gg96ewuo.../pub/file.txt`)'
+        description: 'Full path: `{user_z32}/path` (e.g. `o1gg96ewuo.../pub/file.txt`)'
         schema:
           type: string
       responses:
@@ -305,7 +305,7 @@ paths:
       - name: path
         in: path
         required: true
-        description: 'WebDAV path: `{pubkey}/{webdav_path}`'
+        description: 'WebDAV path: `{user_z32}/{webdav_path}`'
         schema:
           type: string
       responses:
