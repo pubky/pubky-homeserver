@@ -200,7 +200,7 @@ test("Session: grant-only view exposes metadata; GrantManager manages grants", a
   t.ok(info.createdAt > 0, "created timestamp is present");
   t.equal(await grant.grantId(), info.grantId, "grantId() matches sessionInfo()");
 
-  const account = await session.account();
+  const account = await grant.account();
   t.ok(account instanceof AccountInfo, "root session reads its account");
   t.equal(account.pubky.z32(), session.info.publicKey.z32(), "account belongs to the user");
   t.equal(account.disabled, false, "fresh account is enabled");
@@ -298,11 +298,11 @@ test("Session: non-root grant management calls return homeserver 403", async (t)
   }
 
   try {
-    await session.account();
-    t.fail("non-root session.account should fail");
+    await grant.account();
+    t.fail("non-root grant.account should fail");
   } catch (error) {
-    assertPubkyError(t, error, "session.account throws PubkyError");
-    t.equal(getStatusCode(error), 403, "session.account status code is 403");
+    assertPubkyError(t, error, "grant.account throws PubkyError");
+    t.equal(getStatusCode(error), 403, "grant.account status code is 403");
   }
 
   try {

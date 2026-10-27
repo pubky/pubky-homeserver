@@ -518,7 +518,9 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn api_paths_and_other_hosts_behave_as_before() {
-        let site = Site::start(|_| {}).await;
+        // `/account` has a default IP rate limit, which needs the client address
+        // a real connection carries; `TestServer` requests have none.
+        let site = Site::start(|config| config.drive.rate_limits.clear()).await;
         let key = site.owner.z32();
         site.put("/pub/website/_/index.html", "home").await;
         site.put("/pub/data.txt", "data").await;

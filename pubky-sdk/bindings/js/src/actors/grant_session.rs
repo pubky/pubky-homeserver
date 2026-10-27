@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 
+use super::account::AccountInfo;
 use super::encryption_keys::EncryptionKeys;
 
 use crate::custom_pop::{CustomPop, JsonValue};
@@ -65,6 +66,18 @@ impl GrantSession {
     pub async fn session_info(&self) -> JsResult<GrantSessionInfo> {
         let grant = self.as_grant()?;
         Ok(GrantSessionInfo(grant.session_info().await))
+    }
+
+    /// Fetch this user's account: storage used, whether it is disabled, and
+    /// the quota that applies.
+    ///
+    /// Requires a root-capability session. Scoped sessions surface the
+    /// homeserver `403` as the standard request error.
+    ///
+    /// @returns {Promise<AccountInfo>}
+    #[wasm_bindgen]
+    pub async fn account(&self) -> JsResult<AccountInfo> {
+        Ok(AccountInfo(self.as_grant()?.account().await?))
     }
 
     /// Current grant id (`jti`) backing this session.

@@ -63,6 +63,20 @@ pubky_client_identity = { mode = "direct" }
 # quota = "10r/m"
 # key = "ip"
 #
+# Default: Limit account reads to 60 requests per minute per IP, for GET and
+# HEAD. Each one costs a database lookup on top of authentication.
+# [[drive.rate_limits]]
+# path = "/account"
+# method = "GET"
+# quota = "60r/m"
+# key = "ip"
+#
+# [[drive.rate_limits]]
+# path = "/account"
+# method = "HEAD"
+# quota = "60r/m"
+# key = "ip"
+#
 # Limit login attempts to 20 requests per minute per IP.
 [[drive.rate_limits]]
 path = "/session"

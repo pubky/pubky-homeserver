@@ -62,15 +62,20 @@ async fn account_requires_root_grant_and_survives_disable() {
     assert!(body["quota"]["overrides"].is_object());
 
     // The SDK reads the same item.
-    let account = root_session.account().await.unwrap();
+    let account = root_session.as_grant().unwrap().account().await.unwrap();
     assert_eq!(account.pubky, keypair.public_key());
     assert!(!account.disabled);
     assert_eq!(account.used_bytes, 0);
     assert_eq!(serde_json::to_value(&account).unwrap(), body);
-    let err = scoped_session.account().await.unwrap_err();
+    let err = scoped_session
+        .as_grant()
+        .unwrap()
+        .account()
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::FORBIDDEN),
-        "scoped session.account() must be forbidden, got {err:?}"
+        "scoped as_grant().account() must be forbidden, got {err:?}"
     );
 
     // Scoped grant session: forbidden.

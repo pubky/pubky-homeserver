@@ -334,17 +334,27 @@ paths:
       description: |-
         The caller's account: storage used, whether the account is disabled,
         and the quota that applies, in the same shape as the admin
-        `GET /users/{pubkey}` item. Requires root capability. Grant (bearer)
-        sessions work on any host; a cookie session is resolved by the request
-        tenant, so it needs the user's host or `pubky-host` as for
-        `GET /session`. Disabled users can still read it.
+        `GET /users/{pubkey}` item. Requires a grant (bearer) session with
+        root capability; cookie sessions get `401`, since the permissive CORS
+        policy would otherwise let any origin read it with the browser's
+        cookie. Disabled users can still read it. Responses are `no-store`
+        and vary on `Authorization`. Rate limited to 60 requests per minute
+        per IP by default, for GET and HEAD.
       operationId: getAccount
       security:
       - bearerAuth: []
-      - cookieAuth: []
       responses:
         '200':
           description: The caller's account
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+            Vary:
+              schema:
+                type: string
+                example: Authorization
           content:
             application/json:
               schema:
@@ -363,7 +373,7 @@ paths:
                     storage_quota_mb: 500
                     rate_read: 100mb/m
         '401':
-          description: No valid session
+          description: No valid grant session (cookie sessions are rejected)
         '403':
           description: Session lacks root capability
   "/signup":

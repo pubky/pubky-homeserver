@@ -6,10 +6,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use super::{
-    account::AccountInfo, cookie_session::CookieSession, grant_session::GrantSession,
-    storage::SessionStorage,
-};
+use super::{cookie_session::CookieSession, grant_session::GrantSession, storage::SessionStorage};
 use crate::client::constructor::Client;
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 use crate::wrappers::session_info::SessionInfo;
@@ -57,18 +54,6 @@ impl Session {
     #[wasm_bindgen(getter)]
     pub fn cookie(&self) -> Option<CookieSession> {
         self.0.as_cookie().map(|_| CookieSession(self.0.clone()))
-    }
-
-    /// Fetch this user's account: storage used, whether it is disabled, and
-    /// the quota that applies.
-    ///
-    /// Requires a root-capability session. Scoped sessions surface the
-    /// homeserver `403` as the standard request error.
-    ///
-    /// @returns {Promise<AccountInfo>}
-    #[wasm_bindgen]
-    pub async fn account(&self) -> JsResult<AccountInfo> {
-        Ok(AccountInfo(self.0.account().await?))
     }
 
     /// Invalidate the session on the server (clears server cookie).

@@ -76,7 +76,7 @@ struct AccountQuotaJs<'a> {
     overrides: QuotaLimitsJs<'a>,
 }
 
-/// A user's account as returned by `session.account()`.
+/// A user's account as returned by `session.grant.account()`.
 #[wasm_bindgen]
 pub struct AccountInfo(pub(crate) pubky::AccountInfo);
 

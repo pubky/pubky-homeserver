@@ -6,14 +6,17 @@
 //! the grant-only API impossible to misuse against a cookie session.
 
 use pubky_common::{
+    account::AccountInfo,
     auth::{grant_session_responses::GrantSessionInfo, jws::GrantId},
     encryption_keys::ScopedEncryptionKeyBundle,
 };
+use reqwest::Method;
 
 use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
+use crate::client::user_endpoint_url;
 use crate::custom_pop::CustomPop;
-use crate::errors::Result;
+use crate::errors::{RequestError, Result};
 
 /// grant-only operations on a [`PubkySession`].
 #[derive(Debug)]
@@ -25,7 +28,7 @@ pub struct GrantSessionView<'a> {
 impl PubkySession {
     /// Returns a [`GrantSessionView`] if this session is grant-backed.
     ///
-    /// grant-only operations (`session_info`, `export_secret`,
+    /// grant-only operations (`session_info`, `account`, `export_secret`,
     /// `current_bearer`, `force_refresh`, `grant_id`) live on the view.
     /// Cookie-backed sessions return `None`.
     #[must_use]
@@ -107,6 +110,31 @@ impl<'a> GrantSessionView<'a> {
     /// accessor.
     pub async fn session_info(&self) -> GrantSessionInfo {
         self.credential.state.lock().await.session.clone()
+    }
+
+    /// Fetch this user's account: storage used, whether it is disabled, and
+    /// the quota that applies.
+    ///
+    /// Calls `GET /account`, which accepts grant sessions only. Requires the
+    /// **root capability**; scoped sessions get `403 Forbidden` from the
+    /// homeserver. A disabled user can still read it, which is how they learn
+    /// why writes fail.
+    ///
+    /// # Errors
+    /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
+    ///   auth or missing root capability).
+    /// - Returns [`RequestError::DecodeJson`] if the response does not parse.
+    pub async fn account(&self) -> Result<AccountInfo> {
+        let user = self.session.info().public_key().clone();
+        let url = user_endpoint_url(&user, "/account")?;
+        let client = &self.session.client;
+        let rb = client.cross_request(Method::GET, url).await?;
+        let resp = self.session.credential().send(rb, client).await?;
+        let resp = client.check_http_status(resp).await?;
+        let account: AccountInfo = resp.json().await.map_err(|e| RequestError::DecodeJson {
+            message: format!("decoding /account response: {e}"),
+        })?;
+        Ok(account)
     }
 
     /// Export the portable local secret material needed to restore this session.
