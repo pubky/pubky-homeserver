@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HttpMethod(pub Method);
 
+impl HttpMethod {
+    /// Whether a request with `method` falls under a limit configured with
+    /// this method.
+    ///
+    /// A `GET` limit also covers `HEAD`, whether or not the route serves
+    /// `HEAD`: axum serves it on `GET` routes with the same handler by
+    /// default, so the limit would otherwise be trivially bypassed. A `HEAD`
+    /// limit covers only `HEAD`.
+    pub fn matches(&self, method: &Method) -> bool {
+        self.0 == method || (self.0 == Method::GET && method == Method::HEAD)
+    }
+}
+
 impl From<Method> for HttpMethod {
     fn from(method: Method) -> Self {
         HttpMethod(method)
@@ -66,5 +79,20 @@ mod tests {
 
         let deserialized: HttpMethod = "GET".parse().unwrap();
         assert_eq!(deserialized, http_method);
+    }
+
+    #[test]
+    fn get_limit_also_matches_head() {
+        let get = HttpMethod(Method::GET);
+        assert!(get.matches(&Method::GET));
+        assert!(get.matches(&Method::HEAD));
+        assert!(!get.matches(&Method::POST));
+    }
+
+    #[test]
+    fn head_limit_matches_only_head() {
+        let head = HttpMethod(Method::HEAD);
+        assert!(head.matches(&Method::HEAD));
+        assert!(!head.matches(&Method::GET));
     }
 }
