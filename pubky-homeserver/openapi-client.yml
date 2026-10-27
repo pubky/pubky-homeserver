@@ -327,6 +327,7 @@ paths:
         '404':
           description: Grant not found
   "/account":
+    description: Only GET is supported. Unsupported methods return 405 with Allow set to GET.
     get:
       tags:
       - Account
@@ -339,7 +340,7 @@ paths:
         policy would otherwise let any origin read it with the browser's
         cookie. Disabled users can still read it. Responses are `no-store`
         and vary on `Authorization`. Rate limited to 60 requests per minute
-        per IP by default, for GET and HEAD.
+        per IP by default.
       operationId: getAccount
       security:
       - bearerAuth: []

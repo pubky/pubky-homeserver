@@ -131,13 +131,6 @@ mod tests {
             keys,
             ["created_at", "disabled", "pubky", "quota", "used_bytes"]
         );
-
-        // HEAD carries the same cache headers and no body.
-        let response = server.method(axum::http::Method::HEAD, "/account").await;
-        response.assert_status(StatusCode::OK);
-        response.assert_header(header::CACHE_CONTROL, "no-store");
-        response.assert_header(header::VARY, "Authorization");
-        assert!(response.as_bytes().is_empty());
     }
 
     #[tokio::test]

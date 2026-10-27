@@ -249,7 +249,12 @@ impl Drop for ClientServer {
 fn base() -> Router<AppState> {
     Router::new()
         .route("/", get(root::handler))
-        .route("/account", get(account::get))
+        .route(
+            "/account",
+            get(account::get)
+                .head(reject_allow([Method::GET]))
+                .fallback(reject_allow([Method::GET])),
+        )
         .route(
             "/signup_tokens/{token}",
             get(signup_tokens::get)
@@ -482,12 +487,12 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn signup_token_and_event_stream_reject_unsupported_methods() {
+    async fn get_only_routes_reject_unsupported_methods() {
         let context = AppContext::test().await;
         let router = ClientServer::create_router(context).unwrap();
         let server = TestServer::new(router);
 
-        for path in ["/signup_tokens/invalid", "/events-stream"] {
+        for path in ["/signup_tokens/invalid", "/events-stream", "/account"] {
             for method in [Method::HEAD, Method::DELETE] {
                 let response = server
                     .method(method, path)
