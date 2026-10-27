@@ -471,6 +471,30 @@ mod tests {
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
+    /// A `GET` limit meters `HEAD` requests to the same path too, so an
+    /// exhausted `GET` quota cannot be bypassed with `HEAD`.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn get_limit_counts_head_requests() {
+        let path_limit = PathLimit {
+            path: GlobPattern::new("/download"),
+            method: HttpMethod(Method::GET),
+            quota: "1r/m".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        };
+        let socket = start_server(vec![path_limit]).await;
+        let url = format!("http://{socket}/download");
+        let client = Client::new();
+
+        let get = client.get(&url).send().await.unwrap();
+        let head = client.head(&url).send().await.unwrap();
+
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(head.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
     /// A `429 Too Many Requests` response must carry a `Retry-After: <seconds>` header whose value
     /// reflects the configured quota (here `1r/m`, so callers should wait ~60 seconds) and is at
     /// least one second.

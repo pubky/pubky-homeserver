@@ -381,12 +381,10 @@ mod tests {
         assert_eq!(c.pkdns.dht_bootstrap_nodes, None);
         assert_eq!(c.pkdns.dht_request_timeout_ms, None);
         assert_eq!(c.pkdns.relay_request_timeout_ms, None);
-        assert_eq!(c.drive.rate_limits.len(), 3);
+        assert_eq!(c.drive.rate_limits.len(), 2);
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
         assert_eq!(c.drive.rate_limits[1].path.0, "/account");
         assert_eq!(c.drive.rate_limits[1].method.0, Method::GET);
-        assert_eq!(c.drive.rate_limits[2].path.0, "/account");
-        assert_eq!(c.drive.rate_limits[2].method.0, Method::HEAD);
         assert_eq!(c.default_quotas, DefaultQuotasToml::default());
         assert_eq!(c.storage.default_quota_mb, None);
         assert_eq!(c.storage.backend, StorageConfigToml::FileSystem);
@@ -501,7 +499,7 @@ mod tests {
         let s = "[logging]\nlevel=\"trace\"\nmodule_levels = [ ]";
         let merged: ConfigToml = ConfigToml::from_str_with_defaults(s).unwrap();
         // Default rate limits should be preserved from defaults
-        assert_eq!(merged.drive.rate_limits.len(), 3);
+        assert_eq!(merged.drive.rate_limits.len(), 2);
         assert_eq!(merged.drive.rate_limits[0].path.0, "/signup_tokens/*");
         let expected_logging = Some(LoggingToml {
             level: LogLevel::from_str("trace").unwrap(),

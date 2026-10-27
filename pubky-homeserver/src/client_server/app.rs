@@ -483,7 +483,10 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn signup_token_and_event_stream_reject_unsupported_methods() {
-        let context = AppContext::test().await;
+        // The default IP limit on `/signup_tokens/*` meters HEAD too and
+        // needs the client address a real connection carries, which
+        // `TestServer` requests do not have.
+        let context = AppContext::test_with_config(|c| c.drive.rate_limits.clear()).await;
         let router = ClientServer::create_router(context).unwrap();
         let server = TestServer::new(router);
 

@@ -43,6 +43,8 @@ pubky_client_identity = { mode = "direct" }
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE
+#  A GET limit also applies to HEAD requests on the same path; a separate
+#  HEAD limit is applied in addition to it, not instead of it.
 # `quota` defines the limit in the format $rate"r"/$time_unit (request-count only).
 #  - $rate is a positive integer, max 4'294'967'296.
 #  - $time_unit is either "s" for second, "m" for minute.
@@ -63,17 +65,11 @@ pubky_client_identity = { mode = "direct" }
 # quota = "10r/m"
 # key = "ip"
 #
-# Default: Limit account reads to 60 requests per minute per IP, for GET and
-# HEAD. Each one costs a database lookup on top of authentication.
+# Default: Limit account reads to 60 requests per minute per IP. Each one
+# costs a database lookup on top of authentication.
 # [[drive.rate_limits]]
 # path = "/account"
 # method = "GET"
-# quota = "60r/m"
-# key = "ip"
-#
-# [[drive.rate_limits]]
-# path = "/account"
-# method = "HEAD"
 # quota = "60r/m"
 # key = "ip"
 #

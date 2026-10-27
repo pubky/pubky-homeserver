@@ -19,7 +19,7 @@ use super::extract_ip::{extract_ip, MissingClientAddress};
 use super::CLEANUP_INTERVAL_SECS;
 use crate::client_server::middleware::request_tenant::RequestTenant;
 use axum::body::Body;
-use axum::http::Request;
+use axum::http::{Method, Request};
 
 pub(super) type KeyedRateLimiter = RateLimiter<LimitKey, DashMapStateStore<LimitKey>, QuantaClock>;
 
@@ -136,6 +136,10 @@ impl LimitTuple {
     }
 
     /// Check if the request matches the limit.
+    ///
+    /// A `GET` limit also matches `HEAD`, whether or not the route serves
+    /// `HEAD`: axum serves it on `GET` routes with the same handler by
+    /// default, so the limit would otherwise be trivially bypassed.
     pub fn is_match(&self, req: &Request<Body>) -> bool {
         let path = req
             .extensions()
@@ -143,7 +147,8 @@ impl LimitTuple {
             .and_then(RequestTenant::storage_path)
             .map_or(req.uri().path(), |path| path.as_str());
         let glob_match = self.limit.path.is_match(path);
-        let method_match = self.limit.method.0 == req.method();
+        let method_match = self.limit.method.0 == req.method()
+            || (self.limit.method.0 == Method::GET && req.method() == Method::HEAD);
         glob_match && method_match
     }
 }
@@ -151,6 +156,43 @@ impl LimitTuple {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::quota::{GlobPattern, HttpMethod};
+
+    fn limit_tuple(method: Method) -> LimitTuple {
+        LimitTuple::new(PathLimit {
+            path: GlobPattern::new("/account"),
+            method: HttpMethod(method),
+            quota: "1r/m".parse().unwrap(),
+            key: LimitKeyType::Ip,
+            burst: None,
+            whitelist: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    fn request(method: Method, path: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_limit_also_matches_head() {
+        let limit = limit_tuple(Method::GET);
+        assert!(limit.is_match(&request(Method::GET, "/account")));
+        assert!(limit.is_match(&request(Method::HEAD, "/account")));
+        assert!(!limit.is_match(&request(Method::POST, "/account")));
+        assert!(!limit.is_match(&request(Method::GET, "/other")));
+    }
+
+    #[tokio::test]
+    async fn head_limit_matches_only_head() {
+        let limit = limit_tuple(Method::HEAD);
+        assert!(limit.is_match(&request(Method::HEAD, "/account")));
+        assert!(!limit.is_match(&request(Method::GET, "/account")));
+    }
 
     #[tokio::test]
     async fn test_pool_same_rate_shares_limiter() {
