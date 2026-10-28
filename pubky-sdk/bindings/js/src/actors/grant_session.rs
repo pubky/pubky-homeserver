@@ -71,7 +71,7 @@ impl GrantSession {
     /// Fetch this user's account: storage used, whether it is disabled, and
     /// the quota that applies.
     ///
-    /// Requires a session that can read all storage (`/:r` or `/:rw`).
+    /// Requires read permission on the root scope (`/:r`, `/:rw`, ...).
     /// Path-scoped sessions surface the homeserver `403` as the standard
     /// request error.
     ///

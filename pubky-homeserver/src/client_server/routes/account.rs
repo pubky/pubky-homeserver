@@ -26,10 +26,10 @@ const VARY_AUTHORIZATION: HeaderValue = HeaderValue::from_static("Authorization"
 /// cookie-authenticated read would let any origin fetch the signed-in user's
 /// account with the browser's cookie.
 ///
-/// Requires read access to all storage (`/:r` or `/:rw`): account state is
-/// not scoped to any path, so a scoped app has no claim to it, and a read
-/// needs no write access. Disabled users can still read it, which is where
-/// they learn why their writes are refused.
+/// Requires read permission on the root scope (`/:r`, `/:rw`, ...): account
+/// state is not scoped to any path, so a scoped app has no claim to it, and a
+/// read needs no write access. Disabled users can still read it, which is
+/// where they learn why their writes are refused.
 pub async fn get(
     State(state): State<AppState>,
     auth: AuthSession,

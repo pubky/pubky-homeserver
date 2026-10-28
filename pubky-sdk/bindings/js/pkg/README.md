@@ -183,7 +183,7 @@ const caps = session.info.capabilities; // -> string[] permissions and paths
 
 const storage = session.storage; // -> This User's storage API (absolute paths)
 
-// With a grant session that can read all storage (`/:r` or `/:rw`):
+// With a grant session that has read permission on `/` (`/:r`, `/:rw`, ...):
 // storage used and the quota that applies.
 const account = await session.grant.account();
 console.log(account.usedBytes, account.quota.effective.storageQuotaMb);
