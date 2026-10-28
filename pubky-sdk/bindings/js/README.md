@@ -15,7 +15,7 @@ Prerequisites:
 
 - Rust toolchain (via [`rustup`](https://rustup.rs/)).
 - Wasm-pack `cargo install wasm-pack`.
-- Node.js v20+.
+- Node.js v24 for the development tools and Electron browser tests.
 
 Then from `pubky-sdk/bindings/js/pkg`:
 
