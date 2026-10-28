@@ -59,7 +59,7 @@ governor = "0.10"
 fast-glob = "1"
 tokio-util = "0.7"
 percent-encoding.workspace = true
-serde_valid = "2"
+serde_valid = "3"
 opendal = { version = "0.59.4", features = ["services-fs"] }
 opendal-http-transport-reqwest = "0.59.4"
 infer = "0.22"
@@ -85,9 +85,9 @@ async-trait.workspace = true
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }
 pubky_test_utils.workspace = true
-opentelemetry = "0.32"
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics"] }
-opentelemetry-prometheus = "0.32"
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "metrics"] }
+opentelemetry-prometheus = "0.33"
 prometheus = "0.14"
 jsonwebtoken = "9"
 chrono = { version = "0.4", features = ["serde"] }
