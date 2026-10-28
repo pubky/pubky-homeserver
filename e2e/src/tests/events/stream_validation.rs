@@ -293,7 +293,9 @@ async fn events_stream_validation_errors() {
 }
 
 /// All three event APIs paginate by numeric event ID and reject anything else
-/// with 400, including legacy z-base-32 timestamp cursors.
+/// with 400. The route parsers' unit tests cover the other malformed shapes
+/// (negative, overflowing); this only checks each endpoint wires the rejection
+/// and the pagination through.
 #[tokio::test]
 #[pubky_testnet::test]
 async fn event_apis_validate_numeric_cursors() {
@@ -321,15 +323,13 @@ async fn event_apis_validate_numeric_cursors() {
         format!("pubky://{user}/pub/cursor-second.txt"),
     ];
 
+    // The testnet starts from an empty database and signup emits no events,
+    // so the first PUT above is event id 1.
     for (cursor, expected_status, expected_events) in [
         ("0", StatusCode::OK, &event_uris[..]),
         ("1", StatusCode::OK, &event_uris[1..]),
-        ("999999999", StatusCode::OK, &[]),
-        ("1111111111111", StatusCode::OK, &[]),
+        // A legacy z-base-32 timestamp cursor.
         ("yyyyyyyyyyyyy", StatusCode::BAD_REQUEST, &[]),
-        ("abc123xyz", StatusCode::BAD_REQUEST, &[]),
-        ("-1", StatusCode::BAD_REQUEST, &[]),
-        ("18446744073709551616", StatusCode::BAD_REQUEST, &[]),
     ] {
         let requests = [
             (
