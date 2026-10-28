@@ -687,11 +687,12 @@ impl SessionCredential for GrantCredential {
         bearer: &str,
         client: &PubkyHttpClient,
     ) -> Result<bool> {
-        let Some(coordinator) = self.coordinator().await else {
-            return Ok(false);
-        };
-        self.refresh_shared(client, coordinator.as_ref(), Some(bearer))
-            .await?;
+        if let Some(coordinator) = self.coordinator().await {
+            self.refresh_shared(client, coordinator.as_ref(), Some(bearer))
+                .await?;
+        } else {
+            self.refresh_local(client, Some(bearer)).await?;
+        }
         Ok(true)
     }
 

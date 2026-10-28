@@ -54,9 +54,10 @@ independent sessions: those clients can invalidate each other's bearers.
 Browser applications should use the browser store. Requests made with a manually
 copied bearer or by older SDKs are outside this coordination.
 
-Native session-managed requests can recover from an unexpected 401. The SDK
-coordinates refresh across clones of the same credential and retries the
-original replayable HTTP request once with the refreshed bearer. It does not
+Native session-managed requests and WASM Blob uploads with local grants can
+recover from an unexpected 401. The SDK coordinates refresh across clones of
+the same credential and retries the original replayable HTTP request once with
+the refreshed bearer. It does not
 replay non-cloneable bodies, transport failures, other HTTP errors, or a second
 401. A rejected refresh is returned as `Error::CredentialRefresh`, including
 the HTTP status when available; a revoked grant cannot regain access this way.

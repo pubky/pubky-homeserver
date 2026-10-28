@@ -98,7 +98,7 @@ pub(crate) trait SessionCredential: Debug + Send + Sync {
         Ok((self.attach(rb, client).await?, None))
     }
 
-    /// Recover a rejected shared bearer. Other credentials do not replay requests.
+    /// Recover a rejected grant bearer. Other credentials do not replay requests.
     #[cfg(target_arch = "wasm32")]
     async fn refresh_rejected_bearer(
         &self,

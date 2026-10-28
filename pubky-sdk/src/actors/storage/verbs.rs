@@ -137,7 +137,7 @@ impl SessionStorage {
         Ok((request.build()?, self.client.max_error_body_bytes, lease))
     }
 
-    /// Recover a shared bearer after a Blob PUT receives HTTP 401.
+    /// Recover a grant bearer after a Blob PUT receives HTTP 401.
     ///
     /// Release the request's session lease before calling this method.
     ///

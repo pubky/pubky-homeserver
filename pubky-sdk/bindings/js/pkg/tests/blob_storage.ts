@@ -12,6 +12,137 @@ import {
 const HOMESERVER = PublicKey.from("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo");
 const PATH: Path = "/priv/blob-upload/value.bin";
 
+for (const locked of [false, true]) {
+  test(`putBlob recovers a locally restored grant bearer: locked ${locked}`, async (t) => {
+    const sdk = Pubky.testnet();
+    const signer = sdk.signer(Keypair.random());
+    await signer.signup(HOMESERVER, await createSignupToken());
+    const session = await signer.signin("blob-recovery.test");
+    const lock = locked ? await session.storage.lock(PATH, 30) : undefined;
+    const exported = await session.exportLocalSecret();
+    await sdk.restoreSession(exported);
+    const originalFetch = globalThis.fetch;
+    const statuses: number[] = [];
+    const requests: Request[] = [];
+    let exchanges = 0;
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.method === "POST" && new URL(request.url).pathname.endsWith("/auth/grant/session")) exchanges++;
+      const upload = request.method === "PUT" ? request.clone() : undefined;
+      const response = await originalFetch(input, init);
+      if (upload) {
+        requests.push(upload);
+        statuses.push(response.status);
+      }
+      return response;
+    };
+    try {
+      const body = new Blob([new Uint8Array([0, 128, 255])]);
+      if (lock) await session.storage.putBlobLocked(lock, body);
+      else await session.storage.putBlob(PATH, body);
+      t.deepEqual(statuses, [401, 201], "confirmed rejection permits exactly one successful retry");
+      t.equal(exchanges, 1, "the local grant refreshes once");
+      t.ok(requests[0].url === requests[1].url, "the original path is retained");
+      t.ok(requests[0].headers.get("if") === requests[1].headers.get("if"), "the original lock condition is retained");
+      t.equal(requests[0].headers.has("if"), locked, "only the locked upload has a condition");
+      for (const request of requests) {
+        t.deepEqual(new Uint8Array(await request.arrayBuffer()), new Uint8Array(await body.arrayBuffer()), "sent bytes match");
+      }
+      t.deepEqual(await session.storage.getBytes(PATH), new Uint8Array(await body.arrayBuffer()), "stored bytes match");
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.fail(`local Blob recovery rejected with ${error.name}, status ${getStatusCode(error)}`);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (lock) await session.storage.unlock(lock);
+      await session.signout();
+    }
+    t.end();
+  });
+}
+
+for (const rejection of [401, 403, 423, 503, "transport"] as const) {
+  test(`putBlob bounds replay after ${rejection}`, async (t) => {
+    const sdk = Pubky.testnet();
+    const signer = sdk.signer(Keypair.random());
+    await signer.signup(HOMESERVER, await createSignupToken());
+    const session = await signer.signin("blob-recovery.test");
+    const originalFetch = globalThis.fetch;
+    let puts = 0;
+    let exchanges = 0;
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.method === "PUT") {
+        puts++;
+        if (rejection === "transport") throw new TypeError("controlled transport failure");
+        const response = new Response(null, { status: rejection });
+        Object.defineProperty(response, "url", { value: request.url });
+        return response;
+      }
+      if (request.method === "POST" && new URL(request.url).pathname.endsWith("/auth/grant/session")) exchanges++;
+      return originalFetch(input, init);
+    };
+    try {
+      await session.storage.putBlob(PATH, new Blob(["must not write"])).then(
+        () => t.fail("rejected upload must fail"),
+        (error) => {
+          assertPubkyError(t, error);
+          if (rejection !== "transport") t.equal(getStatusCode(error), rejection, "rejection is retained");
+        },
+      );
+      t.equal(puts, rejection === 401 ? 2 : 1, "only confirmed 401 permits one retry");
+      t.equal(exchanges, rejection === 401 ? 1 : 0, "other outcomes never refresh credentials");
+      t.equal(await session.storage.exists(PATH), false, "no file was written");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await session.signout();
+    }
+    t.end();
+  });
+}
+
+for (const refreshStatus of [401, 503]) {
+  test(`putBlob does not replay after grant refresh rejects with ${refreshStatus}`, async (t) => {
+    const sdk = Pubky.testnet();
+    const signer = sdk.signer(Keypair.random());
+    await signer.signup(HOMESERVER, await createSignupToken());
+    const session = await signer.signin("blob-recovery.test");
+    const originalFetch = globalThis.fetch;
+    let puts = 0;
+    let exchanges = 0;
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      let status: number;
+      if (request.method === "PUT") {
+        puts++;
+        status = 401;
+      } else if (request.method === "POST" && new URL(request.url).pathname.endsWith("/auth/grant/session")) {
+        exchanges++;
+        status = refreshStatus;
+      } else return originalFetch(input, init);
+      const response = new Response(null, { status });
+      Object.defineProperty(response, "url", { value: request.url });
+      return response;
+    };
+    try {
+      await session.storage.putBlob(PATH, new Blob(["must not replay"])).then(
+        () => t.fail("failed refresh must reject"),
+        (error) => {
+          assertPubkyError(t, error);
+          t.equal(error.name, "CredentialRefreshError", "typed refresh failure propagates");
+          t.equal(getStatusCode(error), refreshStatus, "refresh status is retained");
+        },
+      );
+      t.equal(puts, 1, "failed refresh never repeats the upload");
+      t.equal(exchanges, 1, "refresh is attempted once");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await session.signout();
+    }
+    t.end();
+  });
+}
+
 type Session = Awaited<ReturnType<ReturnType<Pubky["signer"]>["signin"]>>;
 type _PutBlob = Assert<IsExact<Parameters<Session["storage"]["putBlob"]>, [Path, Blob]>>;
 type _PutBlobLocked = Assert<IsExact<Parameters<Session["storage"]["putBlobLocked"]>, [StorageLock, Blob]>>;
