@@ -1,6 +1,6 @@
 name: Lint
 
-# Formatting, lints and the minimum supported Rust version.
+# Formatting, lints, dependency checks and the minimum supported Rust version.
 on:
   pull_request:
   push:
@@ -15,6 +15,16 @@ concurrency:
 # The Rust caches are saved only on main. Pull requests restore them without
 # saving, so they don't evict the caches of main from the repository's cache.
 jobs:
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - name: Check licenses, sources, advisories, and bans
+        run: cargo deny check sources licenses advisories bans
+
   msrv:
     name: msrv
     runs-on: ubuntu-latest
