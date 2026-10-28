@@ -10,7 +10,6 @@ use pubky_common::{
     auth::grant::GrantClaims,
     auth::grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
     auth::jws::GrantId,
-    capabilities::Action,
     crypto::PublicKey,
 };
 
@@ -234,20 +233,6 @@ impl GrantAuthService {
             Ok(())
         } else {
             Err(AuthServiceError::RootCapabilityRequired)
-        }
-    }
-
-    /// Check that the session can read all of the user's storage (`/:r` or
-    /// `/:rw`), the bar for reads of account-wide state.
-    pub fn require_root_read_capability(auth: &AuthSession) -> Result<(), AuthServiceError> {
-        if auth
-            .capabilities()
-            .iter()
-            .any(|cap| cap.scope().is_root() && cap.actions().contains(&Action::Read))
-        {
-            Ok(())
-        } else {
-            Err(AuthServiceError::RootReadCapabilityRequired)
         }
     }
 
@@ -1163,29 +1148,6 @@ mod tests {
         );
         let err = GrantAuthService::require_root_capability(&auth).unwrap_err();
         assert!(matches!(err, AuthServiceError::RootCapabilityRequired));
-    }
-
-    // ── require_root_read_capability ────────────────────────────────
-
-    #[test]
-    fn require_root_read_capability_passes_with_root_read_or_root() {
-        for cap in [Capability::read("/").unwrap(), Capability::root()] {
-            let auth = session_with(Capabilities::builder().cap(cap).finish());
-            assert!(GrantAuthService::require_root_read_capability(&auth).is_ok());
-        }
-    }
-
-    #[test]
-    fn require_root_read_capability_fails_without_root_read() {
-        for cap in [
-            Capability::write("/").unwrap(),
-            Capability::encryption_keys("/").unwrap(),
-            Capability::read_write("/pub/scoped.app/").unwrap(),
-        ] {
-            let auth = session_with(Capabilities::builder().cap(cap).finish());
-            let err = GrantAuthService::require_root_read_capability(&auth).unwrap_err();
-            assert!(matches!(err, AuthServiceError::RootReadCapabilityRequired));
-        }
     }
 
     #[tokio::test]

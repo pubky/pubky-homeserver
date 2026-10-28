@@ -7,7 +7,10 @@ use axum::{
     Json,
 };
 
-use crate::client_server::auth::{AuthSession, GrantAuthService};
+use pubky_common::capabilities::Action;
+use pubky_common::StoragePath;
+
+use crate::client_server::auth::AuthSession;
 use crate::client_server::cache_policy::CACHE_CONTROL_NO_STORE;
 use crate::client_server::AppState;
 use crate::shared::{HttpError, HttpResult, UserItem};
@@ -34,7 +37,14 @@ pub async fn get(
     let AuthSession::Grant(_) = &auth else {
         return Err(HttpError::unauthorized());
     };
-    GrantAuthService::require_root_read_capability(&auth)?;
+    if !auth
+        .capabilities()
+        .grants(&StoragePath::root(), Action::Read)
+    {
+        return Err(HttpError::forbidden_with_message(
+            "Read access to all storage required",
+        ));
+    }
     let user = state
         .context
         .user_service

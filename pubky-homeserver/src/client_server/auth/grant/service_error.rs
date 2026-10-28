@@ -74,10 +74,6 @@ pub enum AuthServiceError {
     #[error("Root capability required")]
     RootCapabilityRequired,
 
-    /// Session cannot read all of the user's storage (`/:r` or `/:rw`).
-    #[error("Read access to all storage required")]
-    RootReadCapabilityRequired,
-
     /// Database or infrastructure error.
     #[error("Internal error: {0}")]
     Internal(#[from] sqlx::Error),

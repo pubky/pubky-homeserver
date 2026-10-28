@@ -379,6 +379,24 @@ impl Capabilities {
         self.0.contains(capability)
     }
 
+    /// Whether any capability covers `path` with `action`.
+    ///
+    /// ```
+    /// use pubky_common::capabilities::{Action, Capabilities};
+    /// use pubky_common::storage_path::StoragePath;
+    ///
+    /// let caps: Capabilities = "/pub/app/:r".parse().unwrap();
+    /// let file = StoragePath::new("/pub/app/file.txt").unwrap();
+    /// assert!(caps.grants(&file, Action::Read));
+    /// assert!(!caps.grants(&file, Action::Write));
+    /// assert!(!caps.grants(&StoragePath::root(), Action::Read));
+    /// ```
+    pub fn grants(&self, path: &StoragePath, action: Action) -> bool {
+        self.0
+            .iter()
+            .any(|cap| cap.scope_covers_path(path) && cap.actions.contains(&action))
+    }
+
     /// Returns `true` if the list is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -975,5 +993,24 @@ mod tests {
         assert!(root.scope_covers_path(&StoragePath::root()));
         assert!(root.scope_covers_path(&path("/pub/anything")));
         assert!(root.scope_covers_path(&path("/dav/some/file.txt")));
+    }
+
+    #[test]
+    fn grants_requires_a_covering_scope_with_the_action() {
+        let root = StoragePath::root();
+        let caps = |s: &str| s.parse::<Capabilities>().unwrap();
+
+        // Only a `/` scope covers `/` itself, with the action asked for.
+        assert!(caps("/:r").grants(&root, Action::Read));
+        assert!(caps("/:rw").grants(&root, Action::Read));
+        assert!(!caps("/:w").grants(&root, Action::Read));
+        assert!(!caps("/:e").grants(&root, Action::Read));
+        assert!(!caps("/pub/app/:rw").grants(&root, Action::Read));
+
+        // Separate entries combine, and a scope covers the paths inside it.
+        let split = caps("/pub/app/:r,/pub/app/:w");
+        assert!(split.grants(&path("/pub/app/file"), Action::Write));
+        assert!(!split.grants(&path("/pub/other"), Action::Read));
+        assert!(!Capabilities::default().grants(&root, Action::Read));
     }
 }
