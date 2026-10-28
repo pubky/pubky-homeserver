@@ -1,7 +1,11 @@
 [workspace]
 members = [
   "homeservercli",
-  "pubky-*",
+  # List members explicitly so Dependabot can update their dependencies.
+  "pubky-common",
+  "pubky-homeserver",
+  "pubky-sdk",
+  "pubky-testnet",
   "pubky-sdk/bindings/js",
   "e2e",
   "examples/rust",
