@@ -168,7 +168,7 @@ impl AuthToken {
 
     /// Serialize this AuthToken to its canonical binary representation.
     pub fn serialize(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).unwrap()
+        postcard::to_extend(self, Vec::new()).unwrap()
     }
 
     /// Deserialize an AuthToken from its canonical binary representation.

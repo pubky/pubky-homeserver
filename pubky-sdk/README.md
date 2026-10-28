@@ -161,7 +161,7 @@ Use a shared `Pubky` (via cloning it, passing down as argument or behind `OnceCe
 
 - `Pubky` - facade, always start here! Owns the transport and constructs actors.
 - `PubkySigner` - local key holder. Can `signup`, `signin`, approve QR auth, publish PKDNS.
-- `PubkySession` - authenticated “as me” handle. Exposes session-scoped storage.
+- `PubkySession` - authenticated “as me” handle. Exposes session-scoped storage. `session.as_grant()` adds grant-only calls such as `account()` for storage use and quota (root sessions).
 - `GrantManager` - account-level grant listing and revocation using an authenticated root session.
 - `PublicStorage` - unauthenticated reads of others’ public data.
 - `Pkdns` - resolve/publish `_pubky` records.
@@ -521,6 +521,15 @@ panics on grant sessions.
 > its encryption keys. Anyone holding it can authenticate within the granted
 > capabilities until the grant expires or is revoked. The encryption keys stay
 > usable after that. Store it securely and never log it.
+
+## Request errors
+
+[`errors::RequestError::kind`] classifies a failure as an HTTP status, timeout,
+connection, body, decoding or invalid-request error, or `Other` when the
+transport gives no more detail (browser Fetch exposes less than native). The
+category carries no URL, body or credentials; the original error keeps the
+diagnostics. A category describes what was observed, not whether a retry is
+safe: a timeout does not prove a write was not committed.
 
 ## Example code
 

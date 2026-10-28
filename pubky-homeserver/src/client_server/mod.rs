@@ -12,6 +12,8 @@ mod client_identity;
 mod middleware;
 mod query_params;
 pub(crate) mod routes;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 pub use app::create_app;
 pub use app::{ClientServer, ClientServerBuildError};

@@ -1,3 +1,4 @@
+pub mod account;
 pub mod auth_flow;
 pub(crate) mod browser_grant_key_store;
 mod browser_session;

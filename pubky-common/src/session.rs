@@ -1,6 +1,6 @@
 //! Pubky homeserver session types.
 
-use postcard::{from_bytes, to_allocvec};
+use postcard::{from_bytes, to_extend};
 use serde::{Deserialize, Serialize};
 
 extern crate alloc;
@@ -84,7 +84,7 @@ impl CookieSessionRecord {
 
     /// Serialize this session to its canonical binary representation.
     pub fn serialize(&self) -> Vec<u8> {
-        to_allocvec(self).expect("CookieSessionRecord::serialize")
+        to_extend(self, Vec::new()).expect("CookieSessionRecord::serialize")
     }
 
     /// Deserialize this session from its canonical binary representation.

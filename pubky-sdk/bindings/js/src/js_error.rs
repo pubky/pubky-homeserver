@@ -10,7 +10,7 @@ use wasm_bindgen::describe::WasmDescribe;
 use wasm_bindgen::prelude::*;
 
 use pkarr::errors::PublicKeyError;
-use pubky::errors::{BuildError, RequestError};
+use pubky::errors::{BuildError, RequestErrorKind};
 use pubky_common::auth::Error as AuthTokenError;
 use pubky_common::capabilities::{CapabilitiesParseError, CapabilityParseError};
 use pubky_common::recovery_file::Error as RecoveryFileError;
@@ -48,7 +48,7 @@ where
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub enum PubkyErrorName {
-    /// A network or server request failed. Check the network connection or retry.
+    /// A request failed. Inspect its reason and status; retry safety is operation-specific.
     RequestError,
     /// A grant credential refresh request failed while preparing or retrying a request.
     CredentialRefreshError,
@@ -89,7 +89,7 @@ impl Display for PubkyErrorName {
 ///
 /// @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
 /// @property message - A human-readable, descriptive error message suitable for logging.
-/// @property data - An optional payload containing structured context for an error. For a `RequestError`, this may contain an object with the HTTP status code, e.g., `{ statusCode: 404 }`.
+/// @property data - Optional structured context. For a `RequestError` it is a {@link RequestErrorData}, e.g. `{ reason: "Http", statusCode: 404 }`.
 ///
 /// @example
 /// ```typescript
@@ -97,14 +97,11 @@ impl Display for PubkyErrorName {
 ///   await client.signup(...);
 /// } catch (e) {
 ///   const error = e as PubkyError;
-///   if (
-///     error.name === 'RequestError' &&
-///     typeof error.data === 'object' &&
-///     error.data !== null &&
-///     'statusCode' in error.data &&
-///     (error.data as { statusCode?: number }).statusCode === 404
-///   ) {
-///     // Handle not found...
+///   if (error.name === 'RequestError') {
+///     const data = error.data as RequestErrorData;
+///     if (data.statusCode === 404) {
+///       // Handle not found...
+///     }
 ///   }
 /// }
 /// ```
@@ -122,6 +119,24 @@ pub struct PubkyError {
 
 // --- Constructors for Ergonomics ---
 impl PubkyError {
+    pub(crate) fn request(message: impl Display, kind: RequestErrorKind) -> Self {
+        let (reason, status) = match kind {
+            RequestErrorKind::Http { status } => ("Http", Some(status)),
+            RequestErrorKind::Timeout => ("Timeout", None),
+            RequestErrorKind::Connection => ("Connection", None),
+            RequestErrorKind::Body => ("Body", None),
+            RequestErrorKind::Decode => ("Decode", None),
+            RequestErrorKind::InvalidRequest => ("InvalidRequest", None),
+            _ => ("Other", None),
+        };
+        let error =
+            Self::new(PubkyErrorName::RequestError, message).with_data(json!({ "reason": reason }));
+        match status {
+            Some(status) => error.with_status(status),
+            None => error,
+        }
+    }
+
     /// Creates a new error with a name and message.
     pub fn new<T: Display>(name: PubkyErrorName, message: T) -> Self {
         Self {
@@ -167,7 +182,7 @@ const TS_PUBKY_ERROR: &str = r#"/**
  *
  * @property name - A machine-readable error code from {@link PubkyErrorName}. Use this for programmatic error handling.
  * @property message - A human-readable, descriptive error message suitable for logging.
- * @property data - An optional payload containing structured context for an error. For a `RequestError`, this may contain an object with the HTTP status code, e.g., `{ statusCode: 404 }`.
+ * @property data - Optional structured context. For a `RequestError` it is a {@link RequestErrorData}, e.g. `{ reason: "Http", statusCode: 404 }`.
  *
  * @example
  * ```typescript
@@ -175,14 +190,11 @@ const TS_PUBKY_ERROR: &str = r#"/**
  *   await client.signup(...);
  * } catch (e) {
  *   const error = e as PubkyError;
- *   if (
- *     error.name === "RequestError" &&
- *     typeof error.data === "object" &&
- *     error.data !== null &&
- *     "statusCode" in error.data &&
- *     (error.data as { statusCode?: number }).statusCode === 404
- *   ) {
- *     // Handle not found...
+ *   if (error.name === "RequestError") {
+ *     const data = error.data as RequestErrorData;
+ *     if (data.statusCode === 404) {
+ *       // Handle not found...
+ *     }
  *   }
  * }
  * ```
@@ -191,6 +203,27 @@ export interface PubkyError extends Error {
   name: PubkyErrorName;
   message: string;
   data?: unknown;
+}
+
+/** The classified cause of a `RequestError`, carried in `PubkyError.data.reason`. */
+export type RequestErrorReason =
+  | "Http"
+  | "Timeout"
+  | "Connection"
+  | "Body"
+  | "Decode"
+  | "InvalidRequest"
+  | "Other";
+
+/**
+ * `PubkyError.data` for a `RequestError`.
+ *
+ * `statusCode` is present when `reason` is `"Http"`. A reason describes the
+ * failure, not whether retrying is safe.
+ */
+export interface RequestErrorData {
+  reason: RequestErrorReason;
+  statusCode?: number;
 }"#;
 
 // --- Rust-to-JavaScript pubky::Error Conversion Pipeline ---
@@ -199,7 +232,7 @@ export interface PubkyError extends Error {
 impl From<pubky::Error> for PubkyError {
     fn from(err: pubky::Error) -> Self {
         let name = match &err {
-            pubky::Error::Request(_) => PubkyErrorName::RequestError,
+            pubky::Error::Request(request) => return Self::request(&err, request.kind()),
             pubky::Error::CredentialRefresh(_) => PubkyErrorName::CredentialRefreshError,
             pubky::Error::Parse(_) => PubkyErrorName::InvalidInput,
             pubky::Error::Authentication(_) => PubkyErrorName::AuthenticationError,
@@ -208,17 +241,13 @@ impl From<pubky::Error> for PubkyError {
         };
 
         // Only errors that carry an HTTP status populate `data.statusCode`.
-        let status = match &err {
-            pubky::Error::Request(RequestError::Server { status, .. })
-            | pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
-                status: Some(status),
-            }) => Some(status.as_u16()),
-            _ => None,
-        };
-        match status {
-            Some(status) => Self::new_with_status(name, &err, status),
-            None => Self::new(name, err),
+        if let pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
+            status: Some(status),
+        }) = &err
+        {
+            return Self::new_with_status(name, &err, status.as_u16());
         }
+        Self::new(name, err)
     }
 }
 
@@ -322,16 +351,7 @@ impl From<serde_wasm_bindgen::Error> for PubkyError {
 /// Converts a `reqwest::Error` into a `PubkyError`.
 impl From<reqwest::Error> for PubkyError {
     fn from(err: reqwest::Error) -> Self {
-        // Try to propagate status when present
-        if let Some(status) = err.status() {
-            PubkyError::new_with_status(
-                PubkyErrorName::RequestError,
-                err.to_string(),
-                status.as_u16(),
-            )
-        } else {
-            PubkyError::new(PubkyErrorName::RequestError, err.to_string())
-        }
+        Self::request(&err, RequestErrorKind::from_transport(&err))
     }
 }
 
@@ -385,6 +405,77 @@ impl WasmDescribe for PubkyError {
 mod tests {
     use super::*;
     use pubky::custom_pop::CustomPopError;
+    use pubky::errors::RequestError;
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn request_metadata_covers_all_categories() {
+        for (kind, reason) in [
+            (RequestErrorKind::Timeout, "Timeout"),
+            (RequestErrorKind::Connection, "Connection"),
+            (RequestErrorKind::Body, "Body"),
+            (RequestErrorKind::Decode, "Decode"),
+            (RequestErrorKind::InvalidRequest, "InvalidRequest"),
+            (RequestErrorKind::Other, "Other"),
+        ] {
+            let error = PubkyError::request("request failed", kind);
+            assert_eq!(error.name.as_str(), "RequestError");
+            assert_eq!(error.message, "request failed");
+            assert_eq!(error.data, Some(json!({ "reason": reason })));
+        }
+        let source = reqwest::Client::new().get("not a URL").build().unwrap_err();
+        let message = source.to_string();
+        let error = PubkyError::from(source);
+        assert_eq!(error.name.as_str(), "RequestError");
+        assert_eq!(error.message, message);
+        assert_eq!(error.data, Some(json!({ "reason": "InvalidRequest" })));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn request_errors_preserve_names_status_and_categories() {
+        for (error, expected) in [
+            (
+                RequestError::Server {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    message: "unavailable".into(),
+                },
+                json!({ "reason": "Http", "statusCode": 503 }),
+            ),
+            (
+                RequestError::Validation {
+                    message: "invalid path".into(),
+                },
+                json!({ "reason": "InvalidRequest" }),
+            ),
+            (
+                RequestError::DecodeJson {
+                    message: "invalid response".into(),
+                },
+                json!({ "reason": "Decode" }),
+            ),
+            (
+                RequestError::Transport(
+                    reqwest::Client::new().get("not a URL").build().unwrap_err(),
+                ),
+                json!({ "reason": "InvalidRequest" }),
+            ),
+        ] {
+            let source = pubky::Error::Request(error);
+            let message = source.to_string();
+            let actual = PubkyError::from(source);
+            assert_eq!(actual.name.as_str(), "RequestError");
+            assert_eq!(actual.message, message);
+            assert_eq!(actual.data, Some(expected.clone()));
+            #[cfg(target_arch = "wasm32")]
+            {
+                let value = JsValue::from(actual);
+                let data = Reflect::get(&value, &JsValue::from_str("data")).unwrap();
+                let data: Value = serde_wasm_bindgen::from_value(data).unwrap();
+                assert_eq!(data, expected);
+            }
+        }
+    }
 
     #[test]
     fn custom_proof_errors_preserve_javascript_names_and_reasons() {

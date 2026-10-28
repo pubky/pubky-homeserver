@@ -351,6 +351,96 @@ paths:
       responses:
         '204':
           description: File deleted
+  "/users":
+    get:
+      tags:
+      - Admin
+      summary: List users
+      description: |
+        Paginated list of users with their storage usage and quota.
+        Supports filtering by state (`all`, `enabled`, `disabled`) and
+        sorting by `created_at` or `used_bytes`.
+      operationId: listUsers
+      security:
+      - adminPassword: []
+      parameters:
+      - name: limit
+        in: query
+        description: Maximum number of users to return per page.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      - name: cursor
+        in: query
+        description: |-
+          Pagination cursor (the `next_cursor` of a previous response with the same
+          `state`, `sort_by` and `reverse`). Pages continue from the cursor user's
+          current position, so they may shift if that user's `used_bytes` changes
+          between requests.
+        schema:
+          type: string
+      - name: state
+        in: query
+        description: Filter by account state.
+        schema:
+          type: string
+          enum:
+          - all
+          - enabled
+          - disabled
+          default: all
+      - name: sort_by
+        in: query
+        description: Column to order by. Ties are broken by signup order.
+        schema:
+          type: string
+          enum:
+          - created_at
+          - used_bytes
+          default: created_at
+      - name: reverse
+        in: query
+        description: Descending order.
+        schema:
+          type: boolean
+          default: false
+      responses:
+        '200':
+          description: Paginated list of users
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/UsersResponse"
+        '400':
+          description: Invalid query parameters (bad or unknown cursor, unknown
+            state or sort_by, limit=0)
+        '401':
+          description: Missing or invalid admin password
+  "/users/{pubkey}":
+    get:
+      tags:
+      - Admin
+      summary: Get user
+      description: One user in the same shape as the `GET /users` items.
+      operationId: getUser
+      security:
+      - adminPassword: []
+      parameters:
+      - "$ref": "#/components/parameters/AdminPubkey"
+      responses:
+        '200':
+          description: User
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/UserItem"
+        '400':
+          description: Invalid pubkey format
+        '401':
+          description: Missing or invalid admin password
+        '404':
+          description: User not found
   "/users/{pubkey}/disable":
     post:
       tags:
@@ -537,14 +627,14 @@ components:
           description: The signup token string.
         created_at:
           type: string
-          format: date-time
-          description: When the token was created.
+          description: When the token was created, as an ISO 8601 date and time
+            without a UTC offset (e.g. `2026-10-22T10:11:12.123456`).
         used_at:
           type:
           - string
           - 'null'
-          format: date-time
-          description: When the token was used, or `null` if unused.
+          description: When the token was used, in the same format as `created_at`,
+            or `null` if unused.
         used_by:
           type:
           - string
@@ -703,6 +793,48 @@ components:
           - 'null'
           items:
             type: string
+    UsersResponse:
+      type: object
+      required:
+      - items
+      - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            "$ref": "#/components/schemas/UserItem"
+        next_cursor:
+          type:
+          - string
+          - 'null'
+          description: Cursor for the next page, or `null` if this is the last page.
+    UserItem:
+      type: object
+      required:
+      - pubky
+      - created_at
+      - disabled
+      - used_bytes
+      - quota
+      properties:
+        pubky:
+          type: string
+          description: z-base-32 public key of the user.
+        created_at:
+          type: string
+          description: When the user signed up, as an ISO 8601 date and time
+            without a UTC offset (e.g. `2026-10-22T10:11:12.123456`).
+        disabled:
+          type: boolean
+          description: Whether the account is disabled.
+        used_bytes:
+          type: integer
+          format: int64
+          description: Bytes of storage currently used.
+        quota:
+          description: Same shape as `GET /users/{pubkey}/quota`.
+          allOf:
+          - "$ref": "#/components/schemas/UserQuotaResponse"
     UserQuotaResponse:
       type: object
       required:
@@ -710,8 +842,9 @@ components:
       - overrides
       properties:
         effective:
-          description: Overrides merged with system defaults. All fields are always
-            present.
+          description: Overrides merged with system defaults. `storage_quota_mb`,
+            `rate_read` and `rate_write` are always present; the burst fields and
+            `allowed_write_paths` only when set.
           allOf:
           - "$ref": "#/components/schemas/UserQuota"
         overrides:

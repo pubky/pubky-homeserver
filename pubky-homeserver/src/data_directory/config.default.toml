@@ -16,6 +16,12 @@ method = "GET"
 quota = "10r/m"
 key = "ip"
 
+[[drive.rate_limits]]
+path = "/account"
+method = "GET"
+quota = "60r/m"
+key = "ip"
+
 [default_quotas]
 
 [storage]

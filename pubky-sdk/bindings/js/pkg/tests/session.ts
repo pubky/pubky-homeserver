@@ -1,6 +1,7 @@
 import test from "tape";
 
 import {
+  AccountInfo,
   AuthFlowKind,
   CookieSession,
   EncryptionKeys,
@@ -199,6 +200,15 @@ test("Session: grant-only view exposes metadata; GrantManager manages grants", a
   t.ok(info.createdAt > 0, "created timestamp is present");
   t.equal(await grant.grantId(), info.grantId, "grantId() matches sessionInfo()");
 
+  const account = await grant.account();
+  t.ok(account instanceof AccountInfo, "root session reads its account");
+  t.equal(account.pubky.z32(), session.info.publicKey.z32(), "account belongs to the user");
+  t.equal(account.disabled, false, "fresh account is enabled");
+  t.equal(account.usedBytes, 0, "fresh account has used no storage");
+  t.ok(account.createdAt.length > 0, "account has a signup time");
+  t.deepEqual(account.quota.overrides, {}, "fresh account has no quota overrides");
+  t.ok("storageQuotaMb" in account.quota.effective, "effective quota is resolved");
+
   const exported = await grant.exportLocalSecret();
   const restored = await sdk.restoreSession(exported);
   const restoredGrant = restored.grant;
@@ -285,6 +295,14 @@ test("Session: non-root grant management calls return homeserver 403", async (t)
     assertPubkyError(t, error, "GrantManager.list throws PubkyError");
     t.equal(error.name, "RequestError", "GrantManager.list maps to RequestError");
     t.equal(getStatusCode(error), 403, "GrantManager.list status code is 403");
+  }
+
+  try {
+    await grant.account();
+    t.fail("non-root grant.account should fail");
+  } catch (error) {
+    assertPubkyError(t, error, "grant.account throws PubkyError");
+    t.equal(getStatusCode(error), 403, "grant.account status code is 403");
   }
 
   try {

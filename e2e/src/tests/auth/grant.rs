@@ -843,21 +843,7 @@ async fn disabled_user() {
         "User should be able to read their own file"
     );
 
-    let admin_socket = server
-        .admin_server()
-        .expect("admin server should be enabled")
-        .listen_socket();
-    let admin_client = PubkyHttpClient::new().unwrap();
-    let response = admin_client
-        .request(
-            Method::POST,
-            &format!("http://{admin_socket}/users/{}/disable", user_pubky.z32()),
-        )
-        .header("X-Admin-Password", "admin")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    admin_disable_user(server, &user_pubky).await;
 
     let response = session.storage().get(file_path).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);

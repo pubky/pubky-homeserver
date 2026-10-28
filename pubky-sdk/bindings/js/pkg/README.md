@@ -182,6 +182,10 @@ const userPk = session.info.publicKey.toString(); // -> pubky<z32> identifier
 const caps = session.info.capabilities; // -> string[] permissions and paths
 
 const storage = session.storage; // -> This User's storage API (absolute paths)
+
+// With a root grant session: storage used and the quota that applies.
+const account = await session.grant.account();
+console.log(account.usedBytes, account.quota.effective.storageQuotaMb);
 ```
 
 **Persist a grant session**
@@ -649,7 +653,20 @@ interface PubkyError extends Error {
     | "PkarrError"
     | "InternalError";
   message: string;
-  data?: unknown; // structured context when available (e.g. { statusCode: number })
+  data?: unknown; // structured context when available; RequestErrorData for RequestError
+}
+```
+
+`RequestError` carries a `RequestErrorData`: `reason` (`Http`, `Timeout`,
+`Connection`, `Body`, `Decode`, `InvalidRequest` or `Other`) and, for HTTP
+failures, `statusCode`. Browser Fetch may only report `Other`. A reason
+describes the failure, not whether retrying a write is safe.
+
+```ts
+import type { PubkyError, RequestErrorData } from "@synonymdev/pubky";
+
+if (error.name === "RequestError") {
+  const { reason, statusCode } = error.data as RequestErrorData;
 }
 ```
 

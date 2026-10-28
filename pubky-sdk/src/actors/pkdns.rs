@@ -25,7 +25,7 @@ use crate::{
 /// and lookups may not be able to find the user's homeserver.
 ///
 /// You can override this per instance via [`crate::Pkdns::set_stale_after`] (mutable setter).
-pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_hours(1);
 
 /// PKDNS actor: resolve & publish `_pubky` PKARR records.
 ///

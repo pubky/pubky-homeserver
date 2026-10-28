@@ -4,26 +4,11 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Serialize;
 
-use crate::shared::quota::{UserQuota, UserQuotaPatch};
-use crate::shared::{HttpError, HttpResult, Z32Pubkey};
+use crate::shared::quota::UserQuotaPatch;
+use crate::shared::{HttpError, HttpResult, UserQuotaResponse, Z32Pubkey};
 
 use super::super::app_state::AppState;
-
-/// Response for `GET /users/{pubkey}/quota`.
-///
-/// Contains both the effective quota (overrides merged with system defaults)
-/// and the raw per-user overrides, so callers can see what applies and what
-/// was explicitly customised in a single request.
-#[derive(Debug, Serialize)]
-pub struct UserQuotaResponse {
-    /// The effective quota: overrides merged with system defaults.
-    /// All fields are always present (no fields omitted).
-    pub effective: UserQuota,
-    /// Only the per-user overrides. Fields using the system default are omitted.
-    pub overrides: UserQuota,
-}
 
 /// GET /users/{pubkey}/quota — return both effective and override quotas.
 pub async fn get_user_quota(
@@ -36,16 +21,10 @@ pub async fn get_user_quota(
         .get_or_http_error(&pubkey.0, false)
         .await?;
 
-    let overrides = user.quota();
-    let effective = overrides.resolve_with_defaults(
-        state.context.config_toml.storage.default_quota_mb,
-        &state.context.config_toml.default_quotas,
-    );
-
-    Ok(Json(UserQuotaResponse {
-        effective,
-        overrides,
-    }))
+    Ok(Json(UserQuotaResponse::new(
+        &user,
+        &state.context.config_toml,
+    )))
 }
 
 /// PATCH /users/{pubkey}/quota — update per-user custom limits.
