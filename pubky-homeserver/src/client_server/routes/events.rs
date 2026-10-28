@@ -75,7 +75,7 @@ pub struct EventStreamQueryParams {
     /// - Single user: `?user=pubkey1`
     /// - Single user with cursor: `?user=pubkey1:cursor`
     /// - Multiple users: `?user=pubkey1&user=pubkey2:cursor2`
-    pub user_cursors: Vec<(PublicKey, Option<String>)>,
+    pub user_cursors: Vec<(PublicKey, Option<EventCursor>)>,
     /// Repeatable path filters. Each value is a path WITHOUT the `pubky://`
     /// scheme or user pubkey, e.g. `/pub/files/`, `pub/files/`, `/priv/app/`..
     pub paths: Vec<StoragePath>,
@@ -89,7 +89,10 @@ enum EventStreamTenantScope<'a> {
 }
 
 impl<'a> EventStreamTenantScope<'a> {
-    fn from_query(paths: &[StoragePath], user_cursors: &'a [(PublicKey, Option<String>)]) -> Self {
+    fn from_query(
+        paths: &[StoragePath],
+        user_cursors: &'a [(PublicKey, Option<EventCursor>)],
+    ) -> Self {
         if !paths
             .iter()
             .any(|path| path.as_str().starts_with(PRIVATE_ROOT))
@@ -202,8 +205,12 @@ impl TryFrom<RawEventStreamQueryParams> for EventStreamQueryParams {
             }
             let pubkey = PublicKey::try_from_z32(pubkey_str)
                 .map_err(|_| EventStreamError::InvalidPublicKey(pubkey_str.to_string()))?;
+            let cursor = cursor_str
+                .map(str::parse::<EventCursor>)
+                .transpose()
+                .map_err(|_| EventStreamError::InvalidParameter("Invalid cursor".to_string()))?;
 
-            user_cursors.push((pubkey, cursor_str.map(|s| s.to_string())));
+            user_cursors.push((pubkey, cursor));
         }
 
         if user_cursors.is_empty() {
@@ -383,10 +390,9 @@ pub async fn feed_stream(
         .authorize(session, &state.auth_state)
         .await?;
 
-    let mut user_cursor_map =
-        resolve_user_cursors(&params.user_cursors, &state.context.user_service)
-            .await
-            .map_err(HttpError::from)?;
+    let mut user_cursor_map = resolve_user_ids(&params.user_cursors, &state.context.user_service)
+        .await
+        .map_err(HttpError::from)?;
 
     let mut total_sent: usize = 0;
     let stream = async_stream::stream! {
@@ -526,15 +532,15 @@ pub async fn feed_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// Resolve user public keys to user IDs and parse their cursors.
+/// Resolve user public keys to user IDs, keeping each user's cursor.
 /// Returns a map of user_id → optional cursor position.
-async fn resolve_user_cursors(
-    user_cursors: &[(PublicKey, Option<String>)],
+async fn resolve_user_ids(
+    user_cursors: &[(PublicKey, Option<EventCursor>)],
     user_service: &crate::services::user_service::UserService,
 ) -> Result<HashMap<i32, Option<EventCursor>>, EventStreamError> {
     let mut user_cursor_map: HashMap<i32, Option<EventCursor>> = HashMap::new();
 
-    for (user_pubkey, cursor_str_opt) in user_cursors {
+    for (user_pubkey, cursor) in user_cursors {
         let user_id = user_service
             .get_id(user_pubkey)
             .await
@@ -542,16 +548,7 @@ async fn resolve_user_cursors(
                 sqlx::Error::RowNotFound => EventStreamError::UserNotFound,
                 e => EventStreamError::DatabaseError(e),
             })?;
-
-        let cursor = if let Some(cursor_str) = cursor_str_opt {
-            Some(cursor_str.parse::<EventCursor>().map_err(|_| {
-                EventStreamError::InvalidParameter(format!("Invalid cursor: {cursor_str}"))
-            })?)
-        } else {
-            None
-        };
-
-        user_cursor_map.insert(user_id, cursor);
+        user_cursor_map.insert(user_id, *cursor);
     }
 
     Ok(user_cursor_map)
@@ -663,7 +660,7 @@ mod tests {
         })
     }
 
-    fn cursors(keys: &[&PublicKey]) -> Vec<(PublicKey, Option<String>)> {
+    fn cursors(keys: &[&PublicKey]) -> Vec<(PublicKey, Option<EventCursor>)> {
         keys.iter().map(|k| ((*k).clone(), None)).collect()
     }
 
@@ -676,7 +673,7 @@ mod tests {
 
     fn authorize(
         paths: &[StoragePath],
-        user_cursors: &[(PublicKey, Option<String>)],
+        user_cursors: &[(PublicKey, Option<EventCursor>)],
         session: Option<&AuthSession>,
     ) -> Result<Vec<PathFilter>, HttpError> {
         authorized_paths(
@@ -742,6 +739,24 @@ mod tests {
     fn parse_rejects_zero_limit() {
         let err = parse_query_params(&format!("user={}&limit=0", pk().z32())).unwrap_err();
         assert_eq!(err.to_string(), "limit must be at least 1");
+    }
+
+    #[test]
+    fn parse_user_cursor_as_event_id() {
+        let u = pk();
+        let params =
+            parse_query_params(&format!("user={}:42&user={}", u.z32(), pk().z32())).unwrap();
+        assert_eq!(params.user_cursors[0], (u, Some(EventCursor::new(42))));
+        assert_eq!(params.user_cursors[1].1, None);
+    }
+
+    #[test]
+    fn parse_rejects_non_numeric_user_cursor() {
+        // Legacy timestamp cursors and out-of-range ids are rejected alike.
+        for cursor in ["yyyyyyyyyyyyy", "-1", "18446744073709551616", ""] {
+            let err = parse_query_params(&format!("user={}:{cursor}", pk().z32())).unwrap_err();
+            assert_eq!(err.to_string(), "Invalid cursor", "cursor {cursor:?}");
+        }
     }
 
     #[test]

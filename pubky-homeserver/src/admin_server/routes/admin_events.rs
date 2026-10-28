@@ -13,12 +13,14 @@ use axum::{
     },
 };
 use futures_util::StreamExt;
-use pubky_common::{crypto::PublicKey, events::EventCursor};
+use pubky_common::crypto::PublicKey;
 use url::form_urlencoded;
 
 use super::super::app_state::AppState;
 use crate::{
-    persistence::files::events::{AllEventsFilter, Mode, PathFilter, MAX_EVENT_STREAM_USERS},
+    persistence::files::events::{
+        AllEventsFilter, EventCursor, Mode, PathFilter, MAX_EVENT_STREAM_USERS,
+    },
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
@@ -27,7 +29,7 @@ struct AdminStreamParams {
     /// Optional user filter.
     users: Vec<PublicKey>,
     /// Optional starting cursor (global). None = from the beginning.
-    cursor: Option<String>,
+    cursor: Option<EventCursor>,
     /// Maximum total events to send before closing.
     limit: Option<u16>,
     /// Ordering + live behavior; the incompatible reverse-and-live combination is unrepresentable.
@@ -69,7 +71,11 @@ fn parse_admin_stream_query(query: &str) -> Result<AdminStreamParams, HttpError>
             }
             "cursor" => {
                 if !value.is_empty() {
-                    cursor = Some(value.to_string());
+                    cursor = Some(
+                        value
+                            .parse::<EventCursor>()
+                            .map_err(|_| HttpError::bad_request("Invalid cursor"))?,
+                    );
                 }
             }
             "limit" => {
@@ -128,8 +134,8 @@ fn parse_admin_stream_query(query: &str) -> Result<AdminStreamParams, HttpError>
     })
 }
 
-/// Resolve parsed params into a service-layer [`AllEventsFilter`]: `404` for an unknown `user=`,
-/// `400` for an invalid cursor. This is the route's only real work — the streaming itself lives in
+/// Resolve parsed params into a service-layer [`AllEventsFilter`]: `404` for an unknown `user=`.
+/// This is the route's only real work — the streaming itself lives in
 /// [`EventsService::all_events_stream`].
 async fn resolve_filter(
     state: &AppState,
@@ -155,15 +161,8 @@ async fn resolve_filter(
         Some(ids)
     };
 
-    let start_cursor = params
-        .cursor
-        .as_deref()
-        .map(str::parse::<EventCursor>)
-        .transpose()
-        .map_err(|_| HttpError::bad_request("Invalid cursor"))?;
-
     Ok(AllEventsFilter {
-        start_cursor,
+        start_cursor: params.cursor,
         user_ids,
         paths: params.paths.into_iter().map(PathFilter::from).collect(),
         mode: params.mode,
@@ -201,4 +200,33 @@ pub async fn feed_stream(
         [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
         sse,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn parse_cursor_as_event_id() {
+        let params = parse_admin_stream_query("cursor=42").unwrap();
+        assert_eq!(params.cursor, Some(EventCursor::new(42)));
+        assert_eq!(parse_admin_stream_query("cursor=").unwrap().cursor, None);
+    }
+
+    #[test]
+    fn parse_rejects_non_numeric_cursor() {
+        // Legacy timestamp cursors and out-of-range ids are rejected alike.
+        for cursor in ["yyyyyyyyyyyyy", "-1", "18446744073709551616"] {
+            let Err(err) = parse_admin_stream_query(&format!("cursor={cursor}")) else {
+                panic!("cursor {cursor:?} should be rejected");
+            };
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "cursor {cursor:?}"
+            );
+        }
+    }
 }

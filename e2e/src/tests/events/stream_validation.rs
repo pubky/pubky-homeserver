@@ -292,8 +292,8 @@ async fn events_stream_validation_errors() {
     );
 }
 
-/// All event APIs use numeric event IDs, including values that could also be
-/// decoded as legacy timestamps.
+/// All three event APIs paginate by numeric event ID and reject anything else
+/// with 400, including legacy z-base-32 timestamp cursors.
 #[tokio::test]
 #[pubky_testnet::test]
 async fn event_apis_validate_numeric_cursors() {
