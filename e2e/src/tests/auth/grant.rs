@@ -440,9 +440,21 @@ async fn grant_secret_restore_mints_fresh_bearer() {
         original_bearer, restored_bearer,
         "restoring a grant secret must mint a fresh bearer"
     );
+    let session_url = format!(
+        "https://_pubky.{}/auth/grant/session",
+        signer.public_key().z32()
+    );
+    let rejected = pubky
+        .client()
+        .request(Method::GET, &session_url)
+        .bearer_auth(original_bearer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
     assert!(
-        session.revalidate().await.unwrap().is_none(),
-        "minting the restored bearer replaces the old grant session"
+        session.revalidate().await.unwrap().is_some(),
+        "the retained session recovers its replaced bearer"
     );
     restored
         .storage()
@@ -704,6 +716,12 @@ async fn native_session_recovers_after_same_grant_is_restored_elsewhere() {
         "original payload"
     );
 
+    let storage_bearer = grant.current_bearer().await;
+    let restored = pubky.restore_session(&secret).await.unwrap();
+    let revalidated = session.revalidate().await.unwrap().unwrap();
+    assert_eq!(revalidated, session.info().clone());
+    assert_ne!(grant.current_bearer().await, storage_bearer);
+
     restored.signout().await.unwrap();
     let error = session
         .storage()
@@ -716,6 +734,7 @@ async fn native_session_recovers_after_same_grant_is_restored_elsewhere() {
             status: Some(StatusCode::UNAUTHORIZED)
         })
     ));
+    assert!(session.revalidate().await.unwrap().is_none());
 }
 
 #[tokio::test]

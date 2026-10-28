@@ -706,24 +706,13 @@ impl SessionCredential for GrantCredential {
         _user: &PublicKey,
     ) -> Result<Option<SessionInfo>> {
         let request = self.grant_session_request(client, Method::GET).await?;
-        let response = if let Some(coordinator) = self.coordinator().await {
-            // A shared send only checks HTTP status inside the refresh
-            // exchange, so a rejected refresh is how the server reports a
-            // missing session before the GET itself is answered.
-            match self
-                .send_shared(request, client, coordinator.as_ref())
-                .await
-            {
-                Err(Error::CredentialRefresh(CredentialRefreshError::Request {
-                    status: Some(StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND),
-                })) => return Ok(None),
-                result => result?,
-            }
-        } else {
-            request
-                .bearer_auth(self.current_bearer().await)
-                .send()
-                .await?
+        // A rejected refresh is how the server reports a missing grant before
+        // the session GET itself is answered.
+        let response = match self.send(request, client).await {
+            Err(Error::CredentialRefresh(CredentialRefreshError::Request {
+                status: Some(StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND),
+            })) => return Ok(None),
+            result => result?,
         };
         if credential_session_missing(&response) {
             return Ok(None);
@@ -1495,31 +1484,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_revalidation_treats_wrapped_missing_refresh_sessions_as_absent() {
-        for (status, reason) in [(401, "Unauthorized"), (404, "Not Found")] {
-            let response =
-                format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 7\r\n\r\nprivate");
-            let fixture =
-                RequestFailureFixture::new(TestServerBehavior::Reply(response.into_bytes())).await;
-            let credential = fixture.grant_credential(true);
-            let shared = SharedGrantSession {
-                response: credential.state.lock().await.response(),
-                refresh_pending: false,
-                logout_pending: false,
-            };
-            credential.state.lock().await.coordinator = Some(Arc::new(TestCoordinator {
-                shared: Arc::new(tokio::sync::Mutex::new(Some(shared))),
-            }));
+    async fn revalidation_distinguishes_missing_grants_from_refresh_failures() {
+        for shared in [false, true] {
+            for (status, reason) in [
+                (401, "Unauthorized"),
+                (404, "Not Found"),
+                (403, "Forbidden"),
+                (503, "Service Unavailable"),
+            ] {
+                let response =
+                    format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 7\r\n\r\nprivate");
+                let fixture =
+                    RequestFailureFixture::new(TestServerBehavior::Reply(response.into_bytes()))
+                        .await;
+                let credential = fixture.grant_credential(true);
+                if shared {
+                    let session = SharedGrantSession {
+                        response: credential.state.lock().await.response(),
+                        refresh_pending: false,
+                        logout_pending: false,
+                    };
+                    credential.state.lock().await.coordinator = Some(Arc::new(TestCoordinator {
+                        shared: Arc::new(tokio::sync::Mutex::new(Some(session))),
+                    }));
+                }
 
-            let result = credential
-                .revalidate(&fixture.client, &fixture.user.public_key())
-                .await;
-
-            assert!(
-                matches!(result, Ok(None)),
-                "wrapped {status} refresh failure must mean missing session, got {result:?}"
-            );
+                let result = credential
+                    .revalidate(&fixture.client, &fixture.user.public_key())
+                    .await;
+                if status == 401 || status == 404 {
+                    assert!(
+                        matches!(result, Ok(None)),
+                        "{status} refresh rejection must mean missing session, got {result:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(Error::CredentialRefresh(CredentialRefreshError::Request { status: Some(code) })) if code.as_u16() == status),
+                        "{status} refresh failure must remain an error"
+                    );
+                }
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn revalidation_does_not_treat_uncertain_refresh_as_absence() {
+        let fixture = RequestFailureFixture::new(TestServerBehavior::Reply(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        ))
+        .await;
+        let credential = fixture.grant_credential(false);
+
+        // The one-shot server rejects GET, then closes before the refresh exchange.
+        let result = credential
+            .revalidate(&fixture.client, &fixture.user.public_key())
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::CredentialRefresh(CredentialRefreshError::Request {
+                status: None
+            }))
+        ));
     }
 
     #[tokio::test]

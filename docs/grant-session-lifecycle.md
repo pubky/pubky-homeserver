@@ -65,6 +65,11 @@ This does not coordinate independent applications or replay an interrupted
 application operation. Callers must reconcile uncertain mutation outcomes
 before retrying their own work.
 
+Rust `PubkySession::revalidate` uses the same bounded recovery before reporting
+a grant as absent. It returns `None` for a confirmed 401/404 from the refresh
+exchange or the final session response; transport, permission and service
+failures remain errors rather than evidence that the session is missing.
+
 ## Upgrading stored browser sessions
 
 Existing grant records remain readable. On first restore, the SDK exchanges the

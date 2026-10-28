@@ -114,13 +114,14 @@ impl PubkySession {
     /// - `Ok(None)` if the session no longer exists (expired/invalidated).
     /// - `Err(_)` for transport or server errors unrelated to validity.
     ///
-    /// Browser-managed sessions may adopt or refresh their shared bearer during this check.
+    /// Grant sessions may refresh their bearer during this check; browser-managed
+    /// sessions may also adopt a newer shared bearer.
     ///
     /// # Errors
     /// - Propagates transport failures from the session endpoint.
     /// - Returns [`crate::errors::Error::Authentication`] if the homeserver rejects the request.
-    /// - Returns [`crate::errors::Error::CredentialRefresh`] when a browser-managed
-    ///   session fails to refresh its bearer for a reason other than revocation.
+    /// - Returns [`crate::errors::Error::CredentialRefresh`] when a grant session
+    ///   fails to refresh its bearer for a reason other than revocation.
     pub async fn revalidate(&self) -> Result<Option<SessionInfo>> {
         let user = self.info().public_key().clone();
         cross_log!(info, "Revalidating session for {}", user);
