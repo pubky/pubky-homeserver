@@ -39,7 +39,7 @@ cookie = "0.18"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 futures-util.workspace = true
 futures-lite.workspace = true
-lru = { version = "0.18", default-features = false }
+lru = { version = "0.19", default-features = false }
 serde.workspace = true
 # Parse floats in signed custom proof data exactly, not within 1 ULP.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
@@ -72,7 +72,7 @@ wasm-bindgen-futures.workspace = true
 
 [dev-dependencies]
 pubky-testnet.workspace = true # used in docstring tests
-httpmock = "0.8"
+httpmock = "0.9"
 http-relay = { workspace = true, features = ["server", "link-compat"] }
 tokio-rustls = "0.26"
 
