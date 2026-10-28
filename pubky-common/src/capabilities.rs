@@ -387,11 +387,11 @@ impl Capabilities {
     ///
     /// let caps: Capabilities = "/pub/app/:r".parse().unwrap();
     /// let file = StoragePath::new("/pub/app/file.txt").unwrap();
-    /// assert!(caps.grants(&file, Action::Read));
-    /// assert!(!caps.grants(&file, Action::Write));
-    /// assert!(!caps.grants(&StoragePath::root(), Action::Read));
+    /// assert!(caps.permits(&file, Action::Read));
+    /// assert!(!caps.permits(&file, Action::Write));
+    /// assert!(!caps.permits(&StoragePath::root(), Action::Read));
     /// ```
-    pub fn grants(&self, path: &StoragePath, action: Action) -> bool {
+    pub fn permits(&self, path: &StoragePath, action: Action) -> bool {
         self.0
             .iter()
             .any(|cap| cap.scope_covers_path(path) && cap.actions.contains(&action))
@@ -996,21 +996,21 @@ mod tests {
     }
 
     #[test]
-    fn grants_requires_a_covering_scope_with_the_action() {
+    fn permits_requires_a_covering_scope_with_the_action() {
         let root = StoragePath::root();
         let caps = |s: &str| s.parse::<Capabilities>().unwrap();
 
         // Only a `/` scope covers `/` itself, with the action asked for.
-        assert!(caps("/:r").grants(&root, Action::Read));
-        assert!(caps("/:rw").grants(&root, Action::Read));
-        assert!(!caps("/:w").grants(&root, Action::Read));
-        assert!(!caps("/:e").grants(&root, Action::Read));
-        assert!(!caps("/pub/app/:rw").grants(&root, Action::Read));
+        assert!(caps("/:r").permits(&root, Action::Read));
+        assert!(caps("/:rw").permits(&root, Action::Read));
+        assert!(!caps("/:w").permits(&root, Action::Read));
+        assert!(!caps("/:e").permits(&root, Action::Read));
+        assert!(!caps("/pub/app/:rw").permits(&root, Action::Read));
 
         // Separate entries combine, and a scope covers the paths inside it.
         let split = caps("/pub/app/:r,/pub/app/:w");
-        assert!(split.grants(&path("/pub/app/file"), Action::Write));
-        assert!(!split.grants(&path("/pub/other"), Action::Read));
-        assert!(!Capabilities::default().grants(&root, Action::Read));
+        assert!(split.permits(&path("/pub/app/file"), Action::Write));
+        assert!(!split.permits(&path("/pub/other"), Action::Read));
+        assert!(!Capabilities::default().permits(&root, Action::Read));
     }
 }

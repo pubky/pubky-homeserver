@@ -39,7 +39,7 @@ pub async fn get(
     };
     if !auth
         .capabilities()
-        .grants(&StoragePath::root(), Action::Read)
+        .permits(&StoragePath::root(), Action::Read)
     {
         return Err(HttpError::forbidden_with_message(
             "Read access to all storage required",

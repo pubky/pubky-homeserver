@@ -115,7 +115,7 @@ fn session_has_action(
         ));
     }
 
-    if session.capabilities().grants(path, action) {
+    if session.capabilities().permits(path, action) {
         return Ok(());
     }
 
