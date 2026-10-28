@@ -262,9 +262,7 @@ pub async fn feed_stream(
                 // Update the cursor for this specific user
                 user_cursor_map.insert(event.user_id, Some(event.cursor()));
 
-                yield Ok(Event::default()
-                    .event(event.event_type.to_string())
-                    .data(event.to_sse_data()));
+                yield Ok(event.to_sse_event());
 
                 total_sent += 1;
 
@@ -317,9 +315,7 @@ pub async fn feed_stream(
                         // Update this user's cursor
                         user_cursor_map.insert(event.user_id, Some(event.cursor()));
 
-                        yield Ok(Event::default()
-                            .event(event.event_type.to_string())
-                            .data(event.to_sse_data()));
+                        yield Ok(event.to_sse_event());
 
                         total_sent += 1;
 
