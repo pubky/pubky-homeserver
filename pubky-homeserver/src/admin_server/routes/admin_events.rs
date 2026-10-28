@@ -8,7 +8,7 @@ use axum::{
     extract::{RawQuery, State},
     http::{header, HeaderValue},
     response::{
-        sse::{Event, KeepAlive, Sse},
+        sse::{KeepAlive, Sse},
         IntoResponse,
     },
 };
@@ -60,13 +60,7 @@ pub async fn feed_stream(
             .context
             .events_service
             .all_events_stream(state.context.metrics.clone(), filter)
-            .map(|event| {
-                Ok::<_, Infallible>(
-                    Event::default()
-                        .event(event.event_type.to_string())
-                        .data(event.to_sse_data()),
-                )
-            }),
+            .map(|event| Ok::<_, Infallible>(event.to_sse_event())),
     )
     .keep_alive(KeepAlive::default());
 

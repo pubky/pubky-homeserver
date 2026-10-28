@@ -1,3 +1,4 @@
+use axum::response::sse::Event;
 use pubky_common::crypto::Hash;
 use pubky_common::crypto::PublicKey;
 use pubky_common::events::{EventCursor, EventType};
@@ -29,9 +30,17 @@ impl EventEntity {
         format!("pubky://{}{}", self.user_pubkey.z32(), self.path.path())
     }
 
-    /// Multiline SSE `data:` payload (path, `cursor:`, and `content_hash:` for PUTs) shared by the
-    /// public and admin event streams. Each line is prefixed with `data: ` by the SSE layer.
-    pub(crate) fn to_sse_data(&self) -> String {
+    /// SSE message shared by the public and admin event streams: the event type as the `event:`
+    /// name and [`Self::to_sse_data`] as the `data:` payload.
+    pub(crate) fn to_sse_event(&self) -> Event {
+        Event::default()
+            .event(self.event_type.to_string())
+            .data(self.to_sse_data())
+    }
+
+    /// Multiline SSE `data:` payload (path, `cursor:`, and `content_hash:` for PUTs).
+    /// Each line is prefixed with `data: ` by the SSE layer.
+    fn to_sse_data(&self) -> String {
         let mut lines = vec![self.pubky_uri(), format!("cursor: {}", self.cursor())];
         if let Some(hash) = self.event_type.content_hash() {
             let hash_base64 =
@@ -92,5 +101,61 @@ impl FromRow<'_, PgRow> for EventEntity {
             path: entry_path,
             created_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::response::{sse::Sse, IntoResponse};
+    use futures_util::stream;
+    use pubky_common::crypto::Keypair;
+    use std::convert::Infallible;
+
+    use super::*;
+
+    fn sample_event(event_type: EventType) -> EventEntity {
+        let user_pubkey = Keypair::random().public_key();
+        let path = EntryPath::new(
+            user_pubkey.clone(),
+            StoragePath::new("/pub/file.txt").unwrap(),
+        );
+        EventEntity {
+            id: 42,
+            user_id: 1,
+            user_pubkey,
+            event_type,
+            path,
+            created_at: NaiveDateTime::default(),
+        }
+    }
+
+    async fn render(event: &EventEntity) -> String {
+        let sse = Sse::new(stream::iter([Ok::<_, Infallible>(event.to_sse_event())]));
+        let body = axum::body::to_bytes(sse.into_response().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn put_event_frames_type_uri_cursor_and_content_hash() {
+        let event = sample_event(EventType::Put {
+            content_hash: Hash::from_bytes([0; 32]),
+        });
+        let expected = format!(
+            "event: PUT\ndata: {}\ndata: cursor: 42\ndata: content_hash: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\n",
+            event.pubky_uri()
+        );
+        assert_eq!(render(&event).await, expected);
+    }
+
+    #[tokio::test]
+    async fn delete_event_frames_type_uri_and_cursor() {
+        let event = sample_event(EventType::Delete);
+        let expected = format!(
+            "event: DEL\ndata: {}\ndata: cursor: 42\n\n",
+            event.pubky_uri()
+        );
+        assert_eq!(render(&event).await, expected);
     }
 }
