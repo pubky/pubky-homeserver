@@ -47,6 +47,8 @@ pub enum EventStreamError {
     DatabaseError(#[from] sqlx::Error),
     #[error("Invalid public key: {0}")]
     InvalidPublicKey(String),
+    #[error("Invalid cursor: {0}")]
+    InvalidCursor(String),
 }
 
 impl From<EventStreamError> for HttpError {
@@ -205,10 +207,13 @@ impl TryFrom<RawEventStreamQueryParams> for EventStreamQueryParams {
             }
             let pubkey = PublicKey::try_from_z32(pubkey_str)
                 .map_err(|_| EventStreamError::InvalidPublicKey(pubkey_str.to_string()))?;
-            let cursor = cursor_str
-                .map(str::parse::<EventCursor>)
-                .transpose()
-                .map_err(|_| EventStreamError::InvalidParameter("Invalid cursor".to_string()))?;
+            let cursor = match cursor_str {
+                Some(raw) => Some(
+                    raw.parse::<EventCursor>()
+                        .map_err(|_| EventStreamError::InvalidCursor(raw.to_string()))?,
+                ),
+                None => None,
+            };
 
             user_cursors.push((pubkey, cursor));
         }
@@ -292,12 +297,10 @@ pub async fn feed(
     State(state): State<AppState>,
     params: ListQueryParams,
 ) -> HttpResult<impl IntoResponse> {
-    let cursor = params
-        .cursor
-        .as_deref()
-        .unwrap_or("0")
+    let cursor = params.cursor.as_deref().unwrap_or("0");
+    let cursor = cursor
         .parse::<EventCursor>()
-        .map_err(|_| HttpError::bad_request("Invalid cursor"))?;
+        .map_err(|_| HttpError::bad_request(format!("Invalid cursor: {cursor}")))?;
 
     let query_start = Instant::now();
     let events = state
@@ -755,7 +758,7 @@ mod tests {
         // Legacy timestamp cursors and out-of-range ids are rejected alike.
         for cursor in ["yyyyyyyyyyyyy", "-1", "18446744073709551616", ""] {
             let err = parse_query_params(&format!("user={}:{cursor}", pk().z32())).unwrap_err();
-            assert_eq!(err.to_string(), "Invalid cursor", "cursor {cursor:?}");
+            assert_eq!(err.to_string(), format!("Invalid cursor: {cursor}"));
         }
     }
 

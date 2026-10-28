@@ -71,11 +71,10 @@ fn parse_admin_stream_query(query: &str) -> Result<AdminStreamParams, HttpError>
             }
             "cursor" => {
                 if !value.is_empty() {
-                    cursor = Some(
-                        value
-                            .parse::<EventCursor>()
-                            .map_err(|_| HttpError::bad_request("Invalid cursor"))?,
-                    );
+                    cursor =
+                        Some(value.parse::<EventCursor>().map_err(|_| {
+                            HttpError::bad_request(format!("Invalid cursor: {value}"))
+                        })?);
                 }
             }
             "limit" => {
