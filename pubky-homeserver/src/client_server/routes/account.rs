@@ -23,9 +23,10 @@ const VARY_AUTHORIZATION: HeaderValue = HeaderValue::from_static("Authorization"
 /// cookie-authenticated read would let any origin fetch the signed-in user's
 /// account with the browser's cookie.
 ///
-/// Requires root capability: account state is not scoped to any path, so a
-/// scoped app has no claim to it. Disabled users can still read it, which is
-/// where they learn why their writes are refused.
+/// Requires read access to all storage (`/:r` or `/:rw`): account state is
+/// not scoped to any path, so a scoped app has no claim to it, and a read
+/// needs no write access. Disabled users can still read it, which is where
+/// they learn why their writes are refused.
 pub async fn get(
     State(state): State<AppState>,
     auth: AuthSession,
@@ -33,7 +34,7 @@ pub async fn get(
     let AuthSession::Grant(_) = &auth else {
         return Err(HttpError::unauthorized());
     };
-    GrantAuthService::require_root_capability(&auth)?;
+    GrantAuthService::require_root_read_capability(&auth)?;
     let user = state
         .context
         .user_service
@@ -135,18 +136,36 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn scoped_grant_session_is_forbidden() {
+    async fn root_read_grant_session_gets_its_own_account() {
+        let context = AppContext::test().await;
+        let read_only = Capabilities::builder().read("/").unwrap().finish();
+        let (server, pubkey) = grant_server(&context, read_only).await;
+
+        let response = server.get("/account").await;
+        response.assert_status(StatusCode::OK);
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["pubky"], pubkey.z32());
+    }
+
+    /// Neither a path-scoped session nor one that can only write may read
+    /// account-wide state.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn session_without_root_read_is_forbidden() {
         let context = AppContext::test().await;
         let scoped = Capabilities::builder()
             .read_write("/pub/scoped.app/")
             .unwrap()
             .finish();
-        let (server, _pubkey) = grant_server(&context, scoped).await;
+        let write_only = Capabilities::builder().write("/").unwrap().finish();
 
-        server
-            .get("/account")
-            .await
-            .assert_status(StatusCode::FORBIDDEN);
+        for capabilities in [scoped, write_only] {
+            let (server, _pubkey) = grant_server(&context, capabilities).await;
+            server
+                .get("/account")
+                .await
+                .assert_status(StatusCode::FORBIDDEN);
+        }
     }
 
     #[tokio::test]

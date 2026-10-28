@@ -15,7 +15,7 @@ async fn get_account(
 
 #[tokio::test]
 #[pubky_testnet::test]
-async fn account_requires_root_grant_and_survives_disable() {
+async fn account_requires_root_read_grant_and_survives_disable() {
     let testnet = build_full_testnet().await;
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
@@ -29,24 +29,33 @@ async fn account_requires_root_grant_and_survives_disable() {
         .await
         .unwrap();
 
+    // Grant sessions with the given capabilities, approved by the signer.
+    let grant_session = |caps: Capabilities, client_id: &str| {
+        let auth = PubkyGrantAuthFlow::builder(
+            &caps,
+            AuthFlowKind::signin(),
+            ClientId::new(client_id).unwrap(),
+        )
+        .relay(http_relay_url.clone())
+        .client(pubky.client().clone())
+        .start()
+        .unwrap();
+        let signer = signer.clone();
+        async move {
+            signer
+                .approve_auth(&auth.authorization_url())
+                .await
+                .unwrap();
+            auth.await_approval().await.unwrap()
+        }
+    };
+    let read_only_caps = Capabilities::builder().read("/").unwrap().finish();
+    let read_only_session = grant_session(read_only_caps, "readonly.app").await;
     let scoped_caps = Capabilities::builder()
         .read_write("/pub/scoped.app/")
         .unwrap()
         .finish();
-    let auth = PubkyGrantAuthFlow::builder(
-        &scoped_caps,
-        AuthFlowKind::signin(),
-        ClientId::new("scoped.app").unwrap(),
-    )
-    .relay(http_relay_url)
-    .client(pubky.client().clone())
-    .start()
-    .unwrap();
-    signer
-        .approve_auth(&auth.authorization_url())
-        .await
-        .unwrap();
-    let scoped_session = auth.await_approval().await.unwrap();
+    let scoped_session = grant_session(scoped_caps, "scoped.app").await;
 
     let url = format!("{}account", server.icann_http_url());
 
@@ -67,6 +76,16 @@ async fn account_requires_root_grant_and_survives_disable() {
     assert!(!account.disabled);
     assert_eq!(account.used_bytes, 0);
     assert_eq!(serde_json::to_value(&account).unwrap(), body);
+
+    // Read access to all storage is enough: no write capability needed.
+    let account = read_only_session
+        .as_grant()
+        .unwrap()
+        .account()
+        .await
+        .unwrap();
+    assert_eq!(account.pubky, keypair.public_key());
+
     let err = scoped_session
         .as_grant()
         .unwrap()

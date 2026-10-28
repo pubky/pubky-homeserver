@@ -115,14 +115,14 @@ impl<'a> GrantSessionView<'a> {
     /// Fetch this user's account: storage used, whether it is disabled, and
     /// the quota that applies.
     ///
-    /// Calls `GET /account`, which accepts grant sessions only. Requires the
-    /// **root capability**; scoped sessions get `403 Forbidden` from the
-    /// homeserver. A disabled user can still read it, which is how they learn
-    /// why writes fail.
+    /// Calls `GET /account`, which accepts grant sessions only. Requires
+    /// **read access to all storage** (`/:r` or `/:rw`); path-scoped sessions
+    /// get `403 Forbidden` from the homeserver. A disabled user can still
+    /// read it, which is how they learn why writes fail.
     ///
     /// # Errors
     /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
-    ///   auth or missing root capability).
+    ///   auth or a session that cannot read all storage).
     /// - Returns [`RequestError::DecodeJson`] if the response does not parse.
     pub async fn account(&self) -> Result<AccountInfo> {
         let user = self.session.info().public_key().clone();

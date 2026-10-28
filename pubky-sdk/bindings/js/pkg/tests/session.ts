@@ -299,7 +299,7 @@ test("Session: non-root grant management calls return homeserver 403", async (t)
 
   try {
     await grant.account();
-    t.fail("non-root grant.account should fail");
+    t.fail("path-scoped grant.account should fail");
   } catch (error) {
     assertPubkyError(t, error, "grant.account throws PubkyError");
     t.equal(getStatusCode(error), 403, "grant.account status code is 403");

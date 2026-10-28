@@ -71,8 +71,9 @@ impl GrantSession {
     /// Fetch this user's account: storage used, whether it is disabled, and
     /// the quota that applies.
     ///
-    /// Requires a root-capability session. Scoped sessions surface the
-    /// homeserver `403` as the standard request error.
+    /// Requires a session that can read all storage (`/:r` or `/:rw`).
+    /// Path-scoped sessions surface the homeserver `403` as the standard
+    /// request error.
     ///
     /// @returns {Promise<AccountInfo>}
     #[wasm_bindgen]

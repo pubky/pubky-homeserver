@@ -55,6 +55,9 @@ impl From<AuthServiceError> for HttpError {
             AuthServiceError::RootCapabilityRequired => {
                 HttpError::forbidden_with_message("Root capability required")
             }
+            AuthServiceError::RootReadCapabilityRequired => {
+                HttpError::forbidden_with_message("Read access to all storage required")
+            }
             AuthServiceError::Internal(e) => {
                 HttpError::internal_server_and_log(format!("Auth service: {e}"))
             }
@@ -149,6 +152,10 @@ mod tests {
         );
         assert_status(
             AuthServiceError::RootCapabilityRequired,
+            StatusCode::FORBIDDEN,
+        );
+        assert_status(
+            AuthServiceError::RootReadCapabilityRequired,
             StatusCode::FORBIDDEN,
         );
     }
