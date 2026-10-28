@@ -161,8 +161,12 @@ mod tests {
             .unwrap()
             .finish();
         let write_only = Capabilities::builder().write("/").unwrap().finish();
+        let keys_only = Capabilities::builder()
+            .encryption_keys("/")
+            .unwrap()
+            .finish();
 
-        for capabilities in [scoped, write_only] {
+        for capabilities in [scoped, write_only, keys_only] {
             let (server, _pubkey) = grant_server(&context, capabilities).await;
             server
                 .get("/account")
