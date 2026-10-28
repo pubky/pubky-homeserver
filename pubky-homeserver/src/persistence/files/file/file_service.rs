@@ -1,13 +1,11 @@
 #[cfg(test)]
 use crate::AppContext;
 use crate::{
-    persistence::{
-        files::events::EventsService,
-        sql::{
-            entry::{EntryEntity, EntryRepository},
-            SqlDb, UnifiedExecutor,
-        },
+    persistence::sql::{
+        entry::{EntryEntity, EntryRepository},
+        SqlDb, UnifiedExecutor,
     },
+    services::events_service::EventsService,
     shared::webdav::EntryPath,
     ConfigToml,
 };

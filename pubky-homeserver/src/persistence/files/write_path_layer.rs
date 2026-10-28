@@ -210,11 +210,9 @@ mod tests {
     use opendal::raw::oio::Delete;
 
     use crate::persistence::files::test_support::{get_fs_operator, get_memory_operator};
-    use crate::persistence::files::{
-        events::EventsService, write_finalization_layer::WriteFinalizationLayer,
-    };
+    use crate::persistence::files::write_finalization_layer::WriteFinalizationLayer;
     use crate::persistence::sql::SqlDb;
-    use crate::services::user_service::UserService;
+    use crate::services::{events_service::EventsService, user_service::UserService};
     use crate::shared::quota::UserQuota;
     use crate::shared::webdav::StoragePath;
 

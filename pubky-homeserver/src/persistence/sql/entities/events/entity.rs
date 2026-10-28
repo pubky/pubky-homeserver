@@ -5,7 +5,7 @@ use sea_query::Iden;
 use sqlx::{postgres::PgRow, types::chrono::NaiveDateTime, FromRow, Row};
 
 use crate::{
-    persistence::{files::events::events_repository::EventIden, sql::user::UserIden},
+    persistence::sql::{events::EventIden, user::UserIden},
     shared::webdav::{EntryPath, StoragePath},
 };
 

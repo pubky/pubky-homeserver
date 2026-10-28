@@ -207,7 +207,7 @@ mod tests {
         context: &AppContext,
         paths: &[&str],
     ) -> pubky_common::crypto::PublicKey {
-        use crate::persistence::files::events::EventType;
+        use crate::persistence::sql::events::EventType;
         use crate::shared::webdav::{EntryPath, StoragePath};
         use pubky_common::crypto::{Hash, Keypair};
 

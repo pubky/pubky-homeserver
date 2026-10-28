@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_query::{ColumnDef, Index, PostgresQueryBuilder, Table};
 use sqlx::Transaction;
 
-use crate::persistence::{files::events::EventIden, sql::migration::MigrationTrait};
+use crate::persistence::sql::{events::EventIden, migration::MigrationTrait};
 
 const TABLE: &str = "events";
 const INDEX_NAME: &str = "idx_events_user_path_id";

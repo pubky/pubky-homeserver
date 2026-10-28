@@ -19,6 +19,7 @@ pub use connection_string::ConnectionString;
 pub use database_mode::DatabaseMode;
 pub use entities::entry;
 pub(crate) use entities::entry_lock;
+pub(crate) use entities::events;
 pub use entities::signup_code;
 pub(crate) use entities::user;
 pub use migrator::Migrator;
