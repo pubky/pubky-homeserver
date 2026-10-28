@@ -27,9 +27,9 @@ pub struct EventsService {
     channel_capacity: usize,
 }
 
-/// Ordering + live behavior for the admin all-events stream. Encoding the mutually exclusive
+/// Ordering + live behavior for an event stream. Encoding the mutually exclusive
 /// options as one enum makes the invalid reverse-and-live combination unrepresentable.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     /// Batch, oldest-first; close when caught up.
     Forward,
@@ -41,11 +41,11 @@ pub(crate) enum Mode {
 
 impl Mode {
     /// Newest-first batch ordering.
-    fn reverse(self) -> bool {
+    pub(crate) fn reverse(self) -> bool {
         matches!(self, Self::Reverse)
     }
     /// Stay open for live events after replaying history.
-    fn live(self) -> bool {
+    pub(crate) fn live(self) -> bool {
         matches!(self, Self::ForwardLive)
     }
 }
