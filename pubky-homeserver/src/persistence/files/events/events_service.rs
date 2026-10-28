@@ -143,16 +143,6 @@ impl EventsService {
         }
     }
 
-    /// Parse a cursor string into a Cursor object.
-    /// Supports both new cursor format (event ID) and legacy format (timestamp).
-    pub async fn parse_cursor<'a>(
-        &self,
-        cursor: &str,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<EventCursor, sqlx::Error> {
-        EventRepository::parse_cursor(cursor, executor).await
-    }
-
     /// Get a list of public (`/pub/...`) events starting from a cursor position.
     /// Private events are served only through the authenticated event stream.
     ///

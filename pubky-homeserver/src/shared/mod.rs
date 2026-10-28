@@ -17,6 +17,4 @@ pub(crate) use http_handlers::reject_allow;
 pub(crate) use pubkey_path_validator::Z32Pubkey;
 pub use signup_mode::SignupMode;
 pub(crate) use user_item::{UserItem, UserQuotaResponse};
-pub(crate) use utils::{
-    effective_list_limit, parse_bool, split_list_page, timestamp_to_sqlx_datetime,
-};
+pub(crate) use utils::{effective_list_limit, parse_bool, split_list_page};

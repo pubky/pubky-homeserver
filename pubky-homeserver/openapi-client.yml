@@ -1020,8 +1020,9 @@ paths:
       parameters:
       - name: cursor
         in: query
-        description: Starting cursor position. Defaults to `"0"` (beginning) when
-          omitted.
+        description: >-
+          Numeric event ID. Defaults to `"0"` (beginning) when omitted.
+          Non-numeric cursors return HTTP 400.
         schema:
           type: string
       - name: limit
@@ -1081,6 +1082,7 @@ paths:
         description: |-
           One or more user public keys (z-base-32), repeated for multiple users.
           Append `:cursor` to an individual value to resume that user's feed.
+          Cursors must be numeric event IDs. Non-numeric cursors return HTTP 400.
         schema:
           type: array
           items:

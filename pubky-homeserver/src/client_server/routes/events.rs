@@ -33,12 +33,7 @@ use crate::{
     },
     constants::{PRIVATE_ROOT, PUBLIC_ROOT},
     observability::ConnectionGuard,
-    persistence::{
-        files::events::{
-            EventCursor, EventEntity, EventsService, PathFilter, MAX_EVENT_STREAM_USERS,
-        },
-        sql::SqlDb,
-    },
+    persistence::files::events::{EventCursor, EventEntity, PathFilter, MAX_EVENT_STREAM_USERS},
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
@@ -290,20 +285,12 @@ pub async fn feed(
     State(state): State<AppState>,
     params: ListQueryParams,
 ) -> HttpResult<impl IntoResponse> {
-    let cursor = match params.cursor {
-        Some(cursor) => cursor,
-        None => "0".to_string(),
-    };
-
-    let cursor = match state
-        .context
-        .events_service
-        .parse_cursor(cursor.as_str(), &mut state.context.sql_db.pool().into())
-        .await
-    {
-        Ok(cursor) => cursor,
-        Err(_e) => return Err(HttpError::bad_request("Invalid cursor")),
-    };
+    let cursor = params
+        .cursor
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<EventCursor>()
+        .map_err(|_| HttpError::bad_request("Invalid cursor"))?;
 
     let query_start = Instant::now();
     let events = state
@@ -396,14 +383,10 @@ pub async fn feed_stream(
         .authorize(session, &state.auth_state)
         .await?;
 
-    let mut user_cursor_map = resolve_user_cursors(
-        &params.user_cursors,
-        &state.context.events_service,
-        &state.context.sql_db,
-        &state.context.user_service,
-    )
-    .await
-    .map_err(HttpError::from)?;
+    let mut user_cursor_map =
+        resolve_user_cursors(&params.user_cursors, &state.context.user_service)
+            .await
+            .map_err(HttpError::from)?;
 
     let mut total_sent: usize = 0;
     let stream = async_stream::stream! {
@@ -547,8 +530,6 @@ pub async fn feed_stream(
 /// Returns a map of user_id → optional cursor position.
 async fn resolve_user_cursors(
     user_cursors: &[(PublicKey, Option<String>)],
-    events_service: &EventsService,
-    sql_db: &SqlDb,
     user_service: &crate::services::user_service::UserService,
 ) -> Result<HashMap<i32, Option<EventCursor>>, EventStreamError> {
     let mut user_cursor_map: HashMap<i32, Option<EventCursor>> = HashMap::new();
@@ -563,17 +544,9 @@ async fn resolve_user_cursors(
             })?;
 
         let cursor = if let Some(cursor_str) = cursor_str_opt {
-            Some(
-                events_service
-                    .parse_cursor(cursor_str, &mut sql_db.pool().into())
-                    .await
-                    .map_err(|_| {
-                        EventStreamError::InvalidParameter(format!(
-                            "Invalid cursor: {}",
-                            cursor_str
-                        ))
-                    })?,
-            )
+            Some(cursor_str.parse::<EventCursor>().map_err(|_| {
+                EventStreamError::InvalidParameter(format!("Invalid cursor: {cursor_str}"))
+            })?)
         } else {
             None
         };

@@ -1,4 +1,5 @@
 use super::*;
+use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 #[pubky_testnet::test]
@@ -289,4 +290,100 @@ async fn events_stream_validation_errors() {
         stream.next().await.is_some(),
         "Empty path should be treated as no filter"
     );
+}
+
+/// All event APIs use numeric event IDs, including values that could also be
+/// decoded as legacy timestamps.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn event_apis_validate_numeric_cursors() {
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    let session = signer
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    for path in ["/pub/cursor-first.txt", "/pub/cursor-second.txt"] {
+        session.storage().put(path, vec![1]).await.unwrap();
+    }
+
+    let host = server.public_key().z32();
+    let user = signer.public_key().z32();
+    let admin_socket = server.admin_server().unwrap().listen_socket();
+    let admin_password = pubky_testnet::pubky_homeserver::ConfigToml::default_test_config()
+        .admin
+        .admin_password;
+    let client = pubky.client();
+    let event_uris = [
+        format!("pubky://{user}/pub/cursor-first.txt"),
+        format!("pubky://{user}/pub/cursor-second.txt"),
+    ];
+
+    for (cursor, expected_status, expected_events) in [
+        ("0", StatusCode::OK, &event_uris[..]),
+        ("1", StatusCode::OK, &event_uris[1..]),
+        ("999999999", StatusCode::OK, &[]),
+        ("1111111111111", StatusCode::OK, &[]),
+        ("yyyyyyyyyyyyy", StatusCode::BAD_REQUEST, &[]),
+        ("abc123xyz", StatusCode::BAD_REQUEST, &[]),
+        ("-1", StatusCode::BAD_REQUEST, &[]),
+        ("18446744073709551616", StatusCode::BAD_REQUEST, &[]),
+    ] {
+        let requests = [
+            (
+                "text feed",
+                client.request(
+                    Method::GET,
+                    &format!("https://{host}/events/?cursor={cursor}"),
+                ),
+            ),
+            (
+                "client stream",
+                client.request(
+                    Method::GET,
+                    &format!("https://{host}/events-stream?user={user}:{cursor}"),
+                ),
+            ),
+            (
+                "admin stream",
+                client
+                    .request(
+                        Method::GET,
+                        &format!("http://{admin_socket}/events-stream?cursor={cursor}"),
+                    )
+                    .header("X-Admin-Password", &admin_password),
+            ),
+        ];
+
+        for (endpoint, request) in requests {
+            let (status, body) = timeout(Duration::from_secs(10), async {
+                let response = request.send().await.unwrap();
+                let status = response.status();
+                (status, response.text().await.unwrap())
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{endpoint} timed out for cursor {cursor}"));
+
+            assert_eq!(
+                status, expected_status,
+                "{endpoint}, cursor {cursor}: {body}"
+            );
+            if expected_status == StatusCode::BAD_REQUEST {
+                assert!(body.contains("Invalid cursor"), "{endpoint}: {body}");
+                continue;
+            }
+
+            // Both text and SSE feeds expose each event URI as a separate word.
+            let actual_events: Vec<_> = body
+                .split_whitespace()
+                .filter(|word| word.starts_with("pubky://"))
+                .collect();
+            assert_eq!(
+                actual_events, expected_events,
+                "{endpoint}, cursor {cursor}: {body}"
+            );
+        }
+    }
 }

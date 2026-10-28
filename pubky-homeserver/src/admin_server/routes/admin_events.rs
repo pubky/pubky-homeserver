@@ -13,7 +13,7 @@ use axum::{
     },
 };
 use futures_util::StreamExt;
-use pubky_common::crypto::PublicKey;
+use pubky_common::{crypto::PublicKey, events::EventCursor};
 use url::form_urlencoded;
 
 use super::super::app_state::AppState;
@@ -155,17 +155,12 @@ async fn resolve_filter(
         Some(ids)
     };
 
-    let start_cursor = match params.cursor.as_deref() {
-        Some(c) => Some(
-            state
-                .context
-                .events_service
-                .parse_cursor(c, &mut state.context.sql_db.pool().into())
-                .await
-                .map_err(|_| HttpError::bad_request("Invalid cursor"))?,
-        ),
-        None => None,
-    };
+    let start_cursor = params
+        .cursor
+        .as_deref()
+        .map(str::parse::<EventCursor>)
+        .transpose()
+        .map_err(|_| HttpError::bad_request("Invalid cursor"))?;
 
     Ok(AllEventsFilter {
         start_cursor,

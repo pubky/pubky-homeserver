@@ -204,7 +204,10 @@ paths:
             - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo
       - name: cursor
         in: query
-        description: Resume the combined feed after this single global event cursor.
+        description: >-
+          Resume the combined feed after this numeric event ID.
+          Omit the cursor or use `0` to start from the beginning.
+          Non-numeric cursors return HTTP 400.
         schema:
           type: string
       - name: limit
