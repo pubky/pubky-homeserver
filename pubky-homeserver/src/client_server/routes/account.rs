@@ -108,43 +108,36 @@ mod tests {
         Capabilities::builder().cap(Capability::root()).finish()
     }
 
+    /// Read access to all storage is the bar, so `/:r` is enough and `/:rw`
+    /// passes too.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn root_grant_session_gets_its_own_account() {
-        let context = AppContext::test().await;
-        let (server, pubkey) = grant_server(&context, root()).await;
-
-        let response = server.get("/account").await;
-        response.assert_status(StatusCode::OK);
-        response.assert_header(header::CACHE_CONTROL, "no-store");
-        response.assert_header(header::VARY, "Authorization");
-        let body: serde_json::Value = response.json();
-        assert_eq!(body["pubky"], pubkey.z32());
-        assert!(body["created_at"].is_string());
-        assert_eq!(body["disabled"], false);
-        assert_eq!(body["used_bytes"], 0);
-        assert_eq!(body["quota"]["overrides"], serde_json::json!({}));
-        // The test config sets no storage default, so the effective quota is unlimited.
-        assert_eq!(body["quota"]["effective"]["storage_quota_mb"], "unlimited");
-        let mut keys: Vec<_> = body.as_object().unwrap().keys().collect();
-        keys.sort();
-        assert_eq!(
-            keys,
-            ["created_at", "disabled", "pubky", "quota", "used_bytes"]
-        );
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn root_read_grant_session_gets_its_own_account() {
+    async fn root_read_grant_sessions_get_their_own_account() {
         let context = AppContext::test().await;
         let read_only = Capabilities::builder().read("/").unwrap().finish();
-        let (server, pubkey) = grant_server(&context, read_only).await;
 
-        let response = server.get("/account").await;
-        response.assert_status(StatusCode::OK);
-        let body: serde_json::Value = response.json();
-        assert_eq!(body["pubky"], pubkey.z32());
+        for capabilities in [root(), read_only] {
+            let (server, pubkey) = grant_server(&context, capabilities).await;
+
+            let response = server.get("/account").await;
+            response.assert_status(StatusCode::OK);
+            response.assert_header(header::CACHE_CONTROL, "no-store");
+            response.assert_header(header::VARY, "Authorization");
+            let body: serde_json::Value = response.json();
+            assert_eq!(body["pubky"], pubkey.z32());
+            assert!(body["created_at"].is_string());
+            assert_eq!(body["disabled"], false);
+            assert_eq!(body["used_bytes"], 0);
+            assert_eq!(body["quota"]["overrides"], serde_json::json!({}));
+            // The test config sets no storage default, so the effective quota is unlimited.
+            assert_eq!(body["quota"]["effective"]["storage_quota_mb"], "unlimited");
+            let mut keys: Vec<_> = body.as_object().unwrap().keys().collect();
+            keys.sort();
+            assert_eq!(
+                keys,
+                ["created_at", "disabled", "pubky", "quota", "used_bytes"]
+            );
+        }
     }
 
     /// Neither a path-scoped session nor one that can only write may read

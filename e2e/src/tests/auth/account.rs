@@ -19,7 +19,6 @@ async fn account_requires_root_read_grant_and_survives_disable() {
     let testnet = build_full_testnet().await;
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
-    let http_relay_url = testnet.http_relay().local_link_url();
 
     let keypair = Keypair::random();
     let signer = pubky.signer(keypair.clone());
@@ -29,33 +28,13 @@ async fn account_requires_root_read_grant_and_survives_disable() {
         .await
         .unwrap();
 
-    // Grant sessions with the given capabilities, approved by the signer.
-    let grant_session = |caps: Capabilities, client_id: &str| {
-        let auth = PubkyGrantAuthFlow::builder(
-            &caps,
-            AuthFlowKind::signin(),
-            ClientId::new(client_id).unwrap(),
-        )
-        .relay(http_relay_url.clone())
-        .client(pubky.client().clone())
-        .start()
-        .unwrap();
-        let signer = signer.clone();
-        async move {
-            signer
-                .approve_auth(&auth.authorization_url())
-                .await
-                .unwrap();
-            auth.await_approval().await.unwrap()
-        }
-    };
     let read_only_caps = Capabilities::builder().read("/").unwrap().finish();
-    let read_only_session = grant_session(read_only_caps, "readonly.app").await;
+    let read_only_session = grant_session(&testnet, &signer, read_only_caps, "readonly.app").await;
     let scoped_caps = Capabilities::builder()
         .read_write("/pub/scoped.app/")
         .unwrap()
         .finish();
-    let scoped_session = grant_session(scoped_caps, "scoped.app").await;
+    let scoped_session = grant_session(&testnet, &signer, scoped_caps, "scoped.app").await;
 
     let url = format!("{}account", server.icann_http_url());
 

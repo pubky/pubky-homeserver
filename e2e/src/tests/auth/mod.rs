@@ -4,7 +4,7 @@ mod grant;
 mod pkdns;
 mod signup_tokens;
 
-use super::build_full_testnet;
+use super::{build_full_testnet, grant_session};
 use pubky_testnet::pubky::deep_links::{
     DeepLink, DeepLinkScheme, DirectSignupDeepLink, DirectSignupParams,
 };

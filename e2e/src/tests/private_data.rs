@@ -3,41 +3,14 @@
 //! storage action, asserting the status-by-auth-tier contract invariant to
 //! existence — anonymous → 401, under-scoped / other tenant → 403.
 
-use super::build_full_testnet;
-use pubky_testnet::pubky::{
-    AuthFlowKind, ClientId, IntoPubkyResource, Keypair, Method, PubkyGrantAuthFlow,
-    PubkyHttpClient, PubkySession, PubkySigner, StatusCode,
-};
+use super::{build_full_testnet, grant_session};
+use pubky_testnet::pubky::{IntoPubkyResource, Keypair, Method, PubkyHttpClient, StatusCode};
 use pubky_testnet::pubky_common::capabilities::Capabilities;
 use pubky_testnet::pubky_common::crypto::PublicKey;
-use pubky_testnet::EphemeralTestnet;
 
 const SECRET: &str = "/priv/app/secret.txt";
 const ABSENT: &str = "/priv/app/absent.txt";
 const DIR: &str = "/priv/app/";
-
-/// Approve a grant with `caps` for `signer` and return the resulting session.
-async fn grant_session(
-    testnet: &EphemeralTestnet,
-    signer: &PubkySigner,
-    caps: Capabilities,
-) -> PubkySession {
-    let pubky = testnet.sdk().unwrap();
-    let auth = PubkyGrantAuthFlow::builder(
-        &caps,
-        AuthFlowKind::signin(),
-        ClientId::new("test.app").unwrap(),
-    )
-    .relay(testnet.http_relay().local_link_url())
-    .client(pubky.client().clone())
-    .start()
-    .unwrap();
-    signer
-        .approve_auth(&auth.authorization_url())
-        .await
-        .unwrap();
-    auth.await_approval().await.unwrap()
-}
 
 /// Transport URL for `path` in `owner`'s namespace.
 fn owner_url(owner: &PublicKey, path: &str) -> String {
@@ -119,6 +92,7 @@ async fn anonymous_priv_access_is_unauthorized() {
         &testnet,
         &signer,
         Capabilities::builder().read_write(DIR).unwrap().finish(),
+        "test.app",
     )
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
@@ -164,6 +138,7 @@ async fn under_scoped_owner_priv_access_is_forbidden() {
         &testnet,
         &signer,
         Capabilities::builder().read_write(DIR).unwrap().finish(),
+        "test.app",
     )
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
@@ -218,6 +193,7 @@ async fn under_scoped_owner_priv_access_is_forbidden() {
             .read_write("/priv/other/")
             .unwrap()
             .finish(),
+        "test.app",
     )
     .await;
     let token = under.as_grant().unwrap().current_bearer().await;
@@ -272,6 +248,7 @@ async fn cross_tenant_priv_access_is_forbidden() {
         &testnet,
         &owner_signer,
         Capabilities::builder().read_write(DIR).unwrap().finish(),
+        "test.app",
     )
     .await;
     covering.storage().put(SECRET, vec![1, 2, 3]).await.unwrap();
@@ -286,6 +263,7 @@ async fn cross_tenant_priv_access_is_forbidden() {
         &testnet,
         &tenant_signer,
         Capabilities::builder().read_write(DIR).unwrap().finish(),
+        "test.app",
     )
     .await;
     let token = tenant.as_grant().unwrap().current_bearer().await;

@@ -513,6 +513,16 @@ mod tests {
         GrantAuthService::new(db, hs_kp.public_key(), signup_service, user_service)
     }
 
+    /// A grant session for a fresh user holding `caps`.
+    fn session_with(caps: Capabilities) -> AuthSession {
+        AuthSession::Grant(GrantSession::test(
+            Keypair::random().public_key(),
+            caps,
+            GrantId::generate(),
+            0,
+        ))
+    }
+
     async fn create_test_user(service: &GrantAuthService) -> (Keypair, i32) {
         let kp = Keypair::random();
         let user = service.user_service.create(&kp.public_key()).await.unwrap();
@@ -1140,40 +1150,22 @@ mod tests {
 
     #[test]
     fn require_root_capability_passes_with_root() {
-        let session = GrantSession::test(
-            Keypair::random().public_key(),
-            Capabilities::builder().cap(Capability::root()).finish(),
-            GrantId::generate(),
-            0,
-        );
-        assert!(GrantAuthService::require_root_capability(&AuthSession::Grant(session)).is_ok());
+        let auth = session_with(Capabilities::builder().cap(Capability::root()).finish());
+        assert!(GrantAuthService::require_root_capability(&auth).is_ok());
     }
 
     #[test]
     fn require_root_capability_fails_without_root() {
-        let session = GrantSession::test(
-            Keypair::random().public_key(),
+        let auth = session_with(
             Capabilities::builder()
                 .cap(Capability::read("/").unwrap())
                 .finish(),
-            GrantId::generate(),
-            0,
         );
-        let err =
-            GrantAuthService::require_root_capability(&AuthSession::Grant(session)).unwrap_err();
+        let err = GrantAuthService::require_root_capability(&auth).unwrap_err();
         assert!(matches!(err, AuthServiceError::RootCapabilityRequired));
     }
 
     // ── require_root_read_capability ────────────────────────────────
-
-    fn session_with(caps: Capabilities) -> AuthSession {
-        AuthSession::Grant(GrantSession::test(
-            Keypair::random().public_key(),
-            caps,
-            GrantId::generate(),
-            0,
-        ))
-    }
 
     #[test]
     fn require_root_read_capability_passes_with_root_read_or_root() {
