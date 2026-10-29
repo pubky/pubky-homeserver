@@ -15,9 +15,9 @@ use axum::{
         IntoResponse,
     },
 };
-use futures_util::stream::Stream;
+use futures_util::{Stream, StreamExt};
 use pubky_common::crypto::PublicKey;
-use std::{collections::HashMap, convert::Infallible, time::Instant};
+use std::{convert::Infallible, time::Instant};
 use tower_cookies::Cookies;
 
 use crate::{
@@ -30,10 +30,9 @@ use crate::{
         AppState,
     },
     constants::{PRIVATE_ROOT, PUBLIC_ROOT},
-    observability::ConnectionGuard,
     persistence::sql::events::{EventCursor, EventEntity, PathFilter},
     services::{
-        events_service::{EventStreamError, EventStreamQuery, StreamKind},
+        events_service::{ClientStreamQuery, EventStreamError, UserEventsFilter},
         user_service::UserService,
     },
     shared::{webdav::StoragePath, HttpError, HttpResult},
@@ -172,7 +171,7 @@ pub async fn feed_stream(
     cookies: Cookies,
     raw_query: RawQuery,
 ) -> HttpResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let query = EventStreamQuery::parse(raw_query.0.as_deref().unwrap_or(""), StreamKind::Client)?;
+    let query = ClientStreamQuery::parse(raw_query.0.as_deref().unwrap_or(""))?;
     let tenant_scope = EventStreamTenantScope::from_query(&query.paths, &query.user_cursors);
 
     // A presented Bearer disables both middleware-resolved and
@@ -203,153 +202,35 @@ pub async fn feed_stream(
         )
     })?;
 
-    let mut stream_auth = pending_stream_auth
+    let stream_auth = pending_stream_auth
         .authorize(session, &state.auth_state)
         .await?;
 
-    let mut user_cursor_map =
-        resolve_user_ids(&query.user_cursors, &state.context.user_service).await?;
+    let user_cursors = resolve_user_ids(&query.user_cursors, &state.context.user_service).await?;
 
-    let mut total_sent: usize = 0;
-    let stream = async_stream::stream! {
-         // Create guard to ensure cleanup on any exit path (increments on creation, decrements on drop)
-        let _guard = ConnectionGuard::new(state.context.metrics.clone());
-
-        // Subscribe to broadcast channel immediately to prevent race condition
-        // Events that occur during Phase 1 will be buffered in the channel
-        let mut rx = state.context.events_service.subscribe();
-
-        // Phase 1: Batch Mode
-        loop {
-            if !stream_auth.is_valid(&state.auth_state).await {
-                return;
-            }
-
-            // Drain any buffered events before querying as they'll be included in this or a future database query
-            while rx.try_recv().is_ok() {}
-
-            let current_user_cursors: Vec<(i32, Option<EventCursor>)> =
-                user_cursor_map.iter().map(|(k, cursor)| (*k, *cursor)).collect();
-
-            let query_start = Instant::now();
-            let events = match state
-                .context
-                .events_service
-                .get_by_user_cursors(
-                    current_user_cursors,
-                    query.mode.reverse(),
-                    &allowed_paths,
-                    &mut state.context.sql_db.pool().into(),
-                )
-                .await
-            {
-                Ok(events) => events,
-                Err(e) => {
-                    tracing::error!("Database error while fetching events: {}", e);
-                    break;
-                }
-            };
-            state.context.metrics.record_event_stream_db_query(query_start.elapsed().as_millis());
-
-            let event_count = events.len();
-
-            // Stream each historical event
-            for event in events {
-                if !stream_auth.is_valid(&state.auth_state).await {
-                    return;
-                }
-
-                // Update the cursor for this specific user
-                user_cursor_map.insert(event.user_id, Some(event.cursor()));
-
-                yield Ok(event.to_sse_event());
-
-                total_sent += 1;
-
-                // Close if we've reached limit
-                if let Some(max) = query.limit {
-                    if total_sent >= max as usize {
-                        return;
-                    }
-                }
-            }
-
-            // If we got zero events, all users are caught up with history
-            if event_count == 0 {
-                // If not in live mode, close connection (batch mode)
-                if !query.mode.live() {
-                    return;
-                }
-                // Otherwise, transition to live mode
-                break;
-            }
-
-            // If we got a partial batch (> 0 but less than read_batch_size), continue querying
-            // Some users might still have more events even though this batch was partial
-        }
-
-        // Phase 2: Live mode
-        if query.mode.live() {
-            let user_ids: Vec<i32> = user_cursor_map.keys().copied().collect();
-            let half_capacity = state.context.events_service.channel_capacity() / 2;
-
-            loop {
-                tokio::select! {
-                    biased;
-                    check = stream_auth.next_check(&state.auth_state) => {
-                        if !check.await {
-                            return;
-                        }
-                    }
-                    event = rx.recv() => match event {
-                        Ok(event) => {
-                        // Check if receiver queue is at half capacity (early warning of slow clients)
-                        if rx.len() >= half_capacity {
-                            state.context.metrics.record_broadcast_half_full();
-                        }
-                        // Filter events based on user_ids, cursors, and path
-                        if !should_include_live_event(&event, &user_ids, &user_cursor_map, &allowed_paths) {
-                            continue;
-                        }
-
-                        // Update this user's cursor
-                        user_cursor_map.insert(event.user_id, Some(event.cursor()));
-
-                        yield Ok(event.to_sse_event());
-
-                        total_sent += 1;
-
-                        // Close if we've reached limit
-                        if let Some(max) = query.limit {
-                            if total_sent >= max as usize {
-                                return;
-                            }
-                        }
-                    }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            state.context.metrics.record_broadcast_lagged();
-                            tracing::warn!(
-                                "Slow client detected: broadcast channel lagged by {} events. Closing connection.",
-                                skipped
-                            );
-                            return;
-                        }
-                        Err(_) => break, // Channel closed
-                    }
-                }
-            }
-        }
-    };
+    let stream = state
+        .context
+        .events_service
+        .user_events_stream(
+            state.context.metrics.clone(),
+            UserEventsFilter {
+                user_cursors,
+                allowed_paths,
+                mode: query.mode,
+                limit: query.limit,
+            },
+            stream_auth,
+        )
+        .map(|event| Ok::<_, Infallible>(event.to_sse_event()));
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// Resolve user public keys to user IDs, keeping each user's cursor.
-/// Returns a map of user_id → optional cursor position.
 async fn resolve_user_ids(
     user_cursors: &[(PublicKey, Option<EventCursor>)],
     user_service: &UserService,
-) -> Result<HashMap<i32, Option<EventCursor>>, EventStreamError> {
+) -> Result<Vec<(i32, Option<EventCursor>)>, EventStreamError> {
     let pubkeys: Vec<PublicKey> = user_cursors.iter().map(|(pk, _)| pk.clone()).collect();
     let ids = user_service.get_ids(&pubkeys).await?;
     let cursors = user_cursors.iter().map(|(_, cursor)| *cursor);
@@ -393,30 +274,6 @@ fn authorized_paths(
         allowed.push(path.clone().into());
     }
     Ok(allowed)
-}
-
-/// Filter events in live mode based on user IDs, cursors, and the authorized
-/// paths.
-fn should_include_live_event(
-    event: &EventEntity,
-    user_ids: &[i32],
-    user_cursor_map: &HashMap<i32, Option<EventCursor>>,
-    allowed_paths: &[PathFilter],
-) -> bool {
-    if !user_ids.contains(&event.user_id) {
-        return false;
-    }
-
-    // Filter out events we already sent in Phase 1
-    if let Some(Some(cursor)) = user_cursor_map.get(&event.user_id) {
-        if event.cursor() <= *cursor {
-            return false;
-        }
-    }
-
-    // Apply the authorized filter set.
-    let path = event.path.path().as_str();
-    allowed_paths.iter().any(|filter| filter.matches(path))
 }
 
 #[cfg(test)]
