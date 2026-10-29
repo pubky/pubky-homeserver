@@ -89,7 +89,7 @@ opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "metrics"] }
 opentelemetry-prometheus = "0.33"
 prometheus = "0.14"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 rand.workspace = true
