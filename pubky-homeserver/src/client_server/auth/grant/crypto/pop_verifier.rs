@@ -150,15 +150,12 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use pubky_common::crypto::Keypair;
+    use pubky_common::{auth::jws::sign_jws, crypto::Keypair};
 
-    use super::jws_crypto;
     use super::*;
 
     fn sign_pop(client_kp: &Keypair, raw: &PopProofClaims) -> JwsCompact {
-        let header = jws_crypto::eddsa_header(POP_JWS_TYP);
-        let enc = jws_crypto::encoding_key(client_kp);
-        let token = jsonwebtoken::encode(&header, raw, &enc).unwrap();
+        let token = sign_jws(client_kp, POP_JWS_TYP, raw);
         JwsCompact::parse(&token).unwrap()
     }
 
@@ -278,10 +275,7 @@ mod tests {
         let raw = make_valid_pop(&hs_kp);
 
         // Sign with wrong typ header
-        let header = jws_crypto::eddsa_header("wrong-typ");
-        let enc = jws_crypto::encoding_key(&client_kp);
-        let compact =
-            JwsCompact::parse(&jsonwebtoken::encode(&header, &raw, &enc).unwrap()).unwrap();
+        let compact = JwsCompact::parse(&sign_jws(&client_kp, "wrong-typ", &raw)).unwrap();
 
         let cnf_key = client_kp.public_key();
         let aud = hs_kp.public_key().z32();

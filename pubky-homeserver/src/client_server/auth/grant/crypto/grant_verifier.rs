@@ -92,18 +92,15 @@ pub enum Error {
 mod tests {
     use chrono::Utc;
     use pubky_common::{
-        auth::jws::{ClientId, GrantId},
+        auth::jws::{sign_jws, ClientId, GrantId},
         capabilities::Capability,
         crypto::Keypair,
     };
 
-    use super::jws_crypto;
     use super::*;
 
     fn sign_raw_grant(keypair: &Keypair, raw: &GrantClaims) -> JwsCompact {
-        let header = jws_crypto::eddsa_header(GRANT_JWS_TYP);
-        let enc = jws_crypto::encoding_key(keypair);
-        let token = jsonwebtoken::encode(&header, raw, &enc).unwrap();
+        let token = sign_jws(keypair, GRANT_JWS_TYP, raw);
         JwsCompact::parse(&token).unwrap()
     }
 
@@ -185,10 +182,7 @@ mod tests {
         let raw = make_valid_raw_grant(&user_kp, &client_kp);
 
         // Sign with wrong typ header
-        let header = jws_crypto::eddsa_header("wrong-typ");
-        let enc = jws_crypto::encoding_key(&user_kp);
-        let compact =
-            JwsCompact::parse(&jsonwebtoken::encode(&header, &raw, &enc).unwrap()).unwrap();
+        let compact = JwsCompact::parse(&sign_jws(&user_kp, "wrong-typ", &raw)).unwrap();
 
         for verify in [verify_grant, verify_grant_for_revocation] {
             assert!(matches!(verify(&compact), Err(Error::InvalidHeaderType)));
