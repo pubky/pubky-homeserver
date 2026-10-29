@@ -57,17 +57,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Install Nextest
-        uses: taiki-e/install-action@nextest
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-rust
         with:
           # Each crate builds different tests, so each needs a cache of its own.
           shared-key: test-${{ matrix.crate }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Nextest
+        uses: taiki-e/install-action@nextest
       - name: Wait for PostgreSQL
         run: |
           for i in {1..10}; do
@@ -107,11 +102,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.91"
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -121,11 +115,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run wasm-pack unit tests
         working-directory: pubky-sdk/bindings/js
@@ -169,11 +158,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.91"
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
+          workspaces: |
+            . -> target
+            . -> target-testnet
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -189,14 +180,6 @@ jobs:
       - name: Install JS dependencies
         working-directory: pubky-sdk/bindings/js/pkg
         run: npm ci --prefer-offline --no-audit --no-fund
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            . -> target-testnet
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The testnet builds while the WASM bindings build. Its own target
       # directory keeps the two builds from waiting for each other's lock.
@@ -285,13 +268,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+        uses: ./.github/actions/setup-rust
       - name: Run docker postgres tests
         run: |
           cargo test -p pubky-testnet \
@@ -326,17 +303,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Install Nextest
-        uses: taiki-e/install-action@nextest
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-rust
         with:
           # The pubky-homeserver job builds the same tests and saves the cache.
           shared-key: test-pubky-homeserver
-          save-if: false
+          save-cache: false
+      - name: Install Nextest
+        uses: taiki-e/install-action@nextest
       - name: Run the ${{ matrix.backend }} tests
         run: |
           cargo nextest run -p pubky-homeserver --all-features \
@@ -384,19 +357,14 @@ jobs:
         if: steps.credentials.outputs.available == 'true'
       - name: Set up Rust
         if: steps.credentials.outputs.available == 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Install Nextest
-        if: steps.credentials.outputs.available == 'true'
-        uses: taiki-e/install-action@nextest
-      - name: Cache
-        if: steps.credentials.outputs.available == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-rust
         with:
           # The pubky-homeserver job builds the same tests and saves the cache.
           shared-key: test-pubky-homeserver
-          save-if: false
+          save-cache: false
+      - name: Install Nextest
+        if: steps.credentials.outputs.available == 'true'
+        uses: taiki-e/install-action@nextest
       - name: Configure the GCS test bucket
         if: steps.credentials.outputs.available == 'true'
         env:

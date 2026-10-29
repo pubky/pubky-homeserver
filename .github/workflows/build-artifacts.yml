@@ -26,13 +26,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
+          save-cache: true
           # Cache Cargo downloads and installed tools, but exclude target artifacts.
           # Cross images tagged :latest may change and make restored artifacts incompatible.
           cache-targets: false

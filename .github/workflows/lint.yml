@@ -21,13 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up MSRV toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+        uses: ./.github/actions/setup-rust
       - name: Verify MSRV
         run: cargo check --workspace --all-features
 
@@ -37,10 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.91"
           components: rustfmt
+          cache: false
       - name: Check formatting
         run: cargo fmt --check
 
@@ -50,20 +44,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.91"
           components: clippy
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          targets: wasm32-unknown-unknown
 
       - name: Lint host crates and all Cargo targets
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Install WASM compilation target
-        run: rustup target add wasm32-unknown-unknown
 
       - name: Lint WASM bindings and tests
         run: cargo clippy -p pubky-wasm --lib --tests --target wasm32-unknown-unknown -- -D warnings
@@ -74,14 +61,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.91"
           components: rustfmt, clippy
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check excluded helper crates
         run: |
           set -e
