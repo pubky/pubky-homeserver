@@ -179,7 +179,7 @@ mod tests {
 
     use crate::client_server::client_identity::ClientIdentityAcceptor;
     use crate::client_server::middleware::request_tenant::RequestTenant;
-    use crate::shared::quota::{GlobPattern, HttpMethod, LimitKeyType};
+    use crate::shared::quota::{GlobPattern, HttpMethod, LimitKey, LimitKeyType};
     use crate::shared::HttpResult;
 
     use super::*;
@@ -541,6 +541,36 @@ mod tests {
 
         let third = client.post(&url).send().await.unwrap();
         assert_eq!(third.status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn layer_rejects_mismatched_whitelist_keys() {
+        for key in [LimitKeyType::Ip, LimitKeyType::User] {
+            let mut limit = ip_limit();
+            limit.key = key;
+            limit.whitelist = vec![
+                LimitKey::Ip(Ipv4Addr::LOCALHOST.into()),
+                LimitKey::User(Keypair::random().public_key()),
+            ];
+
+            let error = RequestRateLimitLayer::from_path_limits(vec![limit]).unwrap_err();
+
+            assert!(error.contains("Whitelist key type mismatch"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn layer_accepts_matching_whitelist_keys() {
+        for whitelist_key in [
+            LimitKey::Ip(Ipv4Addr::LOCALHOST.into()),
+            LimitKey::User(Keypair::random().public_key()),
+        ] {
+            let mut limit = ip_limit();
+            limit.key = whitelist_key.get_type();
+            limit.whitelist = vec![whitelist_key];
+
+            RequestRateLimitLayer::from_path_limits(vec![limit]).unwrap();
+        }
     }
 
     #[test]

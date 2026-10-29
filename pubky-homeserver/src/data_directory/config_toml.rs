@@ -73,10 +73,22 @@ pub struct DriveToml {
     pub icann_client_identity: ClientIdentityToml,
     /// How the Pubky TLS listener determines the client address.
     pub pubky_client_identity: ClientIdentityToml,
-    /// Per-path request-count rate limits.
+    /// Per-path request-count rate limits, validated during deserialization.
+    #[serde(deserialize_with = "deserialize_path_limits")]
     pub rate_limits: Vec<PathLimit>,
     /// Serve users' static websites from `/pub/website/` by `Host`.
     pub websites: bool,
+}
+
+fn deserialize_path_limits<'de, D>(deserializer: D) -> Result<Vec<PathLimit>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let limits = Vec::<PathLimit>::deserialize(deserializer)?;
+    for limit in &limits {
+        limit.validate().map_err(serde::de::Error::custom)?;
+    }
+    Ok(limits)
 }
 
 /// Client address source for one TCP listener.
@@ -331,13 +343,109 @@ impl FromStr for ConfigToml {
 #[cfg(test)]
 mod tests {
     use crate::data_directory::log_level::LogLevel;
+    #[cfg(feature = "storage-gcs")]
+    use crate::data_directory::storage_config::{
+        GoogleBucketConfig, GoogleServiceAccountKeyConfig,
+    };
+    use crate::shared::quota::{LimitKey, LimitKeyType};
 
     use super::*;
     use axum::http::Method;
+    use pubky_common::crypto::Keypair;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
         str::FromStr,
     };
+
+    #[cfg(feature = "storage-gcs")]
+    fn google_bucket_config_toml(bucket_name: &str) -> String {
+        let mut config = ConfigToml::default();
+        config.storage.backend = StorageConfigToml::GoogleBucket(GoogleBucketConfig {
+            bucket_name: bucket_name.to_owned(),
+            credential: GoogleServiceAccountKeyConfig::Inline(
+                r#"{"type":"service_account","auth_provider_x509_cert_url":"https://example.com"}"#
+                    .to_owned(),
+            ),
+        });
+        toml::to_string(&config).unwrap()
+    }
+
+    #[cfg(feature = "storage-gcs")]
+    #[test]
+    fn google_bucket_config_rejects_empty_names() {
+        let raw = google_bucket_config_toml("");
+
+        let error = ConfigToml::from_str(&raw).unwrap_err();
+        assert!(error.to_string().contains("string must not be empty"));
+
+        let error = ConfigToml::from_str_with_defaults(&raw).unwrap_err();
+        assert!(error.to_string().contains("string must not be empty"));
+    }
+
+    #[cfg(feature = "storage-gcs")]
+    #[test]
+    fn google_bucket_config_preserves_nonempty_names() {
+        // This check only rejects empty strings; it does not trim or enforce GCS naming rules.
+        for bucket_name in ["test-bucket", " "] {
+            let raw = google_bucket_config_toml(bucket_name);
+            let configs = [
+                ConfigToml::from_str(&raw).unwrap(),
+                ConfigToml::from_str_with_defaults(&raw).unwrap(),
+            ];
+            for config in configs {
+                let StorageConfigToml::GoogleBucket(bucket) = config.storage.backend else {
+                    panic!("expected Google bucket storage");
+                };
+                assert_eq!(bucket.bucket_name, bucket_name);
+            }
+        }
+    }
+
+    #[test]
+    fn path_limit_config_rejects_mismatched_whitelist_keys() {
+        for key in [LimitKeyType::Ip, LimitKeyType::User] {
+            let mut config = ConfigToml::default();
+            let limit = &mut config.drive.rate_limits[0];
+            limit.key = key;
+            limit.whitelist = vec![
+                LimitKey::Ip(Ipv4Addr::LOCALHOST.into()),
+                LimitKey::User(Keypair::random().public_key()),
+            ];
+            let raw = toml::to_string(&config).unwrap();
+
+            let error = ConfigToml::from_str(&raw).unwrap_err();
+            assert!(error.to_string().contains("Whitelist key type mismatch"));
+
+            let error = ConfigToml::from_str_with_defaults(&raw).unwrap_err();
+            assert!(error.to_string().contains("Whitelist key type mismatch"));
+        }
+    }
+
+    #[test]
+    fn path_limit_config_preserves_matching_whitelist_keys() {
+        for whitelist_key in [
+            LimitKey::Ip(Ipv4Addr::LOCALHOST.into()),
+            LimitKey::User(Keypair::random().public_key()),
+        ] {
+            let mut config = ConfigToml::default();
+            let limit = &mut config.drive.rate_limits[0];
+            limit.key = whitelist_key.get_type();
+            limit.whitelist = vec![whitelist_key];
+            let raw = toml::to_string(&config).unwrap();
+
+            assert_eq!(
+                ConfigToml::from_str(&raw).unwrap().drive.rate_limits,
+                config.drive.rate_limits
+            );
+            assert_eq!(
+                ConfigToml::from_str_with_defaults(&raw)
+                    .unwrap()
+                    .drive
+                    .rate_limits,
+                config.drive.rate_limits
+            );
+        }
+    }
 
     #[test]
     fn pkarr_request_timeouts_reject_zero() {

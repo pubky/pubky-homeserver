@@ -93,6 +93,7 @@ pub(super) enum LimitKeyExtractionError {
 
 impl LimitTuple {
     pub fn new(path_limit: PathLimit) -> Result<Self, String> {
+        path_limit.validate().map_err(|error| error.to_string())?;
         let quota = Quota::try_from(path_limit.clone())?;
         let limiter = Arc::new(RateLimiter::keyed(quota));
 

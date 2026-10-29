@@ -59,7 +59,6 @@ governor = "0.10"
 fast-glob = "1"
 tokio-util = "0.7"
 percent-encoding.workspace = true
-serde_valid = "3"
 opendal = { version = "0.59.4", features = ["services-fs"] }
 opendal-http-transport-reqwest = "0.59.4"
 infer = "0.22"
