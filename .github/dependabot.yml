@@ -19,6 +19,27 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: "npm"
+    directories:
+      - "/pubky-sdk/bindings/js/pkg"
+      - "/examples/javascript"
+      - "/examples/javascript/2-auth-flow"
+      - "/examples/javascript/5-browser-session-persistence"
+    schedule:
+      interval: "weekly"
+      time: "08:00"
+      day: "tuesday"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "deps"
+    allow:
+      - dependency-type: "all"
+    groups:
+      npm-dependencies:
+        patterns:
+          - "*"
+
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
