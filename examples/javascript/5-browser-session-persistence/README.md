@@ -6,6 +6,9 @@ The app is testnet-only and self-contained. On first load, if there are no saved
 
 ## Run
 
+Use Node.js 20.19+ within the 20.x series, or Node.js 22.12+ (including 24.x),
+for Vite 8.
+
 Start a local testnet in one terminal:
 
 ```bash

@@ -6,6 +6,9 @@ The app starts a `signin_grant` flow, displays a Pubky Auth URL and QR code, wai
 
 ## Run
 
+Use Node.js 20.19+ within the 20.x series, or Node.js 22.12+ (including 24.x),
+for Vite 8.
+
 Start a local testnet in one terminal:
 
 ```bash
