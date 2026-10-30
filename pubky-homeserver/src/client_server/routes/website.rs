@@ -153,12 +153,7 @@ impl Website {
             return Ok(None);
         };
         let entry_path = EntryPath::new(self.owner.clone(), path);
-        match state
-            .context
-            .file_service
-            .get_info(&entry_path, &mut state.context.sql_db.pool().into())
-            .await
-        {
+        match state.context.file_service.get_info(&entry_path).await {
             Ok(entry) => Ok(Some((entry_path, entry))),
             Err(FileIoError::NotFound) => Ok(None),
             Err(error) => Err(error.into()),
