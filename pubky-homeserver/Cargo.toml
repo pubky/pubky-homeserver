@@ -63,16 +63,16 @@ opendal = { version = "0.59.4", features = ["services-fs"] }
 opendal-http-transport-reqwest = "0.59.4"
 infer = "0.22"
 mime_guess = "2"
-dav-server-opendalfs = "=0.7.10" # Pinned to the release built on the opendal version above
+dav-server-opendalfs = "=0.7.11" # Pinned to the release built on the opendal version above
 dav-server = "0.11"
 sea-query = { version = "1", features = ["with-chrono", "postgres-array"] }
-sea-query-sqlx = { version = "0.8", features = [
+sea-query-sqlx = { version = "0.9", features = [
     "with-chrono",
     "runtime-tokio",
     "sqlx-postgres",
     "postgres-array",
 ] }
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.9", features = [
     "runtime-tokio",
     "postgres",
     "chrono",
@@ -88,7 +88,7 @@ opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "metrics"] }
 opentelemetry-prometheus = "0.33"
 prometheus = "0.14"
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 rand.workspace = true
