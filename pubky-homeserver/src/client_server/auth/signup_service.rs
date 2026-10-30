@@ -1,9 +1,10 @@
 //! Signup service — owns signup policy and user creation.
 
 use crate::persistence::sql::{
-    signup_code::{SignupCode, SignupCodeRepository},
+    signup_code::{SignupCode, SignupCodeEntity},
     uexecutor, SqlDb,
 };
+use crate::services::signup_code_service::{SignupCodeError, SignupCodeService};
 use crate::services::user_service::{UserEntity, UserService};
 use crate::shared::quota::UserQuota;
 use crate::SignupMode;
@@ -33,11 +34,22 @@ pub enum SignupServiceError {
     Internal(#[from] sqlx::Error),
 }
 
+impl From<SignupCodeError> for SignupServiceError {
+    fn from(error: SignupCodeError) -> Self {
+        match error {
+            SignupCodeError::Invalid => Self::InvalidSignupToken,
+            SignupCodeError::AlreadyUsed => Self::SignupTokenAlreadyUsed,
+            SignupCodeError::Db(e) => Self::Internal(e),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SignupService {
     sql_db: SqlDb,
     signup_mode: SignupMode,
     user_service: UserService,
+    signup_code_service: SignupCodeService,
 }
 
 impl SignupService {
@@ -47,6 +59,7 @@ impl SignupService {
             sql_db: context.sql_db.clone(),
             signup_mode: context.config_toml.general.signup_mode.clone(),
             user_service: context.user_service.clone(),
+            signup_code_service: context.signup_code_service.clone(),
         }
     }
 
@@ -54,6 +67,7 @@ impl SignupService {
     #[cfg(test)]
     pub fn new(sql_db: SqlDb, signup_mode: SignupMode, user_service: UserService) -> Self {
         Self {
+            signup_code_service: SignupCodeService::new(sql_db.clone()),
             sql_db,
             signup_mode,
             user_service,
@@ -93,8 +107,12 @@ impl SignupService {
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
     ) -> Result<UserEntity, SignupServiceError> {
         self.ensure_user_not_exists(public_key, tx).await?;
-        let quota = if self.signup_mode == SignupMode::TokenRequired {
-            Self::validate_and_consume_signup_token(signup_token, public_key, tx).await?
+        let quota = if self.requires_signup_token() {
+            let code = signup_token.ok_or(SignupServiceError::SignupTokenRequired)?;
+            self.signup_code_service
+                .consume_in_tx(code, public_key, uexecutor!(*tx))
+                .await?
+                .quota()
         } else {
             UserQuota::default()
         };
@@ -107,6 +125,25 @@ impl SignupService {
             .set_quota_in_tx(user.id, &quota, uexecutor!(*tx))
             .await?;
         Ok(user)
+    }
+
+    /// Whether signups must present a signup token.
+    pub fn requires_signup_token(&self) -> bool {
+        self.signup_mode == SignupMode::TokenRequired
+    }
+
+    /// Looks up a signup token.
+    ///
+    /// Fails with [`SignupServiceError::InvalidSignupToken`] when the token is unknown.
+    pub async fn get_token(
+        &self,
+        code: &SignupCode,
+    ) -> Result<SignupCodeEntity, SignupServiceError> {
+        match self.signup_code_service.get(code).await {
+            Ok(entity) => Ok(entity),
+            Err(sqlx::Error::RowNotFound) => Err(SignupServiceError::InvalidSignupToken),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Fails if a user row already exists for `public_key`.
@@ -125,24 +162,47 @@ impl SignupService {
             Err(e) => Err(e.into()),
         }
     }
+}
 
-    /// Validates a signup token and marks it as consumed by `public_key`.
-    async fn validate_and_consume_signup_token(
-        signup_token: Option<&SignupCode>,
-        public_key: &PublicKey,
-        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
-    ) -> Result<UserQuota, SignupServiceError> {
-        let code_id = signup_token.ok_or(SignupServiceError::SignupTokenRequired)?;
-        let code = match SignupCodeRepository::get(code_id, uexecutor!(*tx)).await {
-            Ok(code) => code,
-            Err(sqlx::Error::RowNotFound) => return Err(SignupServiceError::InvalidSignupToken),
-            Err(e) => return Err(SignupServiceError::Internal(e)),
-        };
-        if code.used_by.is_some() {
-            return Err(SignupServiceError::SignupTokenAlreadyUsed);
-        }
-        let quota = code.quota();
-        SignupCodeRepository::mark_as_used(code_id, public_key, uexecutor!(*tx)).await?;
-        Ok(quota)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pubky_common::crypto::Keypair;
+
+    async fn service(signup_mode: SignupMode) -> SignupService {
+        let db = SqlDb::test().await;
+        SignupService::new(db.clone(), signup_mode, UserService::new(db))
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_requires_signup_token_follows_signup_mode() {
+        assert!(!service(SignupMode::Open).await.requires_signup_token());
+        assert!(service(SignupMode::TokenRequired)
+            .await
+            .requires_signup_token());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_get_token_reports_unknown_and_used_tokens() {
+        let svc = service(SignupMode::TokenRequired).await;
+
+        let err = svc.get_token(&SignupCode::random()).await.unwrap_err();
+        assert!(matches!(err, SignupServiceError::InvalidSignupToken));
+
+        let code = svc
+            .signup_code_service
+            .create(&UserQuota::default())
+            .await
+            .unwrap();
+        assert!(svc.get_token(&code.id).await.unwrap().used_by.is_none());
+
+        let user = svc
+            .create_new_user(&Keypair::random().public_key(), Some(&code.id))
+            .await
+            .unwrap();
+        let used = svc.get_token(&code.id).await.unwrap();
+        assert_eq!(used.used_by, Some(user.public_key));
     }
 }
