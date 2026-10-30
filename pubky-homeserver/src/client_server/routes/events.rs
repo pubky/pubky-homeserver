@@ -306,11 +306,7 @@ pub async fn feed(
     let events = state
         .context
         .events_service
-        .get_public_by_cursor(
-            Some(cursor),
-            params.limit,
-            &mut state.context.sql_db.pool().into(),
-        )
+        .get_public_by_cursor(Some(cursor), params.limit)
         .await?;
     state
         .context
@@ -422,12 +418,7 @@ pub async fn feed_stream(
             let events = match state
                 .context
                 .events_service
-                .get_by_user_cursors(
-                    current_user_cursors,
-                    params.reverse,
-                    &allowed_paths,
-                    &mut state.context.sql_db.pool().into(),
-                )
+                .get_by_user_cursors(current_user_cursors, params.reverse, &allowed_paths)
                 .await
             {
                 Ok(events) => events,

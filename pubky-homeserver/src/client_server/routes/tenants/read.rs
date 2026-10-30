@@ -51,11 +51,7 @@ pub async fn head(
         .get_or_http_error(entry_path.pubkey(), false)
         .await?;
 
-    let entry = state
-        .context
-        .file_service
-        .get_info(&entry_path, &mut state.context.sql_db.pool().into())
-        .await?;
+    let entry = state.context.file_service.get_info(&entry_path).await?;
     let blob_length = state.context.file_service.blob_length(&entry_path).await?;
     let response = entry.to_response_headers(blob_length).into_response();
     Ok(response)
@@ -96,11 +92,7 @@ pub async fn get(
         return list(state, &entry_path, params).await;
     }
 
-    let entry = state
-        .context
-        .file_service
-        .get_info(&entry_path, &mut state.context.sql_db.pool().into())
-        .await?;
+    let entry = state.context.file_service.get_info(&entry_path).await?;
 
     if is_not_modified(&headers, &entry) {
         return not_modified_response(&entry);

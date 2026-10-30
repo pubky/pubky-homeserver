@@ -5,7 +5,7 @@ use crate::{
         files::events::EventsService,
         sql::{
             entry::{EntryEntity, EntryRepository},
-            SqlDb, UnifiedExecutor,
+            SqlDb,
         },
     },
     shared::webdav::EntryPath,
@@ -55,12 +55,8 @@ impl FileService {
     }
 
     /// Get the metadata of a file.
-    pub async fn get_info(
-        &self,
-        path: &EntryPath,
-        executor: &mut UnifiedExecutor<'_>,
-    ) -> Result<EntryEntity, FileIoError> {
-        match EntryRepository::get_by_path(path, executor).await {
+    pub async fn get_info(&self, path: &EntryPath) -> Result<EntryEntity, FileIoError> {
+        match EntryRepository::get_by_path(path, &mut self.db.pool().into()).await {
             Ok(entry) => Ok(entry),
             Err(sqlx::Error::RowNotFound) => Err(FileIoError::NotFound),
             Err(e) => Err(e.into()),
@@ -355,7 +351,6 @@ mod tests {
     async fn test_rejects_descendant_when_exact_file_exists() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -378,7 +373,7 @@ mod tests {
 
         assert!(matches!(err, FileIoError::PathCollision));
         file_service
-            .get_info(&descendant_path, &mut db.pool().into())
+            .get_info(&descendant_path)
             .await
             .expect_err("Rejected descendant should not create metadata");
         file_service
@@ -392,7 +387,6 @@ mod tests {
     async fn test_rejects_exact_file_when_descendant_exists() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
-        let db = context.sql_db.clone();
         let user_service = context.user_service.clone();
 
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
@@ -413,7 +407,7 @@ mod tests {
 
         assert!(matches!(err, FileIoError::PathCollision));
         file_service
-            .get_info(&exact_path, &mut db.pool().into())
+            .get_info(&exact_path)
             .await
             .expect_err("Rejected exact file should not create metadata");
         file_service
