@@ -1,4 +1,4 @@
-use serde_valid::Validate;
+use serde::Deserialize;
 use std::{path::PathBuf, str::FromStr};
 
 /// Google service account key config.
@@ -81,13 +81,24 @@ impl<'de> serde::Deserialize<'de> for GoogleServiceAccountKeyConfig {
 }
 
 /// Google Cloud Storage config.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GoogleBucketConfig {
-    /// The name of the bucket to use.
-    #[validate(min_length = 1)]
+    /// The name of the bucket to use. Deserialization rejects empty names.
+    #[serde(deserialize_with = "deserialize_nonempty_string")]
     pub bucket_name: String,
     /// The credential to use. Inline service account key or path to the credential file.
     pub credential: GoogleServiceAccountKeyConfig,
+}
+
+fn deserialize_nonempty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(serde::de::Error::custom("string must not be empty"));
+    }
+    Ok(value)
 }
 
 impl GoogleBucketConfig {

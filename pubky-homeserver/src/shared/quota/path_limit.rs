@@ -1,19 +1,9 @@
 use super::{GlobPattern, HttpMethod, LimitKey, LimitKeyType, RequestCountQuota};
 use serde::{Deserialize, Serialize};
-use serde_valid::Validate;
 use std::num::NonZeroU32;
 
-/// Make sure all whitelist keys are of the same type as the limit key type.
-fn serde_validate_path_limit(limit: &PathLimit) -> Result<(), serde_valid::validation::Error> {
-    limit
-        .validate()
-        .map_err(|e| serde_valid::validation::Error::Custom(e.to_string()))?;
-    Ok(())
-}
-
 /// A limit on a path for a specific method.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash, Validate)]
-#[validate(custom = serde_validate_path_limit)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct PathLimit {
     /// The path glob pattern to match against.
     pub path: GlobPattern,
