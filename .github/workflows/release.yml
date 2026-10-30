@@ -49,9 +49,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: stable
+          cache: false
       - name: Install cross
         run: cargo install cross --locked --git https://github.com/cross-rs/cross --rev 51f46f296253d8122c927c5bb933e3c4f27cc317
       - name: Build Artifacts
@@ -100,7 +101,11 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          cache: false
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
       - name: Install cargo-workspaces
@@ -118,16 +123,21 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
+          cache: false
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: Upgrade npm (v11 required for trusted publishing)
         run: npm install -g npm@11.11.1
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
       - name: Build and publish npm package
         working-directory: pubky-sdk/bindings/js/pkg
         run: |

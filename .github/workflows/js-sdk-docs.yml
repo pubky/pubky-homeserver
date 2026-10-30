@@ -24,10 +24,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
+          save-cache: true
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
@@ -37,8 +39,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
       - name: Install JS dependencies
         working-directory: pubky-sdk/bindings/js/pkg
         run: npm ci --prefer-offline --no-audit --no-fund

@@ -1,0 +1,85 @@
+name: Set up Rust
+description: Install Rust and restore its Cargo cache; checkout must run first.
+
+inputs:
+  toolchain:
+    description: Rust toolchain to install; defaults to the CI baseline.
+    required: false
+    default: '1.91'
+  components:
+    description: Comma-separated list of additional toolchain components.
+    required: false
+    default: ''
+  targets:
+    description: Comma-separated list of additional compilation targets.
+    required: false
+    default: ''
+  cache:
+    description: Whether to restore and save the Cargo cache.
+    required: false
+    default: 'true'
+  key:
+    description: Additional key to distinguish this job's cache.
+    required: false
+    default: ''
+  shared-key:
+    description: Shared cache key to use instead of the job-based key.
+    required: false
+    default: ''
+  workspaces:
+    description: Workspace and target directory mappings, one per line.
+    required: false
+    default: ''
+  env-vars:
+    description: Additional environment variables to include in the cache key.
+    required: false
+    default: ''
+  cache-targets:
+    description: Whether to cache build artifacts as well as Cargo dependencies.
+    required: false
+    default: 'true'
+  save-cache:
+    description: "auto saves only on main; true always allows saving; false disables saving."
+    required: false
+    default: 'auto'
+
+runs:
+  using: composite
+  steps:
+    - name: Validate cache inputs
+      shell: bash
+      env:
+        CACHE_ENABLED: ${{ inputs.cache }}
+        CACHE_TARGETS: ${{ inputs.cache-targets }}
+        SAVE_CACHE: ${{ inputs.save-cache }}
+      run: |
+        case "$CACHE_ENABLED" in
+          true|false) ;;
+          *) echo '::error::cache must be true or false'; exit 1 ;;
+        esac
+        case "$CACHE_TARGETS" in
+          true|false) ;;
+          *) echo '::error::cache-targets must be true or false'; exit 1 ;;
+        esac
+        case "$SAVE_CACHE" in
+          auto|true|false) ;;
+          *) echo '::error::save-cache must be auto, true, or false'; exit 1 ;;
+        esac
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+    - name: Restore Rust cache
+      uses: Swatinem/rust-cache@v2
+      if: inputs.cache == 'true'
+      with:
+        key: ${{ inputs.key }}
+        shared-key: ${{ inputs.shared-key }}
+        workspaces: ${{ inputs.workspaces }}
+        env-vars: ${{ inputs.env-vars }}
+        cache-targets: ${{ inputs.cache-targets }}
+        save-if: >-
+          ${{ inputs.save-cache == 'true' ||
+              (inputs.save-cache == 'auto' && github.ref == 'refs/heads/main') }}

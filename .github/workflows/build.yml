@@ -24,14 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-rust
         with:
           key: ${{ matrix.crate }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build docs
         run: cargo doc -p ${{ matrix.crate }} --all-features --no-deps
 
@@ -41,13 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.91"
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+        uses: ./.github/actions/setup-rust
       - name: Cargo check examples
         run: |
           cargo check -p pubky-homeserver-examples --all-features --bins
