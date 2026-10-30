@@ -48,11 +48,12 @@ impl PubkyHttpClient {
         let mut url = homeserver_url(homeserver, path)?;
         self.prepare_transport_request(&mut url).await?;
 
-        Ok(self
-            .http
-            .request(method, url.clone())
-            .fetch_credentials_include()
-            .header("pubky-host", pubky_host.z32()))
+        Ok(self.with_request_timeout(
+            self.http
+                .request(method, url.clone())
+                .fetch_credentials_include()
+                .header("pubky-host", pubky_host.z32()),
+        ))
     }
 
     pub(super) async fn homeserver_info_request(
@@ -63,7 +64,17 @@ impl PubkyHttpClient {
         let mut url = homeserver_url(homeserver, "/info")?;
         self.prepare_transport_request(&mut url).await?;
 
-        Ok(self.http.request(Method::GET, url).fetch_credentials_omit())
+        // `HomeserverFeatures::fetch` tightens this deadline to at most 5 s.
+        Ok(self.with_request_timeout(self.http.request(Method::GET, url).fetch_credentials_omit()))
+    }
+
+    /// Apply the configured total request deadline, if any. reqwest's browser
+    /// backend has no client-wide timeout, so it is set on each request.
+    fn with_request_timeout(&self, request: RequestBuilder) -> RequestBuilder {
+        match self.request_timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        }
     }
 
     async fn cross_request_with_credentials<T: IntoUrl>(
@@ -77,7 +88,7 @@ impl PubkyHttpClient {
 
         let prepared = self.prepare_fetch(&mut url).await?;
 
-        let request = self.http.request(method, url.clone());
+        let request = self.with_request_timeout(self.http.request(method, url.clone()));
         let request = match credentials {
             AmbientCredentials::Include => request.fetch_credentials_include(),
             AmbientCredentials::Omit => request.fetch_credentials_omit(),
@@ -235,6 +246,32 @@ mod tests {
         };
 
         assert!(message.contains("No HTTPS endpoints found"));
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn request_timeout_applies_to_each_request() {
+        let timeout = std::time::Duration::from_millis(250);
+        let mut builder = PubkyHttpClient::builder();
+        builder.request_timeout(timeout);
+        let client = builder.build().unwrap();
+        let url = Url::parse("https://example.com/").unwrap();
+
+        for request in [
+            client
+                .cross_request(Method::GET, url.clone())
+                .await
+                .unwrap(),
+            client
+                .cross_request_anonymous(Method::GET, url.clone())
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(request.build().unwrap().timeout(), Some(&timeout));
+        }
+
+        let client = PubkyHttpClient::new().unwrap();
+        let request = client.cross_request(Method::GET, url).await.unwrap();
+        assert_eq!(request.build().unwrap().timeout(), None);
     }
 
     #[wasm_bindgen_test(async)]

@@ -31,18 +31,35 @@ use reqwest::{Method, RequestBuilder, Response};
 
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::credential::{SessionCredential, credential_session_missing};
+use crate::util::read_response_body;
 use crate::{
     Error, PubkyHttpClient,
     actors::session::SessionInfo,
     client::user_endpoint_url,
     cross_log,
-    errors::{PkarrError, Result},
+    errors::{AuthError, PkarrError, Result},
 };
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::errors::AuthError;
-
 const SESSION_PATH: &str = "/session";
+
+/// Maximum size, inclusive, of a `/session` or `/signup` response body. A
+/// session record holds a public key and the capabilities from the signed
+/// auth token; the server does not cap those, so this bounds the client
+/// rather than mirrors a server limit.
+const MAX_SESSION_BYTES: usize = 64 * 1024;
+
+/// Read a session response within [`MAX_SESSION_BYTES`].
+async fn read_session_body(response: Response) -> Result<Vec<u8>> {
+    read_response_body(response, MAX_SESSION_BYTES)
+        .await
+        .map_err(|error| {
+            error.into_error(|| {
+                AuthError::Validation(format!(
+                    "Session response exceeds the {MAX_SESSION_BYTES}-byte limit"
+                ))
+            })
+        })
+}
 
 /// Cookie-based session credential (legacy).
 ///
@@ -125,7 +142,7 @@ impl CookieCredential {
     ) -> Result<Self> {
         let raw_set_cookies = collect_set_cookies(&response);
 
-        let bytes = response.bytes().await?;
+        let bytes = read_session_body(response).await?;
         let record = CookieSessionRecord::deserialize(&bytes)?;
         let user = record.public_key().clone();
         let cookie_name = user.z32();
@@ -329,7 +346,7 @@ impl SessionCredential for CookieCredential {
             return Ok(None);
         }
         let response = client.check_http_status(response).await?;
-        let bytes = response.bytes().await?;
+        let bytes = read_session_body(response).await?;
         let record = CookieSessionRecord::deserialize(&bytes)?;
         let info = SessionInfo::new(record.public_key().clone(), record.capabilities().to_vec());
         self.replace_record(record);
@@ -430,5 +447,28 @@ mod tests {
             error,
             Error::Pkarr(PkarrError::InvalidRecord(message)) if message == "invalid target"
         ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn session_bodies_are_bounded() {
+        use crate::util::tests::serve_response;
+
+        let body = b"not a session record";
+        let (response, _connection) =
+            serve_response(200, &format!("Content-Length: {}\r\n", body.len()), body).await;
+        assert_eq!(read_session_body(response).await.unwrap(), body);
+
+        let declared = MAX_SESSION_BYTES + 1;
+        let (response, _connection) =
+            serve_response(200, &format!("Content-Length: {declared}\r\n"), b"").await;
+        let error = read_session_body(response).await.unwrap_err();
+        let Error::Authentication(AuthError::Validation(message)) = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(
+            message,
+            format!("Session response exceeds the {MAX_SESSION_BYTES}-byte limit")
+        );
     }
 }

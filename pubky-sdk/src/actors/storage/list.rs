@@ -5,7 +5,24 @@ use super::core::{PublicStorage, SessionStorage, dir_trailing_slash_error};
 use crate::actors::storage::resource::{
     IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath,
 };
+use crate::errors::RequestError;
+use crate::util::read_response_body;
 use crate::{Result, cross_log};
+
+/// Maximum size of a directory listing response. The homeserver returns at
+/// most 1000 entries per page, so this leaves ample room for long paths.
+const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read a listing response within [`MAX_LIST_BYTES`].
+async fn read_list_body(response: reqwest::Response) -> Result<Vec<u8>> {
+    read_response_body(response, MAX_LIST_BYTES)
+        .await
+        .map_err(|error| {
+            error.into_error(|| RequestError::Validation {
+                message: format!("List response exceeds the {MAX_LIST_BYTES}-byte limit"),
+            })
+        })
+}
 
 impl SessionStorage {
     /// Directory listing **as me** (authenticated).
@@ -150,7 +167,8 @@ impl<'a> ListBuilder<'a> {
     ///
     /// # Errors
     /// - Propagates transport failures while issuing the HTTP request.
-    /// - Returns [`crate::errors::RequestError::Validation`] if any resource line returned by the server is invalid.
+    /// - Returns [`crate::errors::RequestError::Validation`] if any resource line returned by the server is invalid
+    ///   or the listing exceeds the 4 MiB response limit.
     pub async fn send(self) -> Result<Vec<PubkyResource>> {
         // 1) Build query params
         let mut url = self.url;
@@ -199,7 +217,7 @@ impl<'a> ListBuilder<'a> {
         );
         let resp = client.check_http_status(resp).await?;
 
-        let bytes = resp.bytes().await?;
+        let bytes = read_list_body(resp).await?;
         let mut out = Vec::new();
         for line in String::from_utf8_lossy(&bytes).lines() {
             let trimmed = line.trim();
@@ -219,5 +237,32 @@ impl<'a> ListBuilder<'a> {
         } else {
             line.parse()
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::Error;
+    use crate::util::tests::serve_response;
+
+    #[tokio::test]
+    async fn list_bodies_are_bounded() {
+        let body = b"pubky://8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/pub/app/a.txt\n";
+        let (response, _connection) =
+            serve_response(200, &format!("Content-Length: {}\r\n", body.len()), body).await;
+        assert_eq!(read_list_body(response).await.unwrap(), body);
+
+        let declared = MAX_LIST_BYTES + 1;
+        let (response, _connection) =
+            serve_response(200, &format!("Content-Length: {declared}\r\n"), b"").await;
+        let error = read_list_body(response).await.unwrap_err();
+        let Error::Request(RequestError::Validation { message }) = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(
+            message,
+            format!("List response exceeds the {MAX_LIST_BYTES}-byte limit")
+        );
     }
 }
