@@ -149,25 +149,29 @@ impl EventsService {
     /// ## Parameters
     /// - `cursor`: Starting position (None = from beginning)
     /// - `limit`: Maximum number of events to return (None = default limit)
-    pub async fn get_public_by_cursor<'a>(
+    pub async fn get_public_by_cursor(
         &self,
         cursor: Option<EventCursor>,
         limit: Option<u16>,
-        executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Vec<EventEntity>, sqlx::Error> {
-        EventRepository::get_by_cursor(cursor, limit, EventVisibility::Public, executor).await
+        EventRepository::get_by_cursor(
+            cursor,
+            limit,
+            EventVisibility::Public,
+            &mut self.sql_db.pool().into(),
+        )
+        .await
     }
 
     /// All events (public and private) by a single global cursor.
     /// Admin-only, exposes private paths.
-    pub async fn get_all_events<'a>(
+    pub async fn get_all_events(
         &self,
         cursor: Option<EventCursor>,
         limit: Option<u16>,
         reverse: bool,
         path_filters: &[PathFilter],
         user_ids: Option<&[i32]>,
-        executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Vec<EventEntity>, sqlx::Error> {
         EventRepository::get_all_filtered_by_cursor(
             cursor,
@@ -175,7 +179,7 @@ impl EventsService {
             reverse,
             path_filters,
             user_ids,
-            executor,
+            &mut self.sql_db.pool().into(),
         )
         .await
     }
@@ -188,14 +192,19 @@ impl EventsService {
     /// - `allowed_paths`: Authorized paths, an event is returned only if
     ///   it matches at least one (see [`PathFilter`]). Expected non-empty, the
     ///   route defaults to `/pub/`.
-    pub async fn get_by_user_cursors<'a>(
+    pub async fn get_by_user_cursors(
         &self,
         user_cursors: Vec<(i32, Option<EventCursor>)>,
         reverse: bool,
         allowed_paths: &[PathFilter],
-        executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Vec<EventEntity>, sqlx::Error> {
-        EventRepository::get_by_user_cursors(user_cursors, reverse, allowed_paths, executor).await
+        EventRepository::get_by_user_cursors(
+            user_cursors,
+            reverse,
+            allowed_paths,
+            &mut self.sql_db.pool().into(),
+        )
+        .await
     }
 
     /// Stream **all** events (the admin firehose): replay history over a single advancing global
@@ -242,7 +251,6 @@ impl EventsService {
                         reverse,
                         &filter.paths,
                         filter.user_ids.as_deref(),
-                        &mut service.sql_db.pool().into(),
                     )
                     .await
                 {
@@ -407,7 +415,7 @@ mod tests {
 
         // From the beginning, only public events come back, in id order.
         let events = events_service
-            .get_public_by_cursor(None, None, &mut db.pool().into())
+            .get_public_by_cursor(None, None)
             .await
             .unwrap();
         let returned: Vec<&str> = events.iter().map(|e| e.path.path().as_str()).collect();
@@ -416,7 +424,7 @@ mod tests {
         // A limited page returns a FULL page of public events despite the
         // interleaved private ones, and the next cursor resumes correctly.
         let page = events_service
-            .get_public_by_cursor(None, Some(2), &mut db.pool().into())
+            .get_public_by_cursor(None, Some(2))
             .await
             .unwrap();
         assert_eq!(page.len(), 2);
@@ -425,7 +433,7 @@ mod tests {
 
         let next_cursor = page.last().unwrap().cursor();
         let page = events_service
-            .get_public_by_cursor(Some(next_cursor), Some(2), &mut db.pool().into())
+            .get_public_by_cursor(Some(next_cursor), Some(2))
             .await
             .unwrap();
         assert_eq!(page.len(), 1);
@@ -462,7 +470,7 @@ mod tests {
 
         // No filters: every event, private ones included, in id order.
         let events = events_service
-            .get_all_events(None, None, false, &[], None, &mut db.pool().into())
+            .get_all_events(None, None, false, &[], None)
             .await
             .unwrap();
         let returned: Vec<&str> = events.iter().map(|e| e.path.path().as_str()).collect();
@@ -473,7 +481,7 @@ mod tests {
 
         // reverse=true returns newest first.
         let events = events_service
-            .get_all_events(None, None, true, &[], None, &mut db.pool().into())
+            .get_all_events(None, None, true, &[], None)
             .await
             .unwrap();
         let returned: Vec<&str> = events.iter().map(|e| e.path.path().as_str()).collect();
@@ -485,14 +493,7 @@ mod tests {
         // A union of path filters scopes to those roots (here a single private directory).
         let path_filters = [PathFilter::from(StoragePath::new("/priv/").unwrap())];
         let events = events_service
-            .get_all_events(
-                None,
-                None,
-                false,
-                &path_filters,
-                None,
-                &mut db.pool().into(),
-            )
+            .get_all_events(None, None, false, &path_filters, None)
             .await
             .unwrap();
         let returned: Vec<&str> = events.iter().map(|e| e.path.path().as_str()).collect();
@@ -504,14 +505,7 @@ mod tests {
             PathFilter::from(StoragePath::new("/priv/").unwrap()),
         ];
         let events = events_service
-            .get_all_events(
-                None,
-                None,
-                false,
-                &path_filters,
-                None,
-                &mut db.pool().into(),
-            )
+            .get_all_events(None, None, false, &path_filters, None)
             .await
             .unwrap();
         let returned: Vec<&str> = events.iter().map(|e| e.path.path().as_str()).collect();
@@ -519,14 +513,7 @@ mod tests {
 
         // user_ids filters to those users.
         let events = events_service
-            .get_all_events(
-                None,
-                None,
-                false,
-                &[],
-                Some(&[user.id]),
-                &mut db.pool().into(),
-            )
+            .get_all_events(None, None, false, &[], Some(&[user.id]))
             .await
             .unwrap();
         assert_eq!(events.len(), 5);
