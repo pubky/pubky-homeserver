@@ -108,9 +108,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
+        uses: ./.github/actions/setup-node
 
       - uses: taiki-e/install-action@v2
         with:
@@ -167,9 +165,8 @@ jobs:
             . -> target-testnet
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: ./.github/actions/setup-node
         with:
-          node-version: "24"
           cache: npm
           cache-dependency-path: pubky-sdk/bindings/js/pkg/package-lock.json
 

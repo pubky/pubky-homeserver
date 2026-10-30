@@ -1,0 +1,21 @@
+name: Set up Node.js
+description: Install the project's Node.js version with optional dependency caching.
+
+inputs:
+  cache:
+    description: Package manager to cache; leave empty to use setup-node defaults.
+    required: false
+    default: ''
+  cache-dependency-path:
+    description: Path to the lockfile used for the dependency cache key.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+        cache: ${{ inputs.cache }}
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
