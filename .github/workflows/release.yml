@@ -129,11 +129,7 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
           cache: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-      - name: Upgrade npm (v11 required for trusted publishing)
-        run: npm install -g npm@11.11.1
+      - uses: ./.github/actions/setup-node
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2
         with:
