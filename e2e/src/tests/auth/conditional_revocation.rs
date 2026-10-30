@@ -249,3 +249,113 @@ async fn conditional_revocation_http_rejects_rotation_and_discarded_receipt_repl
         "restoring the revoked grant must return 401, got {error:?}"
     );
 }
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn captured_revocation_sdk_scoped_success_is_bound_and_leaves_local_state_untouched() {
+    let testnet = build_full_testnet().await;
+    let sdk = testnet.sdk().unwrap();
+    let signer = sdk.signer(Keypair::random());
+    signer
+        .signup(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let session = grant_session(
+        &testnet,
+        &signer,
+        Capabilities::builder()
+            .read("/pub/captured/")
+            .unwrap()
+            .finish(),
+        "captured.test",
+    )
+    .await;
+    let grant = session.as_grant().unwrap();
+    let secret = grant.export_local_secret().await.unwrap();
+    let bearer = grant.current_bearer().await;
+    let id = RandomId::generate();
+    let operation = grant.prepare_revocation(id.clone()).await.unwrap();
+    let binding = operation.binding().clone();
+    let receipt = operation.execute().await.unwrap();
+    assert_eq!(receipt.operation_id, id);
+    assert_eq!(receipt.pubky, signer.public_key());
+    assert_eq!(receipt.homeserver, testnet.homeserver_app().public_key());
+    assert_eq!(receipt.grant_id, binding.grant_id);
+    assert_eq!(receipt.client_id, binding.client_id);
+    assert!(
+        grant.current_bearer().await == bearer,
+        "no local credential erasure"
+    );
+    assert!(grant.export_local_secret().await.unwrap() == secret);
+    let error = sdk.restore_session(&secret).await.unwrap_err();
+    assert!(
+        matches!(error, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::UNAUTHORIZED)
+    );
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn captured_revocation_sdk_rotated_authority_and_discarded_ack_cannot_replay() {
+    let testnet = build_full_testnet().await;
+    let sdk = testnet.sdk().unwrap();
+    let signer = sdk.signer(Keypair::random());
+    signer
+        .signup(&testnet.homeserver_app().public_key(), None)
+        .await
+        .unwrap();
+    let session = signer
+        .signin(ClientId::new("captured.test").unwrap())
+        .await
+        .unwrap();
+    let grant = session.as_grant().unwrap();
+    let original = grant.current_bearer().await;
+    let old = grant
+        .prepare_revocation(RandomId::generate())
+        .await
+        .unwrap();
+    let secret = grant.export_local_secret().await.unwrap();
+    let replacement = sdk.restore_session(&secret).await.unwrap();
+    let current = replacement.as_grant().unwrap().current_bearer().await;
+    assert!(original != current);
+    assert_eq!(
+        old.execute().await.unwrap_err(),
+        pubky_testnet::pubky::GrantRevocationError::Unacknowledged { status: Some(401) }
+    );
+    assert!(
+        grant.current_bearer().await == original,
+        "must not adopt or refresh after 401"
+    );
+    let url = format!(
+        "https://_pubky.{}/auth/grant/session",
+        signer.public_key().z32()
+    );
+    let active = sdk
+        .client()
+        .request(Method::GET, &url)
+        .bearer_auth(&current)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(active.status(), StatusCode::OK);
+    let grant = replacement.as_grant().unwrap();
+    // Two separately captured handles are intentionally possible: this proves
+    // a discarded acknowledgement never turns a second attempt into success.
+    // Application admission must prohibit creating that second attempt.
+    let first = grant
+        .prepare_revocation(RandomId::generate())
+        .await
+        .unwrap();
+    let second = grant
+        .prepare_revocation(RandomId::generate())
+        .await
+        .unwrap();
+    let _discarded = first.execute().await.unwrap();
+    assert_eq!(
+        second.execute().await.unwrap_err(),
+        pubky_testnet::pubky::GrantRevocationError::Unacknowledged { status: Some(401) }
+    );
+    let error = sdk.restore_session(&secret).await.unwrap_err();
+    assert!(
+        matches!(error, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::UNAUTHORIZED)
+    );
+}

@@ -50,7 +50,7 @@ pub use actors::deep_links;
 #[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use actors::{
     CookieCredential, CookieSessionView, DelegatedGrantCredentialState, GrantCredential,
-    GrantManager, GrantSessionView,
+    GrantManager, GrantRevocation, GrantRevocationError, GrantSessionView,
 };
 #[doc(inline)]
 pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
@@ -97,8 +97,9 @@ pub use pubky_common::{
     auth::{
         AuthToken,
         grant::GrantClaims,
+        grant_revocation::{ConditionalGrantRevocation, GrantRevocationReceipt},
         grant_session_responses::{GrantInfo, GrantSessionInfo, GrantSessionResponse},
-        jws::{ClientId, GRANT_JWS_TYP, GrantId, POP_JWS_TYP, PopNonce},
+        jws::{ClientId, GRANT_JWS_TYP, GrantId, POP_JWS_TYP, PopNonce, RandomId},
         pop::PopProofClaims,
     },
     capabilities::{Capabilities, Capability},

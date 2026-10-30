@@ -15,6 +15,7 @@ pub(crate) mod flow;
 pub(crate) mod grant_exchange;
 pub mod manager;
 pub(crate) mod pop_signer;
+pub mod revocation;
 #[doc(hidden)]
 pub mod shared_session;
 pub mod view;
@@ -24,3 +25,5 @@ pub use custom_pop::CustomPopError;
 pub use flow::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
 pub use manager::GrantManager;
 pub use view::GrantSessionView;
+
+pub use revocation::{GrantRevocation, GrantRevocationError};

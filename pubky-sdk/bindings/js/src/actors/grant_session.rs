@@ -2,6 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use super::account::AccountInfo;
 use super::encryption_keys::EncryptionKeys;
+use super::grant_revocation::{GrantRevocation, revocation_error};
 
 use crate::custom_pop::{CustomPop, JsonValue};
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
@@ -30,6 +31,25 @@ pub struct GrantSession(pub(crate) pubky::PubkySession);
 
 #[wasm_bindgen]
 impl GrantSession {
+    /// Capture the current bearer and original identity before user confirmation.
+    /// No network, refresh or shared-session adoption occurs. The operation ID is
+    /// a fresh 22-character base64url RandomId, not permission to retry.
+    /// Caller owner/lifecycle admission and durable local cleanup remain separate.
+    #[wasm_bindgen(js_name = "prepareRevocation")]
+    pub async fn prepare_revocation(&self, operation_id: &str) -> JsResult<GrantRevocation> {
+        let id = pubky::RandomId::parse(operation_id).map_err(|_| {
+            PubkyError::new(
+                PubkyErrorName::InvalidInput,
+                "Invalid revocation operation ID",
+            )
+        })?;
+        self.as_grant()?
+            .prepare_revocation(id)
+            .await
+            .map(GrantRevocation::new)
+            .map_err(revocation_error)
+    }
+
     /// Sign JSON data and return both the custom proof and its root-signed grant.
     /// Data follows `JSON.stringify` semantics, e.g. `undefined` properties are omitted.
     /// Each proof carries its signing time (`iat`) and a random `nonce`.

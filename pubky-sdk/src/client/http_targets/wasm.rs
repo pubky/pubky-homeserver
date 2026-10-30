@@ -55,6 +55,16 @@ impl PubkyHttpClient {
             .header("pubky-host", pubky_host.z32()))
     }
 
+    pub(crate) async fn homeserver_mutation_url(
+        &self,
+        homeserver: &PublicKey,
+        path: &str,
+    ) -> Result<Url> {
+        let mut url = homeserver_url(homeserver, path)?;
+        self.prepare_transport_request(&mut url).await?;
+        Ok(url)
+    }
+
     pub(super) async fn homeserver_info_request(
         &self,
         homeserver: &PublicKey,

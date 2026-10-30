@@ -148,3 +148,43 @@ When proof logout is not advertised, the SDK retains bearer-authenticated logout
 and uses the latest shared bearer. Remote revocation on those older servers
 requires that bearer to remain valid. Upgrade all homeserver nodes to support
 logout after expiry; mixed server versions must not advertise proof logout.
+
+## Confirming one captured bearer
+
+Applications that require the exact bearer seen at confirmation can use
+`session.as_grant()?.prepare_revocation(operation_id)` in Rust or
+`session.grant.prepareRevocation(operationId)` in JavaScript. Capture happens
+locally under the credential lock, with no refresh or shared-record adoption.
+Capture before confirmation and bind the returned owner, grant, application,
+homeserver and fresh operation ID to the application's original attempt.
+
+`execute` consumes the handle on every outcome. It makes one SDK mutation
+attempt to `POST /auth/grant/session-revocation`, without automatic replay,
+redirects, ambient cookies or proof-logout fallback. Only a complete versioned
+receipt matching every captured binding acknowledges success. Older servers,
+rotated or expired bearers, transport errors and missing/malformed receipts fail
+closed. This requires the conditional endpoint on every serving replica; it
+does not activate that endpoint or change ordinary sign-out behavior.
+
+In JavaScript, pass an `AbortSignal` to cancel routing or response waiting.
+Ignoring the Promise does not cancel it. In Rust, dropping the execution future
+cancels local waiting. Cancellation after dispatch, or loss of the response,
+can leave a committed remote mutation unknown. Never recapture a replacement
+bearer or repeat an uncertain operation automatically. The one-use handle is
+not a global prohibition on making another handle: the application must enforce
+its original owner/lifecycle, fresh confirmation and durable pending state.
+
+A receipt does not clear local credentials, shared browser records, or payment
+watermarks. Perform that separate cleanup only under the original admission and
+after each required local acknowledgement. `free()` before execution only drops
+the handle. No token, refresh secret or handle persistence API is exposed.
+
+```javascript
+// Persist the original application attempt before any destructive work.
+const operation = await session.grant.prepareRevocation(freshOperationId);
+// Show operation.pubky, grantId, clientId and homeserver in the confirmation.
+// Recheck original owner/lifecycle admission after confirmation.
+const controller = new AbortController();
+const receipt = await operation.execute(controller.signal);
+// Record receipt only for that exact attempt; local teardown is separate.
+```

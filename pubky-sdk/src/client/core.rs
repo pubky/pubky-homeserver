@@ -18,6 +18,22 @@ struct NativeHttpConfig {
     extra_trust_anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeHttpConfig {
+    fn configure(&self, mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        if let Some(timeout) = self.request_timeout {
+            builder = builder.timeout(timeout);
+        }
+        if let Some(timeout) = self.read_timeout {
+            builder = builder.read_timeout(timeout);
+        }
+        if let Some(max) = self.pool_max_idle_per_host {
+            builder = builder.pool_max_idle_per_host(max);
+        }
+        builder
+    }
+}
+
 #[derive(Debug, Clone)]
 #[must_use]
 /// Configures a [`PubkyHttpClient`] before construction.
@@ -273,37 +289,34 @@ impl PubkyHttpClientBuilder {
         );
 
         #[cfg(not(target_arch = "wasm32"))]
-        let mut http_builder =
-            reqwest::ClientBuilder::from(pkarr.clone()).user_agent(user_agent.as_ref());
-
+        let native_builders = || {
+            let http = reqwest::ClientBuilder::from(pkarr.clone()).user_agent(user_agent.as_ref());
+            let icann = reqwest::Client::builder()
+                .user_agent(user_agent.as_ref())
+                .tls_backend_preconfigured(icann_tls_config_without_revocation_check(
+                    &self.native_http.extra_trust_anchors,
+                ));
+            (
+                self.native_http.configure(http),
+                self.native_http.configure(icann),
+            )
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let (http_builder, icann_http_builder) = native_builders();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (once_http_builder, once_icann_builder) = native_builders();
+        #[cfg(not(target_arch = "wasm32"))]
+        let once_http = once_http_builder
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let once_icann_http = once_icann_builder
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         #[cfg(target_arch = "wasm32")]
         let http_builder = reqwest::Client::builder().user_agent(user_agent.as_ref());
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut icann_http_builder = reqwest::Client::builder()
-            .user_agent(user_agent.as_ref())
-            .tls_backend_preconfigured(icann_tls_config_without_revocation_check(
-                &self.native_http.extra_trust_anchors,
-            ));
-
-        // TODO: change this after Reqwest publish a release with timeout in wasm
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(timeout) = self.native_http.request_timeout {
-            http_builder = http_builder.timeout(timeout);
-            icann_http_builder = icann_http_builder.timeout(timeout);
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(timeout) = self.native_http.read_timeout {
-            http_builder = http_builder.read_timeout(timeout);
-            icann_http_builder = icann_http_builder.read_timeout(timeout);
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(max) = self.native_http.pool_max_idle_per_host {
-            http_builder = http_builder.pool_max_idle_per_host(max);
-            icann_http_builder = icann_http_builder.pool_max_idle_per_host(max);
-        }
 
         #[cfg(not(target_arch = "wasm32"))]
         let features = HomeserverFeatures::new(self.native_http.request_timeout);
@@ -320,6 +333,10 @@ impl PubkyHttpClientBuilder {
 
             #[cfg(not(target_arch = "wasm32"))]
             icann_http: icann_http_builder.build()?,
+            #[cfg(not(target_arch = "wasm32"))]
+            once_http,
+            #[cfg(not(target_arch = "wasm32"))]
+            once_icann_http,
 
             #[cfg(not(target_arch = "wasm32"))]
             transport: super::http_targets::native::TransportResolver::new(),
@@ -540,6 +557,10 @@ pub struct PubkyHttpClient {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) icann_http: reqwest::Client,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) once_http: reqwest::Client,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) once_icann_http: reqwest::Client,
 
     /// Resolves and caches per-host transport decisions (`PubkyTLS` vs ICANN fallback).
     #[cfg(not(target_arch = "wasm32"))]
@@ -824,7 +845,12 @@ mod test {
             .build()
             .unwrap();
 
-        for http in [&client.http, &client.icann_http] {
+        for http in [
+            &client.http,
+            &client.icann_http,
+            &client.once_http,
+            &client.once_icann_http,
+        ] {
             let response = http.get(stalling_http_server().await).send().await.unwrap();
             let error = tokio::time::timeout(Duration::from_secs(1), response.bytes())
                 .await

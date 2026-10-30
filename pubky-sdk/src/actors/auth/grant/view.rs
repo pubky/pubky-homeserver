@@ -7,12 +7,18 @@
 
 use pubky_common::{
     account::AccountInfo,
-    auth::{grant_session_responses::GrantSessionInfo, jws::GrantId},
+    auth::{
+        grant_session_responses::GrantSessionInfo,
+        jws::{GrantId, RandomId},
+    },
     encryption_keys::ScopedEncryptionKeyBundle,
 };
 use reqwest::Method;
 
-use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
+use super::{
+    CustomPopError, DelegatedGrantCredentialState, GrantCredential, GrantRevocation,
+    GrantRevocationError,
+};
 use crate::actors::session::core::PubkySession;
 use crate::client::user_endpoint_url;
 use crate::custom_pop::CustomPop;
@@ -155,6 +161,21 @@ impl<'a> GrantSessionView<'a> {
     /// to restore keys alongside authentication.
     pub async fn export_delegated_restore_state(&self) -> Option<DelegatedGrantCredentialState> {
         self.credential.export_delegated_restore_state().await
+    }
+
+    /// Capture the original bearer and identity before asking for confirmation.
+    ///
+    /// Makes no network request, refresh, or shared-store adoption. The returned
+    /// one-use operation cannot be restored or cloned. Callers must retain their
+    /// own owner/lifecycle admission through execution and local cleanup.
+    ///
+    /// # Errors
+    /// Returns an invalid-snapshot error when no current bearer is available.
+    pub async fn prepare_revocation(
+        &self,
+        operation_id: RandomId,
+    ) -> std::result::Result<GrantRevocation, GrantRevocationError> {
+        GrantRevocation::capture(self.credential, self.session.client().clone(), operation_id).await
     }
 
     /// Returns the current opaque bearer for this session.

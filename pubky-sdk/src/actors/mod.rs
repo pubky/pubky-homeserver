@@ -14,7 +14,8 @@ pub use auth::deep_links;
 #[doc(hidden)]
 pub use auth::grant::pop_signer::{DelegatedSignFn, GrantSigningError, delegated_sign_callback};
 pub use auth::grant::{
-    CustomPopError, DelegatedGrantCredentialState, GrantCredential, GrantManager, GrantSessionView,
+    CustomPopError, DelegatedGrantCredentialState, GrantCredential, GrantManager, GrantRevocation,
+    GrantRevocationError, GrantSessionView,
 };
 pub use auth::grant::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
 pub use auth::relay::http_relay_inbox_channel::{

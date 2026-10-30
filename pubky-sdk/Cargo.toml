@@ -69,6 +69,9 @@ webpki-roots = "1"
 reqwest = { workspace = true, features = ["json", "stream"] }
 log.workspace = true
 wasm-bindgen-futures.workspace = true
+wasm-bindgen = "0.2"
+js-sys.workspace = true
+web-sys = { version = "0.3.77", features = ["AbortController", "AbortSignal"] }
 
 [dev-dependencies]
 pubky-testnet.workspace = true # used in docstring tests

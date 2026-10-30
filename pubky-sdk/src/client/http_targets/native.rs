@@ -211,6 +211,29 @@ impl PubkyHttpClient {
         )
     }
 
+    /// Prepare one original-authority mutation without HTTP redirects or protocol retries.
+    pub(crate) async fn request_via_homeserver_once(
+        &self,
+        homeserver: &PublicKey,
+        user: &PublicKey,
+        path: &str,
+    ) -> Result<RequestBuilder> {
+        let mut url = homeserver_url(homeserver, path)?;
+        let transport = self.transport.resolve(&homeserver.z32(), &self.pkarr).await;
+        let http = match transport {
+            ResolvedTransport::PubkyTls => &self.once_http,
+            ResolvedTransport::Icann { domain, port } => {
+                url.set_host(Some(&domain))?;
+                if let Some(port) = port {
+                    url.set_port(Some(port))
+                        .map_err(|()| url::ParseError::InvalidPort)?;
+                }
+                &self.once_icann_http
+            }
+        };
+        Ok(http.post(url).header("pubky-host", user.z32()))
+    }
+
     pub(super) async fn homeserver_info_request(
         &self,
         homeserver: &PublicKey,

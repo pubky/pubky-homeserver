@@ -8,6 +8,7 @@ pub mod encryption_keys;
 pub mod event_stream;
 pub mod grant_auth_flow;
 pub mod grant_manager;
+pub mod grant_revocation;
 pub mod grant_session;
 mod in_flight;
 pub mod pkdns;
