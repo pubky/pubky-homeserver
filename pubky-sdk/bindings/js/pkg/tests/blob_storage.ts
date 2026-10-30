@@ -282,6 +282,39 @@ for (const credential of ["cookie", "grant"]) {
   });
 }
 
+test("putBlob rejects 2xx statuses that do not confirm the write", async (t) => {
+  // A zero error-body limit keeps the mock's never-closing body unread.
+  const sdk = Pubky.withClient(new Client({
+    maxErrorBodyBytes: 0,
+    pkarr: { relays: ["http://localhost:15411/"] },
+  }));
+  const signer = sdk.signer(Keypair.random());
+  await signer.signup(HOMESERVER, await createSignupToken());
+  const session = await signer.signin("blob-upload.test");
+  await session.storage.exists(PATH);
+  const response = mockStreamingResponse([], {
+    matches: (request) => request.method === "PUT",
+    response: { status: 202 },
+  });
+  try {
+    await session.storage.putBlob(PATH, new Blob(["contents"])).then(
+      () => t.fail("202 Accepted must not count as a completed write"),
+      (error) => {
+        assertPubkyError(t, error);
+        t.equal(getStatusCode(error), 202, "the unexpected status is reported");
+        t.equal(
+          error.message,
+          "Request failed: Server responded with an error: 202 Accepted - Accepted",
+          "the status reason is the message",
+        );
+      },
+    );
+  } finally {
+    response.restore();
+  }
+  t.end();
+});
+
 for (const limit of [0, 16]) {
   test(`putBlob preserves bounded HTTP errors and path validation: limit ${limit}`, async (t) => {
     const sdk = Pubky.withClient(new Client({

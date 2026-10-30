@@ -44,12 +44,24 @@ pub(crate) async fn read_response_body(
     Ok(body)
 }
 
+/// Whether a status confirms the request succeeded.
+///
+/// Pubky homeservers and relays answer with exactly these codes. Any other
+/// 2xx, such as 202 Accepted or 206 Partial Content, does not confirm that
+/// the operation completed as requested and is treated as a server error.
+pub fn confirms_success(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::OK | StatusCode::CREATED | StatusCode::NO_CONTENT
+    )
+}
+
 impl PubkyHttpClient {
     pub(crate) async fn check_http_status(
         &self,
         response: reqwest::Response,
     ) -> Result<reqwest::Response> {
-        if response.status().is_success() {
+        if confirms_success(response.status()) {
             return Ok(response);
         }
         let status = response.status();

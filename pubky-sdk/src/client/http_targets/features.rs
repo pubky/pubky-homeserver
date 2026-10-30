@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use web_time::Instant;
 
-use crate::util::read_response_body;
+use crate::util::{confirms_success, read_response_body};
 use crate::{PubkyHttpClient, PublicKey};
 
 const MAX_INFO_BYTES: usize = 16 * 1024;
@@ -107,7 +107,7 @@ impl HomeserverFeatures {
         let Ok(response) = request.timeout(self.request_timeout).send().await else {
             return None;
         };
-        if !response.status().is_success() {
+        if !confirms_success(response.status()) {
             return None;
         }
 

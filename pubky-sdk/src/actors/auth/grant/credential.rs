@@ -1374,6 +1374,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_rejects_unexpected_success_statuses() {
+        // A decodable session body behind a 202 must not be taken as a refresh.
+        let now = now_unix();
+        let body = serde_json::to_vec(&GrantSessionResponse {
+            token: "test-bearer".into(),
+            session: GrantSessionInfo {
+                homeserver: Keypair::random().public_key(),
+                pubky: Keypair::random().public_key(),
+                client_id: ClientId::new("refresh-errors.test").unwrap(),
+                capabilities: vec![Capability::root()],
+                grant_id: GrantId::generate(),
+                token_expires_at: now + 3600,
+                grant_expires_at: now + 3600,
+                created_at: now,
+            },
+        })
+        .unwrap();
+        let mut reply = format!(
+            "HTTP/1.1 202 Accepted\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        reply.extend_from_slice(&body);
+        let fixture = RequestFailureFixture::new(TestServerBehavior::Reply(reply)).await;
+        let credential = fixture.grant_credential(true);
+
+        let error = credential.refresh(&fixture.client).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::CredentialRefresh(CredentialRefreshError::Request {
+                status: Some(StatusCode::ACCEPTED)
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn refresh_json_decode_failure_preserves_response_status() {
         let fixture = RequestFailureFixture::new(TestServerBehavior::Reply(
             b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot-json".to_vec(),
