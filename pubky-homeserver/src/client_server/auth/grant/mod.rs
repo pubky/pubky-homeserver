@@ -44,6 +44,12 @@
 //! `DELETE /auth/grant/session` revokes the grant and its session. It accepts
 //! either a live bearer or Grant + PoP JSON, allowing logout after bearer expiry.
 //!
+//! `POST /auth/grant/session-revocation` is an opt-in conditional alternative.
+//! It accepts only a current bearer and original grant/owner/client bindings,
+//! rechecked under the same database lock as rotation. A bound receipt is
+//! returned only after commit. It accepts neither cookies nor Grant + PoP;
+//! a lost receipt is unknown and must not be replaced by a legacy no-op success.
+//!
 //! ## 2. Authenticating requests
 //!
 //! [`GrantAuthenticationMiddleware`](middleware::GrantAuthenticationMiddleware) extracts

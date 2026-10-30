@@ -4,6 +4,34 @@ A grant has one current bearer. Each exchange replaces that bearer. Browser tabs
 on the same origin share it and coordinate refresh through the SDK; applications
 do not need to synchronize credentials themselves.
 
+## Conditional revocation with an original bearer
+
+Servers advertising `conditional-grant-revocation-v1` support
+`POST /auth/grant/session-revocation`. This opt-in endpoint revokes only the grant
+behind the exact bearer in `Authorization: Bearer ...`; it does not refresh a
+credential or accept cookies or Grant + PoP. Root capability is not required.
+Existing SDK signout and legacy DELETE behavior are unchanged.
+
+Send a JSON object with `operation_id` (a freshly generated base64url identifier,
+at most 22 characters), `grant_id`, `pubky` and `client_id`. Unknown fields are
+rejected and the body limit is 4 KiB. The operation identifier correlates the
+response, not an idempotency key or a credential.
+
+The server locks the grant against bearer rotation, then rechecks the exact
+bearer, grant, owner, client and expiry at the authorization point. Revocation,
+session deletion and revocation notification commit together. A 200 response
+contains `GrantRevocationReceipt`, including `original_bearer_revoked_v1`, the
+operation identifier, homeserver, grant, owner and client. Clients must match
+every binding before accepting that receipt.
+
+Missing, invalid or expired authentication gets 401. If authorization changes
+after middleware resolution or a binding differs, the request gets 412 without
+revoking the replacement session. A duplicate after commit cannot authenticate
+and does not return success. If the response is lost, the outcome stays unknown:
+an empty legacy 200, a 401, a missing receipt or malformed JSON is not proof of
+revocation. This endpoint provides no automatic replay or permission to erase
+local state. Local credential teardown and recovery remain separate obligations.
+
 ## Browser applications
 
 Use `browserSessionStore.save(session)` after authentication and

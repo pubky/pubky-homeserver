@@ -70,6 +70,10 @@ pub enum AuthServiceError {
     #[error("Grant does not belong to authenticated user")]
     GrantOwnershipMismatch,
 
+    /// The original bearer or its requested binding is no longer current.
+    #[error("Original bearer revocation precondition failed")]
+    RevocationPreconditionFailed,
+
     /// Session lacks root capability.
     #[error("Root capability required")]
     RootCapabilityRequired,

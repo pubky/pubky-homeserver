@@ -8,6 +8,9 @@ use crate::services::user_service::{UserEntity, UserService};
 use chrono::Utc;
 use pubky_common::{
     auth::grant::GrantClaims,
+    auth::grant_revocation::{
+        ConditionalGrantRevocation, GrantRevocationDisposition, GrantRevocationReceipt,
+    },
     auth::grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
     auth::jws::GrantId,
     crypto::PublicKey,
@@ -188,6 +191,74 @@ impl GrantAuthService {
         session: &GrantSession,
     ) -> Result<(), AuthServiceError> {
         self.revoke_grant(&session.grant_id).await
+    }
+
+    /// Revoke only while the authenticated original bearer is still current.
+    ///
+    /// Middleware authentication is not a lease. Bearer replacement takes the
+    /// same grant-row lock, so an exchange that commits first invalidates this
+    /// request; an exchange blocked behind this revocation cannot revive it.
+    pub async fn revoke_original_bearer(
+        &self,
+        session: &GrantSession,
+        request: &ConditionalGrantRevocation,
+    ) -> Result<GrantRevocationReceipt, AuthServiceError> {
+        let mut tx = self.sql_db.pool().begin().await?;
+        self.revoke_original_bearer_in_transaction(session, request, &mut tx)
+            .await?;
+        tx.commit().await?;
+
+        Ok(GrantRevocationReceipt {
+            disposition: GrantRevocationDisposition::OriginalBearerRevoked,
+            operation_id: request.operation_id.clone(),
+            homeserver: self.homeserver_public_key.clone(),
+            grant_id: request.grant_id.clone(),
+            pubky: request.pubky.clone(),
+            client_id: request.client_id.clone(),
+        })
+    }
+
+    async fn revoke_original_bearer_in_transaction(
+        &self,
+        session: &GrantSession,
+        request: &ConditionalGrantRevocation,
+        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+    ) -> Result<(), AuthServiceError> {
+        if request.grant_id != session.grant_id || request.pubky != session.user_key {
+            return Err(AuthServiceError::RevocationPreconditionFailed);
+        }
+        map_not_found(
+            GrantRepository::lock_for_update(&session.grant_id, tx).await,
+            AuthServiceError::RevocationPreconditionFailed,
+        )?;
+        let grant = map_not_found(
+            GrantRepository::get_by_id(&session.grant_id, &mut UnifiedExecutor::from_tx(tx)).await,
+            AuthServiceError::RevocationPreconditionFailed,
+        )?;
+        let bearer = map_not_found(
+            GrantSessionRepository::get_by_token_hash(
+                &session.token_hash,
+                &mut UnifiedExecutor::from_tx(tx),
+            )
+            .await,
+            AuthServiceError::RevocationPreconditionFailed,
+        )?;
+        // Define validity at this authorization point, after every awaited read
+        // and while holding the lock through revocation, notification and commit.
+        let now = Utc::now().timestamp();
+        if bearer.grant_id != session.grant_id
+            || bearer.expires_at <= now
+            || grant.require_active(now).is_err()
+            || grant.user_pubkey != request.pubky
+            || grant.client_id != request.client_id
+        {
+            return Err(AuthServiceError::RevocationPreconditionFailed);
+        }
+        let executor = &mut UnifiedExecutor::from_tx(tx);
+        GrantRepository::revoke(&session.grant_id, executor).await?;
+        GrantSessionRepository::delete_all_for_grant(&session.grant_id, executor).await?;
+        AuthRevocation::notify_grant_in_transaction(&session.grant_id, executor).await?;
+        Ok(())
     }
 
     /// Resolve an opaque bearer into a `GrantSession`.
@@ -574,6 +645,267 @@ mod tests {
     }
 
     // ── create_grant_session ────────────────────────────────────────
+
+    async fn conditional_fixture() -> (GrantAuthService, GrantSession, ConditionalGrantRevocation) {
+        let service = test_service().await;
+        let (owner, _) = create_test_user(&service).await;
+        let (grant, pop, _) =
+            sign_grant(&owner, &Keypair::random(), &service.homeserver_public_key());
+        let issued = service.create_grant_session(&grant, &pop).await.unwrap();
+        let session = service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&issued.token).unwrap())
+            .await
+            .unwrap();
+        let request = ConditionalGrantRevocation {
+            operation_id: PopNonce::generate(),
+            grant_id: session.grant_id.clone(),
+            pubky: owner.public_key(),
+            client_id: issued.session.client_id,
+        };
+        (service, session, request)
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn conditional_revocation_receipt_follows_commit_and_duplicate_is_not_success() {
+        let (service, session, request) = conditional_fixture().await;
+        let receipt = service
+            .revoke_original_bearer(&session, &request)
+            .await
+            .unwrap();
+        assert_eq!(receipt.operation_id, request.operation_id);
+        assert_eq!(receipt.grant_id, request.grant_id);
+        assert_eq!(receipt.pubky, request.pubky);
+        assert_eq!(receipt.client_id, request.client_id);
+        assert_eq!(receipt.homeserver, service.homeserver_public_key());
+        assert_eq!(
+            receipt.disposition,
+            GrantRevocationDisposition::OriginalBearerRevoked
+        );
+        assert!(service
+            .get_grant(&session.grant_id)
+            .await
+            .unwrap()
+            .revoked_at
+            .is_some());
+        assert!(matches!(
+            GrantSessionRepository::get_by_token_hash(
+                &session.token_hash,
+                &mut service.sql_db.pool().into()
+            )
+            .await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+        // Losing the first response does not make a repeated mutation an acknowledged no-op.
+        assert!(matches!(
+            service.revoke_original_bearer(&session, &request).await,
+            Err(AuthServiceError::RevocationPreconditionFailed)
+        ));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn conditional_revocation_rejects_each_binding_without_mutation() {
+        let (service, session, request) = conditional_fixture().await;
+        let mut wrong_owner = request.clone();
+        wrong_owner.pubky = Keypair::random().public_key();
+        let mut wrong_grant = request.clone();
+        wrong_grant.grant_id = GrantId::generate();
+        let mut wrong_client = request.clone();
+        wrong_client.client_id = ClientId::new("other.app").unwrap();
+        for wrong in [wrong_owner, wrong_grant, wrong_client] {
+            assert!(matches!(
+                service.revoke_original_bearer(&session, &wrong).await,
+                Err(AuthServiceError::RevocationPreconditionFailed)
+            ));
+            assert!(service
+                .get_grant(&session.grant_id)
+                .await
+                .unwrap()
+                .revoked_at
+                .is_none());
+            GrantSessionRepository::get_by_token_hash(
+                &session.token_hash,
+                &mut service.sql_db.pool().into(),
+            )
+            .await
+            .unwrap();
+        }
+        service
+            .revoke_original_bearer(&session, &request)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn conditional_revocation_rejects_rotation_after_authentication() {
+        let (service, session, request) = conditional_fixture().await;
+        let replacement = NewGrantSession {
+            token_hash: SessionBearer::generate().hash(),
+            grant_id: session.grant_id.clone(),
+            expires_at: session.token_expires_at,
+        };
+        GrantSessionRepository::replace_for_grant(&replacement, &service.sql_db)
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.revoke_original_bearer(&session, &request).await,
+            Err(AuthServiceError::RevocationPreconditionFailed)
+        ));
+        assert!(service
+            .get_grant(&session.grant_id)
+            .await
+            .unwrap()
+            .revoked_at
+            .is_none());
+        GrantSessionRepository::get_by_token_hash(
+            &replacement.token_hash,
+            &mut service.sql_db.pool().into(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn conditional_revocation_rechecks_bearer_and_grant_expiry() {
+        for query in [
+            "UPDATE grant_sessions SET expires_at = 0",
+            "UPDATE grants SET expires_at = 0",
+            "UPDATE grants SET revoked_at = 1",
+            "DELETE FROM grant_sessions",
+        ] {
+            let (service, session, request) = conditional_fixture().await;
+            sqlx::query(query)
+                .execute(service.sql_db.pool())
+                .await
+                .unwrap();
+            let before = service
+                .get_grant(&session.grant_id)
+                .await
+                .unwrap()
+                .revoked_at;
+            assert!(matches!(
+                service.revoke_original_bearer(&session, &request).await,
+                Err(AuthServiceError::RevocationPreconditionFailed)
+            ));
+            assert_eq!(
+                service
+                    .get_grant(&session.grant_id)
+                    .await
+                    .unwrap()
+                    .revoked_at,
+                before
+            );
+        }
+    }
+
+    async fn wait_for_blocked_transaction(service: &GrantAuthService, blocker: i32) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))")
+                    .bind(blocker).fetch_one(service.sql_db.pool()).await.unwrap();
+                if blocked { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("transaction must actually wait on the held grant lock");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn conditional_revocation_rotation_commits_while_request_waits_for_lock() {
+        let (service, session, request) = conditional_fixture().await;
+        let mut tx = service.sql_db.pool().begin().await.unwrap();
+        GrantRepository::lock_for_update(&session.grant_id, &mut tx)
+            .await
+            .unwrap();
+        let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let caller = service.clone();
+        let captured = session.clone();
+        let pending =
+            tokio::spawn(async move { caller.revoke_original_bearer(&captured, &request).await });
+        wait_for_blocked_transaction(&service, blocker).await;
+        // Commit the replacement while this request still only has stale middleware auth.
+        let replacement = SessionBearer::generate().hash();
+        GrantSessionRepository::delete_all_for_grant(&session.grant_id, uexecutor!(tx))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO grant_sessions (token_hash, grant_id, expires_at) VALUES ($1, $2, $3)",
+        )
+        .bind(replacement.as_ref())
+        .bind(session.grant_id.to_string())
+        .bind(session.token_expires_at as i64)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            pending.await.unwrap(),
+            Err(AuthServiceError::RevocationPreconditionFailed)
+        ));
+        assert!(service
+            .get_grant(&session.grant_id)
+            .await
+            .unwrap()
+            .revoked_at
+            .is_none());
+        GrantSessionRepository::get_by_token_hash(&replacement, &mut service.sql_db.pool().into())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn conditional_revocation_commit_blocks_later_rotation_and_rollback_preserves_authority()
+    {
+        for commit in [false, true] {
+            let (service, session, request) = conditional_fixture().await;
+            let mut tx = service.sql_db.pool().begin().await.unwrap();
+            service
+                .revoke_original_bearer_in_transaction(&session, &request, &mut tx)
+                .await
+                .unwrap();
+            let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            let db = service.sql_db.clone();
+            let replacement = NewGrantSession {
+                token_hash: SessionBearer::generate().hash(),
+                grant_id: session.grant_id.clone(),
+                expires_at: session.token_expires_at,
+            };
+            let pending = tokio::spawn(async move {
+                GrantSessionRepository::replace_for_grant(&replacement, &db).await
+            });
+            wait_for_blocked_transaction(&service, blocker).await;
+            if commit {
+                tx.commit().await.unwrap();
+            } else {
+                tx.rollback().await.unwrap();
+            }
+            let outcome = pending.await.unwrap();
+            if commit {
+                assert!(matches!(
+                    outcome,
+                    Err(super::super::persistence::grant_session::SessionIssueError::Revoked)
+                ));
+            } else {
+                outcome.unwrap();
+                assert!(service
+                    .get_grant(&session.grant_id)
+                    .await
+                    .unwrap()
+                    .revoked_at
+                    .is_none());
+            }
+        }
+    }
 
     #[tokio::test]
     #[pubky_test_utils::test]

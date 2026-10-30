@@ -8,7 +8,9 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use pubky_common::auth::{grant_session_responses::GrantInfo, jws::GrantId};
+use pubky_common::auth::{
+    grant_revocation::ConditionalGrantRevocation, grant_session_responses::GrantInfo, jws::GrantId,
+};
 use serde::Deserialize;
 
 use super::crypto::jws_crypto::JwsCompact;
@@ -127,6 +129,25 @@ pub async fn signout(
 }
 
 // ── Grant management ───────────────────────────────────────────────────────
+
+/// `POST /auth/grant/session-revocation` — revoke with an atomic original-bearer condition.
+///
+/// Cookie auth and proof-only logout cannot authorize this operation. An earlier
+/// bearer authentication is revalidated under the grant lock before revocation.
+pub async fn revoke_original_bearer(
+    State(state): State<AuthState>,
+    auth: AuthSession,
+    Json(request): Json<ConditionalGrantRevocation>,
+) -> HttpResult<impl IntoResponse> {
+    let AuthSession::Grant(session) = auth else {
+        return Err(HttpError::unauthorized());
+    };
+    let receipt = state
+        .grant_auth_service
+        .revoke_original_bearer(&session, &request)
+        .await?;
+    Ok(Json(receipt))
+}
 
 /// `GET /sessions` — list all active grants for the authenticated user.
 ///

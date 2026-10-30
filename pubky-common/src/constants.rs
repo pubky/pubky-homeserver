@@ -18,6 +18,8 @@ pub mod storage {
 
 /// Features advertised by the homeserver client API.
 pub mod features {
+    /// Atomic original-bearer grant revocation with a bound committed receipt.
+    pub const CONDITIONAL_GRANT_REVOCATION: &str = "conditional-grant-revocation-v1";
     /// Grant + proof-of-possession logout without a live bearer.
     pub const GRANT_PROOF_LOGOUT: &str = "grant-proof-logout";
     /// Homeserver supports storage URLs containing the resource owner in the path.

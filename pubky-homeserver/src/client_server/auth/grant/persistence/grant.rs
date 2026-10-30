@@ -19,6 +19,18 @@ use crate::persistence::sql::{
 pub struct GrantRepository;
 
 impl GrantRepository {
+    /// Hold the same grant-row lock used by bearer replacement until transaction end.
+    pub async fn lock_for_update(
+        grant_id: &GrantId,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT id FROM grants WHERE id = $1 FOR UPDATE")
+            .bind(grant_id.to_string())
+            .fetch_one(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
     /// Insert a grant. Ignores if a grant with the same id already exists (idempotent).
     pub async fn create<'a>(
         grant: &NewGrant,

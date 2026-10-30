@@ -1,4 +1,5 @@
 mod account;
+mod conditional_revocation;
 mod cookie;
 mod grant;
 mod pkdns;

@@ -2,6 +2,7 @@
 
 mod auth_token;
 pub mod grant;
+pub mod grant_revocation;
 pub mod grant_session_responses;
 pub mod jws;
 pub mod pop;

@@ -276,6 +276,51 @@ paths:
       responses:
         '200':
           description: Session revoked (idempotent)
+  "/auth/grant/session-revocation":
+    post:
+      tags:
+      - Auth - Grant
+      summary: Revoke a grant only while the original bearer is current
+      description: |-
+        Opt-in conditional revocation, advertised as conditional-grant-revocation-v1.
+        Requires the exact current bearer; cookies and Grant + PoP are not accepted.
+        No root capability is required. Under the grant row lock used by bearer
+        rotation, recheck the bearer, grant, owner, client and expiry, then commit
+        revocation, session deletion and revocation notification together.
+        Return a bound receipt only after commit. The operation ID correlates a
+        response and does not authorize replay. A lost/malformed receipt, 401, or
+        an empty legacy DELETE response must not be interpreted as success.
+      operationId: revokeOriginalBearer
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        description: JSON body limited to 4096 bytes.
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ConditionalGrantRevocation"
+      responses:
+        '200':
+          description: Conditional revocation committed; verify every receipt binding.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/GrantRevocationReceipt"
+        '400':
+          description: Malformed JSON syntax
+        '401':
+          description: Missing, invalid, expired or non-grant bearer authentication
+        '412':
+          description: Original bearer or bound grant preconditions no longer hold
+        '413':
+          description: Request body exceeds 4096 bytes
+        '415':
+          description: Content type is not application/json
+        '422':
+          description: Invalid or unknown request fields
+        '500':
+          description: Internal failure; no affirmative receipt, outcome may be unknown
   "/auth/grant/sessions":
     get:
       tags:
@@ -1246,6 +1291,45 @@ components:
           description: Opaque bearer token.
         session:
           "$ref": "#/components/schemas/GrantSessionInfo"
+    ConditionalGrantRevocation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, grant_id, pubky, client_id]
+      properties:
+        operation_id:
+          type: string
+          minLength: 1
+          maxLength: 22
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: Fresh correlation identifier, not an idempotency key or credential.
+        grant_id:
+          type: string
+          description: Original grant identifier.
+        pubky:
+          type: string
+          description: Original grant owner public key (z-base-32).
+        client_id:
+          type: string
+          description: Original application identifier.
+    GrantRevocationReceipt:
+      type: object
+      additionalProperties: false
+      required: [disposition, operation_id, homeserver, grant_id, pubky, client_id]
+      properties:
+        disposition:
+          type: string
+          enum: [original_bearer_revoked_v1]
+        operation_id:
+          "$ref": "#/components/schemas/ConditionalGrantRevocation/properties/operation_id"
+        homeserver:
+          type: string
+          description: Homeserver public key (z-base-32); must match the expected server.
+        grant_id:
+          "$ref": "#/components/schemas/ConditionalGrantRevocation/properties/grant_id"
+        pubky:
+          "$ref": "#/components/schemas/ConditionalGrantRevocation/properties/pubky"
+        client_id:
+          "$ref": "#/components/schemas/ConditionalGrantRevocation/properties/client_id"
     GrantSessionInfo:
       type: object
       required:

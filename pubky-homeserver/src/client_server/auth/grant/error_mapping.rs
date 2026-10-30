@@ -52,6 +52,10 @@ impl From<AuthServiceError> for HttpError {
             AuthServiceError::GrantOwnershipMismatch => {
                 HttpError::forbidden_with_message("Grant does not belong to authenticated user")
             }
+            AuthServiceError::RevocationPreconditionFailed => HttpError::new_with_message(
+                StatusCode::PRECONDITION_FAILED,
+                "Original bearer revocation precondition failed",
+            ),
             AuthServiceError::RootCapabilityRequired => {
                 HttpError::forbidden_with_message("Root capability required")
             }
@@ -143,6 +147,10 @@ mod tests {
         );
         assert_status(AuthServiceError::SessionNotFound, StatusCode::UNAUTHORIZED);
         assert_status(AuthServiceError::SessionExpired, StatusCode::UNAUTHORIZED);
+        assert_status(
+            AuthServiceError::RevocationPreconditionFailed,
+            StatusCode::PRECONDITION_FAILED,
+        );
         assert_status(
             AuthServiceError::GrantOwnershipMismatch,
             StatusCode::FORBIDDEN,
