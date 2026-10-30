@@ -5,7 +5,9 @@
 
 use pubky_common::crypto::PublicKey;
 
-use crate::persistence::sql::user::{UserEntity, UserOverview, UserRepository};
+use crate::persistence::sql::user::{
+    UserEntity, UserListPage, UserListQuery, UserOverview, UserRepository,
+};
 use crate::persistence::sql::{uexecutor, SqlDb, UnifiedExecutor};
 use crate::shared::quota::{UserQuota, UserQuotaPatch};
 use crate::shared::{HttpError, HttpResult};
@@ -84,6 +86,13 @@ impl UserService {
     /// Get an overview of all users (counts, total disk usage).
     pub async fn get_overview(&self) -> Result<UserOverview, sqlx::Error> {
         UserRepository::get_overview(&mut self.sql_db.pool().into()).await
+    }
+
+    /// List users page by page.
+    ///
+    /// Fails with [`sqlx::Error::RowNotFound`] when the cursor names an unknown user.
+    pub async fn list(&self, query: UserListQuery) -> Result<UserListPage, sqlx::Error> {
+        UserRepository::list(query, &mut self.sql_db.pool().into()).await
     }
 
     // ── Reads (caller-owned transaction) ──────────────────────────
@@ -380,6 +389,36 @@ mod tests {
         let overview = svc.get_overview().await.unwrap();
         assert_eq!(overview.count, 2);
         assert_eq!(overview.disabled_count, 1);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_list_pages_and_rejects_unknown_cursor() {
+        let svc = service().await;
+        let pk1 = Keypair::random().public_key();
+        let pk2 = Keypair::random().public_key();
+        svc.create(&pk1).await.unwrap();
+        svc.create(&pk2).await.unwrap();
+
+        let page = svc
+            .list(UserListQuery {
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].public_key, pk1);
+        assert_eq!(page.next_cursor, Some(pk1));
+
+        let err = svc
+            .list(UserListQuery {
+                cursor: Some(Keypair::random().public_key()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, sqlx::Error::RowNotFound));
     }
 
     #[tokio::test]
