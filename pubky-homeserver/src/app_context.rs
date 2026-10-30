@@ -12,9 +12,10 @@ use crate::{
     client_server::auth::RevocationListener,
     observability::{Metrics, MetricsInitError},
     persistence::{
-        files::{events::EventsService, FileIoError, FileService},
+        files::{FileIoError, FileService},
         sql::{Migrator, PgEventListener, SqlDb},
     },
+    services::events_service::EventsService,
     ConfigToml, DataDir,
 };
 use pubky_common::crypto::Keypair;

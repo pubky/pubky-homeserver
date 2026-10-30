@@ -4,7 +4,7 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::persistence::files::FileIoError;
+use crate::{persistence::files::FileIoError, services::events_service::EventStreamError};
 
 pub(crate) type HttpResult<T, E = HttpError> = core::result::Result<T, E>;
 
@@ -152,6 +152,16 @@ impl From<axum::http::Error> for HttpError {
     }
 }
 
+impl From<EventStreamError> for HttpError {
+    fn from(error: EventStreamError) -> Self {
+        match error {
+            EventStreamError::UserNotFound => HttpError::not_found(),
+            EventStreamError::DatabaseError(e) => HttpError::from(e),
+            _ => HttpError::bad_request(error.to_string()),
+        }
+    }
+}
+
 impl From<FileIoError> for HttpError {
     fn from(error: FileIoError) -> Self {
         match error {
@@ -219,5 +229,30 @@ mod tests {
     fn publish_conflict_is_a_409() {
         let response = HttpError::from(FileIoError::PublishConflict).into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// Both event stream routes rely on this mapping: a bad query is a 400, an
+    /// unknown `user=` is a 404, and any other database failure is a 500.
+    #[test]
+    fn event_stream_errors_map_to_status() {
+        let cases = [
+            (EventStreamError::UserRequired, StatusCode::BAD_REQUEST),
+            (
+                EventStreamError::from(sqlx::Error::RowNotFound),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                EventStreamError::from(sqlx::Error::PoolClosed),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (error, status) in cases {
+            let message = error.to_string();
+            assert_eq!(
+                HttpError::from(error).into_response().status(),
+                status,
+                "{message}"
+            );
+        }
     }
 }

@@ -58,7 +58,6 @@ mod layer_domain_error;
 mod opendal;
 mod write_check;
 
-pub(crate) mod events;
 pub(crate) mod staged_publish_layer;
 mod storage_repair;
 pub(crate) mod write_finalization_layer;

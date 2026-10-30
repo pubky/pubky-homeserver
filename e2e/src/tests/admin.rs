@@ -617,3 +617,80 @@ async fn admin_event_stream_exposes_private_events() {
         "public feed must not leak private paths: {public_body}"
     );
 }
+
+/// A live admin stream with `limit=N` closes right after the Nth event, without waiting for
+/// another event to arrive first.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn admin_event_stream_live_limit_closes_after_last_event() {
+    use eventsource_stream::Eventsource;
+    use futures::StreamExt;
+    use tokio::time::{timeout, Duration};
+
+    let config = ConfigToml::default_test_config();
+    let admin_password = config.admin.admin_password.clone();
+
+    let mut testnet = Testnet::new().await.unwrap();
+    let pubky = testnet.sdk().unwrap();
+    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
+    let server = testnet
+        .create_homeserver_app_with_mock(mock_dir)
+        .await
+        .unwrap();
+    let admin_socket = server
+        .admin_server()
+        .expect("admin server should be enabled")
+        .listen_socket();
+
+    let session = pubky
+        .signer(Keypair::random())
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    for path in ["/pub/a.txt", "/pub/b.txt"] {
+        session.storage().put(path, vec![1]).await.unwrap();
+    }
+
+    // Two historical events plus one live event reach the limit of three.
+    let response = PubkyHttpClient::new()
+        .unwrap()
+        .request(
+            Method::GET,
+            &format!("http://{admin_socket}/events-stream?live=true&limit=3"),
+        )
+        .header("X-Admin-Password", &admin_password)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.bytes_stream().eventsource();
+    assert!(next_event_data(&mut stream).await.contains("/pub/a.txt"));
+    assert!(next_event_data(&mut stream).await.contains("/pub/b.txt"));
+
+    // Only the third event arrives through the live tail.
+    session.storage().put("/pub/c.txt", vec![1]).await.unwrap();
+    assert!(next_event_data(&mut stream).await.contains("/pub/c.txt"));
+
+    let next = timeout(Duration::from_millis(500), stream.next()).await;
+    assert!(
+        matches!(next, Ok(None)),
+        "stream should close right after the third event"
+    );
+}
+
+/// The `data` of the next SSE event, failing if the stream closes or stalls first.
+async fn next_event_data<S, E>(stream: &mut S) -> String
+where
+    S: futures::Stream<Item = Result<eventsource_stream::Event, E>> + Unpin,
+    E: std::fmt::Debug,
+{
+    use futures::StreamExt;
+    use tokio::time::{timeout, Duration};
+
+    timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("event within timeout")
+        .expect("stream open until the limit")
+        .expect("valid SSE event")
+        .data
+}

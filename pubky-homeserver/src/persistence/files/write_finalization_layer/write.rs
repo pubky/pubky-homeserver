@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use crate::persistence::files::{
-    events::EventType, layer_domain_error::LayerDomainError, FileMetadata, FileMetadataBuilder,
+    layer_domain_error::LayerDomainError, FileMetadata, FileMetadataBuilder,
 };
 use crate::persistence::sql::{
     entry::{EntryEntity, EntryRepository},
+    events::EventType,
     user::UserEntity,
     UnifiedExecutor,
 };

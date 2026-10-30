@@ -76,6 +76,16 @@ impl UserService {
         UserRepository::get_id(pubkey, &mut self.sql_db.pool().into()).await
     }
 
+    /// Get the ids of several users by public key, in the given order.
+    /// Fails with [`sqlx::Error::RowNotFound`] if any of them is unknown.
+    pub async fn get_ids(&self, pubkeys: &[PublicKey]) -> Result<Vec<i32>, sqlx::Error> {
+        let mut ids = Vec::with_capacity(pubkeys.len());
+        for pubkey in pubkeys {
+            ids.push(self.get_id(pubkey).await?);
+        }
+        Ok(ids)
+    }
+
     /// Get all user entities.
     pub async fn get_all(&self) -> Result<Vec<UserEntity>, sqlx::Error> {
         UserRepository::get_all(&mut self.sql_db.pool().into()).await

@@ -15,12 +15,10 @@ use axum::{
         IntoResponse,
     },
 };
-use futures_util::stream::Stream;
+use futures_util::{Stream, StreamExt};
 use pubky_common::crypto::PublicKey;
-use serde::Deserialize;
-use std::{collections::HashMap, convert::Infallible, time::Instant};
+use std::{convert::Infallible, time::Instant};
 use tower_cookies::Cookies;
-use url::form_urlencoded;
 
 use crate::{
     client_server::{
@@ -32,56 +30,13 @@ use crate::{
         AppState,
     },
     constants::{PRIVATE_ROOT, PUBLIC_ROOT},
-    observability::ConnectionGuard,
-    persistence::files::events::{EventCursor, EventEntity, PathFilter, MAX_EVENT_STREAM_USERS},
+    persistence::sql::events::{EventCursor, EventEntity, PathFilter},
+    services::{
+        events_service::{ClientStreamQuery, EventStreamError, UserEventsFilter},
+        user_service::UserService,
+    },
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
-
-#[derive(Debug, thiserror::Error)]
-pub enum EventStreamError {
-    #[error("User not found")]
-    UserNotFound,
-    #[error("{0}")]
-    InvalidParameter(String),
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-    #[error("Invalid public key: {0}")]
-    InvalidPublicKey(String),
-    #[error("Invalid cursor: {0}")]
-    InvalidCursor(String),
-}
-
-impl From<EventStreamError> for HttpError {
-    fn from(error: EventStreamError) -> Self {
-        match error {
-            EventStreamError::UserNotFound => HttpError::not_found(),
-            EventStreamError::DatabaseError(e) => HttpError::from(e),
-            _ => HttpError::bad_request(error.to_string()),
-        }
-    }
-}
-
-/// Query parameters for the event stream SSE endpoint.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(try_from = "RawEventStreamQueryParams")]
-pub struct EventStreamQueryParams {
-    /// Maximum total events to send before closing connection.
-    pub limit: Option<u16>,
-    /// Return events in reverse chronological order
-    /// **Cannot be combined with `live=true`** (returns 400 error).
-    pub reverse: bool,
-    /// Enable live streaming mode
-    pub live: bool,
-    /// One or more user public keys to filter events for.
-    /// - Format: z-base-32 encoded public key (e.g., "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo")
-    /// - Single user: `?user=pubkey1`
-    /// - Single user with cursor: `?user=pubkey1:cursor`
-    /// - Multiple users: `?user=pubkey1&user=pubkey2:cursor2`
-    pub user_cursors: Vec<(PublicKey, Option<EventCursor>)>,
-    /// Repeatable path filters. Each value is a path WITHOUT the `pubky://`
-    /// scheme or user pubkey, e.g. `/pub/files/`, `pub/files/`, `/priv/app/`..
-    pub paths: Vec<StoragePath>,
-}
 
 #[derive(Clone, Copy)]
 enum EventStreamTenantScope<'a> {
@@ -113,147 +68,6 @@ impl<'a> EventStreamTenantScope<'a> {
             Self::PrivateSingleTenant(tenant) => Some(tenant),
             Self::PublicOnly | Self::PrivateUnsupported => None,
         }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct RawEventStreamQueryParams {
-    #[serde(default)]
-    user: Vec<String>,
-    limit: Option<u16>,
-    #[serde(default)]
-    reverse: bool,
-    #[serde(default)]
-    live: bool,
-    #[serde(default)]
-    paths: Vec<String>,
-}
-
-/// Parse query string manually to handle repeated `user` parameters.
-/// URL query string format like: `user=pubkey1&user=pubkey2:cursor&limit=10&live=true`
-fn parse_query_params(query: &str) -> Result<EventStreamQueryParams, EventStreamError> {
-    let mut users = Vec::new();
-    let mut limit = None;
-    let mut reverse = false;
-    let mut live = false;
-    let mut paths = Vec::new();
-
-    // Parse using form_urlencoded which handles URL decoding
-    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
-        match key.as_ref() {
-            "user" => users.push(value.to_string()),
-            "limit" => {
-                let parsed = value.parse::<u16>().map_err(|_| {
-                    EventStreamError::InvalidParameter(format!("Invalid limit: {}", value))
-                })?;
-                if parsed == 0 {
-                    return Err(EventStreamError::InvalidParameter(
-                        "limit must be at least 1".to_string(),
-                    ));
-                }
-                limit = Some(parsed);
-            }
-            "reverse" => {
-                reverse = value == "true" || value == "1";
-            }
-            "live" => {
-                live = value == "true" || value == "1";
-            }
-            // `path` is repeatable; empty values are ignored.
-            "path" if !value.is_empty() => {
-                paths.push(value.to_string());
-            }
-            _ => {} // Ignore unknown parameters
-        }
-    }
-
-    let raw = RawEventStreamQueryParams {
-        user: users,
-        limit,
-        reverse,
-        live,
-        paths,
-    };
-
-    raw.try_into()
-}
-
-impl TryFrom<RawEventStreamQueryParams> for EventStreamQueryParams {
-    type Error = EventStreamError;
-
-    fn try_from(raw: RawEventStreamQueryParams) -> Result<Self, Self::Error> {
-        if raw.live && raw.reverse {
-            return Err(EventStreamError::InvalidParameter(
-                "Cannot use live mode with reverse ordering".to_string(),
-            ));
-        }
-
-        // Parse user values into (pubkey, optional_cursor) pairs
-        // Format: "pubkey" or "pubkey:cursor"
-        let mut user_cursors = Vec::new();
-        for value in raw.user {
-            if value.is_empty() {
-                continue;
-            }
-
-            let (pubkey_str, cursor_str) = if let Some((pubkey, cursor)) = value.split_once(':') {
-                (pubkey, Some(cursor))
-            } else {
-                (value.as_str(), None)
-            };
-
-            if PublicKey::is_pubky_prefixed(pubkey_str) {
-                return Err(EventStreamError::InvalidPublicKey(pubkey_str.to_string()));
-            }
-            let pubkey = PublicKey::try_from_z32(pubkey_str)
-                .map_err(|_| EventStreamError::InvalidPublicKey(pubkey_str.to_string()))?;
-            let cursor = match cursor_str {
-                Some(raw) => Some(
-                    raw.parse::<EventCursor>()
-                        .map_err(|_| EventStreamError::InvalidCursor(raw.to_string()))?,
-                ),
-                None => None,
-            };
-
-            user_cursors.push((pubkey, cursor));
-        }
-
-        if user_cursors.is_empty() {
-            return Err(EventStreamError::InvalidParameter(
-                "user parameter is required".to_string(),
-            ));
-        }
-
-        if user_cursors.len() > MAX_EVENT_STREAM_USERS {
-            return Err(EventStreamError::InvalidParameter(format!(
-                "Too many users. Maximum allowed: {}",
-                MAX_EVENT_STREAM_USERS
-            )));
-        }
-
-        // Parse each repeated `path` value. Empty values were already dropped
-        // during query parsing.
-        let mut paths = Vec::with_capacity(raw.paths.len());
-        for p in raw.paths {
-            let normalized_path = if p.starts_with('/') {
-                p
-            } else {
-                format!("/{}", p)
-            };
-
-            let path = StoragePath::normalize(&normalized_path).map_err(|_| {
-                EventStreamError::InvalidParameter(format!("Invalid path: {}", normalized_path))
-            })?;
-            paths.push(path);
-        }
-
-        Ok(EventStreamQueryParams {
-            limit: raw.limit,
-            reverse: raw.reverse,
-            live: raw.live,
-            user_cursors,
-            paths,
-        })
     }
 }
 
@@ -357,9 +171,8 @@ pub async fn feed_stream(
     cookies: Cookies,
     raw_query: RawQuery,
 ) -> HttpResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let params =
-        parse_query_params(raw_query.0.as_deref().unwrap_or("")).map_err(HttpError::from)?;
-    let tenant_scope = EventStreamTenantScope::from_query(&params.paths, &params.user_cursors);
+    let query = ClientStreamQuery::parse(raw_query.0.as_deref().unwrap_or(""))?;
+    let tenant_scope = EventStreamTenantScope::from_query(&query.paths, &query.user_cursors);
 
     // A presented Bearer disables both middleware-resolved and
     // homeserver-addressed cookie authentication for this endpoint.
@@ -372,7 +185,7 @@ pub async fn feed_stream(
         None => None,
     };
 
-    let allowed_paths = authorized_paths(&params.paths, tenant_scope, session.as_ref())?;
+    let allowed_paths = authorized_paths(&query.paths, tenant_scope, session.as_ref())?;
 
     // Subscribe after path authorization but before the final DB validation.
     // The validation catches revocations committed before this subscription;
@@ -389,172 +202,39 @@ pub async fn feed_stream(
         )
     })?;
 
-    let mut stream_auth = pending_stream_auth
+    let stream_auth = pending_stream_auth
         .authorize(session, &state.auth_state)
         .await?;
 
-    let mut user_cursor_map = resolve_user_ids(&params.user_cursors, &state.context.user_service)
-        .await
-        .map_err(HttpError::from)?;
+    let user_cursors = resolve_user_ids(&query.user_cursors, &state.context.user_service).await?;
 
-    let mut total_sent: usize = 0;
-    let stream = async_stream::stream! {
-         // Create guard to ensure cleanup on any exit path (increments on creation, decrements on drop)
-        let _guard = ConnectionGuard::new(state.context.metrics.clone());
-
-        // Subscribe to broadcast channel immediately to prevent race condition
-        // Events that occur during Phase 1 will be buffered in the channel
-        let mut rx = state.context.events_service.subscribe();
-
-        // Phase 1: Batch Mode
-        loop {
-            if !stream_auth.is_valid(&state.auth_state).await {
-                return;
-            }
-
-            // Drain any buffered events before querying as they'll be included in this or a future database query
-            while rx.try_recv().is_ok() {}
-
-            let current_user_cursors: Vec<(i32, Option<EventCursor>)> =
-                user_cursor_map.iter().map(|(k, cursor)| (*k, *cursor)).collect();
-
-            let query_start = Instant::now();
-            let events = match state
-                .context
-                .events_service
-                .get_by_user_cursors(
-                    current_user_cursors,
-                    params.reverse,
-                    &allowed_paths,
-                    &mut state.context.sql_db.pool().into(),
-                )
-                .await
-            {
-                Ok(events) => events,
-                Err(e) => {
-                    tracing::error!("Database error while fetching events: {}", e);
-                    break;
-                }
-            };
-            state.context.metrics.record_event_stream_db_query(query_start.elapsed().as_millis());
-
-            let event_count = events.len();
-
-            // Stream each historical event
-            for event in events {
-                if !stream_auth.is_valid(&state.auth_state).await {
-                    return;
-                }
-
-                // Update the cursor for this specific user
-                user_cursor_map.insert(event.user_id, Some(event.cursor()));
-
-                yield Ok(Event::default()
-                    .event(event.event_type.to_string())
-                    .data(event.to_sse_data()));
-
-                total_sent += 1;
-
-                // Close if we've reached limit
-                if let Some(max) = params.limit {
-                    if total_sent >= max as usize {
-                        return;
-                    }
-                }
-            }
-
-            // If we got zero events, all users are caught up with history
-            if event_count == 0 {
-                // If not in live mode, close connection (batch mode)
-                if !params.live {
-                    return;
-                }
-                // Otherwise, transition to live mode
-                break;
-            }
-
-            // If we got a partial batch (> 0 but less than read_batch_size), continue querying
-            // Some users might still have more events even though this batch was partial
-        }
-
-        // Phase 2: Live mode
-        if params.live {
-            let user_ids: Vec<i32> = user_cursor_map.keys().copied().collect();
-            let half_capacity = state.context.events_service.channel_capacity() / 2;
-
-            loop {
-                tokio::select! {
-                    biased;
-                    check = stream_auth.next_check(&state.auth_state) => {
-                        if !check.await {
-                            return;
-                        }
-                    }
-                    event = rx.recv() => match event {
-                        Ok(event) => {
-                        // Check if receiver queue is at half capacity (early warning of slow clients)
-                        if rx.len() >= half_capacity {
-                            state.context.metrics.record_broadcast_half_full();
-                        }
-                        // Filter events based on user_ids, cursors, and path
-                        if !should_include_live_event(&event, &user_ids, &user_cursor_map, &allowed_paths) {
-                            continue;
-                        }
-
-                        // Update this user's cursor
-                        user_cursor_map.insert(event.user_id, Some(event.cursor()));
-
-                        yield Ok(Event::default()
-                            .event(event.event_type.to_string())
-                            .data(event.to_sse_data()));
-
-                        total_sent += 1;
-
-                        // Close if we've reached limit
-                        if let Some(max) = params.limit {
-                            if total_sent >= max as usize {
-                                return;
-                            }
-                        }
-                    }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            state.context.metrics.record_broadcast_lagged();
-                            tracing::warn!(
-                                "Slow client detected: broadcast channel lagged by {} events. Closing connection.",
-                                skipped
-                            );
-                            return;
-                        }
-                        Err(_) => break, // Channel closed
-                    }
-                }
-            }
-        }
-    };
+    let stream = state
+        .context
+        .events_service
+        .user_events_stream(
+            state.context.metrics.clone(),
+            UserEventsFilter {
+                user_cursors,
+                allowed_paths,
+                mode: query.mode,
+                limit: query.limit,
+            },
+            stream_auth,
+        )
+        .map(|event| Ok::<_, Infallible>(event.to_sse_event()));
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// Resolve user public keys to user IDs, keeping each user's cursor.
-/// Returns a map of user_id → optional cursor position.
 async fn resolve_user_ids(
     user_cursors: &[(PublicKey, Option<EventCursor>)],
-    user_service: &crate::services::user_service::UserService,
-) -> Result<HashMap<i32, Option<EventCursor>>, EventStreamError> {
-    let mut user_cursor_map: HashMap<i32, Option<EventCursor>> = HashMap::new();
-
-    for (user_pubkey, cursor) in user_cursors {
-        let user_id = user_service
-            .get_id(user_pubkey)
-            .await
-            .map_err(|e| match e {
-                sqlx::Error::RowNotFound => EventStreamError::UserNotFound,
-                e => EventStreamError::DatabaseError(e),
-            })?;
-        user_cursor_map.insert(user_id, *cursor);
-    }
-
-    Ok(user_cursor_map)
+    user_service: &UserService,
+) -> Result<Vec<(i32, Option<EventCursor>)>, EventStreamError> {
+    let pubkeys: Vec<PublicKey> = user_cursors.iter().map(|(pk, _)| pk.clone()).collect();
+    let ids = user_service.get_ids(&pubkeys).await?;
+    let cursors = user_cursors.iter().map(|(_, cursor)| *cursor);
+    Ok(ids.into_iter().zip(cursors).collect())
 }
 
 fn has_bearer_auth(headers: &HeaderMap) -> bool {
@@ -594,30 +274,6 @@ fn authorized_paths(
         allowed.push(path.clone().into());
     }
     Ok(allowed)
-}
-
-/// Filter events in live mode based on user IDs, cursors, and the authorized
-/// paths.
-fn should_include_live_event(
-    event: &EventEntity,
-    user_ids: &[i32],
-    user_cursor_map: &HashMap<i32, Option<EventCursor>>,
-    allowed_paths: &[PathFilter],
-) -> bool {
-    if !user_ids.contains(&event.user_id) {
-        return false;
-    }
-
-    // Filter out events we already sent in Phase 1
-    if let Some(Some(cursor)) = user_cursor_map.get(&event.user_id) {
-        if event.cursor() <= *cursor {
-            return false;
-        }
-    }
-
-    // Apply the authorized filter set.
-    let path = event.path.path().as_str();
-    allowed_paths.iter().any(|filter| filter.matches(path))
 }
 
 #[cfg(test)]
@@ -705,60 +361,6 @@ mod tests {
                 axum::http::HeaderValue::from_bytes(value).expect("valid header bytes"),
             );
             assert_eq!(has_bearer_auth(&headers), expected, "{value:?}");
-        }
-    }
-
-    #[test]
-    fn parse_repeated_paths_preserves_order_and_trailing_slash() {
-        let q = format!(
-            "user={}&path=/pub/&path=/priv/app/&path=/priv/file",
-            pk().z32()
-        );
-        let params = parse_query_params(&q).unwrap();
-        let strs: Vec<&str> = params.paths.iter().map(|p| p.as_str()).collect();
-        assert_eq!(strs, vec!["/pub/", "/priv/app/", "/priv/file"]);
-    }
-
-    #[test]
-    fn parse_ignores_empty_path_values() {
-        let params =
-            parse_query_params(&format!("user={}&path=&path=/pub/&path=", pk().z32())).unwrap();
-        assert_eq!(
-            params.paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-            vec!["/pub/"]
-        );
-    }
-
-    #[test]
-    fn parse_requires_user() {
-        let err = parse_query_params("path=/pub/").unwrap_err();
-        assert_eq!(
-            HttpError::from(err).into_response().status(),
-            StatusCode::BAD_REQUEST
-        );
-    }
-
-    #[test]
-    fn parse_rejects_zero_limit() {
-        let err = parse_query_params(&format!("user={}&limit=0", pk().z32())).unwrap_err();
-        assert_eq!(err.to_string(), "limit must be at least 1");
-    }
-
-    #[test]
-    fn parse_user_cursor_as_event_id() {
-        let u = pk();
-        let params =
-            parse_query_params(&format!("user={}:42&user={}", u.z32(), pk().z32())).unwrap();
-        assert_eq!(params.user_cursors[0], (u, Some(EventCursor::new(42))));
-        assert_eq!(params.user_cursors[1].1, None);
-    }
-
-    #[test]
-    fn parse_rejects_non_numeric_user_cursor() {
-        // Legacy timestamp cursors and out-of-range ids are rejected alike.
-        for cursor in ["yyyyyyyyyyyyy", "-1", "18446744073709551616", ""] {
-            let err = parse_query_params(&format!("user={}:{cursor}", pk().z32())).unwrap_err();
-            assert_eq!(err.to_string(), format!("Invalid cursor: {cursor}"));
         }
     }
 
