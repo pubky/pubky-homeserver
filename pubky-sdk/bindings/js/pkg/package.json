@@ -52,6 +52,7 @@
     "fetch-cookie": "^3.0.1"
   },
   "overrides": {
-    "electron": "45.1.0"
+    "electron": "45.1.0",
+    "minimist": "^1.2.8"
   }
 }
