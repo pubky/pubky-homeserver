@@ -15,6 +15,10 @@ use crate::{PubkyHttpClient, PublicKey};
 const MAX_INFO_BYTES: usize = 16 * 1024;
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const INFO_CACHE_TTL: Duration = Duration::from_secs(60);
+/// A failed fetch is retried after a short TTL: long enough that back-to-back requests to a
+/// homeserver without `/info` do not each re-probe it, short enough that a homeserver first seen
+/// during a transient error is not treated as featureless for the full success TTL.
+const INFO_FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);
 const INFO_CACHE_CAPACITY: usize = 256;
 type FeatureCell = Arc<AsyncMutex<Option<CachedFeatures>>>;
 
@@ -91,11 +95,18 @@ impl HomeserverFeatures {
             return features.iter().any(|candidate| candidate == feature);
         }
 
-        let features = fetch().await.unwrap_or_default();
+        let (features, ttl) = match fetch().await {
+            Some(features) => (features, INFO_CACHE_TTL),
+            // Keep the last known features through a transient failure
+            None => (
+                cached.take().map_or_else(Vec::new, |stale| stale.features),
+                INFO_FAILURE_CACHE_TTL,
+            ),
+        };
         let supports = features.iter().any(|candidate| candidate == feature);
         *cached = Some(CachedFeatures {
             features,
-            expires_at: Instant::now() + INFO_CACHE_TTL,
+            expires_at: Instant::now() + ttl,
         });
         supports
     }
@@ -261,6 +272,54 @@ mod tests {
             .await;
         assert!(!cached);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn caches_failures_briefly_and_successes_for_the_full_ttl() {
+        let discovery = HomeserverFeatures::default();
+        let homeserver = crate::Keypair::random().public_key();
+        let cell = discovery.cell(&homeserver);
+
+        let failed_at = Instant::now();
+        discovery
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async { None })
+            .await;
+        let failure_expiry = cell.lock().await.as_ref().unwrap().expires_at;
+        assert!(failure_expiry >= failed_at + INFO_FAILURE_CACHE_TTL);
+        assert!(failure_expiry < failed_at + INFO_CACHE_TTL);
+
+        *cell.lock().await = None;
+        let succeeded_at = Instant::now();
+        discovery
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
+            })
+            .await;
+        let success_expiry = cell.lock().await.as_ref().unwrap().expires_at;
+        assert!(success_expiry >= succeeded_at + INFO_CACHE_TTL);
+    }
+
+    #[tokio::test]
+    async fn keeps_stale_features_when_a_refresh_fails() {
+        let discovery = HomeserverFeatures::default();
+        let homeserver = crate::Keypair::random().public_key();
+        let cell = discovery.cell(&homeserver);
+        *cell.lock().await = Some(CachedFeatures {
+            features: vec![PATH_ADDRESSED_STORAGE.to_string()],
+            expires_at: Instant::now(),
+        });
+
+        let failed_at = Instant::now();
+        let supported = discovery
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async { None })
+            .await;
+
+        assert!(supported);
+        let cached = cell.lock().await;
+        let cached = cached.as_ref().unwrap();
+        assert_eq!(cached.features, [PATH_ADDRESSED_STORAGE]);
+        assert!(cached.expires_at >= failed_at + INFO_FAILURE_CACHE_TTL);
+        assert!(cached.expires_at < failed_at + INFO_CACHE_TTL);
     }
 
     #[tokio::test]
