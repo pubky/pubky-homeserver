@@ -828,28 +828,59 @@ mod tests {
         decode_request(&message(&user, &claims(&user)), &split_request).unwrap();
     }
 
+    fn approval_in_format(
+        user: &Keypair,
+        request: &SigninGrantParams,
+        format: GrantApprovalFormat,
+    ) -> AuthRelayMessage {
+        let claims = GrantClaims {
+            caps: request.capabilities.to_vec(),
+            cnf: request.client_pk.clone(),
+            ..claims(user)
+        };
+        match format {
+            GrantApprovalFormat::BareGrant => AuthRelayMessage::new(
+                claims
+                    .sign(user, pubky_common::auth::jws::GRANT_JWS_TYP)
+                    .into_bytes(),
+            ),
+            GrantApprovalFormat::SignedApprovalV1 => message(user, &claims),
+        }
+    }
+
+    fn is_expected_signer_mismatch(error: &crate::Error) -> bool {
+        matches!(
+            error,
+            crate::Error::Authentication(AuthError::Validation(message))
+                if message.contains("different key than the request expected")
+        )
+    }
+
     #[test]
     fn approvals_must_come_from_the_expected_signer() {
         let expected = Keypair::random();
         let other = Keypair::random();
-        let mut request = request(GrantApprovalFormat::SignedApprovalV1);
-        request.expected_signer = Some(expected.public_key());
+        for format in [
+            GrantApprovalFormat::BareGrant,
+            GrantApprovalFormat::SignedApprovalV1,
+        ] {
+            let mut request = request(format);
+            request.expected_signer = Some(expected.public_key());
 
-        let error = decode_request(&message(&other, &claims(&other)), &request).unwrap_err();
-        assert!(matches!(
-            error,
-            crate::Error::Authentication(AuthError::Validation(message))
-                if message.contains("different key than the request expected")
-        ));
+            let error = decode_request(&approval_in_format(&other, &request, format), &request)
+                .unwrap_err();
+            assert!(is_expected_signer_mismatch(&error), "{format:?}: {error}");
 
-        let approval = decode_request(&message(&expected, &claims(&expected)), &request).unwrap();
-        assert_eq!(approval.claims.iss, expected.public_key());
+            let approval =
+                decode_request(&approval_in_format(&expected, &request, format), &request).unwrap();
+            assert_eq!(approval.claims.iss, expected.public_key());
+        }
     }
 
     #[tokio::test]
     async fn builder_sets_expected_signer_for_signin_only() {
-        let caps = "/pub/app/:rw".parse().unwrap();
-        let user = Keypair::random().public_key();
+        let caps: Capabilities = "/pub/app/:rw".parse().unwrap();
+        let user = Keypair::random();
         let relay = http_relay::HttpRelay::builder()
             .http_port(0)
             .run()
@@ -861,7 +892,7 @@ mod tests {
             ClientId::new("test.app").unwrap(),
         )
         .relay(relay.local_url().join("inbox").unwrap())
-        .expected_signer(user.clone())
+        .expected_signer(user.public_key())
         .start()
         .unwrap();
         let spk = |url: Url| -> Vec<String> {
@@ -870,21 +901,38 @@ mod tests {
                 .map(|(_, value)| value.into_owned())
                 .collect()
         };
-        assert_eq!(spk(flow.authorization_url()), vec![user.z32()]);
+        assert_eq!(spk(flow.authorization_url()), vec![user.public_key().z32()]);
 
         let restored = PubkyGrantAuthFlow::restore(
             flow.save_local().unwrap(),
             PubkyHttpClient::new().unwrap(),
         )
         .unwrap();
-        assert_eq!(spk(restored.authorization_url()), vec![user.z32()]);
+        assert_eq!(
+            spk(restored.authorization_url()),
+            vec![user.public_key().z32()]
+        );
+        let mut pending = request(GrantApprovalFormat::BareGrant);
+        pending.capabilities = caps.clone();
+        pending.client_pk = restored.client_signer.public_key();
+        for (signer, accepted) in [(&Keypair::random(), false), (&user, true)] {
+            let result = decode_relay_approval(
+                &approval_in_format(signer, &pending, GrantApprovalFormat::BareGrant),
+                &restored.auth_url,
+                restored.approval_key_secret.as_ref(),
+            );
+            match result {
+                Ok(approval) => assert!(accepted && approval.claims.iss == user.public_key()),
+                Err(error) => assert!(!accepted && is_expected_signer_mismatch(&error), "{error}"),
+            }
+        }
 
         let signup = PubkyGrantAuthFlow::builder(
             &caps,
             AuthFlowKind::signup(Keypair::random().public_key(), None),
             ClientId::new("test.app").unwrap(),
         )
-        .expected_signer(user)
+        .expected_signer(user.public_key())
         .start();
         assert!(
             signup
