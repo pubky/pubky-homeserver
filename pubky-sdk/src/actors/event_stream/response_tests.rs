@@ -91,11 +91,11 @@ async fn configured_limit_accepts_maximum_path_cursor_and_hash() {
         format!("{}/", "é".repeat(120)).repeat(3),
         "é".repeat(122)
     );
-    StoragePath::new(&path).unwrap();
+    let encoded_path = StoragePath::new(&path).unwrap().url_encode();
     assert_eq!(path.len(), MAX_STORAGE_PATH_TOTAL_LENGTH);
     let hash = base64::engine::general_purpose::STANDARD.encode([255; 32]);
     let body = format!(
-        "event: PUT\ndata: pubky://{}{path}\ndata: cursor: {}\ndata: content_hash: {hash}\n\n",
+        "event: PUT\ndata: pubky://{}{encoded_path}\ndata: cursor: {}\ndata: content_hash: {hash}\n\n",
         user.z32(),
         u64::MAX
     );

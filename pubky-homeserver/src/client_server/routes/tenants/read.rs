@@ -131,15 +131,7 @@ async fn list(
         ));
     }
 
-    let parsed_cursor = match parse_cursor(params.cursor) {
-        Ok(cursor) => cursor,
-        Err(_) => {
-            return Err(HttpError::new_with_message(
-                StatusCode::BAD_REQUEST,
-                "Invalid cursor",
-            ))
-        }
-    };
+    let parsed_cursor = parse_cursor(params.cursor.as_deref())?;
 
     let entries = if params.shallow {
         EntryRepository::list_shallow(
@@ -162,7 +154,7 @@ async fn list(
     };
     let pubky_urls = entries
         .iter()
-        .map(|entry| format!("pubky://{}", entry))
+        .map(EntryPath::to_pubky_url)
         .collect::<Vec<_>>();
 
     Ok(Response::builder()
@@ -171,18 +163,20 @@ async fn list(
         .body(Body::from(pubky_urls.join("\n")))?)
 }
 
-/// Parse the cursor if it is present.
-/// If the cursor is not present, returns None.
-/// If the cursor is present and valid, returns the EntryPath.
-fn parse_cursor(cursor: Option<String>) -> anyhow::Result<Option<EntryPath>> {
-    let cursor = match cursor {
-        Some(cursor) => cursor,
-        None => return Ok(None),
+/// Decode URL cursors once; bare storage keys already contain decoded paths.
+fn parse_cursor(cursor: Option<&str>) -> HttpResult<Option<EntryPath>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
     };
 
-    let cursor = cursor.trim_start_matches("pubky://");
-    let path = EntryPath::from_str(cursor)?;
-    Ok(Some(path))
+    let entry = if cursor.starts_with("pubky://") {
+        EntryPath::from_pubky_url(cursor)
+    } else {
+        cursor.parse::<EntryPath>()
+    };
+    entry
+        .map(Some)
+        .map_err(|error| HttpError::bad_request(format!("Invalid cursor: {error}")))
 }
 
 /// Whether the request's validators match `entry`, so `304 Not Modified` applies.
@@ -294,6 +288,32 @@ mod tests {
     use crate::app_context::AppContext;
     use crate::client_server::test_utils::signup_cookie;
     use crate::client_server::ClientServer;
+
+    #[test]
+    fn listing_cursor_distinguishes_urls_from_decoded_storage_keys() {
+        let owner = Keypair::random().public_key();
+        assert!(super::parse_cursor(None).unwrap().is_none());
+        for (cursor, expected_path) in [
+            (
+                format!("pubky://{}/pub/a%20b%2520%23%C3%BC", owner.z32()),
+                "/pub/a b%20#ü",
+            ),
+            (format!("{}/pub/a b%20#ü", owner.z32()), "/pub/a b%20#ü"),
+            (
+                format!("{}/pub/a%20b%2520%23%C3%BC", owner.z32()),
+                "/pub/a%20b%2520%23%C3%BC",
+            ),
+            (format!("{}/pub/%FF", owner.z32()), "/pub/%FF"),
+        ] {
+            let entry = super::parse_cursor(Some(&cursor)).unwrap().unwrap();
+            assert_eq!(entry.pubkey(), &owner);
+            assert_eq!(entry.path().as_str(), expected_path);
+        }
+        for path in ["/pub/%FF", "/pub/%2E%2E/file"] {
+            let cursor = format!("pubky://{}{path}", owner.z32());
+            super::parse_cursor(Some(&cursor)).unwrap_err();
+        }
+    }
 
     async fn create_user_with_capabilities(
         server: &axum_test::TestServer,

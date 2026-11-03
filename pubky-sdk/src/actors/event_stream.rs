@@ -665,7 +665,7 @@ fn parse_sse_event(sse: &MessageEvent) -> Result<Event> {
         })
     })?;
 
-    let resource: PubkyResource = path.parse().map_err(|e| {
+    let resource = PubkyResource::from_pubky_url(&path).map_err(|e| {
         Error::from(RequestError::Validation {
             message: format!("Invalid resource path '{path}': {e}"),
         })

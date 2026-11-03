@@ -1,4 +1,5 @@
 mod authorization;
+mod encoded_paths;
 mod legacy_put_get_delete;
 mod listing;
 mod locks;

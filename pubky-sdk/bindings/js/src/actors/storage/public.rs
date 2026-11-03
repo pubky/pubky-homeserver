@@ -24,10 +24,12 @@ impl PublicStorage {
         Ok(PublicStorage(pubky::PublicStorage::new()?))
     }
 
-    /// List a directory. Results are `pubky://…` identifier URLs.
+    /// List a directory. Results are encoded `pubky://…` URLs.
+    /// Pass a result unchanged as a cursor. To use it as a public-storage
+    /// address, decode it once with `decodeURIComponent(url)`.
     ///
     /// @param {Address} address Addressed directory (must end with `/`).
-    /// @param {string|null=} cursor Optional suffix or full URL to start **after**.
+    /// @param {string|null=} cursor Optional last entry `pubky://` URL to start **after**.
     /// @param {boolean=} reverse Default `false`. When `true`, newest/lexicographically-last first.
     /// @param {number=} limit Optional result limit.
     /// @param {boolean=} shallow Default `false`. When `true`, lists only first-level entries.

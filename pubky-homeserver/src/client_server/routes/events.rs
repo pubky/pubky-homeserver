@@ -265,7 +265,7 @@ impl TryFrom<RawEventStreamQueryParams> for EventStreamQueryParams {
 fn format_events_feed(events: &[EventEntity]) -> String {
     let mut result = events
         .iter()
-        .map(|event| format!("{} {}", event.event_type, event.pubky_uri()))
+        .map(|event| format!("{} {}", event.event_type, event.path.to_pubky_url()))
         .collect::<Vec<String>>();
 
     if let Some(next_cursor) = events.last().map(|event| event.id.to_string()) {

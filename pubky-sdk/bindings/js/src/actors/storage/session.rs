@@ -34,8 +34,11 @@ pub struct SessionStorage(pub(crate) pubky::SessionStorage);
 impl SessionStorage {
     /// List a directory (absolute session path).
     ///
+    /// Returned URLs are encoded. Pass them unchanged as cursors; decode once
+    /// with `decodeURIComponent(url)` when using them as public-storage addresses.
+    ///
     /// @param {Path} path Must end with `/`.
-    /// @param {string|null=} cursor Optional last entry URL to start **after**.
+    /// @param {string|null=} cursor Optional last entry `pubky://` URL to start **after**.
     /// @param {boolean=} reverse Default `false`.
     /// @param {number=} limit Optional result limit.
     /// @param {boolean=} shallow Default `false`.

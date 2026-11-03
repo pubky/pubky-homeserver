@@ -45,6 +45,9 @@ fn invalid(msg: impl Into<String>) -> Error {
 /// - Rejects empty **internal** segments (i.e., `//`); preserves a trailing `/`.
 /// - Percent-encodes segments using `url::Url` rules (UTF-8).
 ///
+/// Inputs are decoded filenames: `%20` is literal text, not a space.
+/// Use [`PubkyResource::from_pubky_url`] when parsing encoded URLs.
+///
 /// Accepts both `"pub/my-cool-app/file"` and `"/pub/my-cool-app/file"` and normalizes to an
 /// absolute form.
 ///
@@ -74,7 +77,7 @@ fn invalid(msg: impl Into<String>) -> Error {
 pub struct ResourcePath(String);
 
 impl ResourcePath {
-    /// Parse, validate, and normalize to an absolute HTTP-safe path.
+    /// Parse a decoded filename path and normalize it to an absolute HTTP-safe path.
     ///
     /// See type docs for rules and examples.
     ///
@@ -163,6 +166,9 @@ impl fmt::Display for ResourcePath {
 /// This is the unambiguous “user + absolute path” form used when acting on
 /// **another user’s** data (public reads, etc.).
 ///
+/// `FromStr` treats paths as decoded filenames, including literal percent signs.
+/// Use [`Self::from_pubky_url`] to parse encoded URLs from listings or events.
+///
 /// Accepted inputs for `FromStr`:
 /// - `pubky<public_key>/<abs-path>` (preferred)
 /// - `pubky://<public_key>/<abs-path>`
@@ -193,7 +199,8 @@ pub struct PubkyResource {
 }
 
 impl PubkyResource {
-    /// Construct from `owner` and a path-like value (normalized to [`ResourcePath`]).
+    /// Construct from `owner` and a decoded path (normalized to [`ResourcePath`]).
+    /// Percent signs in this path are literal filename characters.
     ///
     /// # Errors
     /// - Returns [`Error::Request`] if the provided path cannot be normalized into an absolute [`ResourcePath`].
@@ -202,6 +209,36 @@ impl PubkyResource {
             owner,
             path: ResourcePath::parse(path)?,
         })
+    }
+
+    /// Parse an encoded `pubky://<owner>/<path>` URL from a listing or event.
+    ///
+    /// Decodes the path once: `%20` is a space and `%2520` is literal `%20`.
+    /// Unlike `FromStr`, this reverses [`Self::to_pubky_url`].
+    ///
+    /// # Errors
+    /// Returns a validation error for an invalid scheme, owner, UTF-8 path,
+    /// query, fragment, or a path rejected by [`ResourcePath::parse`].
+    pub fn from_pubky_url(url: &str) -> Result<Self, Error> {
+        let resource = url
+            .strip_prefix("pubky://")
+            .ok_or_else(|| invalid("expected a pubky:// URL"))?;
+        if resource.contains(['?', '#']) {
+            return Err(invalid("resource URL cannot contain a query or fragment"));
+        }
+        let path_start = resource
+            .find('/')
+            .ok_or_else(|| invalid("missing `<user>/<path>`"))?;
+        let (owner, path) = resource.split_at(path_start);
+        if PublicKey::is_pubky_prefixed(owner) {
+            return Err(invalid("unexpected `pubky` prefix; expected raw z32"));
+        }
+        let owner =
+            PublicKey::try_from_z32(owner).map_err(|_err| invalid("invalid user public key"))?;
+        let decoded_path = percent_decode_str(path)
+            .decode_utf8()
+            .map_err(|_err| invalid("resource URL path is not valid UTF-8"))?;
+        Self::new(owner, decoded_path.as_ref())
     }
 
     /// Render as `pubky://<owner>/<abs-path>` (deep-link form).
@@ -570,6 +607,60 @@ mod tests {
             PubkyResource::from_str(&s_bad),
             Err(Error::Request(RequestError::Validation { .. }))
         ));
+    }
+
+    #[test]
+    fn encoded_urls_decode_once_and_round_trip() {
+        let owner = Keypair::random().public_key();
+        for (raw, encoded) in [
+            ("/", "/"),
+            ("/pub/a b/", "/pub/a%20b/"),
+            ("/pub/a b.txt", "/pub/a%20b.txt"),
+            ("/pub/a%20b.txt", "/pub/a%2520b.txt"),
+            ("/pub/%%2E%%2E/file", "/pub/%25%252E%25%252E/file"),
+            ("/pub/#?.txt", "/pub/%23%3F.txt"),
+            ("/pub/ü.txt", "/pub/%C3%BC.txt"),
+        ] {
+            let resource = PubkyResource::new(owner.clone(), raw).unwrap();
+            assert_eq!(resource.path.as_str(), encoded);
+            assert_eq!(
+                PubkyResource::from_pubky_url(&resource.to_pubky_url()).unwrap(),
+                resource
+            );
+            assert_eq!(
+                PubkyResource::from_transport_url(&resource.to_transport_url().unwrap()).unwrap(),
+                resource
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_urls_reject_invalid_paths_and_components() {
+        let owner = Keypair::random().public_key();
+        for path in [
+            "/pub/%2e/file",
+            "/pub/%2E%2E/file",
+            "/pub/%FF",
+            "/pub/file?query",
+            "/pub/file#fragment",
+        ] {
+            PubkyResource::from_pubky_url(&format!("pubky://{}{path}", owner.z32())).unwrap_err();
+        }
+        PubkyResource::from_pubky_url(&format!("{owner}/pub/file")).unwrap_err();
+        PubkyResource::from_pubky_url("pubky://invalid/pub/file").unwrap_err();
+    }
+
+    #[test]
+    fn from_str_keeps_percent_escapes_literal() {
+        let owner = Keypair::random().public_key();
+        for prefix in [format!("pubky://{}", owner.z32()), owner.to_string()] {
+            let resource: PubkyResource = format!("{prefix}/pub/a%20b%2520.txt").parse().unwrap();
+            assert_eq!(resource.path.as_str(), "/pub/a%2520b%252520.txt");
+            assert_eq!(
+                resource,
+                PubkyResource::new(owner.clone(), "/pub/a%20b%2520.txt").unwrap()
+            );
+        }
     }
 
     #[test]
