@@ -12,7 +12,9 @@ use crate::{constants::PRIVATE_ROOT, shared::webdav::StoragePath};
 pub(crate) const CACHE_CONTROL_NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 /// A private file may stay in the caller's own cache, but every use must be
 /// revalidated with its `ETag`, so a browser downloads an unchanged file once
-/// and shared caches never store it.
+/// and shared caches never store it. The copy outlives the session and
+/// nothing clears it at sign-out; the README's caching section states that
+/// tradeoff.
 const CACHE_CONTROL_PRIVATE_NO_CACHE: HeaderValue = HeaderValue::from_static("private, no-cache");
 pub(crate) const VARY_PRIVATE_LEGACY: HeaderValue =
     HeaderValue::from_static("pubky-host, Authorization, Cookie");

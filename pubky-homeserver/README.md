@@ -99,10 +99,8 @@ Files can be locked for read-modify-write cycles with WebDAV `LOCK`/`UNLOCK`.
 Private file reads (`GET`/`HEAD` with a `200` or `304`) are sent with
 `Cache-Control: private, no-cache`: the caller's own browser may keep the file
 but must revalidate it with the `ETag` before reusing it, so an unchanged file
-is not downloaded again. The stored copy outlives the session, so it stays in
-the browser cache after sign-out. Every other private response (errors,
-directory listings, `/events-stream`) is `no-store`. Shared caches never store
-either:
+is not downloaded again. Every other private response (errors, directory
+listings, `/events-stream`) is `no-store`. Shared caches never store either:
 
 - `/storage/{user_z32}/priv/...` responses vary on `Authorization` and
   `Cookie`. The owner is part of the URL, so `pubky-host` is not part of the
@@ -112,6 +110,18 @@ either:
 
 Public files remain cacheable. `/storage/{user_z32}/pub/...` responses do not
 vary on `pubky-host`; deprecated `/pub/...` responses still do.
+
+This is a deliberate tradeoff. `no-cache` keeps private file bodies on the
+browser's disk, where `no-store` never put them, and nothing clears them at
+sign-out: the homeserver does not send `Clear-Site-Data`, because it would
+evict the browser's whole cache for the homeserver origin, public files of
+every user included. The retained copy is only useful within the session that
+fetched it. The response varies on `Cookie`, so a later session cannot select
+the entry and downloads the file again, and the revalidation itself fails
+without a session. After sign-out the copy is pure exposure on a shared
+machine until the browser evicts it. Clients that care can clear the browser
+cache themselves, or read private files with `cache: 'no-store'` and forgo
+the saving.
 
 Note: CORS preflight `OPTIONS` is
 handled upstream by the CORS layer and carries no private body.
