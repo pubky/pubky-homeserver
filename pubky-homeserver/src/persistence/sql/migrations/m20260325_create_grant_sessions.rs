@@ -200,6 +200,10 @@ pub enum GrantIden {
     ExpiresAt,
     RevokedAt,
     CreatedAt,
+    /// Added by `m20261103_add_grant_delegation`.
+    Kind,
+    /// Added by `m20261103_add_grant_delegation`.
+    ParentId,
 }
 
 #[derive(Iden)]

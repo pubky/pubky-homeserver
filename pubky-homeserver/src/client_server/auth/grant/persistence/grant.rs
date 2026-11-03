@@ -1,11 +1,17 @@
 //! Repository for Grant entities (grant auth).
 
 use pubky_common::{
-    auth::jws::{ClientId, GrantId},
+    auth::{
+        grant::GrantClaims,
+        grant_session_responses::GrantKind,
+        jws::{ClientId, GrantId},
+    },
     capabilities::Capabilities,
     crypto::PublicKey,
 };
-use sea_query::{Expr, ExprTrait, Iden, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query::{
+    Expr, ExprTrait, Iden, LockType, PostgresQueryBuilder, Query, SelectStatement, SimpleExpr,
+};
 use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
@@ -34,6 +40,9 @@ impl GrantRepository {
                 GrantIden::Capabilities,
                 GrantIden::IssuedAt,
                 GrantIden::ExpiresAt,
+                GrantIden::Kind,
+                GrantIden::ParentId,
+                GrantIden::RevokedAt,
             ])
             .values(vec![
                 SimpleExpr::Value(grant.id.to_string().into()),
@@ -43,6 +52,9 @@ impl GrantRepository {
                 SimpleExpr::Value(grant.capabilities.to_string().into()),
                 SimpleExpr::Value((grant.issued_at as i64).into()),
                 SimpleExpr::Value((grant.expires_at as i64).into()),
+                SimpleExpr::Value(grant.kind.as_str().into()),
+                SimpleExpr::Value(grant.parent_id.as_ref().map(ToString::to_string).into()),
+                SimpleExpr::Value(grant.revoked_at.into()),
             ])
             .expect("invariant: values count matches columns count")
             .on_conflict(
@@ -58,12 +70,9 @@ impl GrantRepository {
         Ok(())
     }
 
-    /// Get a grant by its id.
-    pub async fn get_by_id<'a>(
-        grant_id: &GrantId,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<GrantEntity, sqlx::Error> {
-        let statement = Query::select()
+    /// Select a grant with its user's public key.
+    fn select_grant() -> SelectStatement {
+        Query::select()
             .from(GRANTS_TABLE)
             .columns([
                 (GRANTS_TABLE, GrantIden::Id),
@@ -75,6 +84,8 @@ impl GrantRepository {
                 (GRANTS_TABLE, GrantIden::ExpiresAt),
                 (GRANTS_TABLE, GrantIden::RevokedAt),
                 (GRANTS_TABLE, GrantIden::CreatedAt),
+                (GRANTS_TABLE, GrantIden::Kind),
+                (GRANTS_TABLE, GrantIden::ParentId),
             ])
             .column((USER_TABLE, UserIden::PublicKey))
             .left_join(
@@ -82,7 +93,34 @@ impl GrantRepository {
                 Expr::col((GRANTS_TABLE, GrantIden::User))
                     .eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
+            .to_owned()
+    }
+
+    /// Get a grant by its id.
+    pub async fn get_by_id<'a>(
+        grant_id: &GrantId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<GrantEntity, sqlx::Error> {
+        let statement = Self::select_grant()
             .and_where(Expr::col((GRANTS_TABLE, GrantIden::Id)).eq(grant_id.to_string()))
+            .to_owned();
+
+        let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
+        let con = executor.get_con().await?;
+        sqlx::query_as_with(&query, values).fetch_one(con).await
+    }
+
+    /// Lock a grant row until the transaction ends and return its current state.
+    ///
+    /// Lifecycle changes under a parent lock the parent first, which serializes
+    /// them without a separate lock service.
+    pub async fn get_for_update<'a>(
+        grant_id: &GrantId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<GrantEntity, sqlx::Error> {
+        let statement = Self::select_grant()
+            .and_where(Expr::col((GRANTS_TABLE, GrantIden::Id)).eq(grant_id.to_string()))
+            .lock_with_tables(LockType::Update, [GRANTS_TABLE])
             .to_owned();
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
@@ -132,25 +170,7 @@ impl GrantRepository {
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Vec<GrantEntity>, sqlx::Error> {
         let now = chrono::Utc::now().timestamp();
-        let statement = Query::select()
-            .from(GRANTS_TABLE)
-            .columns([
-                (GRANTS_TABLE, GrantIden::Id),
-                (GRANTS_TABLE, GrantIden::User),
-                (GRANTS_TABLE, GrantIden::ClientId),
-                (GRANTS_TABLE, GrantIden::ClientCnfKey),
-                (GRANTS_TABLE, GrantIden::Capabilities),
-                (GRANTS_TABLE, GrantIden::IssuedAt),
-                (GRANTS_TABLE, GrantIden::ExpiresAt),
-                (GRANTS_TABLE, GrantIden::RevokedAt),
-                (GRANTS_TABLE, GrantIden::CreatedAt),
-            ])
-            .column((USER_TABLE, UserIden::PublicKey))
-            .left_join(
-                USER_TABLE,
-                Expr::col((GRANTS_TABLE, GrantIden::User))
-                    .eq(Expr::col((USER_TABLE, UserIden::Id))),
-            )
+        let statement = Self::select_grant()
             .and_where(Expr::col((GRANTS_TABLE, GrantIden::User)).eq(user_id))
             .and_where(Expr::col((GRANTS_TABLE, GrantIden::RevokedAt)).is_null())
             .and_where(Expr::col((GRANTS_TABLE, GrantIden::ExpiresAt)).gt(now))
@@ -159,6 +179,89 @@ impl GrantRepository {
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
         let con = executor.get_con().await?;
         sqlx::query_as_with(&query, values).fetch_all(con).await
+    }
+
+    /// Revoke a parent's unrevoked children, optionally only one app's, and
+    /// return their ids.
+    pub async fn revoke_children<'a>(
+        parent_id: &GrantId,
+        client_id: Option<&ClientId>,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<Vec<GrantId>, sqlx::Error> {
+        let con = executor.get_con().await?;
+        let ids: Vec<String> = sqlx::query_scalar(
+            "UPDATE grants SET revoked_at = $1
+             WHERE parent_id = $2 AND revoked_at IS NULL AND ($3::TEXT IS NULL OR client_id = $3)
+             RETURNING id",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .bind(parent_id.as_str())
+        .bind(client_id.map(ClientId::as_str))
+        .fetch_all(con)
+        .await?;
+        ids.iter()
+            .map(|id| GrantId::parse(id).map_err(|e| sqlx::Error::Decode(e.into())))
+            .collect()
+    }
+
+    /// Block an app from silently reconnecting under a parent.
+    pub async fn block_app<'a>(
+        user_id: i32,
+        parent_id: &GrantId,
+        client_id: &ClientId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<(), sqlx::Error> {
+        let con = executor.get_con().await?;
+        sqlx::query(
+            r#"INSERT INTO grant_app_blocks ("user", parent_id, client_id) VALUES ($1, $2, $3)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(user_id)
+        .bind(parent_id.as_str())
+        .bind(client_id.as_str())
+        .execute(con)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove an app's block under a parent. Does nothing if there is none.
+    pub async fn unblock_app<'a>(
+        user_id: i32,
+        parent_id: &GrantId,
+        client_id: &ClientId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<(), sqlx::Error> {
+        let con = executor.get_con().await?;
+        sqlx::query(
+            r#"DELETE FROM grant_app_blocks WHERE "user" = $1 AND parent_id = $2 AND client_id = $3"#,
+        )
+        .bind(user_id)
+        .bind(parent_id.as_str())
+        .bind(client_id.as_str())
+        .execute(con)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether an app is blocked under a parent.
+    pub async fn is_app_blocked<'a>(
+        user_id: i32,
+        parent_id: &GrantId,
+        client_id: &ClientId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<bool, sqlx::Error> {
+        let con = executor.get_con().await?;
+        sqlx::query_scalar(
+            r#"SELECT EXISTS (
+                SELECT 1 FROM grant_app_blocks
+                WHERE "user" = $1 AND parent_id = $2 AND client_id = $3
+            )"#,
+        )
+        .bind(user_id)
+        .bind(parent_id.as_str())
+        .bind(client_id.as_str())
+        .fetch_one(con)
+        .await
     }
 }
 
@@ -171,6 +274,33 @@ pub struct NewGrant {
     pub capabilities: Capabilities,
     pub issued_at: u64,
     pub expires_at: u64,
+    pub kind: GrantKind,
+    pub parent_id: Option<GrantId>,
+    /// Set to record an unseen grant as already revoked.
+    pub revoked_at: Option<i64>,
+}
+
+impl NewGrant {
+    /// Build the record for verified grant claims.
+    pub fn from_claims(
+        claims: &GrantClaims,
+        user_id: i32,
+        kind: GrantKind,
+        parent_id: Option<GrantId>,
+    ) -> Self {
+        Self {
+            id: claims.jti.clone(),
+            user_id,
+            client_id: claims.client_id.clone(),
+            client_cnf_key: claims.cnf.z32(),
+            capabilities: claims.caps.clone().into(),
+            issued_at: claims.iat,
+            expires_at: claims.exp,
+            kind,
+            parent_id,
+            revoked_at: None,
+        }
+    }
 }
 
 /// A grant entity as stored in the database.
@@ -187,6 +317,8 @@ pub struct GrantEntity {
     pub expires_at: i64,
     pub revoked_at: Option<i64>,
     pub created_at: sqlx::types::chrono::NaiveDateTime,
+    pub kind: GrantKind,
+    pub parent_id: Option<GrantId>,
 }
 
 /// Why a grant is no longer active.
@@ -207,6 +339,21 @@ impl GrantEntity {
         }
         Ok(())
     }
+
+    /// Whether this record holds the same authorization claims as `grant`.
+    ///
+    /// A grant ID identifies one set of claims, so a repeated use must match
+    /// everything that decides who the grant authorizes and for what.
+    pub fn has_same_claims(&self, grant: &NewGrant) -> bool {
+        self.user_id == grant.user_id
+            && self.kind == grant.kind
+            && self.parent_id == grant.parent_id
+            && self.client_id == grant.client_id
+            && self.client_cnf_key == grant.client_cnf_key
+            && self.capabilities == grant.capabilities
+            && self.issued_at == grant.issued_at as i64
+            && self.expires_at == grant.expires_at as i64
+    }
 }
 
 impl FromRow<'_, PgRow> for GrantEntity {
@@ -214,6 +361,7 @@ impl FromRow<'_, PgRow> for GrantEntity {
         let (id, user_id, user_pubkey, client_id, client_cnf_key) = parse_identity_fields(row)?;
         let (capabilities, issued_at, expires_at, revoked_at, created_at) =
             parse_grant_metadata(row)?;
+        let (kind, parent_id) = parse_delegation_fields(row)?;
         Ok(GrantEntity {
             id,
             user_id,
@@ -225,6 +373,8 @@ impl FromRow<'_, PgRow> for GrantEntity {
             expires_at,
             revoked_at,
             created_at,
+            kind,
+            parent_id,
         })
     }
 }
@@ -271,6 +421,26 @@ fn parse_grant_metadata(
     Ok((capabilities, issued_at, expires_at, revoked_at, created_at))
 }
 
+fn parse_delegation_fields(row: &PgRow) -> Result<(GrantKind, Option<GrantId>), sqlx::Error> {
+    let kind: String = row.try_get(GrantIden::Kind.to_string().as_str())?;
+    let kind = match kind.as_str() {
+        "direct" => GrantKind::Direct,
+        "delegation" => GrantKind::Delegation,
+        "child" => GrantKind::Child,
+        other => {
+            return Err(sqlx::Error::Decode(
+                format!("unknown grant kind {other}").into(),
+            ))
+        }
+    };
+    let parent_id: Option<String> = row.try_get(GrantIden::ParentId.to_string().as_str())?;
+    let parent_id = parent_id
+        .map(|id| GrantId::parse(&id))
+        .transpose()
+        .map_err(|e| sqlx::Error::Decode(e.into()))?;
+    Ok((kind, parent_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +463,9 @@ mod tests {
             capabilities: Capabilities::builder().cap(Capability::root()).finish(),
             issued_at: now,
             expires_at: now + 3600,
+            kind: GrantKind::Direct,
+            parent_id: None,
+            revoked_at: None,
         }
     }
 
@@ -456,6 +629,8 @@ mod tests {
             expires_at,
             revoked_at,
             created_at: chrono::Utc::now().naive_utc(),
+            kind: GrantKind::Direct,
+            parent_id: None,
         }
     }
 
@@ -499,5 +674,134 @@ mod tests {
             grant.require_active(1500).unwrap_err(),
             GrantStatus::Revoked
         );
+    }
+
+    #[test]
+    fn has_same_claims_compares_every_authorization_claim() {
+        let stored = make_grant_entity(2000, None);
+        let matching = || NewGrant {
+            id: stored.id.clone(),
+            user_id: stored.user_id,
+            client_id: stored.client_id.clone(),
+            client_cnf_key: stored.client_cnf_key.clone(),
+            capabilities: stored.capabilities.clone(),
+            issued_at: stored.issued_at as u64,
+            expires_at: stored.expires_at as u64,
+            kind: stored.kind,
+            parent_id: stored.parent_id.clone(),
+            revoked_at: None,
+        };
+        assert!(stored.has_same_claims(&matching()));
+
+        type Edit = fn(&mut NewGrant);
+        let edits: [Edit; 8] = [
+            |g| g.user_id += 1,
+            |g| g.kind = GrantKind::Delegation,
+            |g| g.parent_id = Some(GrantId::generate()),
+            |g| g.client_id = ClientId::new("other.app").unwrap(),
+            |g| g.client_cnf_key = Keypair::random().public_key().z32(),
+            |g| g.capabilities = "/pub/:r".parse().unwrap(),
+            |g| g.issued_at += 1,
+            |g| g.expires_at += 1,
+        ];
+        for edit in edits {
+            let mut changed = matching();
+            edit(&mut changed);
+            assert!(!stored.has_same_claims(&changed));
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn one_app_keeps_one_unrevoked_child_per_parent() {
+        let db = SqlDb::test().await;
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let mut parent = make_new_grant(user.id);
+        parent.kind = GrantKind::Delegation;
+        GrantRepository::create(&parent, &mut db.pool().into())
+            .await
+            .unwrap();
+        let child = |client_id: &str| {
+            let mut child = make_new_grant(user.id);
+            child.kind = GrantKind::Child;
+            child.parent_id = Some(parent.id.clone());
+            child.client_id = ClientId::new(client_id).unwrap();
+            child
+        };
+
+        let first = child("https://a.example/cb");
+        GrantRepository::create(&first, &mut db.pool().into())
+            .await
+            .unwrap();
+        let duplicate = child("https://a.example/cb");
+        assert!(matches!(
+            GrantRepository::create(&duplicate, &mut db.pool().into()).await,
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation()
+        ));
+
+        // Another app and a revoked record are outside the constraint.
+        GrantRepository::create(&child("https://b.example/cb"), &mut db.pool().into())
+            .await
+            .unwrap();
+        let revoked = GrantRepository::revoke_children(
+            &parent.id,
+            Some(&first.client_id),
+            &mut db.pool().into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(revoked, vec![first.id]);
+        GrantRepository::create(&child("https://a.example/cb"), &mut db.pool().into())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn app_blocks_are_scoped_to_user_parent_and_callback() {
+        let db = SqlDb::test().await;
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let parent = make_new_grant(user.id);
+        let other_parent = make_new_grant(user.id);
+        for grant in [&parent, &other_parent] {
+            GrantRepository::create(grant, &mut db.pool().into())
+                .await
+                .unwrap();
+        }
+        let app = ClientId::new("https://a.example/cb").unwrap();
+        let other_app = ClientId::new("https://a.example/cb/").unwrap();
+        let blocked = |parent_id: GrantId, client_id: ClientId| {
+            let db = db.clone();
+            async move {
+                GrantRepository::is_app_blocked(
+                    user.id,
+                    &parent_id,
+                    &client_id,
+                    &mut db.pool().into(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        for _ in 0..2 {
+            GrantRepository::block_app(user.id, &parent.id, &app, &mut db.pool().into())
+                .await
+                .unwrap();
+        }
+        assert!(blocked(parent.id.clone(), app.clone()).await);
+        assert!(!blocked(parent.id.clone(), other_app).await);
+        assert!(!blocked(other_parent.id.clone(), app.clone()).await);
+
+        GrantRepository::unblock_app(user.id, &parent.id, &app, &mut db.pool().into())
+            .await
+            .unwrap();
+        assert!(!blocked(parent.id.clone(), app.clone()).await);
     }
 }

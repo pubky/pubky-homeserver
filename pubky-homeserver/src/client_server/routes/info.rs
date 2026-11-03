@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use pubky_common::constants::features::{
-    GRANT_PROOF_LOGOUT, PATH_ADDRESSED_STORAGE, WEBDAV_LOCKS, WEBSITES,
+    GRANT_DELEGATION, GRANT_PROOF_LOGOUT, PATH_ADDRESSED_STORAGE, WEBDAV_LOCKS, WEBSITES,
 };
 use serde::Serialize;
 
@@ -20,7 +20,12 @@ struct InfoResponse {
 
 /// Return the client features supported by this homeserver.
 pub async fn get(State(state): State<AppState>) -> impl IntoResponse {
-    let mut features = vec![PATH_ADDRESSED_STORAGE, GRANT_PROOF_LOGOUT, WEBDAV_LOCKS];
+    let mut features = vec![
+        PATH_ADDRESSED_STORAGE,
+        GRANT_PROOF_LOGOUT,
+        GRANT_DELEGATION,
+        WEBDAV_LOCKS,
+    ];
     if state.context.config_toml.drive.websites {
         features.push(WEBSITES);
     }

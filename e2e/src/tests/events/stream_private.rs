@@ -3,7 +3,8 @@
 //! guarantee that private events never leak to unauthorized callers
 
 use super::*;
-use eventsource_stream::Event;
+use crate::tests::auth::child_grant::Delegation;
+use eventsource_stream::{Event, Eventsource};
 use futures::{Stream, StreamExt};
 use pubky_testnet::pubky::ClientId;
 use std::{fmt::Debug, future::Future, time::Duration};
@@ -741,4 +742,84 @@ async fn events_stream_live_public_remains_open_after_auth_revocation() {
         .expect("public stream should emit an event")
         .expect("public stream event should decode");
     assert!(event.data.contains("/pub/after-auth-revoke.txt"));
+}
+
+/// Open a live private stream with a child's bearer.
+async fn child_stream(
+    testnet: &pubky_testnet::EphemeralTestnet,
+    d: &Delegation,
+    bearer: &str,
+) -> impl Stream<Item = Result<Event, impl Debug>> + Unpin {
+    let server = testnet.homeserver_app();
+    let url = format!(
+        "https://{}/events-stream?user={}&path=/priv/app/&live=true",
+        server.public_key().z32(),
+        d.parent.iss.z32()
+    );
+    let response = testnet
+        .sdk()
+        .unwrap()
+        .client()
+        .request(Method::GET, &url)
+        .header("Authorization", format!("Bearer {bearer}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes_stream().eventsource()
+}
+
+/// Replacing a child closes the previous child's private stream.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_live_closes_when_child_is_replaced() {
+    let testnet = build_full_testnet().await;
+    let d = Delegation::new(&testnet).await;
+    let writer = d
+        .signer
+        .signin(ClientId::new("stream-writer.test").unwrap())
+        .await
+        .unwrap();
+    let callback = "https://chat.example/auth/callback";
+    let session = d.exchange(&d.app(callback, "/priv/app/:r")).await;
+    let mut stream = child_stream(&testnet, &d, &session.token).await;
+
+    let replacement = d.app(callback, "/priv/app/:r");
+    assert_revocation_closes_private_stream(
+        &mut stream,
+        &writer,
+        "/priv/app/before-replace.txt",
+        async {
+            d.exchange(&replacement).await;
+            Ok::<_, String>(())
+        },
+        "/priv/app/after-replace.txt",
+    )
+    .await;
+}
+
+/// Revoking a parent closes the private streams of all its children.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_live_closes_when_parent_is_revoked() {
+    let testnet = build_full_testnet().await;
+    let d = Delegation::new(&testnet).await;
+    let writer = d
+        .signer
+        .signin(ClientId::new("stream-writer.test").unwrap())
+        .await
+        .unwrap();
+    let session = d
+        .exchange(&d.app("https://chat.example/auth/callback", "/priv/app/:r"))
+        .await;
+    let mut stream = child_stream(&testnet, &d, &session.token).await;
+
+    assert_revocation_closes_private_stream(
+        &mut stream,
+        &writer,
+        "/priv/app/before-parent-revoke.txt",
+        d.parent_signout(),
+        "/priv/app/after-parent-revoke.txt",
+    )
+    .await;
 }

@@ -198,6 +198,18 @@ impl GrantInfo {
     pub fn expires_at(&self) -> f64 {
         self.0.expires_at as f64
     }
+
+    /// How the grant was authorized: `direct`, `delegation` or `child`.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String {
+        self.0.kind.as_str().to_string()
+    }
+
+    /// The delegation parent of a child grant.
+    #[wasm_bindgen(js_name = "parentId", getter)]
+    pub fn parent_id(&self) -> Option<String> {
+        self.0.parent_id.as_ref().map(ToString::to_string)
+    }
 }
 
 /// Grant-specific session metadata returned by `grant.sessionInfo()`.

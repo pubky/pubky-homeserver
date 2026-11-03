@@ -3,6 +3,9 @@
 //! A Grant is a user-signed JWS that authorizes a client to act on behalf
 //! of the user with specific capabilities. This module provides the claims
 //! type shared between Ring (signs), SDK (decodes), and homeserver (verifies).
+//!
+//! Delegation parents use the same claims with the `pubky-delegation` JWS type.
+//! [`ChildGrantClaims`] are signed by the parent's `cnf` key instead of the user.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +68,46 @@ impl GrantClaims {
     }
 }
 
+/// Child grant JWS claims: [`GrantClaims`] plus a reference to the parent.
+///
+/// `iss` names the authorized user, but the signature is verified against the
+/// parent's `cnf` key rather than `iss`. `client_id` is the app's exact HTTPS
+/// callback URL.
+///
+/// # JSON representation
+/// ```json
+/// {
+///   "iss": "{user_pubky_z32}",
+///   "client_id": "https://chat.example/auth/callback",
+///   "caps": ["/pub/chat/v1/:rw", "/priv/chat/v1/:rwe"],
+///   "cnf": "{app_pubky_z32}",
+///   "jti": "{grant_id}",
+///   "parent_jti": "{parent_grant_id}",
+///   "iat": 1700000000,
+///   "exp": 1731536000
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildGrantClaims {
+    /// Claims shared with direct grants and delegation parents.
+    #[serde(flatten)]
+    pub grant: GrantClaims,
+    /// The `jti` of the delegation parent.
+    pub parent_jti: GrantId,
+}
+
+impl ChildGrantClaims {
+    /// Decode a child grant JWS without verifying the signature.
+    pub fn decode(compact: &str) -> Result<Self, jws::Error> {
+        jws::decode_jws_payload(compact)
+    }
+
+    /// Sign the claims as a `pubky-child-grant` JWS with the parent's `cnf` key.
+    pub fn sign(&self, parent_keypair: &Keypair) -> String {
+        jws::sign_jws(parent_keypair, jws::CHILD_GRANT_JWS_TYP, self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -115,5 +158,28 @@ mod tests {
 
         let decoded = GrantClaims::decode(&compact).unwrap();
         assert_eq!(decoded, grant);
+    }
+
+    #[test]
+    fn child_grant_claims_use_flat_json() {
+        let child = ChildGrantClaims {
+            grant: GrantClaims {
+                iss: Keypair::random().public_key(),
+                client_id: ClientId::new("https://chat.example/auth/callback").unwrap(),
+                caps: vec!["/priv/chat/:rwe".parse().unwrap()],
+                cnf: Keypair::random().public_key(),
+                jti: GrantId::generate(),
+                iat: 1700000000,
+                exp: 1731536000,
+            },
+            parent_jti: GrantId::generate(),
+        };
+
+        let compact = child.sign(&Keypair::random());
+        assert_eq!(ChildGrantClaims::decode(&compact).unwrap(), child);
+
+        let json = serde_json::to_value(&child).unwrap();
+        assert_eq!(json["jti"], child.grant.jti.as_str());
+        assert_eq!(json["parent_jti"], child.parent_jti.as_str());
     }
 }

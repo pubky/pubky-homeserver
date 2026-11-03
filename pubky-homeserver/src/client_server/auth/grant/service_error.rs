@@ -54,6 +54,14 @@ pub enum AuthServiceError {
     #[error("Grant has expired")]
     GrantExpired,
 
+    /// The grant ID is already recorded with different claims.
+    #[error("Grant ID is already in use")]
+    GrantConflict,
+
+    /// The user revoked this app under the parent; it needs an explicit reconnect.
+    #[error("App must be reconnected before it can sign in")]
+    AppBlocked,
+
     /// Signup grant violates sessionless signup policy.
     #[error("Invalid signup grant: {0}")]
     InvalidSignupGrant(String),

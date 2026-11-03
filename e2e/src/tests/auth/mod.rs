@@ -1,4 +1,5 @@
 mod account;
+pub(super) mod child_grant;
 mod cookie;
 mod grant;
 mod pkdns;

@@ -61,7 +61,8 @@ impl GrantManager {
     /// List all active grants for this user.
     ///
     /// Calls `GET /auth/grant/sessions`. Requires a root-capability session;
-    /// non-root sessions get `403 Forbidden` from the homeserver.
+    /// non-root sessions get `403 Forbidden` from the homeserver. Each entry's
+    /// `kind` and `parent_id` group child grants under their delegation parent.
     ///
     /// # Errors
     /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
@@ -78,6 +79,9 @@ impl GrantManager {
     }
 
     /// Revoke a specific grant by id, killing all of its sessions.
+    ///
+    /// Revoking a delegation parent also revokes its children. Revoking a child
+    /// also blocks that app under its parent until Accounts reconnects it.
     ///
     /// Calls `DELETE /auth/grant/session/{gid}`. Requires a root-capability
     /// session.

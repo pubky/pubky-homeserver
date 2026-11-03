@@ -29,6 +29,30 @@ pub struct GrantSessionResponse {
     pub session: GrantSessionInfo,
 }
 
+/// How a grant was authorized.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantKind {
+    /// Signed by the user and exchanged for storage sessions.
+    #[default]
+    Direct,
+    /// Signed by the user to authorize child grants. It has no storage sessions.
+    Delegation,
+    /// Signed by a delegation parent's key and exchanged for storage sessions.
+    Child,
+}
+
+impl GrantKind {
+    /// The wire and database name of this kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Delegation => "delegation",
+            Self::Child => "child",
+        }
+    }
+}
+
 /// Summary of an active grant returned by `GET /auth/grant/sessions`.
 ///
 /// Used by Ring's session management UI to show all authorized apps for a user.
@@ -36,7 +60,7 @@ pub struct GrantSessionResponse {
 pub struct GrantInfo {
     /// Grant identifier (revocation target).
     pub grant_id: GrantId,
-    /// Application identifier (domain string).
+    /// Application identifier: a domain string, or a child grant's exact callback URL.
     pub client_id: String,
     /// Capabilities this grant authorizes, formatted as a comma-separated string.
     pub capabilities: String,
@@ -44,6 +68,12 @@ pub struct GrantInfo {
     pub issued_at: u64,
     /// Expiry timestamp (Unix seconds).
     pub expires_at: u64,
+    /// How the grant was authorized. Older homeservers omit it for direct grants.
+    #[serde(default)]
+    pub kind: GrantKind,
+    /// The delegation parent of a child grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<GrantId>,
 }
 
 /// Session metadata returned alongside the bearer.
@@ -97,5 +127,20 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         let parsed: GrantSessionResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(response, parsed);
+    }
+
+    #[test]
+    fn grant_info_without_kind_is_direct() {
+        let info: GrantInfo = serde_json::from_value(serde_json::json!({
+            "grant_id": "grant",
+            "client_id": "franky.pubky.app",
+            "capabilities": "/:rw",
+            "issued_at": 1,
+            "expires_at": 2,
+        }))
+        .unwrap();
+
+        assert_eq!(info.kind, GrantKind::Direct);
+        assert_eq!(info.parent_id, None);
     }
 }

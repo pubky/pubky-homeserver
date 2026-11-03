@@ -10,11 +10,12 @@
 use chrono::{DateTime, Utc};
 use pubky_common::{
     auth::{
-        jws::{GrantId, PopNonce, POP_JWS_TYP},
-        pop::PopProofClaims,
+        jws::{ClientId, GrantId, PopNonce, POP_JWS_TYP, RECONNECT_JWS_TYP},
+        pop::{PopProofClaims, ReconnectProofClaims},
     },
     crypto::PublicKey,
 };
+use serde::de::DeserializeOwned;
 
 use super::jws_crypto::{self, JwsCompact};
 
@@ -59,29 +60,47 @@ impl PopProof {
     ///
     /// Nonce replay checking is done separately via the database.
     pub fn verify(compact: &JwsCompact, context: &PopVerificationContext) -> Result<Self, Error> {
-        let raw = verify_signature(compact.as_str(), context.cnf_key)?;
-        check_header_type(compact.as_str())?;
-        check_audience(&raw, context.expected_audience)?;
-        check_grant_binding(&raw, context.expected_grant_id)?;
-        check_timestamp(&raw)?;
-        parse_verified_pop(raw)
+        let raw: PopProofClaims = verify_signed(compact.as_str(), context.cnf_key, POP_JWS_TYP)?;
+        check_bindings(raw, context)
+    }
+
+    /// Verify a `pubky-reconnect` proof and return the app callback it unblocks.
+    ///
+    /// Applies the same signature, audience, grant and timestamp checks as
+    /// [`Self::verify`]. `context` names the delegation parent.
+    pub fn verify_reconnect(
+        compact: &JwsCompact,
+        context: &PopVerificationContext,
+    ) -> Result<(Self, ClientId), Error> {
+        let raw: ReconnectProofClaims =
+            verify_signed(compact.as_str(), context.cnf_key, RECONNECT_JWS_TYP)?;
+        Ok((check_bindings(raw.pop, context)?, raw.client_id))
     }
 }
 
-/// Check that the JWS header has `typ: "pubky-pop"`.
-fn check_header_type(compact: &str) -> Result<(), Error> {
-    let header = jsonwebtoken::decode_header(compact).map_err(|_| Error::InvalidFormat)?;
-    match header.typ.as_deref() {
-        Some(POP_JWS_TYP) => Ok(()),
-        _ => Err(Error::InvalidHeaderType),
-    }
+fn check_bindings(
+    raw: PopProofClaims,
+    context: &PopVerificationContext,
+) -> Result<PopProof, Error> {
+    check_audience(&raw, context.expected_audience)?;
+    check_grant_binding(&raw, context.expected_grant_id)?;
+    check_timestamp(&raw)?;
+    parse_verified_pop(raw)
 }
 
-fn verify_signature(compact: &str, cnf_key: &PublicKey) -> Result<PopProofClaims, Error> {
+/// Verify the JWS signature against `cnf_key`, then its `typ` header.
+fn verify_signed<T: DeserializeOwned>(
+    compact: &str,
+    cnf_key: &PublicKey,
+    typ: &'static str,
+) -> Result<T, Error> {
     let decoding_key = jws_crypto::decoding_key(cnf_key);
     let validation = jws_crypto::eddsa_validation();
-    let token_data = jsonwebtoken::decode::<PopProofClaims>(compact, &decoding_key, &validation)
+    let token_data = jsonwebtoken::decode::<T>(compact, &decoding_key, &validation)
         .map_err(|_| Error::InvalidSignature)?;
+    if token_data.header.typ.as_deref() != Some(typ) {
+        return Err(Error::InvalidHeaderType(typ));
+    }
     Ok(token_data.claims)
 }
 
@@ -119,13 +138,9 @@ fn parse_verified_pop(raw: PopProofClaims) -> Result<PopProof, Error> {
 /// Errors from PoP proof verification.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// The JWS format is invalid or unparseable.
-    #[error("invalid PoP format")]
-    InvalidFormat,
-
-    /// The JWS header `typ` is not `"pubky-pop"`.
-    #[error("invalid PoP header type, expected pubky-pop")]
-    InvalidHeaderType,
+    /// The JWS header `typ` is not the proof type this operation requires.
+    #[error("invalid PoP header type, expected {0}")]
+    InvalidHeaderType(&'static str),
 
     /// The Ed25519 signature does not match the `cnf` key.
     #[error("invalid PoP signature")]
@@ -292,7 +307,7 @@ mod tests {
         };
 
         let result = PopProof::verify(&compact, &context);
-        assert!(matches!(result, Err(Error::InvalidHeaderType)));
+        assert!(matches!(result, Err(Error::InvalidHeaderType(POP_JWS_TYP))));
     }
 
     #[test]
@@ -313,5 +328,42 @@ mod tests {
 
         let result = PopProof::verify(&compact, &context);
         assert!(matches!(result, Err(Error::TimestampOutOfRange)));
+    }
+
+    #[test]
+    fn reconnect_proofs_and_ordinary_proofs_are_not_interchangeable() {
+        let client_kp = Keypair::random();
+        let hs_kp = Keypair::random();
+        let raw = make_valid_pop(&hs_kp);
+        let reconnect = ReconnectProofClaims {
+            pop: raw.clone(),
+            client_id: ClientId::new("https://chat.example/cb").unwrap(),
+        };
+
+        let cnf_key = client_kp.public_key();
+        let aud = hs_kp.public_key().z32();
+        let context = PopVerificationContext {
+            cnf_key: &cnf_key,
+            expected_audience: &aud,
+            expected_grant_id: &raw.gid,
+        };
+        let sign = |typ: &str| {
+            let token = pubky_common::auth::jws::sign_jws(&client_kp, typ, &reconnect);
+            JwsCompact::parse(&token).unwrap()
+        };
+
+        let (pop, client_id) =
+            PopProof::verify_reconnect(&sign(RECONNECT_JWS_TYP), &context).unwrap();
+        assert_eq!(pop.nonce, raw.nonce);
+        assert_eq!(client_id, reconnect.client_id);
+
+        assert!(matches!(
+            PopProof::verify_reconnect(&sign(POP_JWS_TYP), &context),
+            Err(Error::InvalidHeaderType(RECONNECT_JWS_TYP))
+        ));
+        assert!(matches!(
+            PopProof::verify(&sign(RECONNECT_JWS_TYP), &context),
+            Err(Error::InvalidHeaderType(POP_JWS_TYP))
+        ));
     }
 }

@@ -22,6 +22,7 @@ use crate::client_server::auth::AuthState;
 /// - `POST /signup` — cookie-based user creation (deprecated)
 /// - `POST /session` — cookie-based signin (deprecated)
 /// - `POST /auth/grant/session` — grant-based session creation
+/// - `POST /auth/grant/reconnect` — clear an app's reconnection block
 pub fn base_router(auth_state: AuthState) -> Router<()> {
     Router::new()
         // Cookie (deprecated)
@@ -33,6 +34,7 @@ pub fn base_router(auth_state: AuthState) -> Router<()> {
             "/auth/grant/session",
             post(grant::routes::create_grant_session),
         )
+        .route("/auth/grant/reconnect", post(grant::routes::reconnect))
         .with_state(auth_state)
 }
 
