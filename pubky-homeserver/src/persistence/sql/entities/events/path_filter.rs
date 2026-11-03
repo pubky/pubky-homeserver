@@ -4,7 +4,7 @@ use sea_query::{Expr, ExprTrait, LikeExpr, SimpleExpr};
 
 use crate::shared::webdav::StoragePath;
 
-use super::events_repository::{EventIden, EVENT_TABLE};
+use super::repository::{EventIden, EVENT_TABLE};
 
 /// A single authorized path filter for the event stream.
 ///

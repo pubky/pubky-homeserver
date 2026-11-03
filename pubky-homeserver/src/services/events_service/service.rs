@@ -4,11 +4,9 @@ use futures_util::Stream;
 use tokio::sync::broadcast;
 
 use crate::observability::{ConnectionGuard, Metrics};
-use crate::persistence::{
-    files::events::{
-        EventCursor, EventEntity, EventRepository, EventType, EventVisibility, PathFilter,
-    },
-    sql::{SqlDb, UnifiedExecutor},
+use crate::persistence::sql::{
+    events::{EventCursor, EventEntity, EventRepository, EventType, EventVisibility, PathFilter},
+    SqlDb, UnifiedExecutor,
 };
 use crate::shared::webdav::EntryPath;
 

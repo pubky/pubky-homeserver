@@ -1,6 +1,6 @@
 use std::{mem::take, sync::Arc};
 
-use crate::persistence::files::events::EventType;
+use crate::persistence::sql::events::EventType;
 use crate::persistence::sql::{
     entry::{EntryEntity, EntryRepository},
     user::UserEntity,
@@ -417,8 +417,8 @@ mod tests {
     use opendal::raw::oio::Delete;
     use tokio::sync::Barrier;
 
-    use crate::persistence::files::events::EventType;
     use crate::persistence::files::FileIoError;
+    use crate::persistence::sql::events::EventType;
     use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};

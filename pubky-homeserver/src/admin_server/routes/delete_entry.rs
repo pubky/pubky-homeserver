@@ -25,11 +25,11 @@ mod tests {
 
     use super::super::super::app_state::AppState;
     use super::*;
-    use crate::persistence::files::{
+    use crate::persistence::files::FileService;
+    use crate::persistence::sql::{
+        entry::EntryRepository,
         events::{EventRepository, EventType, EventVisibility},
-        FileService,
     };
-    use crate::persistence::sql::entry::EntryRepository;
     use crate::services::user_service::UserService;
     use crate::shared::webdav::{EntryPath, StoragePath};
     use crate::AppContext;

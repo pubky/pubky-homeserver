@@ -5,12 +5,12 @@ use crate::AppContext;
 use crate::{
     persistence::{
         files::{
-            events::EventsService, staged_publish_layer::StagedPublishLayer,
+            staged_publish_layer::StagedPublishLayer,
             write_finalization_layer::WriteFinalizationLayer, write_path_layer::WritePathLayer,
         },
         sql::SqlDb,
     },
-    services::user_service::UserService,
+    services::{events_service::EventsService, user_service::UserService},
     shared::webdav::EntryPath,
     storage_config::{StorageConfigToml, StorageToml},
 };

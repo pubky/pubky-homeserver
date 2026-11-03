@@ -33,7 +33,8 @@ use crate::{
     },
     constants::{PRIVATE_ROOT, PUBLIC_ROOT},
     observability::ConnectionGuard,
-    persistence::files::events::{EventCursor, EventEntity, PathFilter, MAX_EVENT_STREAM_USERS},
+    persistence::sql::events::{EventCursor, EventEntity, PathFilter},
+    services::events_service::MAX_EVENT_STREAM_USERS,
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 

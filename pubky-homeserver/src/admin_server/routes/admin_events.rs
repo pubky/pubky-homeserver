@@ -18,9 +18,8 @@ use url::form_urlencoded;
 
 use super::super::app_state::AppState;
 use crate::{
-    persistence::files::events::{
-        AllEventsFilter, EventCursor, Mode, PathFilter, MAX_EVENT_STREAM_USERS,
-    },
+    persistence::sql::events::{EventCursor, PathFilter},
+    services::events_service::{AllEventsFilter, Mode, MAX_EVENT_STREAM_USERS},
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 

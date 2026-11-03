@@ -6,8 +6,10 @@
 //! - [`entry`]: File metadata (path, content hash, MIME type, timestamps).
 //! - [`signup_code`]: Token-gated registration codes.
 //! - [`entry_lock`]: Exclusive WebDAV write locks on storage paths.
+//! - [`events`]: PUT/DEL file change events with cursor pagination.
 
 pub mod entry;
 pub mod entry_lock;
+pub mod events;
 pub mod signup_code;
 pub mod user;

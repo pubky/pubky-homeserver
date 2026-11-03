@@ -5,12 +5,10 @@ use sqlx::{postgres::PgRow, types::chrono::Utc, Row};
 
 use crate::{
     constants::{DEFAULT_LIST_LIMIT, PUBLIC_ROOT},
-    persistence::{
-        files::events::EventEntity,
-        sql::{
-            user::{UserIden, USER_TABLE},
-            UnifiedExecutor,
-        },
+    persistence::sql::{
+        events::EventEntity,
+        user::{UserIden, USER_TABLE},
+        UnifiedExecutor,
     },
     shared::{effective_list_limit, webdav::EntryPath},
 };
