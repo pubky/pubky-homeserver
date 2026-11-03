@@ -3,7 +3,9 @@
 
 mod query;
 mod service;
+mod stream;
 
-pub(crate) use query::{EventStreamError, EventStreamQuery, StreamKind};
-pub(crate) use service::{AllEventsFilter, Mode, PG_NOTIFY_CHANNEL};
+pub(crate) use query::{AdminStreamQuery, ClientStreamQuery, EventStreamError};
+pub(crate) use service::{AllEventsFilter, Mode, UserEventsFilter, PG_NOTIFY_CHANNEL};
 pub use service::{EventsService, MAX_EVENT_STREAM_USERS};
+pub(crate) use stream::StreamGuard;

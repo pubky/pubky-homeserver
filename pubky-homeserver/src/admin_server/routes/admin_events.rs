@@ -17,7 +17,7 @@ use futures_util::StreamExt;
 use super::super::app_state::AppState;
 use crate::{
     persistence::sql::events::PathFilter,
-    services::events_service::{AllEventsFilter, EventStreamError, EventStreamQuery, StreamKind},
+    services::events_service::{AdminStreamQuery, AllEventsFilter, EventStreamError},
     shared::HttpResult,
 };
 
@@ -26,14 +26,13 @@ use crate::{
 /// [`EventsService::all_events_stream`].
 async fn resolve_filter(
     state: &AppState,
-    query: EventStreamQuery,
+    query: AdminStreamQuery,
 ) -> Result<AllEventsFilter, EventStreamError> {
     // None = all users (firehose); otherwise resolve each pubkey to its id.
-    let user_ids = if query.user_cursors.is_empty() {
+    let user_ids = if query.users.is_empty() {
         None
     } else {
-        let pubkeys: Vec<_> = query.user_cursors.into_iter().map(|(pk, _)| pk).collect();
-        Some(state.context.user_service.get_ids(&pubkeys).await?)
+        Some(state.context.user_service.get_ids(&query.users).await?)
     };
 
     Ok(AllEventsFilter {
@@ -45,14 +44,14 @@ async fn resolve_filter(
     })
 }
 
-/// Admin-only SSE stream over **all** events (public and private). See [`EventStreamQuery`] for the
+/// Admin-only SSE stream over **all** events (public and private). See [`AdminStreamQuery`] for the
 /// query parameters; the streaming lives in [`EventsService::all_events_stream`]. Response is
 /// `text/event-stream`, `Cache-Control: no-store`.
 pub async fn feed_stream(
     State(state): State<AppState>,
     RawQuery(raw_query): RawQuery,
 ) -> HttpResult<impl IntoResponse> {
-    let query = EventStreamQuery::parse(raw_query.as_deref().unwrap_or(""), StreamKind::Admin)?;
+    let query = AdminStreamQuery::parse(raw_query.as_deref().unwrap_or(""))?;
     let filter = resolve_filter(&state, query).await?;
 
     let sse = Sse::new(
