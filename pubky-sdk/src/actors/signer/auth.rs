@@ -53,7 +53,7 @@ impl PubkySigner {
     /// - Propagates transport failures when posting to the relay or if the
     ///   relay responds with a non-success status.
     pub async fn approve_auth(&self, pubkyauth_url: impl AsRef<str>) -> Result<()> {
-        self.approve_auth_deeplink(Self::parse_deeplink(pubkyauth_url)?, None)
+        self.approve_auth_deeplink(self.parse_deeplink(pubkyauth_url)?, None)
             .await
     }
 
@@ -88,7 +88,7 @@ impl PubkySigner {
         approved_capabilities: &Capabilities,
     ) -> Result<()> {
         self.approve_auth_deeplink(
-            Self::parse_deeplink(pubkyauth_url)?,
+            self.parse_deeplink(pubkyauth_url)?,
             Some(approved_capabilities),
         )
         .await
@@ -105,7 +105,7 @@ impl PubkySigner {
     ///   or the signer does not handle its intent.
     /// - Propagates signup or authentication-delivery failures for the handled intent.
     pub async fn handle_deeplink(&self, pubkyauth_url: impl AsRef<str>) -> Result<()> {
-        match Self::parse_deeplink(pubkyauth_url)? {
+        match self.parse_deeplink(pubkyauth_url)? {
             DeepLink::DirectSignup(d) => {
                 let params = d.params();
                 self.signup(&params.homeserver, params.signup_token.as_deref())
@@ -119,13 +119,28 @@ impl PubkySigner {
         }
     }
 
-    fn parse_deeplink(pubkyauth_url: impl AsRef<str>) -> Result<DeepLink> {
-        pubkyauth_url
+    /// Parse a link for this signer, refusing a grant sign-in that names
+    /// another key (`spk`) before anything is signed.
+    fn parse_deeplink(&self, pubkyauth_url: impl AsRef<str>) -> Result<DeepLink> {
+        let deep_link = pubkyauth_url
             .as_ref()
             .parse()
             .map_err(|e: DeepLinkParseError| {
-                AuthError::Validation(format!("invalid pubkyauth URL: {e}")).into()
-            })
+                AuthError::Validation(format!("invalid pubkyauth URL: {e}"))
+            })?;
+        if let DeepLink::SigninGrant(link) = &deep_link
+            && link
+                .params()
+                .expected_signer
+                .as_ref()
+                .is_some_and(|expected| expected != &self.keypair.public_key())
+        {
+            return Err(AuthError::Validation(
+                "this sign-in request is for a different key".into(),
+            )
+            .into());
+        }
+        Ok(deep_link)
     }
 
     async fn approve_auth_deeplink(
@@ -409,6 +424,7 @@ mod tests {
                                     client_id: ClientId::new("test.app").unwrap(),
                                     client_pk: client_pk.clone(),
                                     approval_format,
+                                    expected_signer: Some(signer.public_key()),
                                 },
                             )
                             .to_string()
@@ -521,6 +537,42 @@ mod tests {
             delivery.assert_calls_async(1).await;
             delivery.delete_async().await;
         }
+    }
+
+    #[tokio::test]
+    async fn grant_signin_for_another_key_is_refused_before_delivery() {
+        let server = MockServer::start_async().await;
+        let signer = Pubky::with_client(PubkyHttpClient::new().unwrap()).signer(Keypair::random());
+        let delivery = server
+            .mock_async(|when, then| {
+                when.method(POST);
+                then.status(200);
+            })
+            .await;
+        let mut params = SigninGrantParams::new(
+            "/pub/app/:rw".parse().unwrap(),
+            Url::parse(&server.url("/inbox/")).unwrap(),
+            [42; 32],
+            ClientId::new("test.app").unwrap(),
+            Keypair::random().public_key(),
+        );
+        params.expected_signer = Some(Keypair::random().public_key());
+        let link = SigninGrantDeepLink::new(DeepLinkScheme::PubkyAuth, params).to_string();
+
+        for result in [
+            signer.approve_auth(&link).await,
+            signer
+                .approve_auth_with_capabilities(&link, &"/pub/app/:r".parse().unwrap())
+                .await,
+            signer.handle_deeplink(&link).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(Error::Authentication(AuthError::Validation(message)))
+                    if message == "this sign-in request is for a different key"
+            ));
+        }
+        delivery.assert_calls_async(0).await;
     }
 
     #[tokio::test]

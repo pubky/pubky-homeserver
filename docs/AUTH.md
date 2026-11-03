@@ -78,6 +78,20 @@ decode them exactly once; in particular, nested percent escapes must remain
 escaped for the destination URL. For compatibility, `callback` may be parsed
 as a fallback for `x-success`, but new requests should emit `x-success`.
 
+A grant sign-in request (`pubkyauth://signin_grant`) may also name the key the
+app expects to approve:
+
+| Parameter | Meaning |
+| --- | --- |
+| `spk` | z-base-32 public key of the signed-in user, at most once. |
+
+Apps send it only when they already know the user, for example to re-authorize
+or to request more capabilities. Authenticators can then select that key
+without asking. It is a hint, not authority: an authenticator signs with a key
+it holds and refuses a request for a key it doesn't hold, and the app rejects
+an approval issued by any other key. Authenticators that predate `spk` ignore
+it.
+
 1. The `Authenticator` app scans that QR code, parses the URL and shows a consent form for the user.
 1. The user decides whether or not to grant these capabilities to the `3rd Party App`.
 1. If the user approves, the `Authenticator` uses their Keypair to sign an [`AuthToken`](#authtoken-encoding), then encrypts that token with the `client_secret`. The `channel_id` is then calculated by hashing that secret and the encrypted token is sent to the callback url, which is the `relay` + `channel_id`.

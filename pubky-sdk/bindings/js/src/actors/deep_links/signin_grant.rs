@@ -83,6 +83,15 @@ impl SigninGrantDeepLink {
         PublicKey(self.0.params().client_pk.clone())
     }
 
+    /// Public key the application expects to approve this request (`spk`),
+    /// or `undefined`. A hint for signer UIs; it never authorizes anything.
+    ///
+    /// @returns {PublicKey|undefined}
+    #[wasm_bindgen(js_name = "expectedSigner", getter)]
+    pub fn expected_signer(&self) -> Option<PublicKey> {
+        self.0.params().expected_signer.clone().map(PublicKey)
+    }
+
     /// Negotiated approval format: `bareGrant` or `signedApprovalV1`.
     #[wasm_bindgen(js_name = "approvalFormat", getter)]
     pub fn approval_format(&self) -> String {

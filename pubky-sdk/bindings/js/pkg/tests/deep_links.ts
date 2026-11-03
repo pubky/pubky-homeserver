@@ -1,6 +1,8 @@
 import test from "tape";
 import {
+  AuthFlowKind,
   PublicKey,
+  Pubky,
   DirectSignupDeepLink,
   SigninDeepLink,
   SigninGrantDeepLink,
@@ -114,6 +116,51 @@ test("signin grant deep link valid", async (t) => {
   t.equal(deepLink.clientId, "franky.pubky.app");
   t.equal(deepLink.clientPublicKey.z32(), CLIENT_PUBLICKEY.z32());
   t.equal(SigninGrantDeepLink.parse(deepLink.toString()).clientPublicKey.z32(), CLIENT_PUBLICKEY.z32());
+
+  t.end();
+});
+
+test("signin grant deep link carries an optional expected signer", async (t) => {
+  const user = PublicKey.from("8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty");
+  const sdk = Pubky.testnet();
+  const deadRelay = "http://127.0.0.1:9/inbox";
+
+  const hinted = await sdk.startGrantAuthFlow("/pub/pubky.app/:rw", AuthFlowKind.signin(), {
+    clientId: "expected-signer.test",
+    relay: deadRelay,
+    expectedSigner: user.toString(),
+  });
+  const hintedLink = SigninGrantDeepLink.parse(hinted.authorizationUrl);
+  t.equal(hintedLink.expectedSigner?.z32(), user.z32(), "pubky<z32> input is emitted as spk");
+  t.deepEqual(new URL(hinted.authorizationUrl).searchParams.getAll("spk"), [user.z32()]);
+  t.equal(SigninGrantDeepLink.parse(hintedLink.toString()).expectedSigner?.z32(), user.z32());
+  await hinted.awaitApproval().catch(() => {});
+
+  const plain = await sdk.startGrantAuthFlow("/pub/pubky.app/:rw", AuthFlowKind.signin(), {
+    clientId: "expected-signer.test",
+    relay: deadRelay,
+  });
+  t.equal(SigninGrantDeepLink.parse(plain.authorizationUrl).expectedSigner, undefined);
+  t.notOk(new URL(plain.authorizationUrl).searchParams.has("spk"));
+  await plain.awaitApproval().catch(() => {});
+
+  try {
+    await sdk.startGrantAuthFlow(
+      "/pub/pubky.app/:rw",
+      AuthFlowKind.signup(HOMESERVER_PUBLICKEY, null),
+      { clientId: "expected-signer.test", relay: deadRelay, expectedSigner: user.z32() },
+    );
+    t.fail("a sign-up flow must reject an expected signer");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.ok(/sign-in flows only/.test(error.message));
+  }
+
+  t.throws(
+    () => SigninGrantDeepLink.parse(`${hintedLink.toString()}&spk=${user.z32()}`),
+    /spk/,
+    "a repeated spk is rejected",
+  );
 
   t.end();
 });

@@ -17,7 +17,7 @@ use crate::actors::auth::grant::flow::PubkyGrantAuthFlow;
 use crate::actors::auth::grant::pop_signer::{DelegatedSignFn, GrantPopSigner};
 use crate::actors::auth::kind::AuthFlowKind;
 use crate::actors::auth::relay::auth_relay_listener::AuthRelayListener;
-use crate::errors::Result;
+use crate::errors::{AuthError, Result};
 use crate::{Capabilities, PubkyHttpClient};
 
 /// Builder for the **Grant + `PoP`** [`PubkyGrantAuthFlow`].
@@ -37,6 +37,7 @@ pub struct GrantAuthFlowBuilder {
     client_signer: GrantPopSigner,
     x_callback: XCallbackParams,
     approval_format: GrantApprovalFormat,
+    expected_signer: Option<PublicKey>,
 }
 
 impl fmt::Debug for GrantAuthFlowBuilder {
@@ -51,6 +52,7 @@ impl fmt::Debug for GrantAuthFlowBuilder {
             .field("client_signer", &self.client_signer)
             .field("x_callback", &self.x_callback)
             .field("approval_format", &self.approval_format)
+            .field("expected_signer", &self.expected_signer)
             .finish()
     }
 }
@@ -68,6 +70,7 @@ impl GrantAuthFlowBuilder {
             client_signer: GrantPopSigner::local(Keypair::random()),
             x_callback: XCallbackParams::default(),
             approval_format: GrantApprovalFormat::BareGrant,
+            expected_signer: None,
         }
     }
 
@@ -120,6 +123,18 @@ impl GrantAuthFlowBuilder {
         self
     }
 
+    /// Name the user expected to approve a sign-in, as the link's `spk` parameter.
+    ///
+    /// Use it only when the app already knows the signed-in user, for example
+    /// to re-authorize or to request more capabilities. Signers can then select
+    /// that key without asking. The flow rejects an approval issued by any
+    /// other key. Sign-up flows reject this option.
+    #[must_use]
+    pub fn expected_signer(mut self, public_key: PublicKey) -> Self {
+        self.expected_signer = Some(public_key);
+        self
+    }
+
     /// Use a delegated PoP signer, for example in a browser environment.
     #[must_use]
     #[doc(hidden)]
@@ -137,6 +152,8 @@ impl GrantAuthFlowBuilder {
     /// the background poller, and return the flow handle.
     ///
     /// # Errors
+    /// - Returns [`crate::errors::Error::Authentication`] if an expected signer
+    ///   is set on a sign-up flow.
     /// - Propagates failures from constructing the default [`PubkyHttpClient`]
     ///   or starting the [`AuthRelayListener`].
     pub fn start(self) -> Result<PubkyGrantAuthFlow> {
@@ -150,9 +167,16 @@ impl GrantAuthFlowBuilder {
             client_signer,
             x_callback,
             approval_format,
+            expected_signer,
         } = self;
 
         approval_format.validate_capabilities(&caps)?;
+        if expected_signer.is_some() && matches!(auth_kind, AuthFlowKind::SignUp { .. }) {
+            return Err(AuthError::Validation(
+                "an expected signer applies to sign-in flows only".into(),
+            )
+            .into());
+        }
 
         let client = match client {
             Some(c) => c,
@@ -183,6 +207,7 @@ impl GrantAuthFlowBuilder {
                     client_id,
                     client_pk,
                     approval_format,
+                    expected_signer,
                 },
             )),
             AuthFlowKind::SignUp {

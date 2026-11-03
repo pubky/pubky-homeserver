@@ -77,6 +77,33 @@ pub(super) fn parse_client_pk(url: &Url) -> Result<PublicKey, DeepLinkParseError
         .map_err(|e| DeepLinkParseError::InvalidQueryParameter("cpk", Box::new(e)))
 }
 
+pub(super) fn parse_expected_signer(url: &Url) -> Result<Option<PublicKey>, DeepLinkParseError> {
+    let mut values = url
+        .query_pairs()
+        .filter(|(key, _)| key == "spk")
+        .map(|(_, value)| value);
+    match (values.next(), values.next()) {
+        (None, _) => Ok(None),
+        (Some(value), None) => PublicKey::try_from_z32(&value)
+            .map(Some)
+            .map_err(|e| DeepLinkParseError::InvalidQueryParameter("spk", Box::new(e))),
+        (Some(_), Some(_)) => Err(DeepLinkParseError::InvalidQueryParameter(
+            "spk",
+            Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected at most one spk parameter",
+            )),
+        )),
+    }
+}
+
+pub(super) fn append_expected_signer(url: &mut Url, expected_signer: Option<&PublicKey>) {
+    if let Some(expected_signer) = expected_signer {
+        url.query_pairs_mut()
+            .append_pair("spk", &expected_signer.z32());
+    }
+}
+
 pub(super) fn parse_grant_relay_channel(
     url: &Url,
     approval_format: GrantApprovalFormat,

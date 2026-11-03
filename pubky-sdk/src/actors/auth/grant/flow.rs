@@ -471,7 +471,8 @@ fn decode_and_validate_approval(
     request: &DeepLink,
     approval_key_secret: Option<&ApprovalRecipientSecret>,
 ) -> Result<GrantApproval> {
-    let (client_id, client_pk, capabilities, format, relay_channel) = match request {
+    let (client_id, client_pk, capabilities, format, relay_channel, expected_signer) = match request
+    {
         DeepLink::SigninGrant(link) => {
             let params = link.params();
             (
@@ -480,6 +481,7 @@ fn decode_and_validate_approval(
                 &params.capabilities,
                 params.approval_format,
                 params.relay_channel,
+                params.expected_signer.as_ref(),
             )
         }
         DeepLink::SignupGrant(link) => {
@@ -490,6 +492,7 @@ fn decode_and_validate_approval(
                 &params.capabilities,
                 params.approval_format,
                 params.relay_channel,
+                None,
             )
         }
         _ => {
@@ -510,6 +513,12 @@ fn decode_and_validate_approval(
     if &approval.claims.cnf != client_pk || &approval.claims.client_id != client_id {
         return Err(AuthError::Validation(
             "approved grant does not match the requesting client".into(),
+        )
+        .into());
+    }
+    if expected_signer.is_some_and(|expected| expected != &approval.claims.iss) {
+        return Err(AuthError::Validation(
+            "approved grant was issued by a different key than the request expected".into(),
         )
         .into());
     }
@@ -624,6 +633,7 @@ mod tests {
             relay: Url::parse("http://localhost/inbox").unwrap(),
             relay_channel,
             approval_format: format,
+            expected_signer: None,
         }
     }
 
@@ -816,6 +826,72 @@ mod tests {
             Capability::encryption_keys("/pub/app/").unwrap(),
         ]);
         decode_request(&message(&user, &claims(&user)), &split_request).unwrap();
+    }
+
+    #[test]
+    fn approvals_must_come_from_the_expected_signer() {
+        let expected = Keypair::random();
+        let other = Keypair::random();
+        let mut request = request(GrantApprovalFormat::SignedApprovalV1);
+        request.expected_signer = Some(expected.public_key());
+
+        let error = decode_request(&message(&other, &claims(&other)), &request).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::Authentication(AuthError::Validation(message))
+                if message.contains("different key than the request expected")
+        ));
+
+        let approval = decode_request(&message(&expected, &claims(&expected)), &request).unwrap();
+        assert_eq!(approval.claims.iss, expected.public_key());
+    }
+
+    #[tokio::test]
+    async fn builder_sets_expected_signer_for_signin_only() {
+        let caps = "/pub/app/:rw".parse().unwrap();
+        let user = Keypair::random().public_key();
+        let relay = http_relay::HttpRelay::builder()
+            .http_port(0)
+            .run()
+            .await
+            .unwrap();
+        let flow = PubkyGrantAuthFlow::builder(
+            &caps,
+            AuthFlowKind::signin(),
+            ClientId::new("test.app").unwrap(),
+        )
+        .relay(relay.local_url().join("inbox").unwrap())
+        .expected_signer(user.clone())
+        .start()
+        .unwrap();
+        let spk = |url: Url| -> Vec<String> {
+            url.query_pairs()
+                .filter(|(name, _)| name == "spk")
+                .map(|(_, value)| value.into_owned())
+                .collect()
+        };
+        assert_eq!(spk(flow.authorization_url()), vec![user.z32()]);
+
+        let restored = PubkyGrantAuthFlow::restore(
+            flow.save_local().unwrap(),
+            PubkyHttpClient::new().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(spk(restored.authorization_url()), vec![user.z32()]);
+
+        let signup = PubkyGrantAuthFlow::builder(
+            &caps,
+            AuthFlowKind::signup(Keypair::random().public_key(), None),
+            ClientId::new("test.app").unwrap(),
+        )
+        .expected_signer(user)
+        .start();
+        assert!(
+            signup
+                .unwrap_err()
+                .to_string()
+                .contains("sign-in flows only")
+        );
     }
 
     #[tokio::test]
@@ -1130,6 +1206,7 @@ mod tests {
                 client_id: ClientId::new("mismatch.test").unwrap(),
                 client_pk: expected_client.public_key(),
                 approval_format: GrantApprovalFormat::BareGrant,
+                expected_signer: None,
             },
         )
         .to_string();

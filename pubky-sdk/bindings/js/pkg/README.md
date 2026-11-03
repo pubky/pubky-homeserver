@@ -352,6 +352,25 @@ Legacy cookie auth flows can be resumed with
 `sessionStorage`, not `localStorage`, and delete it once the flow completes or
 is abandoned.
 
+#### Name the expected signer
+
+When the app already knows who is signed in, for example to re-authorize or to
+request more capabilities, pass that user's public key as `expectedSigner`.
+The link gains `spk=<z32>`, so a signer such as Pubky Ring can open that key
+instead of asking the user to pick one. The hint grants nothing: signers sign
+with a key they hold and refuse a link for another key, and `awaitApproval()`
+rejects an approval issued by any other key. Leave it out for a first sign-in.
+Sign-up flows reject it.
+
+```js
+const flow = await pubky.startGrantAuthFlow(caps, AuthFlowKind.signin(), {
+  clientId: "my-cool-app.example",
+  expectedSigner: session.info.publicKey.z32(),
+});
+```
+
+Signers that predate `spk` ignore it and show their usual key picker.
+
 #### Request encryption keys
 
 Apps can also ask the signer for encryption keys scoped to storage paths. Set
