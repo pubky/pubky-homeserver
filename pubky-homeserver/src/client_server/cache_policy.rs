@@ -1,6 +1,6 @@
 use axum::{
     extract::Request,
-    http::{header, HeaderValue},
+    http::{header, HeaderValue, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -10,6 +10,12 @@ use crate::client_server::middleware::request_tenant::RequestTenant;
 use crate::{constants::PRIVATE_ROOT, shared::webdav::StoragePath};
 
 pub(crate) const CACHE_CONTROL_NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
+/// A private file may stay in the caller's own cache, but every use must be
+/// revalidated with its `ETag`, so a browser downloads an unchanged file once
+/// and shared caches never store it. The copy outlives the session and
+/// nothing clears it at sign-out; the README's caching section states that
+/// tradeoff.
+const CACHE_CONTROL_PRIVATE_NO_CACHE: HeaderValue = HeaderValue::from_static("private, no-cache");
 pub(crate) const VARY_PRIVATE_LEGACY: HeaderValue =
     HeaderValue::from_static("pubky-host, Authorization, Cookie");
 pub(crate) const VARY_PRIVATE_PATH: HeaderValue = HeaderValue::from_static("Authorization, Cookie");
@@ -28,7 +34,8 @@ pub(crate) async fn private_cache_policy(request: Request, next: Next) -> Respon
     let mut response = next.run(request).await;
 
     if is_private {
-        apply_private_cache_headers(&mut response, vary_on_pubky_host);
+        let cache_control = private_cache_control(&response);
+        apply_private_cache_headers(&mut response, cache_control, vary_on_pubky_host);
         if response.status().as_u16() >= 400 {
             remove_validators(&mut response);
         }
@@ -39,13 +46,30 @@ pub(crate) async fn private_cache_policy(request: Request, next: Next) -> Respon
 
 pub(crate) async fn sse_cache_policy(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
-    apply_private_cache_headers(&mut response, true);
+    apply_private_cache_headers(&mut response, CACHE_CONTROL_NO_STORE, true);
     response
 }
 
-fn apply_private_cache_headers(response: &mut Response, vary_on_pubky_host: bool) {
+/// Only a served or unchanged file carries an `ETag`, and only such a response
+/// is worth keeping for revalidation. Errors, listings and writes stay
+/// `no-store`.
+fn private_cache_control(response: &Response) -> HeaderValue {
+    let served_or_unchanged =
+        matches!(response.status(), StatusCode::OK | StatusCode::NOT_MODIFIED);
+    if served_or_unchanged && response.headers().contains_key(header::ETAG) {
+        CACHE_CONTROL_PRIVATE_NO_CACHE
+    } else {
+        CACHE_CONTROL_NO_STORE
+    }
+}
+
+fn apply_private_cache_headers(
+    response: &mut Response,
+    cache_control: HeaderValue,
+    vary_on_pubky_host: bool,
+) {
     let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, CACHE_CONTROL_NO_STORE);
+    headers.insert(header::CACHE_CONTROL, cache_control);
     headers.insert(
         header::VARY,
         if vary_on_pubky_host {
@@ -88,7 +112,7 @@ mod tests {
         http::{header, HeaderMap, Response, StatusCode},
         middleware,
         response::IntoResponse,
-        routing::{get, post},
+        routing::{get, post, put},
         Router,
     };
     use axum_test::TestServer;
@@ -118,6 +142,23 @@ mod tests {
         response_with_private_file_headers(StatusCode::NOT_FOUND)
     }
 
+    async fn not_modified() -> impl IntoResponse {
+        response_with_private_file_headers(StatusCode::NOT_MODIFIED)
+    }
+
+    async fn created() -> impl IntoResponse {
+        response_with_private_file_headers(StatusCode::CREATED)
+    }
+
+    /// A directory listing: served, but with nothing to revalidate.
+    async fn listing() -> impl IntoResponse {
+        (
+            StatusCode::OK,
+            [(header::VARY, "pubky-host")],
+            "pubky://x/priv/app/a.txt\n",
+        )
+    }
+
     #[test]
     fn tenant_private_path_detection_uses_normalized_path() {
         assert!(is_private_tenant_request_path("/priv/secret.txt"));
@@ -134,25 +175,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_cache_policy_rewrites_private_success_headers() {
+    async fn private_cache_policy_lets_private_file_reads_revalidate() {
         let server = TestServer::new(
             Router::new()
-                .route("/{*path}", get(success))
+                .route("/priv/secret.txt", get(success).head(success))
+                .route("/priv/unchanged.txt", get(not_modified))
                 .layer(middleware::from_fn(private_cache_policy)),
         );
 
-        let response = server.get("/priv/secret.txt").await;
+        for response in [
+            server.get("/priv/secret.txt").await,
+            server
+                .method(axum::http::Method::HEAD, "/priv/secret.txt")
+                .await,
+            server.get("/priv/unchanged.txt").await,
+        ] {
+            assert_eq!(
+                header_value(response.headers(), header::CACHE_CONTROL),
+                Some("private, no-cache")
+            );
+            assert_eq!(
+                header_value(response.headers(), header::VARY),
+                Some("pubky-host, Authorization, Cookie")
+            );
+            assert!(response.headers().contains_key(header::ETAG));
+            assert!(response.headers().contains_key(header::LAST_MODIFIED));
+        }
+    }
 
-        assert_eq!(
-            header_value(response.headers(), header::CACHE_CONTROL),
-            Some("no-store")
+    #[tokio::test]
+    async fn private_cache_policy_keeps_listings_and_writes_no_store() {
+        let server = TestServer::new(
+            Router::new()
+                .route("/priv/app/", get(listing))
+                .route("/priv/secret.txt", put(created))
+                .layer(middleware::from_fn(private_cache_policy)),
         );
-        assert_eq!(
-            header_value(response.headers(), header::VARY),
-            Some("pubky-host, Authorization, Cookie")
-        );
-        assert!(response.headers().contains_key(header::ETAG));
-        assert!(response.headers().contains_key(header::LAST_MODIFIED));
+
+        for response in [
+            server.get("/priv/app/").await,
+            server.put("/priv/secret.txt").await,
+        ] {
+            assert_eq!(
+                header_value(response.headers(), header::CACHE_CONTROL),
+                Some("no-store")
+            );
+            assert_eq!(
+                header_value(response.headers(), header::VARY),
+                Some("pubky-host, Authorization, Cookie")
+            );
+        }
     }
 
     #[tokio::test]
@@ -167,7 +239,7 @@ mod tests {
 
         assert_eq!(
             header_value(response.headers(), header::CACHE_CONTROL),
-            Some("no-store")
+            Some("private, no-cache")
         );
         assert_eq!(
             header_value(response.headers(), header::VARY),
