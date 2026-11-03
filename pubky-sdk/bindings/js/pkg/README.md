@@ -501,7 +501,9 @@ await pub.exists(`${userPk}/pub/example.com/foo`); // boolean
 await pub.stats(`${userPk}/pub/example.com/foo`); // { content_length, content_type, etag, last_modified } | null
 
 // List directory (addressed path "<pubky>/pub/.../") must include trailing `/`.
-// list(addr, cursor=null|suffix|fullUrl, reverse=false, limit?, shallow=false)
+// Results are encoded URLs. For reads, use pub.get(decodeURIComponent(url)).
+// For pagination, pass the last returned pubky:// URL unchanged as cursor.
+// list(addr, cursor=null|fullUrl, reverse=false, limit?, shallow=false)
 await pub.list(
   `${userPk}/pub/example.com/`,
   null,

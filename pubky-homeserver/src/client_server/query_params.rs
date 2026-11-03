@@ -17,25 +17,6 @@ pub struct ListQueryParams {
     pub reverse: bool,
 }
 
-impl ListQueryParams {
-    /// Extracts the cursor from the query parameters.
-    /// If the cursor is not a valid EntryPath, returns None.
-    /// If the cursor is empty, returns None.
-    pub fn extract_cursor(params: &Query<HashMap<String, String>>) -> Option<String> {
-        let value = params.get("cursor")?;
-        if value.is_empty() {
-            // Treat `cursor=` as None
-            return None;
-        }
-
-        let mut value = value.as_str();
-        if let Some(stripped_value) = value.strip_prefix("pubky://") {
-            value = stripped_value;
-        }
-        Some(value.to_string())
-    }
-}
-
 impl<S> FromRequestParts<S> for ListQueryParams
 where
     S: Send + Sync,
@@ -63,7 +44,11 @@ where
             // Treat `limit=` as None
             .filter(|&l| !l.is_empty())
             .and_then(|l| l.parse::<u16>().ok());
-        let cursor = Self::extract_cursor(&params);
+
+        let cursor = params
+            .get("cursor")
+            .filter(|value| !value.is_empty())
+            .cloned();
 
         Ok(ListQueryParams {
             shallow,

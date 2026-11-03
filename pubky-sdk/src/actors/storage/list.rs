@@ -139,8 +139,8 @@ impl<'a> ListBuilder<'a> {
     /// Resume listing from a previous cursor.
     ///
     /// Pass the last entry's [`to_pubky_url()`](crate::PubkyResource::to_pubky_url)
-    /// from a previous listing response. Use it to paginate through large
-    /// directories.
+    /// from a previous listing response, including the `pubky://` prefix.
+    /// Pass the URL unchanged; the SDK handles query-string escaping.
     pub fn cursor(mut self, cursor: &str) -> Self {
         self.cursor = Some(cursor.to_string());
         self
@@ -217,7 +217,7 @@ impl<'a> ListBuilder<'a> {
             let url = Url::parse(line)?;
             PubkyResource::from_transport_url(&url)
         } else {
-            line.parse()
+            PubkyResource::from_pubky_url(line)
         }
     }
 }

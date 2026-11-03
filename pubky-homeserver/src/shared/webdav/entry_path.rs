@@ -1,3 +1,4 @@
+use percent_encoding::percent_decode_str;
 use pubky_common::{crypto::PublicKey, StoragePathError};
 use std::str::FromStr;
 
@@ -15,10 +16,10 @@ pub enum EntryPathError {
 
 /// A path to an entry.
 ///
-/// The path as a string is used to identify the entry.
+/// `FromStr` and `Display` use decoded storage keys (`<owner>/<path>`),
+/// where percent signs are literal. Use the explicit URL methods for encoding.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EntryPath {
-    #[allow(dead_code)]
     pubkey: PublicKey,
     path: StoragePath,
     /// The key of the entry represented as a string.
@@ -40,6 +41,40 @@ impl EntryPath {
 
     pub fn path(&self) -> &StoragePath {
         &self.path
+    }
+
+    /// Render as a `pubky://` URL with a percent-encoded path.
+    pub fn to_pubky_url(&self) -> String {
+        format!("pubky://{}{}", self.pubkey.z32(), self.path.url_encode())
+    }
+
+    /// Parse a `pubky://<owner>/<path>` URL, decoding its path exactly once.
+    /// Query strings and fragments are not supported; encode literal `?` and `#`.
+    /// Dot segments are rejected rather than normalized.
+    pub fn from_pubky_url(url: &str) -> Result<Self, EntryPathError> {
+        let resource = url
+            .strip_prefix("pubky://")
+            .ok_or_else(|| EntryPathError::Invalid("expected a pubky:// URL".to_string()))?;
+        if resource.contains(['?', '#']) {
+            return Err(EntryPathError::Invalid(
+                "resource URL cannot contain a query or fragment".to_string(),
+            ));
+        }
+        let path_start = resource
+            .find('/')
+            .ok_or_else(|| EntryPathError::Invalid("Missing '/'".to_string()))?;
+        let (owner, path) = resource.split_at(path_start);
+        if PublicKey::is_pubky_prefixed(owner) {
+            return Err(EntryPathError::Invalid(
+                "unexpected `pubky` prefix; expected raw z32".to_string(),
+            ));
+        }
+        let owner = PublicKey::try_from_z32(owner).map_err(EntryPathError::InvalidPubkey)?;
+        let decoded_path = percent_decode_str(path).decode_utf8().map_err(|_| {
+            EntryPathError::Invalid("resource URL path is not valid UTF-8".to_string())
+        })?;
+        let path = StoragePath::new(&decoded_path).map_err(EntryPathError::InvalidStoragePath)?;
+        Ok(Self::new(owner, path))
     }
 
     /// The key of the entry.
@@ -118,6 +153,35 @@ impl<'de> serde::Deserialize<'de> for EntryPath {
 mod tests {
     use super::*;
     use pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH;
+
+    #[test]
+    fn pubky_url_round_trip_preserves_decoded_storage_key() {
+        let owner = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+        let key = format!("{owner}/pub/a b%20#?ü/%%2E%%2E.txt");
+        let entry: EntryPath = key.parse().unwrap();
+        let url = format!("pubky://{owner}/pub/a%20b%2520%23%3F%C3%BC/%25%252E%25%252E.txt");
+        assert_eq!(entry.to_pubky_url(), url);
+        assert_eq!(EntryPath::from_pubky_url(&url).unwrap(), entry);
+        assert_eq!(entry.to_string(), key);
+    }
+
+    #[test]
+    fn pubky_url_rejects_invalid_components_and_decoded_paths() {
+        let owner = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+        for url in [
+            format!("https://{owner}/pub/file"),
+            format!("{owner}/pub/file"),
+            format!("pubky://{owner}"),
+            "pubky://invalid/pub/file".to_string(),
+            format!("pubky://{owner}/pub/file?query"),
+            format!("pubky://{owner}/pub/file#fragment"),
+            format!("pubky://{owner}/pub/%FF"),
+            format!("pubky://{owner}/pub/%2E%2E/file"),
+            format!("pubky://{owner}/pub/../file"),
+        ] {
+            EntryPath::from_pubky_url(&url).unwrap_err();
+        }
+    }
 
     #[test]
     fn test_entry_path_from_str() {
