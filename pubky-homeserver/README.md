@@ -96,8 +96,13 @@ Files can be locked for read-modify-write cycles with WebDAV `LOCK`/`UNLOCK`.
 
 ## Caching and Proxies
 
-Private responses are sent with `Cache-Control: no-store` so shared caches
-never store them:
+Private file reads (`GET`/`HEAD` with a `200` or `304`) are sent with
+`Cache-Control: private, no-cache`: the caller's own browser may keep the file
+but must revalidate it with the `ETag` before reusing it, so an unchanged file
+is not downloaded again. The stored copy outlives the session, so it stays in
+the browser cache after sign-out. Every other private response (errors,
+directory listings, `/events-stream`) is `no-store`. Shared caches never store
+either:
 
 - `/storage/{user_z32}/priv/...` responses vary on `Authorization` and
   `Cookie`. The owner is part of the URL, so `pubky-host` is not part of the

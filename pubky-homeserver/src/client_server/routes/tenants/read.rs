@@ -367,11 +367,23 @@ mod tests {
         );
     }
 
-    fn assert_private_cache_policy(headers: &HeaderMap) {
+    fn assert_private_no_store(headers: &HeaderMap) {
         assert_eq!(
             header_value(headers, header::CACHE_CONTROL),
             Some("no-store")
         );
+        assert_private_vary(headers);
+    }
+
+    fn assert_private_revalidatable(headers: &HeaderMap) {
+        assert_eq!(
+            header_value(headers, header::CACHE_CONTROL),
+            Some("private, no-cache")
+        );
+        assert_private_vary(headers);
+    }
+
+    fn assert_private_vary(headers: &HeaderMap) {
         assert_eq!(
             header_value(headers, header::VARY),
             Some("pubky-host, Authorization, Cookie")
@@ -800,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn priv_responses_use_no_store_and_auth_vary() {
+    async fn priv_file_reads_revalidate_and_other_priv_responses_use_no_store() {
         let (_, _, server, keypair, cookie) = create_environment_with_keypair().await.unwrap();
         let public_key = keypair.public_key();
 
@@ -825,7 +837,7 @@ mod tests {
             .add_header(header::COOKIE, cookie.clone())
             .expect_success()
             .await;
-        assert_private_cache_policy(ok.headers());
+        assert_private_revalidatable(ok.headers());
         assert_validators_present(ok.headers());
 
         let not_modified = server
@@ -838,7 +850,7 @@ mod tests {
             )
             .await;
         not_modified.assert_status(StatusCode::NOT_MODIFIED);
-        assert_private_cache_policy(not_modified.headers());
+        assert_private_revalidatable(not_modified.headers());
         assert_validators_present(not_modified.headers());
 
         let head = server
@@ -847,7 +859,7 @@ mod tests {
             .add_header(header::COOKIE, cookie.clone())
             .await;
         head.assert_status(StatusCode::OK);
-        assert_private_cache_policy(head.headers());
+        assert_private_revalidatable(head.headers());
         assert_validators_present(head.headers());
 
         let listing = server
@@ -856,14 +868,14 @@ mod tests {
             .add_header(header::COOKIE, cookie.clone())
             .expect_success()
             .await;
-        assert_private_cache_policy(listing.headers());
+        assert_private_no_store(listing.headers());
 
         let unauthorized = server
             .get("/priv/secret.txt")
             .add_header("host", public_key.z32())
             .await;
         unauthorized.assert_status(StatusCode::UNAUTHORIZED);
-        assert_private_cache_policy(unauthorized.headers());
+        assert_private_no_store(unauthorized.headers());
         assert_no_validators(unauthorized.headers());
 
         let write_only_cookie = sign_in_with_capabilities(
@@ -879,7 +891,7 @@ mod tests {
             .add_header(header::COOKIE, write_only_cookie)
             .await;
         forbidden.assert_status(StatusCode::FORBIDDEN);
-        assert_private_cache_policy(forbidden.headers());
+        assert_private_no_store(forbidden.headers());
         assert_no_validators(forbidden.headers());
 
         let missing = server
@@ -888,7 +900,7 @@ mod tests {
             .add_header(header::COOKIE, cookie)
             .await;
         missing.assert_status(StatusCode::NOT_FOUND);
-        assert_private_cache_policy(missing.headers());
+        assert_private_no_store(missing.headers());
         assert_no_validators(missing.headers());
     }
 
@@ -1045,16 +1057,34 @@ mod tests {
 
         let response = server
             .get(&url)
-            .add_header(header::COOKIE, cookie)
+            .add_header(header::COOKIE, cookie.clone())
             .expect_success()
             .await;
         assert_eq!(response.text(), "private");
         assert_eq!(
             header_value(response.headers(), header::CACHE_CONTROL),
-            Some("no-store")
+            Some("private, no-cache")
         );
         assert_eq!(
             header_value(response.headers(), header::VARY),
+            Some("Authorization, Cookie")
+        );
+
+        let not_modified = server
+            .get(&url)
+            .add_header(header::COOKIE, cookie)
+            .add_header(
+                header::IF_NONE_MATCH,
+                response.headers().get(header::ETAG).unwrap(),
+            )
+            .await;
+        not_modified.assert_status(StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            header_value(not_modified.headers(), header::CACHE_CONTROL),
+            Some("private, no-cache")
+        );
+        assert_eq!(
+            header_value(not_modified.headers(), header::VARY),
             Some("Authorization, Cookie")
         );
     }

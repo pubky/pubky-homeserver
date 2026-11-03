@@ -578,8 +578,9 @@ paths:
               schema:
                 type: string
             Cache-Control:
-              description: Files use `private, must-revalidate`; private paths
-                and private directory listings use `no-store`.
+              description: Public files use `private, must-revalidate`; private
+                files use `private, no-cache`; private directory listings use
+                `no-store`.
               schema:
                 type: string
             Vary:
@@ -599,6 +600,23 @@ paths:
                 description: Newline-separated `pubky://` URLs for directory listings.
         '304':
           description: Not modified.
+          headers:
+            ETag:
+              schema:
+                type: string
+            Last-Modified:
+              schema:
+                type: string
+            Cache-Control:
+              description: "`private, must-revalidate` for public files;
+                `private, no-cache` for private files."
+              schema:
+                type: string
+            Vary:
+              description: Does not include `pubky-host`; private paths include
+                `Authorization, Cookie`. Other middleware may add values.
+              schema:
+                type: string
         '400':
           description: Invalid owner public key, storage path, or pagination cursor.
         '401':
@@ -635,6 +653,8 @@ paths:
               schema:
                 type: string
             Cache-Control:
+              description: "`private, must-revalidate` for public files;
+                `private, no-cache` for private files."
               schema:
                 type: string
             Vary:
@@ -826,10 +846,11 @@ paths:
             Cache-Control:
               description: |
                 `/pub/...` files use `private, must-revalidate`; `/priv/...`
-                files and private directory listings use `no-store`.
+                files use `private, no-cache`; private directory listings use
+                `no-store`.
               schema:
                 type: string
-                example: no-store
+                example: private, no-cache
             Vary:
               description: |
                 `/pub/...` files vary by `pubky-host`; authentication-dependent
@@ -863,8 +884,8 @@ paths:
               schema:
                 type: string
             Cache-Control:
-              description: "`private, must-revalidate` for `/pub/...`; `no-store`
-                for `/priv/...`.\n"
+              description: "`private, must-revalidate` for `/pub/...`; `private,
+                no-cache` for `/priv/...`.\n"
               schema:
                 type: string
             Vary:
@@ -923,9 +944,11 @@ paths:
               schema:
                 type: string
             Cache-Control:
+              description: "`private, must-revalidate` for `/pub/...`; `private,
+                no-cache` for `/priv/...`.\n"
               schema:
                 type: string
-                example: no-store
+                example: private, no-cache
             Vary:
               schema:
                 type: string
