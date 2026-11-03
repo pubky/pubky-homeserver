@@ -139,11 +139,7 @@ impl SignupService {
         &self,
         code: &SignupCode,
     ) -> Result<SignupCodeEntity, SignupServiceError> {
-        match self.signup_code_service.get(code).await {
-            Ok(entity) => Ok(entity),
-            Err(sqlx::Error::RowNotFound) => Err(SignupServiceError::InvalidSignupToken),
-            Err(e) => Err(e.into()),
-        }
+        Ok(self.signup_code_service.get(code).await?)
     }
 
     /// Fails if a user row already exists for `public_key`.
@@ -177,10 +173,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_requires_signup_token_follows_signup_mode() {
-        assert!(!service(SignupMode::Open).await.requires_signup_token());
-        assert!(service(SignupMode::TokenRequired)
-            .await
-            .requires_signup_token());
+        let db = SqlDb::test().await;
+        let service = |mode| SignupService::new(db.clone(), mode, UserService::new(db.clone()));
+
+        assert!(!service(SignupMode::Open).requires_signup_token());
+        assert!(service(SignupMode::TokenRequired).requires_signup_token());
     }
 
     #[tokio::test]

@@ -93,7 +93,6 @@ mod tests {
 
     use super::*;
     use crate::admin_server::AdminAuthExt;
-    use crate::persistence::sql::user::UserRepository;
     use crate::AppContext;
 
     fn create_test_server(context: &Arc<AppContext>) -> TestServer {
@@ -106,7 +105,9 @@ mod tests {
         let mut user = context.user_service.create(&pubkey).await.unwrap();
         user.used_bytes = used_bytes;
         user.disabled = disabled;
-        UserRepository::update(&user, &mut context.sql_db.pool().into())
+        context
+            .user_service
+            .update_in_tx(&user, &mut context.sql_db.pool().into())
             .await
             .unwrap();
         pubkey

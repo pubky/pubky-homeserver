@@ -91,11 +91,7 @@ mod tests {
 
     use super::*;
     use crate::admin_server::AdminAuthExt;
-    use crate::{
-        persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
-        shared::quota::UserQuota,
-        AppContext,
-    };
+    use crate::{persistence::sql::signup_code::SignupCode, shared::quota::UserQuota, AppContext};
 
     fn create_test_server(context: &Arc<AppContext>) -> TestServer {
         AppState::test_server(context)
@@ -118,7 +114,9 @@ mod tests {
 
         let used_by = Keypair::random().public_key();
         let token_id = SignupCode::new(token.clone()).unwrap();
-        SignupCodeRepository::mark_as_used(&token_id, &used_by, &mut context.sql_db.pool().into())
+        context
+            .signup_code_service
+            .consume_in_tx(&token_id, &used_by, &mut context.sql_db.pool().into())
             .await
             .unwrap();
 
@@ -212,13 +210,11 @@ mod tests {
 
         let used_by = Keypair::random().public_key();
         let used_token_id = SignupCode::new(used_token.clone()).unwrap();
-        SignupCodeRepository::mark_as_used(
-            &used_token_id,
-            &used_by,
-            &mut context.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        context
+            .signup_code_service
+            .consume_in_tx(&used_token_id, &used_by, &mut context.sql_db.pool().into())
+            .await
+            .unwrap();
 
         let response = server
             .get("/signup_tokens?state=used")
@@ -259,13 +255,11 @@ mod tests {
         let token3 = SignupCode::new("0000-0000-0003".to_string()).unwrap();
 
         for token in [&token1, &token2, &token3] {
-            SignupCodeRepository::create(
-                token,
-                &UserQuota::default(),
-                &mut context.sql_db.pool().into(),
-            )
-            .await
-            .unwrap();
+            context
+                .signup_code_service
+                .create_with_id(token, &UserQuota::default())
+                .await
+                .unwrap();
         }
 
         let response = server

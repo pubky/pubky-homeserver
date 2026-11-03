@@ -39,8 +39,8 @@ impl SignupCodeService {
     // ── Reads (use internal pool) ──────────────────────────────────
 
     /// Get a signup code by its id.
-    pub async fn get(&self, code: &SignupCode) -> Result<SignupCodeEntity, sqlx::Error> {
-        SignupCodeRepository::get(code, &mut self.sql_db.pool().into()).await
+    pub async fn get(&self, code: &SignupCode) -> Result<SignupCodeEntity, SignupCodeError> {
+        Self::fetch(code, &mut self.sql_db.pool().into()).await
     }
 
     /// List signup codes in token order.
@@ -73,15 +73,33 @@ impl SignupCodeService {
         used_by: &PublicKey,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<SignupCodeEntity, SignupCodeError> {
-        let entity = match SignupCodeRepository::get(code, executor).await {
-            Ok(entity) => entity,
-            Err(sqlx::Error::RowNotFound) => return Err(SignupCodeError::Invalid),
-            Err(e) => return Err(e.into()),
-        };
-        if entity.used_by.is_some() {
+        if Self::fetch(code, executor).await?.used_by.is_some() {
             return Err(SignupCodeError::AlreadyUsed);
         }
         Ok(SignupCodeRepository::mark_as_used(code, used_by, executor).await?)
+    }
+
+    async fn fetch<'a>(
+        code: &SignupCode,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<SignupCodeEntity, SignupCodeError> {
+        match SignupCodeRepository::get(code, executor).await {
+            Ok(entity) => Ok(entity),
+            Err(sqlx::Error::RowNotFound) => Err(SignupCodeError::Invalid),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SignupCodeService {
+    /// Create a signup code with a chosen id, for tests that depend on token order.
+    pub async fn create_with_id(
+        &self,
+        id: &SignupCode,
+        quota: &UserQuota,
+    ) -> Result<SignupCodeEntity, sqlx::Error> {
+        SignupCodeRepository::create(id, quota, &mut self.sql_db.pool().into()).await
     }
 }
 
@@ -117,12 +135,12 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_get_nonexistent_returns_row_not_found() {
+    async fn test_get_nonexistent_returns_invalid() {
         let svc = service().await;
         let code = SignupCode::random();
 
         let err = svc.get(&code).await.unwrap_err();
-        assert!(matches!(err, sqlx::Error::RowNotFound));
+        assert!(matches!(err, SignupCodeError::Invalid));
     }
 
     #[tokio::test]

@@ -469,10 +469,8 @@ fn map_not_found<T>(
 mod tests {
     use super::super::crypto::jws_crypto;
     use super::*;
-    use crate::persistence::sql::{
-        signup_code::{SignupCode, SignupCodeRepository},
-        SqlDb,
-    };
+    use crate::persistence::sql::{signup_code::SignupCode, SqlDb};
+    use crate::services::signup_code_service::SignupCodeService;
     use crate::shared::quota::UserQuota;
     use crate::SignupMode;
     use pubky_common::{
@@ -731,23 +729,15 @@ mod tests {
         let (grant_jws, pop_jws, _) =
             sign_signup_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
-        let code_id = SignupCode::random();
-        SignupCodeRepository::create(
-            &code_id,
-            &UserQuota::default(),
-            &mut service.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        let codes = SignupCodeService::new(service.sql_db.clone());
+        let code_id = codes.create(&UserQuota::default()).await.unwrap().id;
 
         service
             .signup_grant_account(&grant_jws, &pop_jws, Some(&code_id))
             .await
             .unwrap();
 
-        let consumed = SignupCodeRepository::get(&code_id, &mut service.sql_db.pool().into())
-            .await
-            .unwrap();
+        let consumed = codes.get(&code_id).await.unwrap();
         assert_eq!(consumed.used_by, Some(user_kp.public_key()));
     }
 
@@ -795,22 +785,13 @@ mod tests {
         let (grant_jws, pop_jws, _) =
             sign_signup_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
-        let code_id = SignupCode::random();
-        SignupCodeRepository::create(
-            &code_id,
-            &UserQuota::default(),
-            &mut service.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        let codes = SignupCodeService::new(service.sql_db.clone());
+        let code_id = codes.create(&UserQuota::default()).await.unwrap().id;
         let prior_user = Keypair::random().public_key();
-        SignupCodeRepository::mark_as_used(
-            &code_id,
-            &prior_user,
-            &mut service.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        codes
+            .consume_in_tx(&code_id, &prior_user, &mut service.sql_db.pool().into())
+            .await
+            .unwrap();
 
         let err = service
             .signup_grant_account(&grant_jws, &pop_jws, Some(&code_id))
