@@ -15,8 +15,9 @@ use crate::errors::Result;
 use crate::util::read_json_body;
 use crate::{PubkyHttpClient, PubkySession};
 
-/// Maximum size of a `/auth/grant/sessions` listing. The homeserver returns
-/// every grant in one response, so an overflow fails the whole call.
+/// Maximum size, inclusive, of a `/auth/grant/sessions` listing. A client-side
+/// bound: the homeserver returns every grant in one uncapped response, so an
+/// overflow fails the whole call.
 const MAX_GRANT_LIST_BYTES: usize = 1024 * 1024;
 
 /// Account-level grant management for a signed-in user.

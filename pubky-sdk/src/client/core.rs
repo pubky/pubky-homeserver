@@ -73,8 +73,9 @@ pub struct PubkyHttpClientBuilder {
     #[cfg(not(target_arch = "wasm32"))]
     native_http: NativeHttpConfig,
 
-    /// Total deadline for each HTTP request. Native applies it on the reqwest
-    /// client; WASM sets it on each request (see `http_targets::wasm`).
+    /// Total deadline for each HTTP request, or `None` for no deadline at all
+    /// (reqwest's default). Native applies it on the reqwest client; WASM sets
+    /// it on each request (see `http_targets::wasm`).
     request_timeout: Option<Duration>,
 
     /// The hostname to use for testnet URL transformations (WASM only).

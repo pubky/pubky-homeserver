@@ -23,8 +23,9 @@ use crate::PubkyHttpClient;
 use crate::errors::{CredentialRefreshError, Error, RequestError, Result};
 use crate::util::read_json_body;
 
-/// Maximum size of a `/auth/grant/session` response body: a session id,
-/// expiry and capabilities, the same shape as a cookie session record.
+/// Maximum size, inclusive, of a `/auth/grant/session` response body: a
+/// session id, expiry and capabilities, the same shape as a cookie session
+/// record. A client-side bound; the server does not cap the response.
 pub(super) const MAX_GRANT_SESSION_BYTES: usize = 64 * 1024;
 
 /// Decode a refreshed grant session response, redacting every read or decode

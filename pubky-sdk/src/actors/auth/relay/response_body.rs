@@ -1,7 +1,8 @@
 use crate::errors::{AuthError, Result};
 use crate::util::read_response_body;
 
-/// Maximum wire size for a received auth relay message, including encryption.
+/// Maximum wire size, inclusive, for a received auth relay message, including
+/// encryption.
 /// Allows larger custom deployments without trusting the relay's upload limit.
 pub(super) const MAX_RELAY_BODY_BYTES: usize = 1024 * 1024;
 

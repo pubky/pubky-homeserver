@@ -1,4 +1,4 @@
-use super::read_json_body;
+use super::{ResponseBodyError, read_json_body, read_response_body};
 use crate::{
     Error, PubkyHttpClient,
     errors::{RequestError, RequestErrorKind},
@@ -369,4 +369,37 @@ async fn json_bodies_are_bounded_then_decoded() {
         panic!("unexpected error: {error:?}");
     };
     assert!(message.starts_with("decoding numbers: "));
+}
+
+#[tokio::test]
+async fn body_limit_is_inclusive_under_both_framings() {
+    const LIMIT: usize = 16;
+    for size in [0, LIMIT - 1, LIMIT, LIMIT + 1] {
+        let body = vec![b'x'; size];
+        let mut chunked = Vec::new();
+        if size > 0 {
+            chunked.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+            chunked.extend_from_slice(&body);
+            chunked.extend_from_slice(b"\r\n");
+        }
+        chunked.extend_from_slice(b"0\r\n\r\n");
+        for (framing, wire) in [
+            (format!("Content-Length: {size}\r\n"), body.as_slice()),
+            (
+                "Transfer-Encoding: chunked\r\n".to_string(),
+                chunked.as_slice(),
+            ),
+        ] {
+            let (response, _connection) = serve_response(200, &framing, wire).await;
+            let result = read_response_body(response, LIMIT).await;
+            if size <= LIMIT {
+                assert_eq!(result.unwrap(), body, "{framing} size {size}");
+            } else {
+                assert!(
+                    matches!(result, Err(ResponseBodyError::TooLarge)),
+                    "{framing} size {size}"
+                );
+            }
+        }
+    }
 }

@@ -9,8 +9,9 @@ use crate::errors::RequestError;
 use crate::util::read_response_body;
 use crate::{Result, cross_log};
 
-/// Maximum size of a directory listing response. The homeserver returns at
-/// most 1000 entries per page, so this leaves ample room for long paths.
+/// Maximum size, inclusive, of a directory listing response. A client-side
+/// bound: the homeserver returns at most 1000 entries per page, so this leaves
+/// ample room for long paths.
 const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
 
 /// Read a listing response within [`MAX_LIST_BYTES`].
