@@ -346,6 +346,8 @@ impl Pubky {
     ///
     /// Use this when you already know the homeserver pubkey. This avoids
     /// Pkarr resolution overhead. Obtain a homeserver pubkey via [`Self::get_homeserver_of`].
+    /// Add the users to follow with [`EventStreamBuilder::add_users`], or stream every
+    /// user's public events with [`EventStreamBuilder::all_users`].
     ///
     /// # Example
     /// ```no_run

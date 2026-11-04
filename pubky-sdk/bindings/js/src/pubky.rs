@@ -382,6 +382,8 @@ impl Pubky {
     ///
     /// Use this when you already know the homeserver pubkey. This avoids
     /// Pkarr resolution overhead. Obtain a homeserver pubkey via `getHomeserverOf()`.
+    /// Add the users to follow with `addUsers()`, or stream every user's public
+    /// events with `allUsers()`.
     ///
     /// @param {PublicKey} homeserver - The homeserver public key
     /// @returns {EventStreamBuilder} - Builder for configuring and subscribing to the stream

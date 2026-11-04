@@ -31,10 +31,7 @@ use crate::{
     },
     constants::{PRIVATE_ROOT, PUBLIC_ROOT},
     persistence::sql::events::{EventCursor, EventEntity, PathFilter},
-    services::{
-        events_service::{ClientStreamQuery, EventStreamError, UserEventsFilter},
-        user_service::UserService,
-    },
+    services::events_service::{EventStreamFilter, EventStreamQuery, Resume},
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
@@ -46,10 +43,7 @@ enum EventStreamTenantScope<'a> {
 }
 
 impl<'a> EventStreamTenantScope<'a> {
-    fn from_query(
-        paths: &[StoragePath],
-        user_cursors: &'a [(PublicKey, Option<EventCursor>)],
-    ) -> Self {
+    fn from_query(paths: &[StoragePath], resume: &'a Resume) -> Self {
         if !paths
             .iter()
             .any(|path| path.as_str().starts_with(PRIVATE_ROOT))
@@ -57,8 +51,9 @@ impl<'a> EventStreamTenantScope<'a> {
             return Self::PublicOnly;
         }
 
-        match user_cursors {
-            [(tenant, _)] => Self::PrivateSingleTenant(tenant),
+        // A private path needs exactly one tenant; an all-users stream has none.
+        match resume.users().as_slice() {
+            [tenant] => Self::PrivateSingleTenant(tenant),
             _ => Self::PrivateUnsupported,
         }
     }
@@ -167,8 +162,8 @@ pub async fn feed_stream(
     cookies: Cookies,
     raw_query: RawQuery,
 ) -> HttpResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let query = ClientStreamQuery::parse(raw_query.0.as_deref().unwrap_or(""))?;
-    let tenant_scope = EventStreamTenantScope::from_query(&query.paths, &query.user_cursors);
+    let query = EventStreamQuery::parse(raw_query.0.as_deref().unwrap_or(""))?;
+    let tenant_scope = EventStreamTenantScope::from_query(&query.paths, &query.resume);
 
     // A presented Bearer disables both middleware-resolved and
     // homeserver-addressed cookie authentication for this endpoint.
@@ -202,16 +197,16 @@ pub async fn feed_stream(
         .authorize(session, &state.auth_state)
         .await?;
 
-    let user_cursors = resolve_user_ids(&query.user_cursors, &state.context.user_service).await?;
+    let cursor = query.resume.resolve(&state.context.user_service).await?;
 
     let stream = state
         .context
         .events_service
-        .user_events_stream(
+        .stream(
             state.context.metrics.clone(),
-            UserEventsFilter {
-                user_cursors,
-                allowed_paths,
+            EventStreamFilter {
+                cursor,
+                paths: allowed_paths,
                 mode: query.mode,
                 limit: query.limit,
             },
@@ -220,17 +215,6 @@ pub async fn feed_stream(
         .map(|event| Ok::<_, Infallible>(event.to_sse_event()));
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-/// Resolve user public keys to user IDs, keeping each user's cursor.
-async fn resolve_user_ids(
-    user_cursors: &[(PublicKey, Option<EventCursor>)],
-    user_service: &UserService,
-) -> Result<Vec<(i32, Option<EventCursor>)>, EventStreamError> {
-    let pubkeys: Vec<PublicKey> = user_cursors.iter().map(|(pk, _)| pk.clone()).collect();
-    let ids = user_service.get_ids(&pubkeys).await?;
-    let cursors = user_cursors.iter().map(|(_, cursor)| *cursor);
-    Ok(ids.into_iter().zip(cursors).collect())
 }
 
 fn has_bearer_auth(headers: &HeaderMap) -> bool {
@@ -315,8 +299,11 @@ mod tests {
         })
     }
 
-    fn cursors(keys: &[&PublicKey]) -> Vec<(PublicKey, Option<EventCursor>)> {
-        keys.iter().map(|k| ((*k).clone(), None)).collect()
+    fn users(keys: &[&PublicKey]) -> Resume {
+        Resume::Global {
+            cursor: None,
+            users: keys.iter().map(|k| (*k).clone()).collect(),
+        }
     }
 
     fn reject_status(result: Result<Vec<PathFilter>, HttpError>) -> StatusCode {
@@ -328,12 +315,12 @@ mod tests {
 
     fn authorize(
         paths: &[StoragePath],
-        user_cursors: &[(PublicKey, Option<EventCursor>)],
+        resume: &Resume,
         session: Option<&AuthSession>,
     ) -> Result<Vec<PathFilter>, HttpError> {
         authorized_paths(
             paths,
-            EventStreamTenantScope::from_query(paths, user_cursors),
+            EventStreamTenantScope::from_query(paths, resume),
             session,
         )
     }
@@ -363,14 +350,14 @@ mod tests {
     #[test]
     fn authorized_paths_defaults_to_public_dir_filter() {
         let u = pk();
-        let filters = authorize(&[], &cursors(&[&u]), None).unwrap();
+        let filters = authorize(&[], &users(&[&u]), None).unwrap();
         assert_eq!(filters, vec![pf("/pub/")]);
     }
 
     #[test]
     fn authorized_paths_rejects_anonymous_private_path() {
         let u = pk();
-        let status = reject_status(authorize(&[wd("/priv/app/")], &cursors(&[&u]), None));
+        let status = reject_status(authorize(&[wd("/priv/app/")], &users(&[&u]), None));
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
@@ -378,7 +365,7 @@ mod tests {
     fn authorized_paths_allows_cookie_session_own_private_path() {
         let owner = pk();
         let session = cookie_session(owner.clone(), Capabilities::from(vec![Capability::root()]));
-        let filters = authorize(&[wd("/priv/app/")], &cursors(&[&owner]), Some(&session)).unwrap();
+        let filters = authorize(&[wd("/priv/app/")], &users(&[&owner]), Some(&session)).unwrap();
         assert_eq!(filters, vec![pf("/priv/app/")]);
     }
 
@@ -388,10 +375,28 @@ mod tests {
         let session = cookie_session(a, Capabilities::from(vec![Capability::root()]));
         let status = reject_status(authorize(
             &[wd("/priv/app/")],
-            &cursors(&[&b]),
+            &users(&[&b]),
             Some(&session),
         ));
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn authorized_paths_rejects_private_path_without_users() {
+        let owner = pk();
+        let session = grant_session(owner, Capabilities::from(vec![Capability::root()]));
+        let status = reject_status(authorize(&[wd("/priv/app/")], &users(&[]), Some(&session)));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let status = reject_status(authorize(&[wd("/priv/app/")], &users(&[]), None));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn authorized_paths_defaults_to_public_dir_filter_without_users() {
+        assert_eq!(
+            authorize(&[], &users(&[]), None).unwrap(),
+            vec![pf("/pub/")]
+        );
     }
 
     #[test]
@@ -400,7 +405,7 @@ mod tests {
         let session = grant_session(a.clone(), Capabilities::from(vec![Capability::root()]));
         let status = reject_status(authorize(
             &[wd("/priv/app/")],
-            &cursors(&[&a, &b]),
+            &users(&[&a, &b]),
             Some(&session),
         ));
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -415,7 +420,7 @@ mod tests {
         );
         let status = reject_status(authorize(
             &[wd("/priv/other/")],
-            &cursors(&[&owner]),
+            &users(&[&owner]),
             Some(&session),
         ));
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -430,7 +435,7 @@ mod tests {
         );
         let filters = authorize(
             &[wd("/pub/"), wd("/priv/app/")],
-            &cursors(&[&owner]),
+            &users(&[&owner]),
             Some(&session),
         )
         .unwrap();
@@ -440,7 +445,7 @@ mod tests {
     #[test]
     fn authorized_paths_allows_public_paths_with_multiple_users() {
         let (a, b) = (pk(), pk());
-        let filters = authorize(&[wd("/pub/")], &cursors(&[&a, &b]), None).unwrap();
+        let filters = authorize(&[wd("/pub/")], &users(&[&a, &b]), None).unwrap();
         assert_eq!(filters, vec![pf("/pub/")]);
     }
 }

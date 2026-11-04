@@ -106,10 +106,42 @@ impl EventStreamBuilder {
         Ok(EventStreamBuilder(self.0.clone()))
     }
 
+    /// Stream every user's public events on the homeserver instead of a user
+    /// list, resuming after `cursor` (null = from the beginning).
+    ///
+    /// A batch request without `limit()` closes after 100 events. Needs a
+    /// builder from `Pubky.eventStreamFor()` and cannot be combined with
+    /// `addUsers()`. Updates this builder and returns a copy for chaining.
+    ///
+    /// @param {string | null} cursor - Global cursor to resume after
+    /// @returns {EventStreamBuilder} - Builder for chaining
+    /// @throws {Error} - If the cursor is invalid
+    ///
+    /// @example
+    /// ```typescript
+    /// const stream = await pubky.eventStreamFor(homeserver)
+    ///   .allUsers("100")
+    ///   .live()
+    ///   .subscribe();
+    /// ```
+    #[wasm_bindgen(js_name = "allUsers")]
+    pub fn all_users(&mut self, cursor: Option<String>) -> Result<EventStreamBuilder, JsValue> {
+        let cursor = cursor
+            .map(|cursor| {
+                cursor
+                    .parse::<pubky::EventCursor>()
+                    .map_err(|e| JsValue::from_str(&format!("Invalid cursor: {e}")))
+            })
+            .transpose()?;
+        self.0 = self.0.clone().all_users(cursor);
+        Ok(EventStreamBuilder(self.0.clone()))
+    }
+
     /// Set maximum number of events to receive before closing the connection.
     ///
     /// If omitted:
-    /// - With `live=false`: sends all historical events, then closes
+    /// - With `live=false`: sends all historical events, then closes (100 for
+    ///   an `allUsers()` stream)
     /// - With `live=true`: sends all historical events, then enters live mode (infinite stream)
     ///
     /// @param {number} limit - Maximum number of events (1-65535)
@@ -231,7 +263,8 @@ impl EventStreamBuilder {
     ///
     /// @throws {PubkyError}
     /// - `{ name: "RequestError" }` if the homeserver cannot be resolved
-    /// - `{ name: "ValidationError" }` if `live=true` and `reverse=true` (invalid combination)
+    /// - `{ name: "ValidationError" }` if `live=true` and `reverse=true` (invalid combination),
+    ///   if no users were added without `allUsers()`, or if both were given
     /// - Propagates HTTP request errors
     ///
     /// @example
