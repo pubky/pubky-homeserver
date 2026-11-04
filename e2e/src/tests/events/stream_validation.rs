@@ -26,21 +26,21 @@ async fn events_stream_validation_errors() {
     let pubky2 = keypair2.public_key(); // Not registered
     let invalid_pubkey = "invalid_key_not_zbase32";
 
-    // Test 1: No user parameter
-    let stream_url = format!("https://{}/events-stream", server_host);
+    // Test 1: A global cursor combined with a per-user cursor
+    let stream_url = format!(
+        "https://{}/events-stream?user={}:1&cursor=2",
+        server_host,
+        pubky1.z32()
+    );
     let response = pubky
         .client()
         .request(Method::GET, &stream_url)
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "No user parameter"
-    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "Mixed cursors");
     let body = response.text().await.unwrap();
-    assert!(body.contains("user parameter is required"));
+    assert!(body.contains("Cannot combine cursor with per-user cursors"));
 
     // Test 2: Too many users (>50)
     let mut query_params = vec![];
@@ -292,8 +292,9 @@ async fn events_stream_validation_errors() {
     );
 }
 
-/// All three event APIs paginate by numeric event ID and reject anything else
-/// with 400. The route parsers' unit tests cover the other malformed shapes
+/// Every event API paginates by numeric event ID and rejects anything else
+/// with 400: the text feed, and each resume form of the client and admin
+/// streams. The parser's unit tests cover the other malformed shapes
 /// (negative, overflowing); this only checks each endpoint wires the rejection
 /// and the pagination through.
 #[tokio::test]
@@ -340,14 +341,37 @@ async fn event_apis_validate_numeric_cursors() {
                 ),
             ),
             (
-                "client stream",
+                "client stream, per-user cursor",
                 client.request(
                     Method::GET,
                     &format!("https://{host}/events-stream?user={user}:{cursor}"),
                 ),
             ),
             (
-                "admin stream",
+                "client stream, global cursor with user filter",
+                client.request(
+                    Method::GET,
+                    &format!("https://{host}/events-stream?user={user}&cursor={cursor}"),
+                ),
+            ),
+            (
+                "client stream, global cursor over every user",
+                client.request(
+                    Method::GET,
+                    &format!("https://{host}/events-stream?cursor={cursor}"),
+                ),
+            ),
+            (
+                "admin stream, per-user cursor",
+                client
+                    .request(
+                        Method::GET,
+                        &format!("http://{admin_socket}/events-stream?user={user}:{cursor}"),
+                    )
+                    .header("X-Admin-Password", &admin_password),
+            ),
+            (
+                "admin stream, global cursor",
                 client
                     .request(
                         Method::GET,
@@ -385,5 +409,59 @@ async fn event_apis_validate_numeric_cursors() {
                 "{endpoint}, cursor {cursor}: {body}"
             );
         }
+    }
+}
+
+/// The admin stream rejects the same malformed resume forms as the client stream and
+/// returns 404 for an unknown `user=`.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn admin_events_stream_validation_errors() {
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let signer = pubky.signer(Keypair::random());
+    signer
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    let user = signer.public_key().z32();
+    let unknown = Keypair::random().public_key().z32();
+
+    let admin_socket = server.admin_server().unwrap().listen_socket();
+    let admin_password = pubky_testnet::pubky_homeserver::ConfigToml::default_test_config()
+        .admin
+        .admin_password;
+
+    for (query, status, message) in [
+        (
+            format!("user={user}:1&cursor=2"),
+            StatusCode::BAD_REQUEST,
+            "Cannot combine cursor with per-user cursors",
+        ),
+        (
+            format!("user={unknown}"),
+            StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+        (
+            format!("user={user}&user={unknown}:5"),
+            StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+    ] {
+        let response = pubky
+            .client()
+            .request(
+                Method::GET,
+                &format!("http://{admin_socket}/events-stream?{query}"),
+            )
+            .header("X-Admin-Password", &admin_password)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{query}");
+        let body = response.text().await.unwrap();
+        assert!(body.contains(message), "{query}: {body}");
     }
 }

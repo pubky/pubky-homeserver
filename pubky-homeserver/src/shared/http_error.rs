@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn event_stream_errors_map_to_status() {
         let cases = [
-            (EventStreamError::UserRequired, StatusCode::BAD_REQUEST),
+            (EventStreamError::MixedCursors, StatusCode::BAD_REQUEST),
             (
                 EventStreamError::from(sqlx::Error::RowNotFound),
                 StatusCode::NOT_FOUND,

@@ -1,8 +1,8 @@
 //! The two-phase event stream shared by the client and admin routes: replay
 //! history from the database in batches, then (in live mode) tail the
-//! broadcast channel. The routes differ only in how a stream resumes
-//! ([`StreamCursor`]) and in whether its credential is re-checked while the
-//! stream is open ([`StreamGuard`]).
+//! broadcast channel. A request resumes in one of two shapes
+//! ([`StreamCursor`]); the routes differ only in whether the credential is
+//! re-checked while the stream is open ([`StreamGuard`]).
 
 use std::{
     collections::HashMap,
@@ -33,7 +33,7 @@ pub(crate) trait StreamGuard: Send + 'static {
 }
 
 /// A guard for streams with nothing to re-check.
-pub(super) struct NoGuard;
+pub(crate) struct NoGuard;
 
 impl StreamGuard for NoGuard {
     fn is_valid(&mut self) -> impl Future<Output = bool> + Send {
@@ -45,12 +45,12 @@ impl StreamGuard for NoGuard {
     }
 }
 
-/// Where a stream has got to, in the two shapes the routes resume from.
-pub(super) enum StreamCursor {
-    /// Client stream: only these users, each resuming from its own cursor.
+/// Where a stream has got to, in the two shapes a request resumes from.
+pub(crate) enum StreamCursor {
+    /// Only these users, each resuming from its own cursor.
     PerUser(HashMap<i32, Option<EventCursor>>),
-    /// Admin stream: one cursor over the whole feed, optionally restricted to
-    /// some users (`None` = every user).
+    /// One cursor over the whole feed, optionally restricted to some users
+    /// (`None` = every user).
     Global {
         last: Option<EventCursor>,
         user_ids: Option<Vec<i32>>,
@@ -117,8 +117,10 @@ impl StreamCursor {
     }
 }
 
-/// What a stream sends, beyond where it resumes from.
-pub(super) struct StreamOptions {
+/// A resolved stream request: the route has mapped `user=` keys to ids and
+/// authorized the path filters.
+pub(crate) struct EventStreamFilter {
+    pub cursor: StreamCursor,
     /// Path filters (union). Empty = every path.
     pub paths: Vec<PathFilter>,
     pub mode: Mode,
@@ -126,105 +128,117 @@ pub(super) struct StreamOptions {
     pub limit: Option<u16>,
 }
 
-/// Replay history after `cursor` in batches, then tail the broadcast channel in
-/// live mode. Closes after `limit` events, when caught up in batch mode, when
-/// the guard fails, or when the client falls behind the channel.
-pub(super) fn stream_events(
-    service: EventsService,
-    mut cursor: StreamCursor,
-    options: StreamOptions,
-    mut guard: impl StreamGuard,
-) -> impl Stream<Item = EventEntity> {
-    let half_capacity = service.channel_capacity() / 2;
-    let reverse = options.mode.reverse();
-    let live = options.mode.live();
-    let metrics = service.metrics().clone();
+impl EventsService {
+    /// Replay history after the filter's cursor in batches, then tail the
+    /// broadcast channel in live mode. Closes after `limit` events, when caught
+    /// up in batch mode, when the guard fails, on a database error, or when the
+    /// client falls behind the channel. Yields domain [`EventEntity`]s for the
+    /// caller to frame (e.g. SSE); visibility is the caller's path filters.
+    pub(crate) fn stream(
+        &self,
+        filter: EventStreamFilter,
+        mut guard: impl StreamGuard,
+    ) -> impl Stream<Item = EventEntity> {
+        let service = self.clone();
+        let half_capacity = self.channel_capacity() / 2;
+        let EventStreamFilter {
+            mut cursor,
+            paths,
+            mode,
+            limit,
+        } = filter;
+        let reverse = mode.reverse();
+        let live = mode.live();
+        let metrics = self.metrics().clone();
 
-    async_stream::stream! {
-        // Connection metrics on any exit path.
-        let _connection = ConnectionGuard::new(metrics.clone());
-        // Subscribe before the first query so events committed during replay are buffered.
-        let mut rx = service.subscribe();
-        let mut total_sent: usize = 0;
+        async_stream::stream! {
+            // Connection metrics on any exit path.
+            let _connection = ConnectionGuard::new(metrics.clone());
+            // Subscribe before the first query so events committed during replay are buffered.
+            let mut rx = service.subscribe();
+            let mut total_sent: usize = 0;
 
-        // Phase 1: replay history.
-        loop {
-            if !guard.is_valid().await {
-                return;
-            }
-            // Drain buffered events; this or a later query covers them.
-            while rx.try_recv().is_ok() {}
-
-            // Only fetch the events still owed under `limit`; the per-event
-            // check below returns before `total_sent` can reach it.
-            let batch_limit = options.limit.map(|max| max - total_sent as u16);
-
-            let query_start = Instant::now();
-            let events = match cursor.fetch(&service, batch_limit, reverse, &options.paths).await {
-                Ok(events) => events,
-                Err(e) => {
-                    tracing::error!("Database error while fetching events: {}", e);
-                    break;
-                }
-            };
-            metrics.record_event_stream_db_query(query_start.elapsed().as_millis());
-
-            // An empty batch means everything up to the cursor has been replayed.
-            let caught_up = events.is_empty();
-            for event in events {
+            // Phase 1: replay history.
+            loop {
                 if !guard.is_valid().await {
                     return;
                 }
-                cursor.advance(&event);
-                yield event;
-                total_sent += 1;
-                if options.limit.is_some_and(|max| total_sent >= max as usize) {
-                    return;
-                }
-            }
-            if caught_up {
-                if !live {
-                    return;
-                }
-                break;
-            }
-        }
+                // Drain buffered events; this or a later query covers them.
+                while rx.try_recv().is_ok() {}
 
-        // Phase 2: live tail.
-        if live {
-            loop {
-                tokio::select! {
-                    biased;
-                    check = guard.next_check() => {
-                        if !check.await {
-                            return;
-                        }
+                // Only fetch the events still owed under `limit`; the per-event
+                // check below returns before `total_sent` can reach it.
+                let batch_limit = limit.map(|max| max - total_sent as u16);
+
+                let query_start = Instant::now();
+                let events = match cursor.fetch(&service, batch_limit, reverse, &paths).await {
+                    Ok(events) => events,
+                    Err(e) => {
+                        // Closing lets the client resume from its last cursor instead of
+                        // tailing live events it has a gap before.
+                        tracing::error!("Database error while fetching events: {}", e);
+                        return;
                     }
-                    received = rx.recv() => match received {
-                        Ok(event) => {
-                            // Early warning of a slow client.
-                            if rx.len() >= half_capacity {
-                                metrics.record_broadcast_half_full();
-                            }
-                            if !cursor.accepts_live(&event, &options.paths) {
-                                continue;
-                            }
-                            cursor.advance(&event);
-                            yield event;
-                            total_sent += 1;
-                            if options.limit.is_some_and(|max| total_sent >= max as usize) {
+                };
+                metrics.record_event_stream_db_query(query_start.elapsed().as_millis());
+
+                // An empty batch means everything up to the cursor has been replayed.
+                let caught_up = events.is_empty();
+                for event in events {
+                    if !guard.is_valid().await {
+                        return;
+                    }
+                    cursor.advance(&event);
+                    yield event;
+                    total_sent += 1;
+                    if limit.is_some_and(|max| total_sent >= max as usize) {
+                        return;
+                    }
+                }
+                if caught_up {
+                    if !live {
+                        return;
+                    }
+                    break;
+                }
+            }
+
+            // Phase 2: live tail.
+            if live {
+                loop {
+                    tokio::select! {
+                        biased;
+                        check = guard.next_check() => {
+                            if !check.await {
                                 return;
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            metrics.record_broadcast_lagged();
-                            tracing::warn!(
-                                "Slow client detected: broadcast channel lagged by {} events. Closing connection.",
-                                skipped
-                            );
-                            return;
+                        received = rx.recv() => match received {
+                            Ok(event) => {
+                                // Early warning of a slow client.
+                                if rx.len() >= half_capacity {
+                                    metrics.record_broadcast_half_full();
+                                }
+                                if !cursor.accepts_live(&event, &paths) {
+                                    continue;
+                                }
+                                cursor.advance(&event);
+                                yield event;
+                                total_sent += 1;
+                                if limit.is_some_and(|max| total_sent >= max as usize) {
+                                    return;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                metrics.record_broadcast_lagged();
+                                tracing::warn!(
+                                    "Slow client detected: broadcast channel lagged by {} events. Closing connection.",
+                                    skipped
+                                );
+                                return;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }

@@ -214,6 +214,108 @@ test("eventStreamFor: homeserver-direct subscription", async (t) => {
 });
 
 /**
+ * Test allUsers() — every user's public events on the homeserver.
+ */
+test("allUsers: homeserver-wide subscription", async (t) => {
+  const sdk = Pubky.testnet();
+
+  const signer = sdk.signer(Keypair.random());
+  const signupToken = await createSignupToken();
+  await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await signer.signin("events.test");
+  const userPk = session.info.publicKey;
+
+  await session.storage.putText("/pub/all/first.txt" as Path, "1");
+  await session.storage.putText("/priv/all/secret.txt" as Path, "2");
+  await session.storage.putText("/pub/all/second.txt" as Path, "3");
+
+  await sleep(500);
+
+  // === Test 1: newest events across the homeserver are this user's public writes ===
+  t.comment("allUsers: reverse batch over every user");
+
+  const stream1 = await sdk
+    .eventStreamFor(HOMESERVER_PUBLICKEY)
+    .allUsers(null)
+    .reverse()
+    .limit(2)
+    .subscribe();
+
+  const events1 = [];
+  const reader1 = stream1.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader1.read();
+      if (done) break;
+      events1.push(value);
+    }
+  } finally {
+    reader1.releaseLock();
+  }
+
+  t.deepEqual(
+    events1.map((event) => event.resource.path),
+    ["/pub/all/second.txt", "/pub/all/first.txt"],
+    "should receive the two newest public events, never the private one",
+  );
+  for (const event of events1) {
+    t.equal(event.resource.owner.z32(), userPk.z32(), "owner should match user");
+  }
+
+  // === Test 2: resume after a global cursor ===
+  t.comment("allUsers: resume after a cursor");
+
+  const stream2 = await sdk
+    .eventStreamFor(HOMESERVER_PUBLICKEY)
+    .allUsers(events1[1].cursor)
+    .subscribe();
+
+  const events2 = [];
+  const reader2 = stream2.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader2.read();
+      if (done) break;
+      events2.push(value);
+    }
+  } finally {
+    reader2.releaseLock();
+  }
+
+  t.deepEqual(
+    events2.map((event) => event.resource.path),
+    ["/pub/all/second.txt"],
+    "should receive only the event after the cursor",
+  );
+
+  // === Test 3: invalid input ===
+  t.comment("allUsers: invalid cursor and combination with addUsers");
+
+  t.throws(
+    () => sdk.eventStreamFor(HOMESERVER_PUBLICKEY).allUsers("notanumber"),
+    /Invalid cursor/,
+    "non-numeric cursor should throw",
+  );
+
+  try {
+    await sdk
+      .eventStreamFor(HOMESERVER_PUBLICKEY)
+      .addUsers([[userPk.z32(), null]])
+      .allUsers(null)
+      .subscribe();
+    t.fail("allUsers combined with addUsers should be rejected");
+  } catch (error) {
+    assertPubkyError(t, error);
+    t.ok(
+      error.message.includes("Cannot combine all_users with specific users"),
+      `error should name the conflict: ${error.message}`,
+    );
+  }
+
+  t.end();
+});
+
+/**
  * Test addUsers() — batch multi-user API.
  */
 test("addUsers: batch multi-user subscription", async (t) => {
