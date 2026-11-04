@@ -82,12 +82,6 @@ impl SignupService {
         Ok(user)
     }
 
-    /// Populates the quota cache for a user created through [`Self::create_user_in_tx`]
-    /// once the caller's transaction has committed.
-    pub(crate) fn cache_user_quota(&self, user: &UserEntity) {
-        self.user_service.cache_user_quota(user);
-    }
-
     /// Creates a new user inside an existing transaction.
     ///
     /// Used by auth flows that must atomically create the user and persist
@@ -141,10 +135,15 @@ impl SignupService {
         used_by: &PublicKey,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<SignupCodeEntity, SignupServiceError> {
-        if Self::fetch_token(code, executor).await?.used_by.is_some() {
-            return Err(SignupServiceError::SignupTokenAlreadyUsed);
+        // Tells an unknown token apart from a used one before the guarded update.
+        Self::fetch_token(code, executor).await?;
+        match SignupCodeRepository::mark_as_used(code, used_by, executor).await {
+            Ok(entity) => Ok(entity),
+            // The update only matches `used_by IS NULL`, so no row means the
+            // token was already used, possibly by a concurrent signup.
+            Err(sqlx::Error::RowNotFound) => Err(SignupServiceError::SignupTokenAlreadyUsed),
+            Err(e) => Err(e.into()),
         }
-        Ok(SignupCodeRepository::mark_as_used(code, used_by, executor).await?)
     }
 
     async fn fetch_token<'a>(
@@ -321,6 +320,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SignupServiceError::SignupTokenAlreadyUsed));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_concurrent_signups_redeem_token_once() {
+        let svc = service(SignupMode::TokenRequired).await;
+        let code = svc.create_token(&UserQuota::default()).await.unwrap();
+
+        let alice = Keypair::random().public_key();
+        let bob = Keypair::random().public_key();
+        let (first, second) = tokio::join!(
+            svc.create_new_user(&alice, Some(&code.id)),
+            svc.create_new_user(&bob, Some(&code.id)),
+        );
+        let mut results = [first, second];
+        results.sort_by_key(|result| result.is_err());
+
+        let [winner, loser] = results;
+        let winner = winner.unwrap();
+        assert!(matches!(
+            loser.unwrap_err(),
+            SignupServiceError::SignupTokenAlreadyUsed
+        ));
+        let used = svc.get_token(&code.id).await.unwrap();
+        assert_eq!(used.used_by, Some(winner.public_key));
     }
 
     #[tokio::test]

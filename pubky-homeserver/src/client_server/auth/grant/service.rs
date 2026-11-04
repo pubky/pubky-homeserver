@@ -111,7 +111,7 @@ impl GrantAuthService {
             .create_user_in_tx(&grant.iss, signup_token, &mut tx)
             .await?;
         tx.commit().await?;
-        self.signup_service.cache_user_quota(&user);
+        self.user_service.cache_user_quota(&user);
         Ok(())
     }
 
