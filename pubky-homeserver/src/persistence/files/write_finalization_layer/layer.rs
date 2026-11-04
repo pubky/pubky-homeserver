@@ -1,13 +1,12 @@
 use std::{future::Future, sync::Arc};
 
 use crate::persistence::files::{
-    events::EventsService,
     layer_domain_error::LayerDomainError,
     staged_publish_layer::{live_generation, under_expected_generation, ExpectedGeneration},
     write_check::{checked_copier, CheckedWriter, WriteCheck},
 };
 use crate::persistence::sql::{entry::EntryRepository, SqlDb, UnifiedExecutor};
-use crate::services::user_service::UserService;
+use crate::services::{events_service::EventsService, user_service::UserService};
 use crate::shared::webdav::EntryPath;
 use opendal::raw::*;
 use opendal::{Capability, OperationContext, Operator, Result};
@@ -376,11 +375,11 @@ pub(crate) mod test_support {
     use pubky_common::crypto::Keypair;
     use tempfile::TempDir;
 
-    use crate::persistence::files::{
+    use crate::persistence::files::test_support::{get_fs_operator, get_memory_operator};
+    use crate::persistence::sql::{
         events::{EventEntity, EventRepository, EventVisibility},
-        test_support::{get_fs_operator, get_memory_operator},
+        SqlDb,
     };
-    use crate::persistence::sql::SqlDb;
 
     use super::*;
 
@@ -550,9 +549,9 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use crate::persistence::files::events::EventType;
     use crate::persistence::files::staged_publish_layer::StagedPublishLayer;
     use crate::persistence::files::test_support::{get_fs_operator, Versioned};
+    use crate::persistence::sql::events::EventType;
     use crate::persistence::sql::{entry::EntryRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};

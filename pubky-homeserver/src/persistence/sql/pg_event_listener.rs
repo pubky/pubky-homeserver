@@ -23,10 +23,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::constants::DEFAULT_MAX_LIST_LIMIT;
-use crate::persistence::files::events::{
-    EventCursor, EventRepository, EventVisibility, EventsService, PG_NOTIFY_CHANNEL,
+use crate::persistence::sql::{
+    events::{EventCursor, EventRepository, EventVisibility},
+    UnifiedExecutor,
 };
-use crate::persistence::sql::UnifiedExecutor;
+use crate::services::events_service::{EventsService, PG_NOTIFY_CHANNEL};
 
 /// Default fallback poll interval when no NOTIFY is received.
 /// This is a safety net for rare failures (missed NOTIFYs, listener downtime).
@@ -285,8 +286,9 @@ impl Drop for PgEventListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::files::events::{EventRepository, EventType, EventsService};
+    use crate::persistence::sql::events::{EventRepository, EventType};
     use crate::persistence::sql::SqlDb;
+    use crate::services::events_service::EventsService;
     use crate::services::user_service::UserService;
     use crate::shared::webdav::{EntryPath, StoragePath};
     use pubky_common::crypto::{Hash, Keypair};
