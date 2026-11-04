@@ -20,7 +20,7 @@
 //! | Token | Signer | Lifetime | Purpose |
 //! |-------|--------|----------|---------|
 //! | **Grant** (`pubky-grant`) | User keypair | Long-lived | Delegates scoped capabilities to a client app |
-//! | **Delegation parent** (`pubky-delegation`) | User keypair | Long-lived | Authorizes child grants, not storage sessions |
+//! | **Parent grant** (`pubky-parent-grant`) | User keypair | Long-lived | Authorizes child grants, not storage sessions |
 //! | **Child grant** (`pubky-child-grant`) | Parent's `cnf` key | Up to the parent's expiry | Delegates part of the parent's capabilities to one app |
 //! | **PoP proof** (`pubky-pop`) | Client keypair | ±3 min | Proves possession of the key bound by Grant `cnf` |
 //! | **Reconnect proof** (`pubky-reconnect`) | Parent's `cnf` key | ±3 min | Clears an app's reconnection block |

@@ -67,7 +67,7 @@ impl PopProof {
     /// Verify a `pubky-reconnect` proof and return the app callback it unblocks.
     ///
     /// Applies the same signature, audience, grant and timestamp checks as
-    /// [`Self::verify`]. `context` names the delegation parent.
+    /// [`Self::verify`]. `context` names the parent grant.
     pub fn verify_reconnect(
         compact: &JwsCompact,
         context: &PopVerificationContext,

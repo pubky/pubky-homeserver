@@ -4,7 +4,7 @@
 //! of the user with specific capabilities. This module provides the claims
 //! type shared between Ring (signs), SDK (decodes), and homeserver (verifies).
 //!
-//! Delegation parents use the same claims with the `pubky-delegation` JWS type.
+//! Parent grants use the same claims with the `pubky-parent-grant` JWS type.
 //! [`ChildGrantClaims`] are signed by the parent's `cnf` key instead of the user.
 
 use serde::{Deserialize, Serialize};
@@ -89,10 +89,10 @@ impl GrantClaims {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildGrantClaims {
-    /// Claims shared with direct grants and delegation parents.
+    /// Claims shared with direct grants and parent grants.
     #[serde(flatten)]
     pub grant: GrantClaims,
-    /// The `jti` of the delegation parent.
+    /// The `jti` of the parent grant.
     pub parent_jti: GrantId,
 }
 

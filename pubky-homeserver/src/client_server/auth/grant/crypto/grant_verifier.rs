@@ -6,14 +6,14 @@
 //! Pubky Ring creates these grants to give the SDKs the necessary information to authenticate and authorize requests to the homeserver.
 //! The homeserver verifies the grant and returns a short-lived access token for API calls.
 //!
-//! A delegation chain has exactly one parent, signed by the user, and one child,
-//! signed by the parent's `cnf` key. JWS types keep the three grant forms apart:
+//! A chain has two levels: a parent signed by the user, and a child signed by the
+//! parent's `cnf` key. JWS types keep the three grant forms apart:
 //! a parent can't be exchanged for storage, and a child can't act as a parent.
 
 use pubky_common::{
     auth::{
         grant::{ChildGrantClaims, GrantClaims},
-        jws::{CHILD_GRANT_JWS_TYP, DELEGATION_JWS_TYP, GRANT_JWS_TYP},
+        jws::{CHILD_GRANT_JWS_TYP, GRANT_JWS_TYP, PARENT_GRANT_JWS_TYP},
     },
     capabilities::{Capabilities, Capability},
     crypto::PublicKey,
@@ -26,9 +26,9 @@ use super::{
     pop_verifier::POP_MAX_AGE_SECS,
 };
 
-/// The most a delegation parent can authorize. Excludes `/:rw`, so delegated
+/// The most a parent grant can authorize. Excludes `/:rw`, so delegated
 /// sessions can't manage grants.
-const DELEGATION_CEILING: &str = "/pub/:rwe,/priv/:rwe";
+const PARENT_CEILING: &str = "/pub/:rwe,/priv/:rwe";
 
 /// A verified parent and child.
 #[derive(Debug, Clone)]
@@ -56,27 +56,27 @@ pub fn verify_grant_for_revocation(compact: &JwsCompact) -> Result<GrantClaims, 
     verify_signed(compact.as_str(), &issuer_key, GRANT_JWS_TYP)
 }
 
-/// Verify a usable delegation parent.
-pub fn verify_delegation(compact: &JwsCompact) -> Result<GrantClaims, Error> {
-    let parent = verify_delegation_for_revocation(compact)?;
+/// Verify a usable parent grant.
+pub fn verify_parent(compact: &JwsCompact) -> Result<GrantClaims, Error> {
+    let parent = verify_parent_for_revocation(compact)?;
     check_usable(&parent)?;
     Ok(parent)
 }
 
-/// Verify a delegation parent, allowing expired parents for revocation.
+/// Verify a parent grant, allowing expired parents for revocation.
 ///
 /// Checks the user's signature, the type, the lifetime order, the callback, and
-/// the delegation ceiling.
-pub fn verify_delegation_for_revocation(compact: &JwsCompact) -> Result<GrantClaims, Error> {
+/// the parent ceiling.
+pub fn verify_parent_for_revocation(compact: &JwsCompact) -> Result<GrantClaims, Error> {
     let issuer_key = extract_issuer_key(compact.as_str())?;
-    let parent: GrantClaims = verify_signed(compact.as_str(), &issuer_key, DELEGATION_JWS_TYP)?;
+    let parent: GrantClaims = verify_signed(compact.as_str(), &issuer_key, PARENT_GRANT_JWS_TYP)?;
     if parent.iat >= parent.exp {
         return Err(Error::InvalidTimestamps);
     }
     check_callback(&parent)?;
-    let ceiling: Capabilities = DELEGATION_CEILING
+    let ceiling: Capabilities = PARENT_CEILING
         .parse()
-        .expect("invariant: the delegation ceiling is a valid capability list");
+        .expect("invariant: the parent ceiling is a valid capability list");
     check_permitted(&ceiling, &parent.caps)?;
     Ok(parent)
 }
@@ -98,7 +98,7 @@ pub fn verify_chain_for_revocation(
     parent: &JwsCompact,
     child: &JwsCompact,
 ) -> Result<GrantChain, Error> {
-    let parent = verify_delegation_for_revocation(parent)?;
+    let parent = verify_parent_for_revocation(parent)?;
     let child: ChildGrantClaims = verify_signed(child.as_str(), &parent.cnf, CHILD_GRANT_JWS_TYP)?;
     if child.grant.iss != parent.iss || child.parent_jti != parent.jti {
         return Err(Error::ParentMismatch);
@@ -114,10 +114,10 @@ pub fn verify_chain_for_revocation(
     Ok(GrantChain { parent, child })
 }
 
-/// Whether `compact` has the `pubky-delegation` type, without verifying it.
-pub fn is_delegation(compact: &JwsCompact) -> bool {
+/// Whether `compact` has the `pubky-parent-grant` type, without verifying it.
+pub fn is_parent_grant(compact: &JwsCompact) -> bool {
     jsonwebtoken::decode_header(compact.as_str())
-        .is_ok_and(|header| header.typ.as_deref() == Some(DELEGATION_JWS_TYP))
+        .is_ok_and(|header| header.typ.as_deref() == Some(PARENT_GRANT_JWS_TYP))
 }
 
 /// Extract the `iss` claim from the JWS payload without verifying the signature.
@@ -228,8 +228,8 @@ pub enum Error {
     #[error("delegated grant client_id must be an exact HTTPS callback URL")]
     InvalidCallback,
 
-    /// A capability exceeds the parent or the delegation ceiling.
-    #[error("grant capabilities exceed the delegation limit")]
+    /// A capability exceeds the parent, or the parent exceeds the ceiling.
+    #[error("grant capabilities exceed the parent grant limit")]
     CapabilitiesExceeded,
 }
 
@@ -343,7 +343,7 @@ mod tests {
         }
     }
 
-    // ── Delegation chains ───────────────────────────────────────────────
+    // ── Grant chains ───────────────────────────────────────────────
 
     const PARENT_CALLBACK: &str = "https://accounts.example/auth/callback";
     const CHILD_CALLBACK: &str = "https://chat.example/auth/callback";
@@ -390,7 +390,7 @@ mod tests {
         }
 
         fn parent_jws(&self) -> JwsCompact {
-            sign(&self.user, DELEGATION_JWS_TYP, &self.parent)
+            sign(&self.user, PARENT_GRANT_JWS_TYP, &self.parent)
         }
 
         fn child_jws(&self) -> JwsCompact {
@@ -427,7 +427,7 @@ mod tests {
         let stranger = Keypair::random();
 
         // A parent not signed by the user it names.
-        let forged_parent = sign(&stranger, DELEGATION_JWS_TYP, &chain.parent);
+        let forged_parent = sign(&stranger, PARENT_GRANT_JWS_TYP, &chain.parent);
         assert!(matches!(
             verify_chain(&forged_parent, &chain.child_jws()),
             Err(Error::InvalidSignature)
@@ -455,7 +455,7 @@ mod tests {
         let direct_as_parent = sign(&chain.user, GRANT_JWS_TYP, &chain.parent);
         assert!(matches!(
             verify_chain(&direct_as_parent, &chain.child_jws()),
-            Err(Error::InvalidHeaderType(DELEGATION_JWS_TYP))
+            Err(Error::InvalidHeaderType(PARENT_GRANT_JWS_TYP))
         ));
 
         // Further delegation: a child in the parent's place, even when signed
@@ -463,16 +463,16 @@ mod tests {
         let child_as_parent = sign(&chain.user, CHILD_GRANT_JWS_TYP, &chain.child.grant);
         assert!(matches!(
             verify_chain(&child_as_parent, &chain.child_jws()),
-            Err(Error::InvalidHeaderType(DELEGATION_JWS_TYP))
+            Err(Error::InvalidHeaderType(PARENT_GRANT_JWS_TYP))
         ));
-        let parent_as_child = sign(&chain.accounts, DELEGATION_JWS_TYP, &chain.child);
+        let parent_as_child = sign(&chain.accounts, PARENT_GRANT_JWS_TYP, &chain.child);
         assert!(matches!(
             verify_chain(&chain.parent_jws(), &parent_as_child),
             Err(Error::InvalidHeaderType(CHILD_GRANT_JWS_TYP))
         ));
 
-        assert!(is_delegation(&chain.parent_jws()));
-        assert!(!is_delegation(&chain.child_jws()));
+        assert!(is_parent_grant(&chain.parent_jws()));
+        assert!(!is_parent_grant(&chain.child_jws()));
     }
 
     #[test]

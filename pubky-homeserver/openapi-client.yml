@@ -229,7 +229,7 @@ paths:
       - Auth - Grant
       summary: Exchange grant + PoP for bearer token
       description: |-
-        Exchanges a direct grant, or a delegation parent and child grant, for a
+        Exchanges a direct grant, or a parent grant and child grant, for a
         bearer that lasts at most one hour and never outlives the grants.
 
         The first exchange of a new child revokes the app's previous child under
@@ -269,7 +269,7 @@ paths:
           description: Invalid grant signature, expired grant, PoP verification failed,
             nonce replay, or grant revoked/expired. A replaced child is revoked.
         '403':
-          description: Capabilities exceed the parent or the delegation limit, or the
+          description: Capabilities exceed the parent or the limit for parent grants, or the
             app is blocked under this parent and must be reconnected
         '404':
           description: User not found
@@ -304,7 +304,7 @@ paths:
         - `parent`, `grant` and `pop` sign out one app. They revoke the child and
           leave the parent and other apps usable, and the app can sign in again
           with a new child.
-        - A delegation parent in `grant`, with `pop` from the parent's key, revokes
+        - A parent grant in `grant`, with `pop` from the parent's key, revokes
           the parent and all its children.
 
         An unseen parent or child is recorded as revoked. Each request needs a
@@ -328,7 +328,7 @@ paths:
         '401':
           description: Invalid grant signature, PoP verification failed, or nonce replay
         '403':
-          description: Capabilities exceed the parent or the delegation limit, or the
+          description: Capabilities exceed the parent or the limit for parent grants, or the
             direct grant does not match the stored owner
         '404':
           description: User not found, or an unseen direct grant
@@ -359,7 +359,7 @@ paths:
         '401':
           description: Invalid signature or proof, nonce replay, or parent revoked/expired
         '403':
-          description: The parent exceeds the delegation limit
+          description: The parent exceeds the limit for parent grants
         '404':
           description: User not found
         '409':
@@ -369,7 +369,7 @@ paths:
       tags:
       - Auth - Grant
       summary: List all active grants
-      description: Requires root capability. Includes active delegation parents and
+      description: Requires root capability. Includes active parent grants and
         their children, identified by `kind` and `parent_id`. A child is left out
         once its parent is inactive.
       operationId: listGrants
@@ -396,7 +396,7 @@ paths:
       description: |-
         Requires root capability. Revokes the grant and all its sessions.
 
-        Revoking a delegation parent also revokes its children and rejects future
+        Revoking a parent grant also revokes its children and rejects future
         child exchanges. Revoking a child revokes the app's current child and blocks
         the app under that parent until `POST /auth/grant/reconnect`.
       operationId: revokeGrant
@@ -1349,7 +1349,7 @@ components:
       properties:
         parent:
           type: string
-          description: Delegation parent JWS in compact form (`pubky-delegation`,
+          description: Parent grant JWS in compact form (`pubky-parent-grant`,
             user-signed). Required when `grant` is a child grant.
         grant:
           type: string
@@ -1367,7 +1367,7 @@ components:
       properties:
         parent:
           type: string
-          description: Delegation parent JWS in compact form (`pubky-delegation`,
+          description: Parent grant JWS in compact form (`pubky-parent-grant`,
             user-signed).
         proof:
           type: string
@@ -1464,13 +1464,13 @@ components:
           type: string
           enum:
           - direct
-          - delegation
+          - parent
           - child
           description: How the grant was authorized. Homeservers without
             `grant-delegation` omit it, which means `direct`.
         parent_id:
           type: string
-          description: The delegation parent's grant ID. Present only for child grants.
+          description: The parent grant's ID. Present only for child grants.
     SignupTokenResponse:
       type: object
       required:

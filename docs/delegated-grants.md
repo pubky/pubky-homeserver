@@ -1,6 +1,6 @@
 # Parent and child grants
 
-A delegation parent lets one trusted holder, such as Pubky Accounts, sign in
+A parent grant lets one trusted holder, such as Pubky Accounts, sign in
 first-party apps without asking the user to approve each one in Ring. This guide
 is for developers who build Accounts, Ring and SDK integrations. It covers the
 token format, the homeserver API and the grant lifecycle.
@@ -16,11 +16,11 @@ All tokens are Ed25519 JWS values with `alg: EdDSA`.
 | Token | `typ` | Signed by | Can do |
 | --- | --- | --- | --- |
 | Direct grant | `pubky-grant` | The user's identity key | Create storage sessions |
-| Delegation parent | `pubky-delegation` | The user's identity key | Authorize child grants |
+| Parent grant | `pubky-parent-grant` | The user's identity key | Authorize child grants |
 | Child grant | `pubky-child-grant` | The key in the parent's `cnf` | Create storage sessions |
 
-A chain has exactly one parent and one child. A parent can't create storage
-sessions, and a child can't delegate.
+A chain has two levels: a parent can sign many children, and a child can't sign
+further grants. A parent can't create storage sessions.
 
 Decoded parent, signed by `<user-key>`:
 
@@ -163,7 +163,7 @@ parent has been revoked or expired.
 
 `GET /auth/grant/sessions` requires a root session and includes active parents
 and children, so Ring can group apps under their parent. `kind` is `direct`,
-`delegation` or `child`. Children also have `parent_id`. A child doesn't appear
+`parent` or `child`. Children also have `parent_id`. A child doesn't appear
 once its parent is inactive.
 
 A parent appears only after the homeserver first sees it, normally through its

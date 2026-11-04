@@ -18,8 +18,8 @@ use sqlx::{Postgres, Transaction};
 
 use super::crypto::{
     grant_verifier::{
-        is_delegation, verify_chain, verify_chain_for_revocation, verify_delegation,
-        verify_delegation_for_revocation, verify_grant, verify_grant_for_revocation, GrantChain,
+        is_parent_grant, verify_chain, verify_chain_for_revocation, verify_grant,
+        verify_grant_for_revocation, verify_parent, verify_parent_for_revocation, GrantChain,
     },
     jws_crypto::JwsCompact,
     pop_verifier::{
@@ -119,7 +119,7 @@ impl GrantAuthService {
         let GrantChain { parent, child } = verify_chain(parent_jws, child_jws)?;
         self.verify_and_track_pop(pop_jws, &child.grant).await?;
         let user = self.find_user(&parent).await?;
-        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Delegation, None);
+        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Parent, None);
         let new_child = NewGrant::from_claims(
             &child.grant,
             user.id,
@@ -177,14 +177,14 @@ impl GrantAuthService {
     /// Revoke with grant + PoP, even after bearer or grant expiry.
     /// Fresh proofs allow retries after revocation.
     ///
-    /// A delegation parent in place of the grant signs out the parent and all
+    /// A parent grant in place of the grant signs out the parent and all
     /// its children.
     pub async fn signout_with_proof(
         &self,
         grant_jws: &JwsCompact,
         pop_jws: &JwsCompact,
     ) -> Result<(), AuthServiceError> {
-        if is_delegation(grant_jws) {
+        if is_parent_grant(grant_jws) {
             return self.signout_parent_with_proof(grant_jws, pop_jws).await;
         }
         let grant = verify_grant_for_revocation(grant_jws)?;
@@ -205,10 +205,10 @@ impl GrantAuthService {
         parent_jws: &JwsCompact,
         pop_jws: &JwsCompact,
     ) -> Result<(), AuthServiceError> {
-        let parent = verify_delegation_for_revocation(parent_jws)?;
+        let parent = verify_parent_for_revocation(parent_jws)?;
         self.verify_and_track_pop(pop_jws, &parent).await?;
         let user = self.find_user(&parent).await?;
-        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Delegation, None);
+        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Parent, None);
 
         let mut tx = self.sql_db.pool().begin().await?;
         let stored = Self::store_grant(&new_parent, uexecutor!(tx)).await?;
@@ -231,7 +231,7 @@ impl GrantAuthService {
         let GrantChain { parent, child } = verify_chain_for_revocation(parent_jws, child_jws)?;
         self.verify_and_track_pop(pop_jws, &child.grant).await?;
         let user = self.find_user(&parent).await?;
-        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Delegation, None);
+        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Parent, None);
         let mut new_child = NewGrant::from_claims(
             &child.grant,
             user.id,
@@ -257,7 +257,7 @@ impl GrantAuthService {
         parent_jws: &JwsCompact,
         proof_jws: &JwsCompact,
     ) -> Result<(), AuthServiceError> {
-        let parent = verify_delegation(parent_jws)?;
+        let parent = verify_parent(parent_jws)?;
         let hs_pubkey_z32 = self.homeserver_public_key.z32();
         let context = PopVerificationContext {
             cnf_key: &parent.cnf,
@@ -267,7 +267,7 @@ impl GrantAuthService {
         let (pop, client_id) = PopProof::verify_reconnect(proof_jws, &context)?;
         self.check_nonce_replay(&pop).await?;
         let user = self.find_user(&parent).await?;
-        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Delegation, None);
+        let new_parent = NewGrant::from_claims(&parent, user.id, GrantKind::Parent, None);
 
         let mut tx = self.sql_db.pool().begin().await?;
         Self::store_grant(&new_parent, uexecutor!(tx))
@@ -340,7 +340,7 @@ impl GrantAuthService {
                     .await?,
                 );
             }
-        } else if grant.kind == GrantKind::Delegation {
+        } else if grant.kind == GrantKind::Parent {
             GrantRepository::get_for_update(&grant.id, uexecutor!(*tx)).await?;
             revoked
                 .extend(GrantRepository::revoke_children(&grant.id, None, uexecutor!(*tx)).await?);
@@ -714,8 +714,8 @@ mod tests {
         auth::{
             grant::ChildGrantClaims,
             jws::{
-                ClientId, GrantId, PopNonce, CHILD_GRANT_JWS_TYP, DELEGATION_JWS_TYP,
-                GRANT_JWS_TYP, POP_JWS_TYP, RECONNECT_JWS_TYP,
+                ClientId, GrantId, PopNonce, CHILD_GRANT_JWS_TYP, GRANT_JWS_TYP,
+                PARENT_GRANT_JWS_TYP, POP_JWS_TYP, RECONNECT_JWS_TYP,
             },
             pop::{PopProofClaims, ReconnectProofClaims},
         },
@@ -1596,8 +1596,8 @@ mod tests {
     const CHAT: &str = "https://chat.example/auth/callback";
     const SHOP: &str = "https://shop.example/auth/callback";
 
-    /// A user with a delegation parent held by an Accounts key.
-    struct Delegation {
+    /// A user with a parent grant held by an Accounts key.
+    struct ParentGrant {
         service: GrantAuthService,
         user: Keypair,
         user_id: i32,
@@ -1612,7 +1612,7 @@ mod tests {
         child: ChildGrantClaims,
     }
 
-    impl Delegation {
+    impl ParentGrant {
         async fn new() -> Self {
             let service = test_service().await;
             let (user, user_id) = create_test_user(&service).await;
@@ -1645,7 +1645,7 @@ mod tests {
         }
 
         fn parent_jws(&self) -> JwsCompact {
-            sign_jws(&self.user, DELEGATION_JWS_TYP, &self.parent)
+            sign_jws(&self.user, PARENT_GRANT_JWS_TYP, &self.parent)
         }
 
         fn app(&self, callback: &str) -> App {
@@ -1767,7 +1767,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn child_exchange_issues_a_session_with_the_childs_identity_and_rights() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
 
         let response = d.exchange(&app).await.unwrap();
@@ -1785,7 +1785,7 @@ mod tests {
         assert_eq!(session.capabilities.to_string(), "/priv/chat/:rw");
 
         let parent = d.service.get_grant(&d.parent.jti).await.unwrap();
-        assert_eq!(parent.kind, GrantKind::Delegation);
+        assert_eq!(parent.kind, GrantKind::Parent);
         assert_eq!(parent.parent_id, None);
         let child = d.service.get_grant(&app.child.grant.jti).await.unwrap();
         assert_eq!(child.kind, GrantKind::Child);
@@ -1795,7 +1795,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn child_bearer_expires_with_a_short_lived_child() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let mut app = d.app(CHAT);
         app.child.grant.exp = Utc::now().timestamp() as u64 + 60;
 
@@ -1807,7 +1807,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn child_exchange_requires_the_childs_key_and_a_fresh_nonce() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
         let (parent, child) = (d.parent_jws(), d.child_jws(&app));
 
@@ -1845,7 +1845,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn delegated_grants_are_never_accepted_as_direct_grants() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
         let parent_pop = pop_for(&d.service, &d.accounts, &d.parent.jti);
         let child_pop = pop_for(&d.service, &app.key, &app.child.grant.jti);
@@ -1868,7 +1868,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn repeated_exchange_rotates_the_bearer_without_replacing_the_child() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
 
         let first = d.exchange(&app).await.unwrap();
@@ -1888,7 +1888,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn changed_chain_claims_under_recorded_ids_are_rejected() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
         d.exchange(&app).await.unwrap();
 
@@ -1944,7 +1944,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn a_new_child_replaces_the_previous_child_for_that_app_and_parent() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let (old, new) = (d.app(CHAT), d.app(CHAT));
         let old_session = d.exchange(&old).await.unwrap();
         let new_session = d.exchange(&new).await.unwrap();
@@ -1968,7 +1968,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn replacement_is_scoped_to_one_app_and_one_parent() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let other_parent = d.sibling();
         let chat = d.exchange(&d.app(CHAT)).await.unwrap();
         let shop = d.exchange(&d.app(SHOP)).await.unwrap();
@@ -1985,7 +1985,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn concurrent_exchanges_leave_one_active_child_with_one_bearer() {
-        let d = std::sync::Arc::new(Delegation::new().await);
+        let d = std::sync::Arc::new(ParentGrant::new().await);
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..10 {
             let d = d.clone();
@@ -2012,7 +2012,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn app_signout_is_independent_and_leaves_no_block() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let (chat, shop) = (d.app(CHAT), d.app(SHOP));
         let chat_session = d.exchange(&chat).await.unwrap();
         let shop_session = d.exchange(&shop).await.unwrap();
@@ -2045,7 +2045,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn app_signout_requires_the_childs_key() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
         let session = d.exchange(&app).await.unwrap();
 
@@ -2062,7 +2062,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn unseen_child_signout_records_it_revoked_without_displacing_the_current_child() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let current = d.app(CHAT);
         let session = d.exchange(&current).await.unwrap();
         let unseen = d.app(CHAT);
@@ -2083,7 +2083,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn proof_signout_accepts_expired_chains() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let mut expired = d.sibling();
         expired.parent.iat = 1000;
         expired.parent.exp = 2000;
@@ -2107,7 +2107,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn root_revocation_blocks_the_app_until_reconnect() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let root = d.stored_root().await;
         let (chat, shop) = (d.app(CHAT), d.app(SHOP));
         let chat_session = d.exchange(&chat).await.unwrap();
@@ -2146,7 +2146,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn revoking_a_replaced_child_still_revokes_the_apps_current_child() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let root = d.stored_root().await;
         let (old, current) = (d.app(CHAT), d.app(CHAT));
         d.exchange(&old).await.unwrap();
@@ -2164,9 +2164,9 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn another_users_root_session_cannot_revoke_a_child() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let (other_user, other_user_id) = create_test_user(&d.service).await;
-        let other = Delegation::for_user(d.service.clone(), other_user, other_user_id);
+        let other = ParentGrant::for_user(d.service.clone(), other_user, other_user_id);
         let root = other.stored_root().await;
         let app = d.app(CHAT);
         let session = d.exchange(&app).await.unwrap();
@@ -2183,7 +2183,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn reconnect_requires_a_reconnect_proof_from_the_parents_key_for_that_app() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let root = d.stored_root().await;
         let app = d.app(CHAT);
         d.exchange(&app).await.unwrap();
@@ -2223,7 +2223,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn reconnect_is_refused_after_the_parent_is_revoked() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         d.exchange(&d.app(CHAT)).await.unwrap();
         d.parent_signout().await.unwrap();
 
@@ -2236,7 +2236,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn parent_revocation_ends_every_child_including_unexchanged_ones() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let other_parent = d.sibling();
         let (chat, shop) = (d.app(CHAT), d.app(SHOP));
         let chat_session = d.exchange(&chat).await.unwrap();
@@ -2268,7 +2268,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn root_revocation_of_a_parent_cascades() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let root = d.stored_root().await;
         let app = d.app(CHAT);
         let session = d.exchange(&app).await.unwrap();
@@ -2288,12 +2288,12 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn an_unseen_parent_can_be_recorded_as_revoked() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
 
         d.parent_signout().await.unwrap();
 
         let parent = d.service.get_grant(&d.parent.jti).await.unwrap();
-        assert_eq!(parent.kind, GrantKind::Delegation);
+        assert_eq!(parent.kind, GrantKind::Parent);
         assert!(parent.revoked_at.is_some());
         assert!(matches!(
             d.exchange(&d.app(CHAT)).await,
@@ -2304,7 +2304,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn parent_signout_requires_the_parents_key() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
         let session = d.exchange(&app).await.unwrap();
 
@@ -2321,7 +2321,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn bearer_requires_an_active_parent_and_an_unblocked_app() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let app = d.app(CHAT);
         let response = d.exchange(&app).await.unwrap();
         let pool = d.service.sql_db.pool();
@@ -2362,7 +2362,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn listing_shows_active_parents_and_children_with_their_relationship() {
-        let d = Delegation::new().await;
+        let d = ParentGrant::new().await;
         let client = Keypair::random();
         let (grant_jws, pop, direct) =
             sign_grant(&d.user, &client, &d.service.homeserver_public_key());
@@ -2377,7 +2377,7 @@ mod tests {
         assert_eq!(grants.len(), 3);
         let find = |id: &GrantId| grants.iter().find(|g| &g.id == id).unwrap();
         assert_eq!(find(&direct.jti).kind, GrantKind::Direct);
-        assert_eq!(find(&d.parent.jti).kind, GrantKind::Delegation);
+        assert_eq!(find(&d.parent.jti).kind, GrantKind::Parent);
         let child = find(&app.child.grant.jti);
         assert_eq!(child.kind, GrantKind::Child);
         assert_eq!(child.parent_id.as_ref(), Some(&d.parent.jti));
@@ -2418,7 +2418,7 @@ mod tests {
     }
 
     /// Begin a transaction holding the parent's lock, as lifecycle changes do.
-    async fn lock_parent(d: &Delegation) -> (Transaction<'static, Postgres>, GrantEntity) {
+    async fn lock_parent(d: &ParentGrant) -> (Transaction<'static, Postgres>, GrantEntity) {
         let mut tx = d.service.sql_db.pool().begin().await.unwrap();
         let parent = GrantRepository::get_for_update(&d.parent.jti, uexecutor!(tx))
             .await
@@ -2427,7 +2427,7 @@ mod tests {
     }
 
     fn spawn_exchange(
-        d: &std::sync::Arc<Delegation>,
+        d: &std::sync::Arc<ParentGrant>,
         app: &App,
     ) -> tokio::task::JoinHandle<Result<GrantSessionResponse, AuthServiceError>> {
         let (d, app) = (d.clone(), app.clone());
@@ -2437,7 +2437,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn new_child_waiting_on_parent_revocation_is_rejected() {
-        let d = std::sync::Arc::new(Delegation::new().await);
+        let d = std::sync::Arc::new(ParentGrant::new().await);
         d.exchange(&d.app(SHOP)).await.unwrap();
 
         let (mut tx, parent) = lock_parent(&d).await;
@@ -2458,7 +2458,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn refresh_waiting_on_child_revocation_cannot_restore_access() {
-        let d = std::sync::Arc::new(Delegation::new().await);
+        let d = std::sync::Arc::new(ParentGrant::new().await);
         let app = d.app(CHAT);
         d.exchange(&app).await.unwrap();
         let child = d.service.get_grant(&app.child.grant.jti).await.unwrap();
@@ -2481,7 +2481,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn refresh_waiting_on_replacement_cannot_keep_the_old_child() {
-        let d = std::sync::Arc::new(Delegation::new().await);
+        let d = std::sync::Arc::new(ParentGrant::new().await);
         let (old, new) = (d.app(CHAT), d.app(CHAT));
         d.exchange(&old).await.unwrap();
 
@@ -2514,7 +2514,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn exchange_waiting_on_a_block_is_rejected() {
-        let d = std::sync::Arc::new(Delegation::new().await);
+        let d = std::sync::Arc::new(ParentGrant::new().await);
         let app = d.app(CHAT);
         d.exchange(&app).await.unwrap();
         let child = d.service.get_grant(&app.child.grant.jti).await.unwrap();
@@ -2536,7 +2536,7 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn exchange_waiting_on_a_reconnect_sees_the_cleared_block() {
-        let d = std::sync::Arc::new(Delegation::new().await);
+        let d = std::sync::Arc::new(ParentGrant::new().await);
         let app = d.app(CHAT);
         d.exchange(&app).await.unwrap();
         let root = d.stored_root().await;

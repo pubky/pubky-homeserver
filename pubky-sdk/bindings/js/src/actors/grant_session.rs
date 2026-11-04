@@ -199,13 +199,13 @@ impl GrantInfo {
         self.0.expires_at as f64
     }
 
-    /// How the grant was authorized: `direct`, `delegation` or `child`.
+    /// How the grant was authorized: `direct`, `parent` or `child`.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.0.kind.as_str().to_string()
     }
 
-    /// The delegation parent of a child grant.
+    /// The parent grant of a child grant.
     #[wasm_bindgen(js_name = "parentId", getter)]
     pub fn parent_id(&self) -> Option<String> {
         self.0.parent_id.as_ref().map(ToString::to_string)

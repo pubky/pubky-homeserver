@@ -3,7 +3,7 @@
 //! guarantee that private events never leak to unauthorized callers
 
 use super::*;
-use crate::tests::auth::child_grant::Delegation;
+use crate::tests::auth::child_grant::ParentGrant;
 use eventsource_stream::{Event, Eventsource};
 use futures::{Stream, StreamExt};
 use pubky_testnet::pubky::ClientId;
@@ -747,7 +747,7 @@ async fn events_stream_live_public_remains_open_after_auth_revocation() {
 /// Open a live private stream with a child's bearer.
 async fn child_stream(
     testnet: &pubky_testnet::EphemeralTestnet,
-    d: &Delegation,
+    d: &ParentGrant,
     bearer: &str,
 ) -> impl Stream<Item = Result<Event, impl Debug>> + Unpin {
     let server = testnet.homeserver_app();
@@ -774,7 +774,7 @@ async fn child_stream(
 #[pubky_testnet::test]
 async fn events_stream_live_closes_when_child_is_replaced() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let writer = d
         .signer
         .signin(ClientId::new("stream-writer.test").unwrap())
@@ -803,7 +803,7 @@ async fn events_stream_live_closes_when_child_is_replaced() {
 #[pubky_testnet::test]
 async fn events_stream_live_closes_when_parent_is_revoked() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let writer = d
         .signer
         .signin(ClientId::new("stream-writer.test").unwrap())

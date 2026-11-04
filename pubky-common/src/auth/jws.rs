@@ -15,9 +15,9 @@ use crate::crypto::{random_bytes, Keypair};
 /// JWS header `typ` for Grant tokens.
 pub const GRANT_JWS_TYP: &str = "pubky-grant";
 
-/// JWS header `typ` for delegation parents, which authorize child grants but
+/// JWS header `typ` for parent grants, which authorize child grants but
 /// never storage sessions.
-pub const DELEGATION_JWS_TYP: &str = "pubky-delegation";
+pub const PARENT_GRANT_JWS_TYP: &str = "pubky-parent-grant";
 
 /// JWS header `typ` for child grants signed by their parent's `cnf` key.
 pub const CHILD_GRANT_JWS_TYP: &str = "pubky-child-grant";

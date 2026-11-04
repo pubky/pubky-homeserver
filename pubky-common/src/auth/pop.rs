@@ -34,7 +34,7 @@ pub struct PopProofClaims {
     pub iat: u64,
 }
 
-/// Proof that the holder of a delegation parent's `cnf` key confirmed
+/// Proof that the holder of a parent grant's `cnf` key confirmed
 /// reconnecting a blocked app.
 ///
 /// `gid` is the parent's `jti` and `client_id` is the app's exact callback. The

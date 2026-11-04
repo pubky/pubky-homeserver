@@ -24,7 +24,7 @@ use crate::shared::{HttpError, HttpResult};
 /// JSON request body for grant-based session creation.
 #[derive(Deserialize)]
 pub struct CreateGrantSessionRequest {
-    /// Delegation parent JWS (user-signed), present when `grant` is a child grant.
+    /// Parent grant JWS (user-signed), present when `grant` is a child grant.
     pub parent: Option<JwsCompact>,
     /// Grant JWS, signed by the user or, for a child grant, by the parent's key.
     pub grant: JwsCompact,
@@ -35,7 +35,7 @@ pub struct CreateGrantSessionRequest {
 /// JSON request body for reconnecting a blocked app.
 #[derive(Deserialize)]
 pub struct ReconnectRequest {
-    /// Delegation parent JWS (user-signed).
+    /// Parent grant JWS (user-signed).
     pub parent: JwsCompact,
     /// `pubky-reconnect` proof JWS, signed by the parent's key.
     pub proof: JwsCompact,
@@ -143,7 +143,7 @@ pub async fn get_session(
 /// `DELETE /auth/grant/session` — idempotently revokes the grant (if any).
 ///
 /// Clients may send grant + PoP JSON to revoke without a live bearer. A parent +
-/// child + PoP body signs out one app; a delegation parent in place of the grant
+/// child + PoP body signs out one app; a parent grant in place of the grant
 /// signs out the parent and all its children.
 /// Takes `Option<AuthSession>` rather than `AuthSession` so a second signout with an
 /// already-revoked bearer is a 200 no-op rather than a 401.

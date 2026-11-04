@@ -3,7 +3,7 @@ use sqlx::Transaction;
 
 use crate::persistence::sql::migration::MigrationTrait;
 
-/// Records delegation parents, their child grants, and blocked apps.
+/// Records parent grants, their child grants, and blocked apps.
 ///
 /// Existing rows become direct grants through the column default, so they keep
 /// working without a data rewrite. Revoked and replaced grants stay in the table
@@ -18,7 +18,7 @@ impl MigrationTrait for M20261103AddGrantDelegationMigration {
             "ALTER TABLE grants
                 ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'direct',
                 ADD COLUMN parent_id VARCHAR(36) REFERENCES grants (id) ON DELETE CASCADE,
-                ADD CONSTRAINT chk_grants_kind CHECK (kind IN ('direct', 'delegation', 'child')),
+                ADD CONSTRAINT chk_grants_kind CHECK (kind IN ('direct', 'parent', 'child')),
                 ADD CONSTRAINT chk_grants_parent CHECK ((kind = 'child') = (parent_id IS NOT NULL))",
             "CREATE INDEX idx_grants_parent_id ON grants (parent_id)",
             r#"CREATE UNIQUE INDEX uq_grants_active_child ON grants ("user", parent_id, client_id)

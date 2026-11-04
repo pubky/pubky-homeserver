@@ -8,7 +8,7 @@ use pubky_testnet::pubky_common::auth::{
     grant::{ChildGrantClaims, GrantClaims},
     grant_session_responses::{GrantKind, GrantSessionResponse},
     jws::{
-        sign_jws, GrantId, PopNonce, CHILD_GRANT_JWS_TYP, DELEGATION_JWS_TYP, POP_JWS_TYP,
+        sign_jws, GrantId, PopNonce, CHILD_GRANT_JWS_TYP, PARENT_GRANT_JWS_TYP, POP_JWS_TYP,
         RECONNECT_JWS_TYP,
     },
     pop::{PopProofClaims, ReconnectProofClaims},
@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CHAT: &str = "https://chat.example/auth/callback";
 const SHOP: &str = "https://shop.example/auth/callback";
 
-/// A signed-up user with a delegation parent held by an Accounts key.
-pub(in crate::tests) struct Delegation {
+/// A signed-up user with a parent grant held by an Accounts key.
+pub(in crate::tests) struct ParentGrant {
     pub signer: pubky_testnet::pubky::PubkySigner,
     client: PubkyHttpClient,
     base_url: String,
@@ -36,7 +36,7 @@ pub(in crate::tests) struct App {
     pub child: ChildGrantClaims,
 }
 
-impl Delegation {
+impl ParentGrant {
     pub async fn new(testnet: &EphemeralTestnet) -> Self {
         let server = testnet.homeserver_app();
         let pubky = testnet.sdk().unwrap();
@@ -86,7 +86,7 @@ impl Delegation {
     }
 
     fn parent_jws(&self) -> String {
-        sign_jws(&self.user, DELEGATION_JWS_TYP, &self.parent)
+        sign_jws(&self.user, PARENT_GRANT_JWS_TYP, &self.parent)
     }
 
     fn child_jws(&self, app: &App) -> String {
@@ -197,7 +197,7 @@ impl Delegation {
 #[pubky_testnet::test]
 async fn child_session_is_limited_to_the_childs_capabilities() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let app = d.app(CHAT, "/pub/chat/:rw,/priv/chat/keys/:e");
 
     let session = d.exchange(&app).await;
@@ -235,7 +235,7 @@ async fn child_session_is_limited_to_the_childs_capabilities() {
 #[pubky_testnet::test]
 async fn rejected_chains_return_their_documented_statuses() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let app = d.app(CHAT, "/priv/chat/:rw");
 
     // A child signed by someone other than the parent's key.
@@ -290,7 +290,7 @@ async fn rejected_chains_return_their_documented_statuses() {
 #[pubky_testnet::test]
 async fn signup_accepts_direct_grants_only() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let app = d.app(CHAT, "/priv/chat/:rw");
 
     assert_eq!(
@@ -305,7 +305,7 @@ async fn signup_accepts_direct_grants_only() {
 #[pubky_testnet::test]
 async fn info_advertises_grant_delegation() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
 
     let info: serde_json::Value = d
         .client
@@ -327,7 +327,7 @@ async fn info_advertises_grant_delegation() {
 #[pubky_testnet::test]
 async fn listing_groups_children_under_their_parent_and_direct_grants_stay_direct() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let root = d
         .signer
         .signin(ClientId::new("root.test").unwrap())
@@ -342,7 +342,7 @@ async fn listing_groups_children_under_their_parent_and_direct_grants_stay_direc
     let root_id = root.as_grant().unwrap().grant_id().await;
     assert_eq!(find(&root_id).kind, GrantKind::Direct);
     assert_eq!(find(&root_id).parent_id, None);
-    assert_eq!(find(&d.parent.jti).kind, GrantKind::Delegation);
+    assert_eq!(find(&d.parent.jti).kind, GrantKind::Parent);
     assert_eq!(find(&d.parent.jti).parent_id, None);
     let child = find(&app.child.grant.jti);
     assert_eq!(child.kind, GrantKind::Child);
@@ -362,7 +362,7 @@ async fn listing_groups_children_under_their_parent_and_direct_grants_stay_direc
 #[pubky_testnet::test]
 async fn deliberate_revocation_blocks_the_app_until_it_is_reconnected() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let root = d
         .signer
         .signin(ClientId::new("root.test").unwrap())
@@ -405,7 +405,7 @@ async fn deliberate_revocation_blocks_the_app_until_it_is_reconnected() {
 #[pubky_testnet::test]
 async fn app_signout_keeps_the_parent_and_other_apps() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let (chat, shop) = (d.app(CHAT, "/pub/chat/:rw"), d.app(SHOP, "/pub/shop/:rw"));
     let chat_session = d.exchange(&chat).await;
     let shop_session = d.exchange(&shop).await;
@@ -431,7 +431,7 @@ async fn app_signout_keeps_the_parent_and_other_apps() {
 #[pubky_testnet::test]
 async fn parent_signout_ends_every_child_and_future_exchanges() {
     let testnet = build_full_testnet().await;
-    let d = Delegation::new(&testnet).await;
+    let d = ParentGrant::new(&testnet).await;
     let chat = d.app(CHAT, "/pub/chat/:rw");
     let session = d.exchange(&chat).await;
     let unexchanged = d.app(SHOP, "/pub/shop/:rw");

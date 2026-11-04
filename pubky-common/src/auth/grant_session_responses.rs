@@ -37,8 +37,8 @@ pub enum GrantKind {
     #[default]
     Direct,
     /// Signed by the user to authorize child grants. It has no storage sessions.
-    Delegation,
-    /// Signed by a delegation parent's key and exchanged for storage sessions.
+    Parent,
+    /// Signed by a parent grant's key and exchanged for storage sessions.
     Child,
 }
 
@@ -47,7 +47,7 @@ impl GrantKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
-            Self::Delegation => "delegation",
+            Self::Parent => "parent",
             Self::Child => "child",
         }
     }
@@ -71,7 +71,7 @@ pub struct GrantInfo {
     /// How the grant was authorized. Older homeservers omit it for direct grants.
     #[serde(default)]
     pub kind: GrantKind,
-    /// The delegation parent of a child grant.
+    /// The parent grant of a child grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<GrantId>,
 }

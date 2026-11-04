@@ -361,7 +361,7 @@ impl FromRow<'_, PgRow> for GrantEntity {
         let (id, user_id, user_pubkey, client_id, client_cnf_key) = parse_identity_fields(row)?;
         let (capabilities, issued_at, expires_at, revoked_at, created_at) =
             parse_grant_metadata(row)?;
-        let (kind, parent_id) = parse_delegation_fields(row)?;
+        let (kind, parent_id) = parse_kind_and_parent(row)?;
         Ok(GrantEntity {
             id,
             user_id,
@@ -421,11 +421,11 @@ fn parse_grant_metadata(
     Ok((capabilities, issued_at, expires_at, revoked_at, created_at))
 }
 
-fn parse_delegation_fields(row: &PgRow) -> Result<(GrantKind, Option<GrantId>), sqlx::Error> {
+fn parse_kind_and_parent(row: &PgRow) -> Result<(GrantKind, Option<GrantId>), sqlx::Error> {
     let kind: String = row.try_get(GrantIden::Kind.to_string().as_str())?;
     let kind = match kind.as_str() {
         "direct" => GrantKind::Direct,
-        "delegation" => GrantKind::Delegation,
+        "parent" => GrantKind::Parent,
         "child" => GrantKind::Child,
         other => {
             return Err(sqlx::Error::Decode(
@@ -696,7 +696,7 @@ mod tests {
         type Edit = fn(&mut NewGrant);
         let edits: [Edit; 8] = [
             |g| g.user_id += 1,
-            |g| g.kind = GrantKind::Delegation,
+            |g| g.kind = GrantKind::Parent,
             |g| g.parent_id = Some(GrantId::generate()),
             |g| g.client_id = ClientId::new("other.app").unwrap(),
             |g| g.client_cnf_key = Keypair::random().public_key().z32(),
@@ -720,7 +720,7 @@ mod tests {
             .await
             .unwrap();
         let mut parent = make_new_grant(user.id);
-        parent.kind = GrantKind::Delegation;
+        parent.kind = GrantKind::Parent;
         GrantRepository::create(&parent, &mut db.pool().into())
             .await
             .unwrap();
