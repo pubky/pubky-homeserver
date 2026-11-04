@@ -8,6 +8,7 @@
 mod connection_string;
 mod database_mode;
 pub(crate) mod entities;
+pub(crate) mod like_pattern;
 mod migration;
 pub(crate) mod migrations;
 mod migrator;
