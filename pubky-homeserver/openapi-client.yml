@@ -1200,8 +1200,11 @@ paths:
         - **Batch mode** (`live=false` or omitted): fetches historical events then closes.
         - **Live mode** (`live=true`): fetches historical events, then streams new events in real-time.
 
-        The repeatable `user` parameter is required. Each value contains a z-base-32 public
-        key and may append its own cursor as `<pubkey>:<cursor>`.
+        A request resumes in one of two forms. The global form takes an optional `cursor`
+        over the combined feed and an optional repeatable `user` filter; omit `user` to
+        stream every user's public events, in which case a batch request without `limit`
+        closes after 100 events. The per-user form appends a cursor to each value as
+        `<pubkey>:<cursor>`. Combining `cursor` with a per-user cursor returns `400`.
 
         Public paths may be streamed anonymously. Private `/priv/...` paths require exactly
         one target user plus a bearer or cookie session with matching read capability.
@@ -1222,18 +1225,17 @@ paths:
       parameters:
       - name: user
         in: query
-        required: true
+        required: false
         description: |-
-          One or more user public keys (z-base-32), repeated for multiple users.
-          Append `:cursor` to an individual value to resume that user's feed.
-          Cursors must be numeric event IDs. Non-numeric cursors return HTTP 400.
+          User public keys (z-base-32), repeated for multiple users. Omit to stream
+          every user. Append `:cursor` to an individual value to resume that user's
+          feed; cursors must be numeric event IDs and non-numeric cursors return HTTP 400.
           A repeated public key counts once and resumes from the last cursor given
           for it; more than 50 distinct users returns `400`.
         schema:
           type: array
           items:
             type: string
-          minItems: 1
           maxItems: 50
         style: form
         explode: true
@@ -1244,9 +1246,20 @@ paths:
           withCursor:
             value:
             - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo:42
+      - name: cursor
+        in: query
+        description: >-
+          Resume the combined feed after this numeric event ID; applies to every
+          listed user, or to every user when `user` is omitted. Omit the cursor
+          or use `0` to start from the beginning. Non-numeric cursors return HTTP 400,
+          as does combining it with a per-user cursor.
+        schema:
+          type: string
       - name: limit
         in: query
-        description: Maximum total events to send.
+        description: >-
+          Maximum total events to send. Defaults to 100 for a batch request with
+          no `user`; otherwise unlimited.
         schema:
           type: integer
           minimum: 1
@@ -1301,8 +1314,9 @@ paths:
                 type: string
         '400':
           description: |-
-            Invalid user public key or cursor, missing or excessive user parameters,
-            zero/invalid limit, incompatible `live=true` and `reverse=true`, or invalid path.
+            Invalid user public key or cursor, `cursor` combined with a per-user cursor,
+            excessive user parameters, zero/invalid limit, incompatible `live=true` and
+            `reverse=true`, or invalid path.
         '401':
           description: A private path was requested without a valid session.
         '403':
