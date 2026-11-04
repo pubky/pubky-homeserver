@@ -82,12 +82,10 @@ async fn events_stream_all_users_batch_defaults_to_100_events() {
         .signup_cookie(&server.public_key(), None)
         .await
         .unwrap();
-    for i in 0..101 {
-        session
-            .storage()
-            .put(format!("/pub/file_{i}.txt"), vec![1])
-            .await
-            .unwrap();
+    let storage = session.storage();
+    let writes = (0..101).map(|i| storage.put(format!("/pub/file_{i}.txt"), vec![1]));
+    for result in futures::future::join_all(writes).await {
+        result.unwrap();
     }
 
     let response = pubky
@@ -215,4 +213,56 @@ async fn events_stream_all_users_never_shows_private_writes() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The global form's `user=` filter: with two users on the homeserver, `user=<alice>&cursor=`
+/// returns only alice's events, and resuming after her last event returns nothing.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_global_cursor_user_filter_excludes_other_users() {
+    use eventsource_stream::Eventsource;
+    use futures::StreamExt;
+
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let server_host = server.public_key().z32();
+    let pubky = testnet.sdk().unwrap();
+
+    let mut users = Vec::new();
+    for name in ["alice", "bob"] {
+        let signer = pubky.signer(Keypair::random());
+        let session = signer
+            .signup_cookie(&server.public_key(), None)
+            .await
+            .unwrap();
+        session
+            .storage()
+            .put(format!("/pub/{name}.txt"), vec![1])
+            .await
+            .unwrap();
+        users.push(signer.public_key().z32());
+    }
+    let alice = &users[0];
+
+    let events_after = |cursor: &str| {
+        let url = format!("https://{server_host}/events-stream?user={alice}&cursor={cursor}");
+        let client = pubky.client();
+        async move {
+            let response = client.request(Method::GET, &url).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut stream = response.bytes_stream().eventsource();
+            let mut data = Vec::new();
+            while let Ok(Some(Ok(event))) = timeout(Duration::from_secs(10), stream.next()).await {
+                data.push(event.data);
+            }
+            data
+        }
+    };
+
+    let from_start = events_after("0").await;
+    assert_eq!(from_start.len(), 1, "{from_start:?}");
+    assert!(from_start[0].contains("/pub/alice.txt"), "{from_start:?}");
+
+    let resumed = events_after(sse_cursor(&from_start[0])).await;
+    assert!(resumed.is_empty(), "{resumed:?}");
 }

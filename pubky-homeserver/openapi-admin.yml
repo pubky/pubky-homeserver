@@ -209,6 +209,9 @@ paths:
           single:
             value:
             - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo
+          withCursor:
+            value:
+            - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo:42
       - name: cursor
         in: query
         description: >-
