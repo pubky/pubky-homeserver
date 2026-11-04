@@ -5,6 +5,7 @@
 //! Create with a `DataDir` instance: `AppContext::try_from(data_dir)`
 //!
 
+use crate::services::signup_code_service::SignupCodeService;
 use crate::services::user_service::UserService;
 #[cfg(any(test, feature = "testing"))]
 use crate::MockDataDir;
@@ -96,6 +97,8 @@ pub struct AppContext {
     pub(crate) revocation_listener: RevocationListener,
     /// User service for quota resolution and user creation with defaults.
     pub(crate) user_service: UserService,
+    /// Signup code service for issuing, listing and consuming signup codes.
+    pub(crate) signup_code_service: SignupCodeService,
 }
 
 impl AppContext {
@@ -176,6 +179,7 @@ impl AppContext {
             .map_err(AppContextConversionError::RevocationListener)?;
 
         let user_service = UserService::new(sql_db.clone());
+        let signup_code_service = SignupCodeService::new(sql_db.clone());
 
         let file_service = FileService::new_from_config(
             &conf,
@@ -203,6 +207,7 @@ impl AppContext {
             _pg_event_listener: Arc::new(pg_event_listener),
             revocation_listener,
             user_service,
+            signup_code_service,
         })
     }
 }

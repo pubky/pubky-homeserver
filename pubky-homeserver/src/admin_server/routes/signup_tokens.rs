@@ -4,7 +4,6 @@ use super::super::app_state::AppState;
 use crate::{
     persistence::sql::signup_code::{
         SignupCode, SignupCodeEntity, SignupCodeListQuery, SignupCodeListState,
-        SignupCodeRepository,
     },
     shared::{quota::UserQuota, HttpResult},
 };
@@ -68,9 +67,11 @@ pub async fn list_signup_tokens(
     State(state): State<AppState>,
     Query(params): Query<SignupTokensQuery>,
 ) -> HttpResult<(StatusCode, Json<SignupTokensResponse>)> {
-    let page =
-        SignupCodeRepository::list(params.list_query(), &mut state.context.sql_db.pool().into())
-            .await?;
+    let page = state
+        .context
+        .signup_code_service
+        .list(params.list_query())
+        .await?;
     let items = page.items.into_iter().map(SignupTokenItem::from).collect();
 
     Ok((

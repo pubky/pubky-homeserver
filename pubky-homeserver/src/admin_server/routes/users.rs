@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::app_state::AppState;
 use crate::{
-    persistence::sql::user::{UserListQuery, UserListSortBy, UserListState, UserRepository},
+    persistence::sql::user::{UserListQuery, UserListSortBy, UserListState},
     shared::{HttpError, HttpResult, UserItem, Z32Pubkey},
 };
 
@@ -47,7 +47,10 @@ pub async fn list_users(
     State(state): State<AppState>,
     Query(params): Query<UsersQuery>,
 ) -> HttpResult<(StatusCode, Json<UsersResponse>)> {
-    let page = UserRepository::list(params.list_query(), &mut state.context.sql_db.pool().into())
+    let page = state
+        .context
+        .user_service
+        .list(params.list_query())
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => HttpError::bad_request("Unknown cursor"),
@@ -90,6 +93,7 @@ mod tests {
 
     use super::*;
     use crate::admin_server::AdminAuthExt;
+    use crate::persistence::sql::user::UserRepository;
     use crate::AppContext;
 
     fn create_test_server(context: &Arc<AppContext>) -> TestServer {
