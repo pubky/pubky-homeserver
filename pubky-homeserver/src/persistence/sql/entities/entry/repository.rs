@@ -2,7 +2,7 @@ use crate::persistence::sql::entry::EntryEntity;
 use crate::{
     persistence::sql::{
         entities::user::{UserIden, USER_TABLE},
-        UnifiedExecutor,
+        like_pattern, UnifiedExecutor,
     },
     shared::{
         effective_list_limit,
@@ -223,7 +223,10 @@ impl EntryRepository {
                 USER_TABLE,
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).like(format!("{}%", full_path))) // Everything that starts with the path
+            .and_where(
+                Expr::col((ENTRY_TABLE, EntryIden::Path))
+                    .like(like_pattern::starts_with(&full_path)),
+            )
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .limit(1)
             .to_owned();
@@ -340,7 +343,9 @@ impl EntryRepository {
                 USER_TABLE,
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).like(format!("{}%", dir_path))) // Everything that starts with the path
+            .and_where(
+                Expr::col((ENTRY_TABLE, EntryIden::Path)).like(like_pattern::starts_with(&dir_path)),
+            )
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .to_owned();
 
@@ -426,7 +431,10 @@ impl EntryRepository {
                 USER_TABLE,
                 Expr::col((ENTRY_TABLE, EntryIden::User)).eq(Expr::col((USER_TABLE, UserIden::Id))),
             )
-            .and_where(Expr::col((ENTRY_TABLE, EntryIden::Path)).like(format!("{}%", full_path))) // Everything that starts with the path
+            .and_where(
+                Expr::col((ENTRY_TABLE, EntryIden::Path))
+                    .like(like_pattern::starts_with(&full_path)),
+            )
             .and_where(Expr::col((USER_TABLE, UserIden::PublicKey)).eq(path.pubkey().z32()))
             .to_owned();
 
@@ -498,7 +506,7 @@ mod tests {
     use super::*;
     use crate::persistence::sql::SqlDb;
     use crate::services::user_service::UserService;
-    use pubky_common::crypto::Keypair;
+    use pubky_common::crypto::{Keypair, PublicKey};
     use std::collections::HashSet;
 
     #[tokio::test]
@@ -1433,5 +1441,109 @@ mod tests {
         .await
         .unwrap();
         assert!(!exists);
+    }
+
+    /// Sibling folders whose names differ only where `%` and `_` would act
+    /// as `LIKE` wildcards, each with its single file.
+    const LIKE_METACHARACTER_SIBLINGS: [(&str, &str); 4] = [
+        ("/pub/a%b/", "/pub/a%b/1.txt"),
+        ("/pub/a%20b/", "/pub/a%20b/2.txt"),
+        ("/pub/a_b/", "/pub/a_b/3.txt"),
+        ("/pub/aXb/", "/pub/aXb/4.txt"),
+    ];
+
+    async fn create_user_with_like_metacharacter_siblings(db: &SqlDb) -> PublicKey {
+        let user_pubkey = Keypair::random().public_key();
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
+            .await
+            .unwrap();
+        for (_, file) in LIKE_METACHARACTER_SIBLINGS {
+            create_entry_for_path(db, user.id, file).await;
+        }
+        user_pubkey
+    }
+
+    fn entry_path(user_pubkey: &PublicKey, path: &str) -> EntryPath {
+        EntryPath::new(user_pubkey.clone(), StoragePath::new(path).unwrap())
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_list_shallow_escapes_like_metacharacters() {
+        let db = SqlDb::test().await;
+        let user_pubkey = create_user_with_like_metacharacter_siblings(&db).await;
+
+        for (dir, file) in LIKE_METACHARACTER_SIBLINGS {
+            let entries = EntryRepository::list_shallow(
+                &entry_path(&user_pubkey, dir),
+                None,
+                None,
+                false,
+                &mut db.pool().into(),
+            )
+            .await
+            .unwrap();
+            let got: Vec<&str> = entries.iter().map(|e| e.path().as_str()).collect();
+            assert_eq!(got, vec![file], "listing {dir}");
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_list_deep_escapes_like_metacharacters() {
+        let db = SqlDb::test().await;
+        let user_pubkey = create_user_with_like_metacharacter_siblings(&db).await;
+
+        for (dir, file) in LIKE_METACHARACTER_SIBLINGS {
+            let entries = EntryRepository::list_deep(
+                &entry_path(&user_pubkey, dir),
+                None,
+                None,
+                false,
+                &mut db.pool().into(),
+            )
+            .await
+            .unwrap();
+            let got: Vec<&str> = entries.iter().map(|e| e.path().as_str()).collect();
+            assert_eq!(got, vec![file], "listing {dir}");
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_contains_directory_escapes_like_metacharacters() {
+        let db = SqlDb::test().await;
+        let user_pubkey = Keypair::random().public_key();
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
+            .await
+            .unwrap();
+        create_entry_for_path(&db, user.id, "/pub/a%20b/2.txt").await;
+        create_entry_for_path(&db, user.id, "/pub/aXb/4.txt").await;
+
+        // Only the similarly named folders exist, so these must not be found.
+        for dir in ["/pub/a%b/", "/pub/a_b/"] {
+            let exists = EntryRepository::contains_directory(
+                &entry_path(&user_pubkey, dir),
+                &mut db.pool().into(),
+            )
+            .await
+            .unwrap();
+            assert!(!exists, "{dir} should not exist");
+        }
+
+        create_entry_for_path(&db, user.id, "/pub/a%b/1.txt").await;
+        create_entry_for_path(&db, user.id, "/pub/a_b/3.txt").await;
+
+        for dir in ["/pub/a%b/", "/pub/a_b/", "/pub/a%20b/", "/pub/aXb/"] {
+            let exists = EntryRepository::contains_directory(
+                &entry_path(&user_pubkey, dir),
+                &mut db.pool().into(),
+            )
+            .await
+            .unwrap();
+            assert!(exists, "{dir} should exist");
+        }
     }
 }

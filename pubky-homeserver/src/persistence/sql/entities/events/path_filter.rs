@@ -1,7 +1,8 @@
 //! Authorized path filter for the event stream, shared by the route and the repository.
 
-use sea_query::{Expr, ExprTrait, LikeExpr, SimpleExpr};
+use sea_query::{Expr, ExprTrait, SimpleExpr};
 
+use crate::persistence::sql::like_pattern;
 use crate::shared::webdav::StoragePath;
 
 use super::repository::{EventIden, EVENT_TABLE};
@@ -32,18 +33,12 @@ impl PathFilter {
     }
 
     /// SQL predicate selecting rows whose `path` column matches this filter.
-    /// File filters use exact equality; directory filters use an escaped
-    /// `LIKE '<dir>%'` so `_`/`%`/`\` in the stored prefix are matched
-    /// literally and cannot widen the match.
+    /// File filters use exact equality; directory filters match every path
+    /// that starts with the directory.
     pub(super) fn to_condition(&self) -> SimpleExpr {
         let path = self.0.as_str();
         if self.0.is_directory() {
-            let escaped = path
-                .replace('\\', "\\\\")
-                .replace('_', "\\_")
-                .replace('%', "\\%");
-            let like_pattern = format!("{escaped}%");
-            Expr::col((EVENT_TABLE, EventIden::Path)).like(LikeExpr::new(like_pattern).escape('\\'))
+            Expr::col((EVENT_TABLE, EventIden::Path)).like(like_pattern::starts_with(path))
         } else {
             Expr::col((EVENT_TABLE, EventIden::Path)).eq(path)
         }

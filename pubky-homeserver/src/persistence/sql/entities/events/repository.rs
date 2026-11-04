@@ -7,6 +7,7 @@ use crate::{
     constants::PUBLIC_ROOT,
     persistence::sql::{
         events::EventEntity,
+        like_pattern,
         user::{UserIden, USER_TABLE},
         UnifiedExecutor,
     },
@@ -250,7 +251,8 @@ impl EventRepository {
         if let EventVisibility::Public = visibility {
             statement = statement
                 .and_where(
-                    Expr::col((EVENT_TABLE, EventIden::Path)).like(format!("{PUBLIC_ROOT}%")),
+                    Expr::col((EVENT_TABLE, EventIden::Path))
+                        .like(like_pattern::starts_with(PUBLIC_ROOT)),
                 )
                 .to_owned();
         }
