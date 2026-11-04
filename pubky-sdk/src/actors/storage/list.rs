@@ -40,7 +40,7 @@ impl SessionStorage {
         if !path.as_str().ends_with('/') {
             return Err(dir_trailing_slash_error().into());
         }
-        let resource = PubkyResource::new(self.user.clone(), path.as_str())?;
+        let resource = PubkyResource::new(self.user.clone(), path)?;
         let url = resource.to_transport_url()?;
         Ok(ListBuilder::session(self, url))
     }
@@ -212,6 +212,7 @@ impl<'a> ListBuilder<'a> {
         Ok(out)
     }
 
+    /// Listing lines are `pubky://<owner><path>`; legacy HTTP URLs are also accepted.
     fn parse_resource_line(line: &str) -> Result<PubkyResource> {
         if line.starts_with("http://") || line.starts_with("https://") {
             let url = Url::parse(line)?;

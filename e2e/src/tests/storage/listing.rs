@@ -14,9 +14,12 @@ async fn list_deep() {
         .await
         .unwrap();
     let public_key = owner_session.public_key();
-    // Write files to the server
+    // Write files to the server. Names are stored as written and listed in
+    // byte order, so `My File.txt` sorts first and `über.txt` last.
     let mut paths = vec![
         "/pub/a.wrong/a.txt",
+        "/pub/example.com/My File.txt",
+        "/pub/example.com/über.txt",
         "/pub/example.com/a.txt",
         "/pub/example.com/b.txt",
         "/pub/example.com/cc-nested/z.txt",
@@ -43,6 +46,9 @@ async fn list_deep() {
         assert_eq!(
             list,
             vec![
+                format!("{public_key}/pub/example.com/My File.txt")
+                    .parse()
+                    .unwrap(),
                 format!("{public_key}/pub/example.com/a.txt")
                     .parse()
                     .unwrap(),
@@ -58,9 +64,23 @@ async fn list_deep() {
                 format!("{public_key}/pub/example.com/d.txt")
                     .parse()
                     .unwrap(),
+                format!("{public_key}/pub/example.com/über.txt")
+                    .parse()
+                    .unwrap(),
             ],
             "normal list with no limit or cursor"
         );
+
+        // The last entry's address is a valid cursor.
+        let after_last = owner_session
+            .storage()
+            .list(&url)
+            .unwrap()
+            .cursor(&list.last().unwrap().to_pubky_url())
+            .send()
+            .await
+            .unwrap();
+        assert!(after_last.is_empty(), "cursor after the last entry");
     }
 
     // List files with limit of 2
@@ -76,10 +96,10 @@ async fn list_deep() {
         assert_eq!(
             list,
             vec![
-                format!("{public_key}/pub/example.com/a.txt")
+                format!("{public_key}/pub/example.com/My File.txt")
                     .parse()
                     .unwrap(),
-                format!("{public_key}/pub/example.com/b.txt")
+                format!("{public_key}/pub/example.com/a.txt")
                     .parse()
                     .unwrap(),
             ],
@@ -137,6 +157,17 @@ async fn list_deep() {
             "normal list with limit and a full url cursor"
         );
     }
+
+    // Other clients find a name with a space under that name.
+    let body = pubky
+        .public_storage()
+        .get((&public_key, "/pub/example.com/My File.txt"))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(body, Bytes::from(vec![0]));
 }
 
 #[tokio::test]

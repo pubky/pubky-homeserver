@@ -94,11 +94,14 @@ impl StoragePath {
     pub fn covers_path(&self, path: &StoragePath) -> bool {
         self == path || (self.is_directory() && path.as_str().starts_with(self.as_str()))
     }
+}
 
-    /// Encode this decoded path for use as an HTTP URL path.
-    pub fn url_encode(&self) -> String {
-        percent_encoding::utf8_percent_encode(self.as_str(), PATH_ENCODE_SET).to_string()
-    }
+/// Percent-encode a decoded storage path for use as an HTTP URL path.
+///
+/// Every byte outside the unreserved set is encoded; `/` stays as the segment
+/// separator.
+pub fn url_encode_path(path: &str) -> String {
+    percent_encoding::utf8_percent_encode(path, PATH_ENCODE_SET).to_string()
 }
 
 impl AsRef<str> for StoragePath {
@@ -503,16 +506,20 @@ mod tests {
 
     #[test]
     fn url_encoding_preserves_literal_percent_semantics() {
-        let decoded = StoragePath::new("/pub/My%20 File/über").unwrap();
-        assert_eq!(decoded.url_encode(), "/pub/My%2520%20File/%C3%BCber");
+        assert_eq!(
+            url_encode_path("/pub/My%20 File/über"),
+            "/pub/My%2520%20File/%C3%BCber"
+        );
     }
 
     #[test]
     fn url_encoding_preserves_only_path_separators_and_unreserved_characters() {
-        let decoded = StoragePath::new("/AZaz09-._~/:,?#@/%").unwrap();
-        assert_eq!(decoded.url_encode(), "/AZaz09-._~/%3A%2C%3F%23%40/%25");
-        assert_eq!(StoragePath::root().url_encode(), "/");
-        assert_eq!(StoragePath::new("/a/").unwrap().url_encode(), "/a/");
+        assert_eq!(
+            url_encode_path("/AZaz09-._~/:,?#@/%"),
+            "/AZaz09-._~/%3A%2C%3F%23%40/%25"
+        );
+        assert_eq!(url_encode_path("/"), "/");
+        assert_eq!(url_encode_path("/a/"), "/a/");
     }
 
     #[test]

@@ -16,6 +16,7 @@ use axum::{
 };
 use percent_encoding::percent_decode_str;
 use pubky_common::crypto::PublicKey;
+use pubky_common::url_encode_path;
 
 use crate::{
     client_server::{middleware::request_tenant::RequestTenant, AppState},
@@ -122,7 +123,7 @@ impl Website {
                 .is_some()
         {
             // Relative links in the index resolve against the folder.
-            let mut location = format!("{}/", self.path.url_encode());
+            let mut location = format!("{}/", url_encode_path(self.path.as_str()));
             if let Some(query) = request.uri.query() {
                 location.push('?');
                 location.push_str(query);

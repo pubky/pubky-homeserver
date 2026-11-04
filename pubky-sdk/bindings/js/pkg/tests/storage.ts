@@ -887,3 +887,28 @@ test("session: lock/refreshLock/unlock and locked writes", async (t) => {
 
   t.end();
 });
+
+test("storage: names with spaces and % round-trip through public reads and listings", async (t) => {
+  const sdk = Pubky.testnet();
+  const signer = sdk.signer(Keypair.random());
+  const signupToken = await createSignupToken();
+  await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await signer.signin("storage.test");
+  const userPk = session.info.publicKey.z32();
+
+  const path: Path = "/pub/example.com/My File 100%.txt";
+  await session.storage.putText(path, "plain");
+
+  t.equal(
+    await sdk.publicStorage.getText(`pubky${userPk}${path}` as Address),
+    "plain",
+    "public read by the plain name",
+  );
+  t.deepEqual(
+    await sdk.publicStorage.list(`pubky${userPk}/pub/example.com/` as Address),
+    [`pubky://${userPk}${path}`],
+    "listing returns the plain name",
+  );
+
+  t.end();
+});

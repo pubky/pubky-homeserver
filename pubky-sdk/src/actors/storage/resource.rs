@@ -3,9 +3,9 @@
 //! # Why two address shapes?
 //! Pubky paths come in two *disjoint* forms, each used by a different part of the API:
 //!
-//! - [`ResourcePath`]: an **absolute**, URL-safe path like `"/pub/my-cool-app/file"`.
-//!   It contains **no user** information and is used by *session-scoped* (authenticated)
-//!   operations that act “as me”. Example: `session.storage().get("/pub/my-cool-app/file")`.
+//! - [`ResourcePath`]: an **absolute** path like `"/pub/my-cool-app/file"`, holding the
+//!   file's plain name. It contains **no user** information and is used by *session-scoped*
+//!   (authenticated) operations that act “as me”. Example: `session.storage().get("/pub/my-cool-app/file")`.
 //!
 //! - [`PubkyResource`]: an **addressed resource** that pairs a user with an absolute path,
 //!   e.g. `"pubky<public_key>/pub/my-cool-app/file"` (preferred) or `pubky://<public_key>/pub/my-cool-app/file`.
@@ -22,6 +22,7 @@ use std::{fmt, str::FromStr};
 
 use crate::PublicKey;
 use percent_encoding::percent_decode_str;
+use pubky_common::url_encode_path;
 use url::Url;
 
 use crate::{Error, errors::RequestError};
@@ -38,12 +39,16 @@ fn invalid(msg: impl Into<String>) -> Error {
 // ResourcePath
 // ============================================================================
 
-/// An **absolute, URL-safe** homeserver path (`/…`), with percent-encoding where needed.
+/// An **absolute** homeserver path (`/…`) holding the file's plain name.
+///
+/// Nothing is percent-encoded; [`PubkyResource::to_transport_url`] encodes
+/// the path for an HTTP URL.
 ///
 /// - Always normalized to start with `/`.
 /// - Rejects `.` and `..` segments (no path traversal).
 /// - Rejects empty **internal** segments (i.e., `//`); preserves a trailing `/`.
-/// - Percent-encodes segments using `url::Url` rules (UTF-8).
+/// - Other name rules (characters, length) are the homeserver's; it answers
+///   `400` to a name it rejects.
 ///
 /// Accepts both `"pub/my-cool-app/file"` and `"/pub/my-cool-app/file"` and normalizes to an
 /// absolute form.
@@ -59,9 +64,9 @@ fn invalid(msg: impl Into<String>) -> Error {
 /// let dir = ResourcePath::parse("/pub/my-cool-app/")?;
 /// assert_eq!(dir.to_string(), "/pub/my-cool-app/");
 ///
-/// // Percent-encoding
-/// let enc = ResourcePath::parse("pub/My File.txt")?;
-/// assert_eq!(enc.to_string(), "/pub/My%20File.txt");
+/// // Names keep their characters as written
+/// let name = ResourcePath::parse("pub/My File.txt")?;
+/// assert_eq!(name.to_string(), "/pub/My File.txt");
 /// # Ok::<(), pubky::Error>(())
 /// ```
 ///
@@ -74,13 +79,12 @@ fn invalid(msg: impl Into<String>) -> Error {
 pub struct ResourcePath(String);
 
 impl ResourcePath {
-    /// Parse, validate, and normalize to an absolute HTTP-safe path.
+    /// Parse, validate, and normalize to an absolute path.
     ///
     /// See type docs for rules and examples.
     ///
     /// # Errors
     /// - Returns [`Error::Request`] when the input is empty, contains `.`/`..`, or has empty segments (`//`).
-    /// - Returns [`Error::Request`] if internal URL handling fails while normalizing the path.
     pub fn parse<S: AsRef<str>>(s: S) -> Result<Self, Error> {
         let raw = s.as_ref();
         if raw.is_empty() {
@@ -88,56 +92,31 @@ impl ResourcePath {
         }
 
         // Normalize to absolute (keep "/" as-is).
-        let input = if raw.starts_with('/') {
+        let absolute = if raw.starts_with('/') {
             raw.to_string()
         } else {
             format!("/{raw}")
         };
-        if input == "/" {
-            return Ok(Self("/".to_string()));
-        }
-        let wants_trailing = input.ends_with('/');
 
-        // Build via URL path segments (handles percent-encoding).
-        let mut u = Url::parse("dummy:///").map_err(|_err| invalid("internal URL setup failed"))?;
-        {
-            let mut segs = u
-                .path_segments_mut()
-                .map_err(|_err| invalid("internal URL path handling failed"))?;
-            segs.clear();
-
-            let mut parts = input.trim_start_matches('/').split('/').peekable();
-            while let Some(seg) = parts.next() {
-                if seg.is_empty() {
-                    // Only allow the final empty segment (trailing slash)
-                    if parts.peek().is_none() && wants_trailing {
-                        break;
-                    }
-                    return Err(invalid("path contains empty segment ('//')"));
-                }
-                if seg == "." || seg == ".." {
-                    return Err(invalid("path cannot contain '.' or '..'"));
-                }
-                segs.push(seg);
+        let mut segments = absolute[1..].split('/').peekable();
+        while let Some(segment) = segments.next() {
+            // Only the final empty segment (a trailing slash) is allowed.
+            if segment.is_empty() && segments.peek().is_some() {
+                return Err(invalid("path contains empty segment ('//')"));
             }
-            if wants_trailing {
-                segs.push(""); // encode trailing slash
+            if segment == "." || segment == ".." {
+                return Err(invalid("path cannot contain '.' or '..'"));
             }
         }
 
-        Ok(Self(u.path().to_string()))
+        Ok(Self(absolute))
     }
 
-    /// Borrow the normalized absolute path as `&str`.
+    /// Borrow the plain absolute path as `&str`.
     #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    #[inline]
-    fn as_root_relative_str(&self) -> &str {
-        self.as_str().trim_start_matches('/')
     }
 }
 
@@ -169,6 +148,9 @@ impl fmt::Display for ResourcePath {
 ///
 /// Display renders as `pubky<public_key>/<abs-path>` for quick visual identification.
 ///
+/// Every rendering carries the plain path except [`to_transport_url`](Self::to_transport_url),
+/// which percent-encodes it for HTTP.
+///
 /// ### Examples
 /// ```
 /// # use pubky::Keypair;
@@ -197,27 +179,23 @@ impl PubkyResource {
     ///
     /// # Errors
     /// - Returns [`Error::Request`] if the provided path cannot be normalized into an absolute [`ResourcePath`].
-    pub fn new<S: AsRef<str>>(owner: PublicKey, path: S) -> Result<Self, Error> {
+    pub fn new<P: IntoResourcePath>(owner: PublicKey, path: P) -> Result<Self, Error> {
         Ok(Self {
             owner,
-            path: ResourcePath::parse(path)?,
+            path: path.into_abs_path()?,
         })
     }
 
-    /// Render as `pubky://<owner>/<abs-path>` (deep-link form).
-    ///
-    /// Useful when storing or sharing canonical identifiers that include the
-    /// owner’s public key. The returned string never contains a leading
-    /// double-slash in the path (`pubky://<pk>//...`) because [`ResourcePath`]
-    /// is always normalized.
+    /// Render as `pubky://<owner><abs-path>` (deep-link form), the form
+    /// listings and event streams use. `FromStr` parses it back.
     #[must_use]
     pub fn to_pubky_url(&self) -> String {
-        let path = self.path.as_root_relative_str();
-        format!("pubky://{}/{path}", self.owner.z32())
+        format!("pubky://{}{}", self.owner.z32(), self.path)
     }
 
     /// Render as the canonical path-addressed transport URL:
-    /// `https://_pubky.<owner>/storage/<owner>/<abs-path>`.
+    /// `https://_pubky.<owner>/storage/<owner><abs-path>`, with the path
+    /// percent-encoded.
     ///
     /// It is the same mapping performed by [`resolve_pubky`].
     ///
@@ -225,8 +203,10 @@ impl PubkyResource {
     /// - Returns [`Error::Request`] if the constructed transport URL is invalid.
     pub fn to_transport_url(&self) -> Result<Url, Error> {
         let owner = self.owner.z32();
-        let path = self.path.as_root_relative_str();
-        let https = format!("https://_pubky.{owner}/storage/{owner}/{path}");
+        let https = format!(
+            "https://_pubky.{owner}/storage/{owner}{}",
+            url_encode_path(self.path.as_str())
+        );
         Ok(Url::parse(&https)?)
     }
 
@@ -266,10 +246,9 @@ impl PubkyResource {
         Self::new(owner, decoded_path.as_ref())
     }
 
-    /// Render as the identifier form `pubky<owner>/<abs-path>`.
+    /// Render as the identifier form `pubky<owner><abs-path>`.
     pub(crate) fn to_identifier(&self) -> String {
-        let path = self.path.as_root_relative_str();
-        format!("{}/{path}", self.owner)
+        format!("{}{}", self.owner, self.path)
     }
 }
 
@@ -546,7 +525,7 @@ mod tests {
         // To render a pubky:// URL, pair with an explicit owner
         let kp = Keypair::random();
         let user = kp.public_key();
-        let r = PubkyResource::new(user.clone(), p_abs.as_str()).unwrap();
+        let r = PubkyResource::new(user.clone(), &p_abs).unwrap();
         assert_eq!(
             r.to_pubky_url(),
             format!("pubky://{}/pub/my-cool-app/file", user.z32())
@@ -573,15 +552,54 @@ mod tests {
     }
 
     #[test]
-    fn percent_encoding_and_unicode() {
-        assert_eq!(
-            ResourcePath::parse("pub/My File.txt").unwrap().as_str(),
-            "/pub/My%20File.txt"
-        );
-        assert_eq!(
-            ResourcePath::parse("/ä/β/漢").unwrap().as_str(),
-            "/%C3%A4/%CE%B2/%E6%BC%A2"
-        );
+    fn names_stay_plain_and_transport_urls_encode_them() {
+        let owner = Keypair::random().public_key();
+        let prefix = format!("/storage/{}", owner.z32());
+        for (name, encoded) in [
+            ("pub/My File.txt", "/pub/My%20File.txt"),
+            ("/ä/β/漢", "/%C3%A4/%CE%B2/%E6%BC%A2"),
+            ("/pub/100%.txt", "/pub/100%25.txt"),
+        ] {
+            let resource = PubkyResource::new(owner.clone(), name).unwrap();
+            assert_eq!(
+                resource.path.as_str(),
+                format!("/{}", name.trim_start_matches('/'))
+            );
+            assert_eq!(
+                resource.to_transport_url().unwrap().path(),
+                format!("{prefix}{encoded}")
+            );
+        }
+    }
+
+    #[test]
+    fn parsing_and_rendering_round_trip() {
+        let owner = Keypair::random().public_key();
+        for name in [
+            "/pub/My File.txt",
+            "/pub/100%.txt",
+            "/pub/a+b.txt",
+            "/pub/a#b.txt",
+            "/pub/über.txt",
+            "/pub/app/",
+        ] {
+            let path = ResourcePath::parse(name).unwrap();
+            assert_eq!(ResourcePath::parse(path.as_str()).unwrap(), path);
+
+            let resource = PubkyResource::new(owner.clone(), &path).unwrap();
+            assert_eq!(
+                resource.to_pubky_url(),
+                format!("pubky://{}{name}", owner.z32())
+            );
+            assert_eq!(
+                PubkyResource::from_str(&resource.to_pubky_url()).unwrap(),
+                resource
+            );
+            assert_eq!(
+                PubkyResource::from_transport_url(&resource.to_transport_url().unwrap()).unwrap(),
+                resource
+            );
+        }
     }
 
     #[test]
@@ -665,7 +683,7 @@ mod tests {
 
         let resource = PubkyResource::from_transport_url(&url).unwrap();
         assert_eq!(resource.owner, owner);
-        assert_eq!(resource.path.as_str(), "/pub/My%20File.txt");
+        assert_eq!(resource.path.as_str(), "/pub/My File.txt");
     }
 
     #[test]
