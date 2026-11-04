@@ -407,17 +407,18 @@ impl GrantAuthService {
     /// Sessions take their user and capabilities from the stored grant row, and
     /// `store_grant` keeps an existing row for the same client-chosen ID. Refuse
     /// to mint from a row the presented grant does not describe, so a grant ID
-    /// cannot be reused by another user or re-signed with other claims.
+    /// cannot be reused by another user or re-signed with other claims. The
+    /// capability list is compared as signed: parsing canonicalizes each entry's
+    /// actions, so the stored list round-trips unchanged.
     async fn require_stored_grant_matches(
         &self,
         grant: &GrantClaims,
     ) -> Result<(), AuthServiceError> {
         let stored = self.get_grant(&grant.jti).await?;
-        let presented_caps = Capabilities::from(grant.caps.clone()).normalize();
         let matches = stored.user_pubkey == grant.iss
             && stored.client_id == grant.client_id
             && stored.client_cnf_key == grant.cnf.z32()
-            && stored.capabilities.normalize() == presented_caps
+            && stored.capabilities == Capabilities::from(grant.caps.clone())
             && stored.issued_at == grant.iat as i64
             && stored.expires_at == grant.exp as i64;
         if !matches {
@@ -857,10 +858,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.user_key, user_kp.public_key());
-        assert_eq!(
-            session.capabilities.normalize().to_string(),
-            "/pub/b/:w,/pub/a/:rw"
-        );
+        assert_eq!(session.capabilities, Capabilities::from(raw_grant.caps));
     }
 
     // ── signup_grant_account ────────────────────────────────────────
