@@ -37,11 +37,12 @@ pub struct GrantAuthFlowOptions {
     /// `signedApprovalV1` sets `af=v1` in the authorization link.
     #[tsify(optional)]
     pub(crate) approval_format: Option<GrantApprovalFormat>,
-    /// Optional public key of the signed-in user expected to approve, as raw
-    /// z32 or `pubky<z32>`. Set it only when the app already knows the user,
-    /// e.g. to re-authorize or request more capabilities. It adds `spk` to the
-    /// link so signers can select that key, and the flow rejects approvals from
-    /// any other key. Sign-up flows reject it.
+    /// Optional expected identity: public key of the signed-in user that must
+    /// approve, as raw z32 or `pubky<z32>`. Set it only when the app already
+    /// knows the user, e.g. to re-authorize or request more capabilities. It
+    /// adds `spk` to the link; signers approve with that key or refuse, and the
+    /// flow rejects approvals from any other key. Switching accounts takes a
+    /// flow without it. Sign-up flows reject it.
     #[tsify(optional, type = "string | null")]
     pub(crate) expected_signer: Option<String>,
 }

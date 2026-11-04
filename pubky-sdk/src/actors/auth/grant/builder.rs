@@ -123,12 +123,14 @@ impl GrantAuthFlowBuilder {
         self
     }
 
-    /// Name the user expected to approve a sign-in, as the link's `spk` parameter.
+    /// Require a sign-in to be approved by this identity (the link's `spk`
+    /// parameter, an expected-identity constraint).
     ///
     /// Use it only when the app already knows the signed-in user, for example
-    /// to re-authorize or to request more capabilities. Signers can then select
-    /// that key without asking. The flow rejects an approval issued by any
-    /// other key. Sign-up flows reject this option.
+    /// to re-authorize or to request more capabilities. Signers approve with
+    /// that key or refuse the request, and the flow rejects an approval issued
+    /// by any other key. Switching accounts takes a flow without it. Sign-up
+    /// flows reject this option.
     #[must_use]
     pub fn expected_signer(mut self, public_key: PublicKey) -> Self {
         self.expected_signer = Some(public_key);

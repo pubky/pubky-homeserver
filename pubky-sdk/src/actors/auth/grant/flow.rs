@@ -877,6 +877,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_request_without_an_expected_identity_accepts_any_key() {
+        // Switching accounts means a fresh request without `spk`.
+        for format in [
+            GrantApprovalFormat::BareGrant,
+            GrantApprovalFormat::SignedApprovalV1,
+        ] {
+            let request = request(format);
+            for user in [Keypair::random(), Keypair::random()] {
+                let approval =
+                    decode_request(&approval_in_format(&user, &request, format), &request).unwrap();
+                assert_eq!(approval.claims.iss, user.public_key());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn builder_sets_expected_signer_for_signin_only() {
         let caps: Capabilities = "/pub/app/:rw".parse().unwrap();

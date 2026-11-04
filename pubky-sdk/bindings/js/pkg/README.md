@@ -352,15 +352,15 @@ Legacy cookie auth flows can be resumed with
 `sessionStorage`, not `localStorage`, and delete it once the flow completes or
 is abandoned.
 
-#### Name the expected signer
+#### Require the signed-in identity
 
 When the app already knows who is signed in, for example to re-authorize or to
 request more capabilities, pass that user's public key as `expectedSigner`.
-The link gains `spk=<z32>`, so a signer such as Pubky Ring can open that key
-instead of asking the user to pick one. The hint grants nothing: signers sign
-with a key they hold and refuse a link for another key, and `awaitApproval()`
-rejects an approval issued by any other key. Leave it out for a first sign-in.
-Sign-up flows reject it.
+The link gains `spk=<z32>`, an expected-identity constraint: a signer such as
+Pubky Ring opens that key or refuses the request, and `awaitApproval()`
+rejects an approval issued by any other key. Switching accounts takes a fresh
+sign-in without `expectedSigner`. Leave it out for a first sign-in. Sign-up
+flows reject it.
 
 ```js
 const flow = await pubky.startGrantAuthFlow(caps, AuthFlowKind.signin(), {
@@ -369,7 +369,10 @@ const flow = await pubky.startGrantAuthFlow(caps, AuthFlowKind.signin(), {
 });
 ```
 
-Signers that predate `spk` ignore it and show their usual key picker.
+Signers that predate `spk` ignore it and show their usual key picker; an
+approval from another key picked there is rejected. Any app can name any
+public key, so signers should show prominently that the app chose the
+identity; see [AUTH.md](../../../../docs/AUTH.md) for the accepted tradeoffs.
 
 #### Request encryption keys
 

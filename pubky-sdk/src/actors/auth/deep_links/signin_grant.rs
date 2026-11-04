@@ -40,12 +40,12 @@ pub struct SigninGrantParams {
     pub client_pk: PublicKey,
     /// Relay payload format understood by the requesting client.
     pub approval_format: GrantApprovalFormat,
-    /// Public key the requesting app expects to approve, encoded as `spk`.
+    /// Expected identity, encoded as `spk`: the public key that must approve.
     ///
-    /// Set it only when the app already knows the signed-in user, so a signer
-    /// can select that key instead of asking. It is a hint, not authority:
-    /// signers sign with a key they hold, and the grant flow rejects an
-    /// approval issued by any other key.
+    /// Set it only when the app already knows the signed-in user, for example
+    /// to re-authorize. It is a constraint: signers approve with that key or
+    /// refuse the request, and the grant flow rejects an approval issued by
+    /// any other key. Switching accounts takes a request without it.
     pub expected_signer: Option<PublicKey>,
 }
 

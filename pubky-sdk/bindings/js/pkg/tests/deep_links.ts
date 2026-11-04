@@ -120,21 +120,21 @@ test("signin grant deep link valid", async (t) => {
   t.end();
 });
 
-test("signin grant deep link carries an optional expected signer", async (t) => {
+test("signin grant deep link carries an optional expected identity", async (t) => {
   const user = PublicKey.from("8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty");
   const sdk = Pubky.testnet();
   const deadRelay = "http://127.0.0.1:9/inbox";
 
-  const hinted = await sdk.startGrantAuthFlow("/pub/pubky.app/:rw", AuthFlowKind.signin(), {
+  const named = await sdk.startGrantAuthFlow("/pub/pubky.app/:rw", AuthFlowKind.signin(), {
     clientId: "expected-signer.test",
     relay: deadRelay,
     expectedSigner: user.toString(),
   });
-  const hintedLink = SigninGrantDeepLink.parse(hinted.authorizationUrl);
-  t.equal(hintedLink.expectedSigner?.z32(), user.z32(), "pubky<z32> input is emitted as spk");
-  t.deepEqual(new URL(hinted.authorizationUrl).searchParams.getAll("spk"), [user.z32()]);
-  t.equal(SigninGrantDeepLink.parse(hintedLink.toString()).expectedSigner?.z32(), user.z32());
-  await hinted.awaitApproval().catch(() => {});
+  const namedLink = SigninGrantDeepLink.parse(named.authorizationUrl);
+  t.equal(namedLink.expectedSigner?.z32(), user.z32(), "pubky<z32> input is emitted as spk");
+  t.deepEqual(new URL(named.authorizationUrl).searchParams.getAll("spk"), [user.z32()]);
+  t.equal(SigninGrantDeepLink.parse(namedLink.toString()).expectedSigner?.z32(), user.z32());
+  await named.awaitApproval().catch(() => {});
 
   const plain = await sdk.startGrantAuthFlow("/pub/pubky.app/:rw", AuthFlowKind.signin(), {
     clientId: "expected-signer.test",
@@ -157,7 +157,7 @@ test("signin grant deep link carries an optional expected signer", async (t) => 
   }
 
   t.throws(
-    () => SigninGrantDeepLink.parse(`${hintedLink.toString()}&spk=${user.z32()}`),
+    () => SigninGrantDeepLink.parse(`${namedLink.toString()}&spk=${user.z32()}`),
     /spk/,
     "a repeated spk is rejected",
   );
