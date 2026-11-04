@@ -2,7 +2,7 @@
 
 use axum::http::StatusCode;
 
-use super::SignupServiceError;
+use crate::services::signup_service::SignupServiceError;
 use crate::shared::HttpError;
 
 impl From<SignupServiceError> for HttpError {

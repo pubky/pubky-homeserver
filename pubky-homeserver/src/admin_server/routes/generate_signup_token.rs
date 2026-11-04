@@ -6,7 +6,7 @@ use super::super::app_state::AppState;
 
 /// Shared helper: create a signup code with the given limits.
 async fn create_signup_code(state: &AppState, limits: &UserQuota) -> HttpResult<impl IntoResponse> {
-    let code = state.context.signup_code_service.create(limits).await?;
+    let code = state.context.signup_service.create_token(limits).await?;
     Ok((StatusCode::OK, code.id.0))
 }
 

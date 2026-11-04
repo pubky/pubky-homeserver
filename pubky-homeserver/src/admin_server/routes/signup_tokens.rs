@@ -69,8 +69,8 @@ pub async fn list_signup_tokens(
 ) -> HttpResult<(StatusCode, Json<SignupTokensResponse>)> {
     let page = state
         .context
-        .signup_code_service
-        .list(params.list_query())
+        .signup_service
+        .list_tokens(params.list_query())
         .await?;
     let items = page.items.into_iter().map(SignupTokenItem::from).collect();
 
@@ -115,8 +115,8 @@ mod tests {
         let used_by = Keypair::random().public_key();
         let token_id = SignupCode::new(token.clone()).unwrap();
         context
-            .signup_code_service
-            .consume_in_tx(&token_id, &used_by, &mut context.sql_db.pool().into())
+            .signup_service
+            .mark_token_used(&token_id, &used_by)
             .await
             .unwrap();
 
@@ -211,8 +211,8 @@ mod tests {
         let used_by = Keypair::random().public_key();
         let used_token_id = SignupCode::new(used_token.clone()).unwrap();
         context
-            .signup_code_service
-            .consume_in_tx(&used_token_id, &used_by, &mut context.sql_db.pool().into())
+            .signup_service
+            .mark_token_used(&used_token_id, &used_by)
             .await
             .unwrap();
 
@@ -256,8 +256,8 @@ mod tests {
 
         for token in [&token1, &token2, &token3] {
             context
-                .signup_code_service
-                .create_with_id(token, &UserQuota::default())
+                .signup_service
+                .create_token_with_id(token, &UserQuota::default())
                 .await
                 .unwrap();
         }

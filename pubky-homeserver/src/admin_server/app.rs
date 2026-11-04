@@ -377,16 +377,16 @@ mod tests {
 
         for token in [&token1, &token2, &token3, &token4] {
             context
-                .signup_code_service
-                .create_with_id(token, &UserQuota::default())
+                .signup_service
+                .create_token_with_id(token, &UserQuota::default())
                 .await
                 .unwrap();
         }
 
         let used_by = Keypair::random().public_key();
         context
-            .signup_code_service
-            .consume_in_tx(&token1, &used_by, &mut context.sql_db.pool().into())
+            .signup_service
+            .mark_token_used(&token1, &used_by)
             .await
             .unwrap();
 
@@ -612,7 +612,7 @@ mod tests {
         // Verify the code was created with custom limits
         let token_str = response.text();
         let code_id = SignupCode::new(token_str).unwrap();
-        let code = context.signup_code_service.get(&code_id).await.unwrap();
+        let code = context.signup_service.get_token(&code_id).await.unwrap();
         let limits = code.quota();
         assert_eq!(limits.storage_quota_mb, QuotaOverride::Value(1024));
         assert_eq!(limits.rate_read, QuotaOverride::Value(bw("200mb/m")));

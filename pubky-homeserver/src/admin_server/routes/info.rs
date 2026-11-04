@@ -19,7 +19,7 @@ pub(crate) struct InfoResponse {
 /// Return summary statistics about the homeserver.
 pub async fn info(State(state): State<AppState>) -> HttpResult<(StatusCode, Json<InfoResponse>)> {
     let user_overview = state.context.user_service.get_overview().await?;
-    let signup_code_overview = state.context.signup_code_service.get_overview().await?;
+    let signup_code_overview = state.context.signup_service.token_overview().await?;
 
     // Build response
     let body = InfoResponse {

@@ -1,8 +1,8 @@
 //! Signup token resource endpoints.
 
-use crate::client_server::auth::SignupServiceError;
 use crate::client_server::AppState;
 use crate::persistence::sql::signup_code::SignupCode;
+use crate::services::signup_service::SignupServiceError;
 use crate::shared::{HttpError, HttpResult};
 use axum::{
     extract::{Path, State},
@@ -36,7 +36,7 @@ pub async fn get(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> HttpResult<impl IntoResponse> {
-    if !state.auth_state.signup_service.requires_signup_token() {
+    if !state.context.signup_service.requires_signup_token() {
         return Err(HttpError::new_with_message(
             StatusCode::BAD_REQUEST,
             "Signup tokens not required",
@@ -51,7 +51,7 @@ pub async fn get(
     })?;
 
     let code = state
-        .auth_state
+        .context
         .signup_service
         .get_token(&signup_code_id)
         .await
@@ -103,8 +103,8 @@ mod tests {
         .await;
         let server = test_server(&context);
         let code = context
-            .signup_code_service
-            .create(&UserQuota::default())
+            .signup_service
+            .create_token(&UserQuota::default())
             .await
             .unwrap();
 
