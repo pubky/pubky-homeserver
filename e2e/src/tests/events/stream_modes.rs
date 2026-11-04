@@ -69,12 +69,10 @@ async fn events_stream_basic_modes() {
             } else if event.event == "DEL" {
                 del_count += 1;
             }
-            if let Some(cursor_line) = event.data.lines().find(|l| l.starts_with("cursor: ")) {
-                last_cursor = cursor_line.strip_prefix("cursor: ").unwrap().to_string();
-                // Capture cursor at event 250 for Test 3
-                if event_count == 249 {
-                    cursor_250 = last_cursor.clone();
-                }
+            last_cursor = sse_cursor(&event.data).to_string();
+            // Capture cursor at event 250 for Test 3
+            if event_count == 249 {
+                cursor_250 = last_cursor.clone();
             }
             event_count += 1;
         } else {

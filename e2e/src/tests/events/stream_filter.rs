@@ -131,9 +131,7 @@ async fn events_stream_path_filter() {
                     "Cursor: Expected filtered path"
                 );
                 first_batch.push(lines[0].to_string());
-                if let Some(c) = lines.iter().find(|l| l.starts_with("cursor: ")) {
-                    cursor = c.strip_prefix("cursor: ").unwrap().to_string();
-                }
+                cursor = sse_cursor(&event.data).to_string();
             }
         } else {
             break;
