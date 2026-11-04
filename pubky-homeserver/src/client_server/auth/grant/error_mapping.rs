@@ -52,6 +52,9 @@ impl From<AuthServiceError> for HttpError {
             AuthServiceError::GrantOwnershipMismatch => {
                 HttpError::forbidden_with_message("Grant does not belong to authenticated user")
             }
+            AuthServiceError::GrantClaimsMismatch => HttpError::forbidden_with_message(
+                "Grant ID is already stored for another user or with different claims",
+            ),
             AuthServiceError::RootCapabilityRequired => {
                 HttpError::forbidden_with_message("Root capability required")
             }
@@ -147,6 +150,7 @@ mod tests {
             AuthServiceError::GrantOwnershipMismatch,
             StatusCode::FORBIDDEN,
         );
+        assert_status(AuthServiceError::GrantClaimsMismatch, StatusCode::FORBIDDEN);
         assert_status(
             AuthServiceError::RootCapabilityRequired,
             StatusCode::FORBIDDEN,

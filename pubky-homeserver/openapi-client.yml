@@ -246,6 +246,8 @@ paths:
         '401':
           description: Invalid grant signature, expired grant, PoP verification failed,
             nonce replay, or grant revoked/expired
+        '403':
+          description: Grant ID is already stored for another user or with different claims
         '404':
           description: User not found
     get:
