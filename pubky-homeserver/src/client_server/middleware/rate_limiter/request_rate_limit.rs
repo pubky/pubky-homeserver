@@ -172,15 +172,17 @@ mod tests {
     use axum_server::Server;
     use pubky_common::crypto::{Keypair, PublicKey};
     use reqwest::{Client, Response};
-    use tcp_client_addr::{IdentityMode, ProxyProtocol};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinHandle;
     use tower_cookies::CookieManagerLayer;
 
-    use crate::client_server::client_identity::ClientIdentityAcceptor;
+    use crate::client_server::client_identity::{
+        with_http_header_identity, ClientIdentityAcceptor,
+    };
     use crate::client_server::middleware::request_tenant::RequestTenant;
     use crate::shared::quota::{GlobPattern, HttpMethod, LimitKey, LimitKeyType};
     use crate::shared::HttpResult;
+    use crate::ClientIdentityToml;
 
     use super::*;
 
@@ -193,12 +195,12 @@ mod tests {
     }
 
     async fn start_server(config: Vec<PathLimit>) -> SocketAddr {
-        start_server_with_identity(config, IdentityMode::Direct).await
+        start_server_with_identity(config, ClientIdentityToml::Direct {}).await
     }
 
     async fn start_server_with_identity(
         config: Vec<PathLimit>,
-        identity: IdentityMode,
+        identity: ClientIdentityToml,
     ) -> SocketAddr {
         let app = Router::new()
             .route("/upload", post(upload_handler))
@@ -211,6 +213,13 @@ mod tests {
             .layer(CookieManagerLayer::new())
             .layer(middleware::from_fn(RequestTenant::resolve));
 
+        let acceptor = ClientIdentityAcceptor::from_config(&identity).unwrap();
+        let app = match &identity {
+            ClientIdentityToml::HttpHeader { header, .. } => {
+                with_http_header_identity(app, header).unwrap()
+            }
+            ClientIdentityToml::Direct {} | ClientIdentityToml::ProxyProtocol { .. } => app,
+        };
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             0,
@@ -222,7 +231,7 @@ mod tests {
 
         tokio::spawn(async move {
             server
-                .acceptor(ClientIdentityAcceptor::new(identity))
+                .acceptor(acceptor)
                 .serve(app.into_make_service())
                 .await
                 .unwrap();
@@ -239,6 +248,92 @@ mod tests {
             key: LimitKeyType::Ip,
             burst: None,
             whitelist: Vec::new(),
+        }
+    }
+
+    fn header_config(trusted_peer: &str) -> ClientIdentityToml {
+        ClientIdentityToml::HttpHeader {
+            header: "X-Real-IP".into(),
+            trusted_proxies: vec![trusted_peer.parse().unwrap()],
+        }
+    }
+
+    #[tokio::test]
+    async fn http_header_resolves_each_request_on_the_same_connection() {
+        let socket =
+            start_server_with_identity(vec![ip_limit()], header_config("127.0.0.1/32")).await;
+        let mut stream = tokio::net::TcpStream::connect(socket).await.unwrap();
+        // Pipeline requests on one TCP connection, including a mapped IPv4 alias.
+        let mut requests = String::new();
+        for ip in ["198.51.100.1", "::ffff:198.51.100.1", "2001:db8::1"] {
+            requests.push_str(&format!(
+                "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nX-Real-IP: {ip}\r\n\r\n"
+            ));
+        }
+        requests.push_str("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nX-Real-IP: 2001:db8::1\r\nConnection: close\r\n\r\n");
+        stream.write_all(requests.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        let statuses: Vec<_> = response
+            .split("HTTP/1.1 ")
+            .skip(1)
+            .map(|line| {
+                line.split_whitespace()
+                    .next()
+                    .expect("response status code")
+            })
+            .collect();
+        assert_eq!(statuses, ["201", "429", "201", "429"], "{response}");
+    }
+
+    #[tokio::test]
+    async fn http_header_rejects_untrusted_connection_before_http() {
+        let socket = start_server_with_identity(vec![], header_config("192.0.2.0/24")).await;
+        let mut stream = tokio::net::TcpStream::connect(socket).await.unwrap();
+        // Send no HTTP bytes: the peer alone must be enough to reject it.
+        let mut byte = [0];
+        let result = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
+            .await
+            .expect("untrusted connection must close without waiting for HTTP");
+        match result {
+            Ok(length) => assert_eq!(length, 0),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_header_rejects_invalid_values() {
+        for (peer, headers, expected) in [
+            ("127.0.0.1/32", vec![], StatusCode::BAD_REQUEST),
+            ("127.0.0.1/32", vec![""], StatusCode::BAD_REQUEST),
+            ("127.0.0.1/32", vec!["garbage"], StatusCode::BAD_REQUEST),
+            (
+                "127.0.0.1/32",
+                vec!["198.51.100.1:80"],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "127.0.0.1/32",
+                vec!["198.51.100.1, 198.51.100.2"],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "127.0.0.1/32",
+                vec!["198.51.100.1", "198.51.100.1"],
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let socket = start_server_with_identity(vec![], header_config(peer)).await;
+            let mut request = Client::new()
+                .post(format!("http://{socket}/upload"))
+                .header("x-forwarded-for", "198.51.100.1");
+            for value in headers {
+                request = request.header("x-real-ip", value);
+            }
+            assert_eq!(request.send().await.unwrap().status(), expected);
         }
     }
 
@@ -309,9 +404,9 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_protocol_uses_claimed_client_ip_for_rate_limits() {
-        let mode = IdentityMode::ProxyProtocol(
-            ProxyProtocol::new(["127.0.0.1/32".parse().unwrap()]).unwrap(),
-        );
+        let mode = ClientIdentityToml::ProxyProtocol {
+            trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
+        };
         let socket = start_server_with_identity(vec![ip_limit()], mode).await;
 
         let first = proxy_request(socket, "198.51.100.1").await;
@@ -332,10 +427,10 @@ mod tests {
                 "PROXY TCP4 198.51.100.1 127.0.0.1 12345 80\r\n",
             ),
         ] {
-            let proxy = ProxyProtocol::new([trusted_peer.parse().unwrap()]).unwrap();
-            let socket =
-                start_server_with_identity(vec![ip_limit()], IdentityMode::ProxyProtocol(proxy))
-                    .await;
+            let config = ClientIdentityToml::ProxyProtocol {
+                trusted_proxies: vec![trusted_peer.parse().unwrap()],
+            };
+            let socket = start_server_with_identity(vec![ip_limit()], config).await;
             let mut stream = tokio::net::TcpStream::connect(socket).await.unwrap();
             let request = format!("{preface}POST /upload HTTP/1.0\r\nHost: localhost\r\n\r\n");
             if let Err(error) = stream.write_all(request.as_bytes()).await {

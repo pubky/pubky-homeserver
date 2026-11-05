@@ -6,7 +6,7 @@ use crate::MockDataDir;
 use crate::{
     app_context::{AppContext, AppContextConversionError},
     shared::reject_allow,
-    PersistentDataDir,
+    ClientIdentityToml, PersistentDataDir,
 };
 use anyhow::Result;
 use futures_util::TryFutureExt;
@@ -26,14 +26,13 @@ use axum_server::{
     Handle,
 };
 use std::{net::SocketAddr, sync::Arc};
-use tcp_client_addr::IdentityMode;
 use tower::ServiceBuilder;
 use tower_cookies::CookieManagerLayer;
 use tower_http::cors::CorsLayer;
 
 use super::auth::{self, AuthenticationLayer};
 use super::cache_policy;
-use super::client_identity::ClientIdentityAcceptor;
+use super::client_identity::{with_http_header_identity, ClientIdentityAcceptor};
 use super::middleware::{
     rate_limiter::{BandwidthQuotaLimitLayer, RequestRateLimitLayer},
     request_tenant::RequestTenant,
@@ -56,12 +55,21 @@ pub enum ClientServerBuildError {
     /// Failed to build request-count rate limit layer.
     #[error("Request-count rate limit configuration error: {0}")]
     RequestRateLimits(String),
+    /// Invalid HTTP client identity header name.
+    #[error("{listener} client identity header configuration error: {source}")]
+    ClientIdentityHeader {
+        /// Listener with an invalid HTTP header name.
+        listener: &'static str,
+        /// Invalid configured header name.
+        #[source]
+        source: axum::http::header::InvalidHeaderName,
+    },
     /// Invalid client identity configuration for a listener.
     #[error("{listener} client identity configuration error: {source}")]
     ClientIdentityConfig {
         /// Listener with invalid client identity settings.
         listener: &'static str,
-        /// Invalid PROXY protocol configuration.
+        /// Invalid trusted proxy or PROXY protocol configuration.
         #[source]
         source: tcp_client_addr::ConfigError,
     },
@@ -111,28 +119,18 @@ impl ClientServer {
     ) -> std::result::Result<Self, ClientServerBuildError> {
         // Validate both listeners before binding either socket.
         let drive = &context.config_toml.drive;
-        let icann_identity = drive
-            .icann_client_identity
-            .to_identity_mode()
-            .map_err(|source| ClientServerBuildError::ClientIdentityConfig {
-                listener: "ICANN HTTP",
-                source,
-            })?;
-        let pubky_identity = drive
-            .pubky_client_identity
-            .to_identity_mode()
-            .map_err(|source| ClientServerBuildError::ClientIdentityConfig {
-                listener: "Pubky TLS",
-                source,
-            })?;
         let router = Self::create_router(Arc::clone(&context))?;
+        let (icann_router, icann_identity_acceptor) =
+            configure_client_identity(router.clone(), &drive.icann_client_identity, "ICANN HTTP")?;
+        let (pubky_router, pubky_identity_acceptor) =
+            configure_client_identity(router, &drive.pubky_client_identity, "Pubky TLS")?;
 
         let (icann_http_handle, icann_http_socket) =
-            Self::start_icann_http_server(&context, router.clone(), icann_identity)
+            Self::start_icann_http_server(&context, icann_router, icann_identity_acceptor)
                 .await
                 .map_err(ClientServerBuildError::IcannWebServer)?;
         let (pubky_tls_handle, pubky_tls_socket) =
-            Self::start_pubky_tls_server(&context, router, pubky_identity)
+            Self::start_pubky_tls_server(&context, pubky_router, pubky_identity_acceptor)
                 .await
                 .map_err(ClientServerBuildError::PubkyTlsServer)?;
 
@@ -156,7 +154,7 @@ impl ClientServer {
     async fn start_icann_http_server(
         context: &AppContext,
         router: Router,
-        identity: IdentityMode,
+        identity_acceptor: ClientIdentityAcceptor,
     ) -> Result<(Handle<SocketAddr>, SocketAddr)> {
         // Icann http server
         let http_listener = TcpListener::bind(context.config_toml.drive.icann_listen_socket)?;
@@ -166,7 +164,7 @@ impl ClientServer {
         let server = axum_server::from_tcp(http_listener)?;
         tokio::spawn(
             server
-                .acceptor(ClientIdentityAcceptor::new(identity))
+                .acceptor(identity_acceptor)
                 .handle(http_handle.clone())
                 .serve(router.into_make_service())
                 .map_err(|error| {
@@ -182,7 +180,7 @@ impl ClientServer {
     async fn start_pubky_tls_server(
         context: &AppContext,
         router: Router,
-        identity: IdentityMode,
+        identity_acceptor: ClientIdentityAcceptor,
     ) -> Result<(Handle<SocketAddr>, SocketAddr)> {
         // Pubky tls server
         let https_listener = TcpListener::bind(context.config_toml.drive.pubky_listen_socket)?;
@@ -192,7 +190,7 @@ impl ClientServer {
         let server = axum_server::from_tcp(https_listener)?;
         let tls_config =
             RustlsConfig::from_config(Arc::new(context.keypair.to_rpk_rustls_server_config()));
-        let acceptor = pubky_tls_acceptor(tls_config, identity);
+        let acceptor = pubky_tls_acceptor(tls_config, identity_acceptor);
         tokio::spawn(
             server
                 .acceptor(acceptor)
@@ -230,12 +228,28 @@ impl ClientServer {
     }
 }
 
+/// Configure connection and request identity together before binding a listener.
+fn configure_client_identity(
+    router: Router,
+    config: &ClientIdentityToml,
+    listener: &'static str,
+) -> Result<(Router, ClientIdentityAcceptor), ClientServerBuildError> {
+    let acceptor = ClientIdentityAcceptor::from_config(config)
+        .map_err(|source| ClientServerBuildError::ClientIdentityConfig { listener, source })?;
+    let router = match config {
+        ClientIdentityToml::HttpHeader { header, .. } => with_http_header_identity(router, header)
+            .map_err(|source| ClientServerBuildError::ClientIdentityHeader { listener, source })?,
+        ClientIdentityToml::Direct {} | ClientIdentityToml::ProxyProtocol { .. } => router,
+    };
+    Ok((router, acceptor))
+}
+
 fn pubky_tls_acceptor(
     tls_config: RustlsConfig,
-    identity: IdentityMode,
+    identity_acceptor: ClientIdentityAcceptor,
 ) -> RustlsAcceptor<ClientIdentityAcceptor> {
-    // Read the PROXY preface before starting the TLS handshake.
-    RustlsAcceptor::new(tls_config).acceptor(ClientIdentityAcceptor::new(identity))
+    // Check trusted peers and read any PROXY preface before the TLS handshake.
+    RustlsAcceptor::new(tls_config).acceptor(identity_acceptor)
 }
 
 impl Drop for ClientServer {
@@ -324,16 +338,16 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, sync::Arc};
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     use axum::{
         http::{header, Method, StatusCode},
         routing::get,
         Router,
     };
+    use axum_server::accept::Accept;
     use axum_test::TestServer;
     use pubky_common::{capabilities::Capability, crypto::Keypair};
-    use tcp_client_addr::{IdentityMode, ProxyProtocol};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinHandle;
     use tokio_rustls::{
@@ -348,6 +362,7 @@ mod tests {
 
     use crate::client_server::middleware::rate_limiter::RequestRateLimitLayer;
     use crate::client_server::test_utils::signup_cookie;
+    use crate::ClientIdentityToml;
     use crate::{
         app_context::AppContext,
         client_server::ClientServer,
@@ -355,7 +370,7 @@ mod tests {
         shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
     };
 
-    use super::{pubky_tls_acceptor, RustlsConfig};
+    use super::{pubky_tls_acceptor, ClientIdentityAcceptor, RustlsConfig};
 
     // Certificate verification is outside this test's scope. Raw public keys
     // must still be negotiated for the Pubky TLS handshake to succeed.
@@ -437,6 +452,33 @@ mod tests {
         StatusCode::from_bytes(&status_line[9..]).unwrap()
     }
 
+    #[tokio::test]
+    async fn http_header_rejects_untrusted_peer_before_tls_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let keypair = Keypair::random();
+        let tls_config = RustlsConfig::from_config(Arc::new(keypair.to_rpk_rustls_server_config()));
+        let identity_acceptor =
+            ClientIdentityAcceptor::from_config(&ClientIdentityToml::HttpHeader {
+                header: "X-Real-IP".into(),
+                trusted_proxies: vec!["192.0.2.0/24".parse().unwrap()],
+            })
+            .unwrap();
+        let acceptor = pubky_tls_acceptor(tls_config, identity_acceptor);
+        // No TLS ClientHello: rejection must happen before the handshake waits.
+        let result = tokio::time::timeout(Duration::from_secs(5), acceptor.accept(stream, ()))
+            .await
+            .expect("peer rejection must not wait for TLS");
+        let error = match result {
+            Ok(_) => panic!("untrusted peer was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
     fn start_proxy_tls_rate_limited_server() -> (SocketAddr, JoinHandle<()>) {
         let router = Router::new()
             .route("/", get(|| async { "Pubky Homeserver" }))
@@ -456,8 +498,13 @@ mod tests {
         let socket = listener.local_addr().unwrap();
         let keypair = Keypair::random();
         let tls_config = RustlsConfig::from_config(Arc::new(keypair.to_rpk_rustls_server_config()));
-        let proxy = ProxyProtocol::new(["127.0.0.1/32".parse().unwrap()]).unwrap();
-        let acceptor = pubky_tls_acceptor(tls_config, IdentityMode::ProxyProtocol(proxy));
+        let config = ClientIdentityToml::ProxyProtocol {
+            trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
+        };
+        let acceptor = pubky_tls_acceptor(
+            tls_config,
+            ClientIdentityAcceptor::from_config(&config).unwrap(),
+        );
         let server = axum_server::from_tcp(listener).unwrap();
         let server_task = tokio::spawn(async move {
             server

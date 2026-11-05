@@ -34,13 +34,53 @@ There are three deployment guides depending on your requirements and network lim
 
 ## Client addresses and rate limits
 
-From v0.17.0, IP-based limits use the TCP client address; HTTP forwarding
-headers such as `X-Forwarded-For` are ignored. Behind a proxy, clients share
-its IP-based limits unless it sends their addresses using PROXY protocol.
-User-based limits remain separate.
+Each listener has its own client identity setting:
+`drive.icann_client_identity` for browser HTTP traffic and
+`drive.pubky_client_identity` for Pubky TLS. Both default to `direct`.
+The modes determine which client IP is used for IP-based rate limits:
 
-The Caddy guides above use the [`reverse_proxy` transport option][caddy-proxy]
-to send PROXY protocol to the homeserver. Cloudflare Tunnel requires `direct`
-mode and shares IP-based limits across visitors.
+- `direct` uses the TCP peer address. Behind a proxy, visitors share that
+  proxy's IP-based limits.
+- `proxy_protocol` requires a PROXY v1/v2 preface from a trusted proxy.
+  The Caddy guides above use the
+  [`reverse_proxy` transport option][caddy-proxy] to send it. For Pubky TLS,
+  the preface must precede the TLS handshake.
+- `http_header` reads a configured single-IP header on each request from a
+  trusted proxy. The proxy must overwrite the header with the client's IP.
+
+User-based limits remain separate. The `direct` and `proxy_protocol` modes
+ignore HTTP client identity headers.
+
+For HTTP header mode, edit `~/.pubky/config.toml`. Remove any existing
+`icann_client_identity` inline setting from `[drive]`, then add this table
+after the other `[drive]` settings:
+
+```toml
+[drive.icann_client_identity]
+mode = "http_header"
+header = "X-Real-IP"
+trusted_proxies = ["127.0.0.1/32"]
+```
+
+Use the header your proxy overwrites and the proxy's immediate TCP source
+address or network. Both proxy modes require a nonempty `trusted_proxies`
+list. An allowed proxy can claim any client IP; connections from other peers
+are closed before HTTP processing or the TLS handshake.
+
+In `http_header` mode, every request must contain exactly one header value:
+a bare IPv4 or IPv6 address, without a port. Missing, duplicate, or malformed
+values receive `400 Bad Request`, even on routes without IP limits.
+Address lists such as `X-Forwarded-For` chains are unsupported, and no other
+header is used as a fallback. IPv4-mapped IPv6 addresses share limits with
+their IPv4 equivalents.
+
+For Cloudflare Tunnel, use `CF-Connecting-IP` as the header and trust only
+the local connector's source address. Keeping `direct` mode continues to
+share IP-based limits across visitors. See the
+[Cloudflare Tunnel guide](deploy/cloudflare-tunnel.md).
+
+Restart the homeserver after changing `config.toml`. See
+[Run](INSTALL.md#run) in the install guide. For all configuration options, see
+[`config.sample.toml`](../pubky-homeserver/config.sample.toml).
 
 [caddy-proxy]: https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#the-http-transport
