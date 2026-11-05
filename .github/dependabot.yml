@@ -14,6 +14,14 @@ updates:
     # Cover both direct and transitive deps
     allow:
       - dependency-type: "all"
+    ignore:
+      # sqlx 0.9 requires rustc 1.94 (workspace MSRV is 1.91) and rejects
+      # dynamic query strings unless wrapped in `AssertSqlSafe`, which needs a
+      # port of the persistence layer. Lift once MSRV and code are upgraded.
+      - dependency-name: "sqlx"
+        versions: [">= 0.9"]
+      - dependency-name: "sea-query-sqlx"
+        versions: [">= 0.9"]
     groups:
       cargo-dependencies:
         patterns:
