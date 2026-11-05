@@ -54,10 +54,6 @@ pub enum AuthServiceError {
     #[error("Grant has expired")]
     GrantExpired,
 
-    /// The grant ID is already recorded with different claims.
-    #[error("Grant ID is already in use")]
-    GrantConflict,
-
     /// The user revoked this app under the parent; it needs an explicit reconnect.
     #[error("App must be reconnected before it can sign in")]
     AppBlocked,
@@ -77,6 +73,10 @@ pub enum AuthServiceError {
     /// Grant does not belong to the authenticated user.
     #[error("Grant does not belong to authenticated user")]
     GrantOwnershipMismatch,
+
+    /// A grant with this ID is already stored for another user or with other claims.
+    #[error("Grant ID is already stored for another user or with different claims")]
+    GrantClaimsMismatch,
 
     /// Session lacks root capability.
     #[error("Root capability required")]

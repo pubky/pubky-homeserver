@@ -352,6 +352,28 @@ Legacy cookie auth flows can be resumed with
 `sessionStorage`, not `localStorage`, and delete it once the flow completes or
 is abandoned.
 
+#### Require the signed-in identity
+
+When the app already knows who is signed in, for example to re-authorize or to
+request more capabilities, pass that user's public key as `expectedSigner`.
+The link gains `spk=<z32>`, an expected-identity constraint: a signer such as
+Pubky Ring opens that key or refuses the request, and `awaitApproval()`
+rejects an approval issued by any other key. Switching accounts takes a fresh
+sign-in without `expectedSigner`. Leave it out for a first sign-in. Sign-up
+flows reject it.
+
+```js
+const flow = await pubky.startGrantAuthFlow(caps, AuthFlowKind.signin(), {
+  clientId: "my-cool-app.example",
+  expectedSigner: session.info.publicKey.z32(),
+});
+```
+
+Signers that predate `spk` ignore it and show their usual key picker; an
+approval from another key picked there is rejected. Any app can name any
+public key, so signers should show prominently that the app chose the
+identity; see [AUTH.md](../../../../docs/AUTH.md) for the accepted tradeoffs.
+
 #### Request encryption keys
 
 Apps can also ask the signer for encryption keys scoped to storage paths. Set
@@ -659,9 +681,12 @@ interface PubkyError extends Error {
 ```
 
 `RequestError` carries a `RequestErrorData`: `reason` (`Http`, `Timeout`,
-`Connection`, `Body`, `Decode`, `InvalidRequest` or `Other`) and, for HTTP
-failures, `statusCode`. Browser Fetch may only report `Other`. A reason
-describes the failure, not whether retrying a write is safe.
+`Connection`, `TlsVerification`, `Body`, `Decode`, `InvalidRequest` or `Other`)
+and, for HTTP failures, `statusCode`. Browser Fetch may only report `Other`.
+`TlsVerification` means the server certificate was rejected; after a legitimate
+key rotation a stale pkarr cache looks the same, so it does not prove
+interception on its own. A reason describes the failure, not whether retrying a
+write is safe.
 
 ```ts
 import type { PubkyError, RequestErrorData } from "@synonymdev/pubky";

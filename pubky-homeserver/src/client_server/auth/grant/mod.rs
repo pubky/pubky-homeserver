@@ -42,6 +42,8 @@
 //! (signature, expiry, PoP audience/nonce/timestamp), stores the Grant idempotently,
 //! generates a fresh opaque bearer, and inserts a session row holding only
 //! `SHA-256(bearer)`. Each exchange replaces the previous bearer for that grant.
+//! A Grant whose ID is already stored for another user or with other claims is
+//! rejected with 403, so a session always reflects the Grant that was presented.
 //! Browser tabs share that bearer and coordinate refresh through the SDK.
 //!
 //! `DELETE /auth/grant/session` revokes the grant and its session. It accepts

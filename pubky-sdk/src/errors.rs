@@ -171,8 +171,17 @@ pub enum RequestErrorKind {
     },
     /// A transport deadline expired, including during response-body consumption.
     Timeout,
-    /// The native transport identified a connection failure, including TLS setup.
+    /// The native transport identified a connection failure, including a TLS
+    /// handshake that failed for a reason other than [`Self::TlsVerification`].
     Connection,
+    /// The server certificate was rejected during the TLS handshake: by the
+    /// `PubkyTLS` verifier for pkarr hosts, or by the X.509 verifier for ICANN hosts.
+    ///
+    /// For a pkarr host, the presented key is not in the HTTPS or SVCB records
+    /// the client holds for that host. A stale cache after a legitimate key
+    /// rotation looks the same as interception, so this alone does not prove
+    /// tampering. Retrying without re-resolving the record is unlikely to help.
+    TlsVerification,
     /// Sending or receiving an HTTP body failed; the transport does not say why.
     /// Response reads report their failures as [`Self::Decode`], so in practice
     /// this covers request-body (upload) failures.
@@ -193,7 +202,9 @@ impl RequestErrorKind {
     /// or body failure. reqwest's kind records where the failure was noticed,
     /// while the timeout is the underlying cause in the error's source chain; a
     /// response body that stalls past the deadline would otherwise be reported
-    /// as [`Self::Decode`]. Browser errors are not parsed to guess native causes.
+    /// as [`Self::Decode`]. A rejected server certificate is reported as
+    /// [`Self::TlsVerification`] even though reqwest files it as a connection
+    /// failure. Browser errors are not parsed to guess native causes.
     pub fn from_transport(error: &reqwest::Error) -> Self {
         if error.is_timeout() {
             return Self::Timeout;
@@ -202,6 +213,10 @@ impl RequestErrorKind {
             return Self::Http {
                 status: status.as_u16(),
             };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if is_certificate_rejection(error) {
+            return Self::TlsVerification;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if error.is_connect() {
@@ -217,6 +232,32 @@ impl RequestErrorKind {
             Self::Other
         }
     }
+}
+
+/// Whether the transport error was caused by the server certificate being rejected.
+///
+/// tokio-rustls and hyper-rustls each wrap the handshake error in an `io::Error`,
+/// and `io::Error::source` skips its own payload, so the walk descends through
+/// `io::Error::get_ref` as well as `source` to reach the rustls error.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_certificate_rejection(error: &reqwest::Error) -> bool {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = cause {
+        if matches!(
+            current.downcast_ref::<rustls::Error>(),
+            Some(rustls::Error::InvalidCertificate(_))
+        ) {
+            return true;
+        }
+        cause = match current
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+        {
+            Some(payload) => Some(payload),
+            None => current.source(),
+        };
+    }
+    false
 }
 
 /// Transport and server-side HTTP errors.

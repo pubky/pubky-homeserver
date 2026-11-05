@@ -98,6 +98,14 @@ pub enum ClientIdentityToml {
     /// Use the direct TCP peer address.
     // An empty struct variant makes Serde reject fields intended for proxy mode.
     Direct {},
+    /// Require a single-IP HTTP header from a trusted immediate peer.
+    HttpHeader {
+        /// Single-IP header overwritten by the trusted proxy.
+        header: String,
+        /// Networks permitted to supply a client address.
+        #[serde(deserialize_with = "deserialize_trusted_proxies")]
+        trusted_proxies: Vec<IpNet>,
+    },
     /// Require a PROXY preface from a trusted immediate peer.
     ProxyProtocol {
         /// Networks permitted to supply a client address.
@@ -123,6 +131,14 @@ impl ClientIdentityToml {
     pub(crate) fn to_identity_mode(&self) -> Result<IdentityMode, ConfigError> {
         match self {
             Self::Direct {} => Ok(IdentityMode::Direct),
+            Self::HttpHeader {
+                trusted_proxies, ..
+            } => {
+                if trusted_proxies.is_empty() {
+                    return Err(ConfigError::NoTrustedProxies);
+                }
+                Ok(IdentityMode::Direct)
+            }
             Self::ProxyProtocol { trusted_proxies } => {
                 let proxy = ProxyProtocol::new(trusted_proxies.iter().copied())?;
                 Ok(IdentityMode::ProxyProtocol(proxy))
@@ -534,6 +550,37 @@ mod tests {
         // Other fields that were not set (left empty) should still match the default.
         assert_eq!(parsed.admin, ConfigToml::default().admin);
         assert_eq!(parsed.logging, ConfigToml::default().logging);
+    }
+
+    #[test]
+    fn http_header_configuration_requires_header_and_trusted_peers() {
+        let config: ClientIdentityToml = toml::from_str(
+            r#"mode = "http_header"
+header = "X-Real-IP"
+trusted_proxies = ["127.0.0.1/32"]"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            config.to_identity_mode().unwrap(),
+            IdentityMode::Direct
+        ));
+        let encoded = toml::to_string(&config).unwrap();
+        assert_eq!(
+            toml::from_str::<ClientIdentityToml>(&encoded).unwrap(),
+            config
+        );
+        for invalid in [
+            "mode = 'http_header'\nheader = 'X-Real-IP'",
+            "mode = 'http_header'\ntrusted_proxies = ['127.0.0.1/32']",
+            "mode = 'http_header'\nheader = 'X-Real-IP'\ntrusted_proxies = []",
+        ] {
+            assert!(toml::from_str::<ClientIdentityToml>(invalid).is_err());
+        }
+        let empty = ClientIdentityToml::HttpHeader {
+            header: "X-Real-IP".into(),
+            trusted_proxies: vec![],
+        };
+        assert!(empty.to_identity_mode().is_err());
     }
 
     #[test]

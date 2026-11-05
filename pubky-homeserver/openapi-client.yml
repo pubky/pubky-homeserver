@@ -269,12 +269,11 @@ paths:
           description: Invalid grant signature, expired grant, PoP verification failed,
             nonce replay, or grant revoked/expired. A replaced child is revoked.
         '403':
-          description: Capabilities exceed the parent or the limit for parent grants, or the
-            app is blocked under this parent and must be reconnected
+          description: Capabilities exceed the parent or the limit for parent grants, the
+            app is blocked under this parent and must be reconnected, or a grant ID is
+            already stored for another user or with different claims
         '404':
           description: User not found
-        '409':
-          description: A grant ID is already recorded with different claims
     get:
       tags:
       - Auth - Grant
@@ -328,12 +327,11 @@ paths:
         '401':
           description: Invalid grant signature, PoP verification failed, or nonce replay
         '403':
-          description: Capabilities exceed the parent or the limit for parent grants, or the
-            direct grant does not match the stored owner
+          description: Capabilities exceed the parent or the limit for parent grants, the
+            direct grant does not match the stored owner, or a grant ID is already stored
+            with different claims
         '404':
           description: User not found, or an unseen direct grant
-        '409':
-          description: A grant ID is already recorded with different claims
   "/auth/grant/reconnect":
     post:
       tags:
@@ -359,11 +357,10 @@ paths:
         '401':
           description: Invalid signature or proof, nonce replay, or parent revoked/expired
         '403':
-          description: The parent exceeds the limit for parent grants
+          description: The parent exceeds the limit for parent grants, or its grant ID is
+            already stored with different claims
         '404':
           description: User not found
-        '409':
-          description: The parent's grant ID is already recorded with different claims
   "/auth/grant/sessions":
     get:
       tags:
@@ -1202,6 +1199,8 @@ paths:
           One or more user public keys (z-base-32), repeated for multiple users.
           Append `:cursor` to an individual value to resume that user's feed.
           Cursors must be numeric event IDs. Non-numeric cursors return HTTP 400.
+          A repeated public key counts once and resumes from the last cursor given
+          for it; more than 50 distinct users returns `400`.
         schema:
           type: array
           items:

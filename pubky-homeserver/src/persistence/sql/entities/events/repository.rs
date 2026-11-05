@@ -4,13 +4,12 @@ use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, types::chrono::Utc, Row};
 
 use crate::{
-    constants::{DEFAULT_LIST_LIMIT, PUBLIC_ROOT},
-    persistence::{
-        files::events::EventEntity,
-        sql::{
-            user::{UserIden, USER_TABLE},
-            UnifiedExecutor,
-        },
+    constants::PUBLIC_ROOT,
+    persistence::sql::{
+        events::EventEntity,
+        like_pattern,
+        user::{UserIden, USER_TABLE},
+        UnifiedExecutor,
     },
     shared::{effective_list_limit, webdav::EntryPath},
 };
@@ -118,6 +117,7 @@ impl EventRepository {
     /// The executor can either be db.pool() or a transaction.
     pub async fn get_by_user_cursors<'a>(
         user_cursors: Vec<(i32, Option<EventCursor>)>,
+        limit: Option<u16>,
         reverse: bool,
         allowed_paths: &[PathFilter],
         executor: &mut UnifiedExecutor<'a>,
@@ -205,7 +205,7 @@ impl EventRepository {
             .column((subquery_alias.clone(), EventIden::ContentHash))
             .column((subquery_alias.clone(), UserIden::PublicKey))
             .order_by((subquery_alias, EventIden::Id), order)
-            .limit(DEFAULT_LIST_LIMIT as u64)
+            .limit(effective_list_limit(limit) as u64)
             .to_owned();
 
         let (query, values) = combined_query.build_sqlx(PostgresQueryBuilder);
@@ -251,7 +251,8 @@ impl EventRepository {
         if let EventVisibility::Public = visibility {
             statement = statement
                 .and_where(
-                    Expr::col((EVENT_TABLE, EventIden::Path)).like(format!("{PUBLIC_ROOT}%")),
+                    Expr::col((EVENT_TABLE, EventIden::Path))
+                        .like(like_pattern::starts_with(PUBLIC_ROOT)),
                 )
                 .to_owned();
         }
@@ -515,6 +516,7 @@ mod tests {
         let filters = vec![pf("/pub/"), pf("/priv/app/")];
         let events = EventRepository::get_by_user_cursors(
             vec![(user.id, None)],
+            None,
             false,
             &filters,
             &mut db.pool().into(),
@@ -528,6 +530,7 @@ mod tests {
         let filters = vec![pf("/priv/app")];
         let events = EventRepository::get_by_user_cursors(
             vec![(user.id, None)],
+            None,
             false,
             &filters,
             &mut db.pool().into(),
@@ -541,6 +544,7 @@ mod tests {
         let filters = vec![pf("/pub/")];
         let events = EventRepository::get_by_user_cursors(
             vec![(user.id, None)],
+            None,
             true,
             &filters,
             &mut db.pool().into(),
@@ -577,6 +581,7 @@ mod tests {
         let filters = vec![pf("/priv/a_b/")];
         let events = EventRepository::get_by_user_cursors(
             vec![(user.id, None)],
+            None,
             false,
             &filters,
             &mut db.pool().into(),
@@ -590,6 +595,7 @@ mod tests {
         let filters = vec![pf("/priv/a%/")];
         let events = EventRepository::get_by_user_cursors(
             vec![(user.id, None)],
+            None,
             false,
             &filters,
             &mut db.pool().into(),
@@ -631,6 +637,7 @@ mod tests {
         let filters = vec![pf("/pub/")];
         let events = EventRepository::get_by_user_cursors(
             vec![(ua.id, None), (ub.id, None)],
+            None,
             false,
             &filters,
             &mut db.pool().into(),

@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     js_error::{JsResult, PubkyError, PubkyErrorName, deserialize_ts},
-    wrappers::capabilities::parse_capabilities,
+    wrappers::{capabilities::parse_capabilities, keys::PublicKey},
 };
 
 /// Options for starting a grant-backed pubkyauth flow.
@@ -37,6 +37,14 @@ pub struct GrantAuthFlowOptions {
     /// `signedApprovalV1` sets `af=v1` in the authorization link.
     #[tsify(optional)]
     pub(crate) approval_format: Option<GrantApprovalFormat>,
+    /// Optional expected identity: public key of the signed-in user that must
+    /// approve, as raw z32 or `pubky<z32>`. Set it only when the app already
+    /// knows the user, e.g. to re-authorize or request more capabilities. It
+    /// adds `spk` to the link; signers approve with that key or refuse, and the
+    /// flow rejects approvals from any other key. Switching accounts takes a
+    /// flow without it. Sign-up flows reject it.
+    #[tsify(optional, type = "string | null")]
+    pub(crate) expected_signer: Option<String>,
 }
 
 /// Relay payload format understood by the requesting app.
@@ -94,7 +102,7 @@ impl GrantAuthFlow {
     /// The kind of authentication flow to perform.
     ///
     /// @param {GrantAuthFlowOptions} options
-    /// Options for the grant flow: `{ clientId, relay?, xCallback? }`.
+    /// Options for the grant flow: `{ clientId, relay?, xCallback?, approvalFormat?, expectedSigner? }`.
     ///
     /// @returns {GrantAuthFlow}
     /// A running grant auth flow. Call `authorizationUrl()` to show the deep link,
@@ -122,6 +130,7 @@ impl GrantAuthFlow {
             relay,
             x_callback,
             approval_format,
+            expected_signer,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
@@ -141,6 +150,11 @@ impl GrantAuthFlow {
 
         if let Some(x_callback) = x_callback {
             builder = builder.x_callback(x_callback.into());
+        }
+
+        if let Some(expected_signer) = expected_signer {
+            builder =
+                builder.expected_signer(PublicKey::try_from(expected_signer)?.as_inner().clone());
         }
 
         let flow = builder.start()?;
@@ -177,6 +191,7 @@ impl GrantAuthFlow {
             relay,
             x_callback,
             approval_format,
+            expected_signer,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
@@ -199,6 +214,11 @@ impl GrantAuthFlow {
 
         if let Some(x_callback) = x_callback {
             builder = builder.x_callback(x_callback.into());
+        }
+
+        if let Some(expected_signer) = expected_signer {
+            builder =
+                builder.expected_signer(PublicKey::try_from(expected_signer)?.as_inner().clone());
         }
 
         let flow = builder.start()?;

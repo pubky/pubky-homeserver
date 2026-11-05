@@ -283,7 +283,7 @@ async fn rejected_chains_return_their_documented_statuses() {
     d.exchange(&app).await;
     let mut changed = d.app(CHAT, "/priv/chat/:r");
     changed.child.grant.jti = app.child.grant.jti.clone();
-    assert_eq!(d.exchange_status(&changed).await, StatusCode::CONFLICT);
+    assert_eq!(d.exchange_status(&changed).await, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

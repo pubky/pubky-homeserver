@@ -88,9 +88,8 @@ outlives the child or the parent.
 | --- | --- |
 | `400` | The format, grant type, parent reference, timestamps or callback is invalid |
 | `401` | A signature or PoP is invalid, a nonce was replayed, or a grant has expired or been revoked |
-| `403` | The capabilities exceed the limit, or the app is blocked and must be reconnected |
+| `403` | The capabilities exceed the limit, the app is blocked and must be reconnected, or a grant ID is already stored for another user or with different claims |
 | `404` | The user doesn't exist on this homeserver |
-| `409` | A grant ID is already recorded with different claims |
 
 `POST /auth/grant/signup` accepts direct grants only.
 
@@ -104,7 +103,7 @@ separate parents don't affect each other.
 - Repeating the exchange of the active child only replaces its bearer.
 - A revoked or replaced child never becomes active again.
 - A grant ID always refers to the same claims. Reusing an ID with any changed
-  claim returns `409`. This also applies to direct grants.
+  claim returns `403`. This also applies to direct grants.
 
 ## Revoke grants
 

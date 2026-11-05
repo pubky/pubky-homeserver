@@ -254,6 +254,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
 
+    use crate::ClientIdentityToml;
     use axum::middleware::{from_fn, Next};
     use axum::routing::{get, post};
     use axum::{body::Body, Router};
@@ -264,7 +265,6 @@ mod tests {
     use pubky_common::crypto::Keypair;
     use pubky_common::crypto::PublicKey;
     use reqwest::Client;
-    use tcp_client_addr::IdentityMode;
     use tokio::{task::JoinHandle, time::Instant};
     use tower_cookies::CookieManagerLayer;
 
@@ -329,7 +329,9 @@ mod tests {
 
         tokio::spawn(async move {
             server
-                .acceptor(ClientIdentityAcceptor::new(IdentityMode::Direct))
+                .acceptor(
+                    ClientIdentityAcceptor::from_config(&ClientIdentityToml::Direct {}).unwrap(),
+                )
                 .serve(app.into_make_service())
                 .await
                 .unwrap();

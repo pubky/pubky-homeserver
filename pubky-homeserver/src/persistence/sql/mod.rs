@@ -8,6 +8,7 @@
 mod connection_string;
 mod database_mode;
 pub(crate) mod entities;
+pub(crate) mod like_pattern;
 mod migration;
 pub(crate) mod migrations;
 mod migrator;
@@ -19,6 +20,7 @@ pub use connection_string::ConnectionString;
 pub use database_mode::DatabaseMode;
 pub use entities::entry;
 pub(crate) use entities::entry_lock;
+pub(crate) use entities::events;
 pub use entities::signup_code;
 pub(crate) use entities::user;
 pub use migrator::Migrator;

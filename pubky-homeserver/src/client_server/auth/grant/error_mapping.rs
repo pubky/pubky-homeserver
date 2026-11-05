@@ -45,9 +45,6 @@ impl From<AuthServiceError> for HttpError {
             AuthServiceError::GrantExpired => {
                 HttpError::unauthorized_with_message("Grant has expired")
             }
-            AuthServiceError::GrantConflict => {
-                HttpError::new_with_message(StatusCode::CONFLICT, "Grant ID is already in use")
-            }
             AuthServiceError::AppBlocked => {
                 HttpError::forbidden_with_message("App must be reconnected before it can sign in")
             }
@@ -61,6 +58,9 @@ impl From<AuthServiceError> for HttpError {
             AuthServiceError::GrantOwnershipMismatch => {
                 HttpError::forbidden_with_message("Grant does not belong to authenticated user")
             }
+            AuthServiceError::GrantClaimsMismatch => HttpError::forbidden_with_message(
+                "Grant ID is already stored for another user or with different claims",
+            ),
             AuthServiceError::RootCapabilityRequired => {
                 HttpError::forbidden_with_message("Root capability required")
             }
@@ -150,7 +150,6 @@ mod tests {
         assert_status(AuthServiceError::NonceReplay, StatusCode::UNAUTHORIZED);
         assert_status(AuthServiceError::GrantRevoked, StatusCode::UNAUTHORIZED);
         assert_status(AuthServiceError::GrantExpired, StatusCode::UNAUTHORIZED);
-        assert_status(AuthServiceError::GrantConflict, StatusCode::CONFLICT);
         assert_status(AuthServiceError::AppBlocked, StatusCode::FORBIDDEN);
         assert_status(
             AuthServiceError::InvalidSignupGrant("bad signup grant".into()),
@@ -162,6 +161,7 @@ mod tests {
             AuthServiceError::GrantOwnershipMismatch,
             StatusCode::FORBIDDEN,
         );
+        assert_status(AuthServiceError::GrantClaimsMismatch, StatusCode::FORBIDDEN);
         assert_status(
             AuthServiceError::RootCapabilityRequired,
             StatusCode::FORBIDDEN,

@@ -70,4 +70,8 @@ Check that Caddy sends `proxy_protocol v2` and the homeserver's
 in `trusted_proxies` (`127.0.0.1/32` for these guides). A missing preface or
 untrusted peer causes `Rejected connection during client identification`.
 HTTP requests without a PROXY preface also fail on this listener.
-Cloudflare Tunnel must instead use `direct` mode.
+Cloudflare Tunnel uses `direct` mode by default. To preserve individual client
+IPs, use [HTTP header mode](../DEPLOY.md#client-addresses-and-rate-limits)
+with `CF-Connecting-IP` and trust only the connector's TCP source address.
+In header mode, an untrusted peer is disconnected before HTTP processing;
+missing, duplicate, or invalid header values return `400 Bad Request`.

@@ -124,6 +124,7 @@ impl PubkyError {
             RequestErrorKind::Http { status } => ("Http", Some(status)),
             RequestErrorKind::Timeout => ("Timeout", None),
             RequestErrorKind::Connection => ("Connection", None),
+            RequestErrorKind::TlsVerification => ("TlsVerification", None),
             RequestErrorKind::Body => ("Body", None),
             RequestErrorKind::Decode => ("Decode", None),
             RequestErrorKind::InvalidRequest => ("InvalidRequest", None),
@@ -210,6 +211,7 @@ export type RequestErrorReason =
   | "Http"
   | "Timeout"
   | "Connection"
+  | "TlsVerification"
   | "Body"
   | "Decode"
   | "InvalidRequest"
@@ -413,6 +415,7 @@ mod tests {
         for (kind, reason) in [
             (RequestErrorKind::Timeout, "Timeout"),
             (RequestErrorKind::Connection, "Connection"),
+            (RequestErrorKind::TlsVerification, "TlsVerification"),
             (RequestErrorKind::Body, "Body"),
             (RequestErrorKind::Decode, "Decode"),
             (RequestErrorKind::InvalidRequest, "InvalidRequest"),

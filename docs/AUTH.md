@@ -78,6 +78,37 @@ decode them exactly once; in particular, nested percent escapes must remain
 escaped for the destination URL. For compatibility, `callback` may be parsed
 as a fallback for `x-success`, but new requests should emit `x-success`.
 
+A grant sign-in request (`pubkyauth://signin_grant`) may also require a
+specific identity:
+
+| Parameter | Meaning |
+| --- | --- |
+| `spk` | Expected identity: z-base-32 public key that must approve, at most once. Exactly the key's canonical 52-character z-base-32; prefixed (`pubky`, `pk:`), URL-shaped and noncanonical encodings are rejected. |
+
+`spk` is a constraint, not a suggestion. Apps send it only when they already
+know the user, for example to re-authorize or to request more capabilities,
+where renewing access for one account must not switch to another.
+
+- The authenticator uses that key or nothing. It refuses the request when it
+  doesn't hold the key, and it offers no other key. To use another account,
+  the user starts a fresh sign-in, which carries no `spk`.
+- The app rejects an approval issued by any other key, before the grant
+  exchange.
+- The authenticator still asks the user to approve, and its approval screen
+  should say that the app chose the identity: the app, the account's name
+  and its short key.
+
+Authenticators that predate `spk` ignore it and show their key picker. If the
+user then picks another key, the app rejects that approval.
+
+Accepted tradeoffs. A pubky is public, so any app can name any pubky in `spk`:
+- An authenticator that holds several keys opens the named one instead of
+  asking which to use. The user must notice which account the app chose, which
+  is why the approval screen shows it prominently.
+- An app that opens the authenticator by deep link can learn whether it holds
+  a given key: a held key leads to the approval screen and, on deny or
+  timeout, to `x-cancel`; a missing key leads to a local error and no callback.
+
 1. The `Authenticator` app scans that QR code, parses the URL and shows a consent form for the user.
 1. The user decides whether or not to grant these capabilities to the `3rd Party App`.
 1. If the user approves, the `Authenticator` uses their Keypair to sign an [`AuthToken`](#authtoken-encoding), then encrypts that token with the `client_secret`. The `channel_id` is then calculated by hashing that secret and the encrypted token is sent to the callback url, which is the `relay` + `channel_id`.
