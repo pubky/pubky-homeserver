@@ -66,6 +66,62 @@ fn v1_keys_match_shared_vectors() {
 }
 
 #[test]
+fn narrowing_yields_the_keys_the_signer_would_derive() {
+    let scopes = [
+        path("/pub/chat/v1/"),
+        path("/pub/chat/"),
+        path("/priv/chat/settings.json"),
+        path("/priv/ñandú/日本語/"),
+    ];
+    let direct = issue(&scopes);
+    let narrowed = issue(&[path("/pub/"), path("/priv/")])
+        .narrow(&scopes)
+        .unwrap();
+    assert!(narrowed.scopes().eq(scopes.iter()));
+    for scope in &scopes {
+        assert_eq!(
+            *narrowed.derive_scoped_path(scope).unwrap(),
+            *direct.derive_scoped_path(scope).unwrap(),
+            "{scope}"
+        );
+    }
+
+    // Narrowing again, or to the same exact file, keeps the same keys.
+    let file = path("/priv/chat/settings.json");
+    let again = narrowed.narrow(std::slice::from_ref(&file)).unwrap();
+    assert_eq!(
+        *again.derive_for_path(&file).unwrap(),
+        *direct.derive_for_path(&file).unwrap()
+    );
+}
+
+#[test]
+fn narrowing_rejects_scopes_outside_the_bundle() {
+    let bundle = issue(&[path("/pub/app/"), path("/priv/notes")]);
+    for outside in [
+        "/",
+        "/pub/",
+        "/pub/other/",
+        "/pub/app",
+        "/pub/application/",
+        "/priv/notes/",
+        "/priv/notes2",
+    ] {
+        let requested = path(outside);
+        assert_eq!(
+            bundle.narrow(std::slice::from_ref(&requested)).unwrap_err(),
+            KeyDerivationError::OutsideScope { requested },
+        );
+    }
+}
+
+#[test]
+fn narrowing_to_nothing_or_from_nothing_stays_empty() {
+    assert_eq!(root().narrow(&[]).unwrap().scopes().len(), 0);
+    assert!(issue(&[]).narrow(&[path("/pub/")]).is_err());
+}
+
+#[test]
 fn public_api_rejects_directory_seeds_even_with_covering_scopes() {
     for bundle in [root(), issue(&[path("/pub/app/")]), issue(&[])] {
         for directory in ["/", "/pub/app/", "/pub/app/sub/"] {

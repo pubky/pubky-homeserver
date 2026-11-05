@@ -3,6 +3,7 @@ use reqwest::{Method, RequestBuilder};
 use url::Url;
 
 mod features;
+pub use features::FeatureSupport;
 pub(crate) use features::HomeserverFeatures;
 mod storage;
 use storage::StorageAddressing;

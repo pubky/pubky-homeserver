@@ -1,9 +1,11 @@
 //! Signed, confidential grant approval payload for delivery through the relay.
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{
+    StoragePath,
     auth::{
         grant::GrantClaims,
-        jws::{GRANT_JWS_TYP, sign_jws},
+        jws::{GRANT_JWS_TYP, PARENT_GRANT_JWS_TYP, sign_jws},
     },
     capabilities::Capability,
     crypto::Keypair,
@@ -14,6 +16,20 @@ use zeroize::Zeroizing;
 
 /// Distinct JWS type prevents confusing approvals containing secrets with grants.
 pub(crate) const APPROVAL_JWS_TYP: &str = "pubky-grant-approval";
+
+/// JWS type of a user-signed parent approval. Clients that predate delegation
+/// reject it, and it can never be read as a direct approval.
+pub(crate) const PARENT_APPROVAL_JWS_TYP: &str = "pubky-parent-approval";
+
+/// JWS type of a child approval, which the parent's `cnf` key signs.
+pub(crate) const CHILD_APPROVAL_JWS_TYP: &str = "pubky-child-approval";
+
+/// Scopes the grant approved with `e`, the only ones that receive keys.
+pub(crate) fn key_scopes(caps: &[Capability]) -> impl Iterator<Item = &StoragePath> {
+    caps.iter()
+        .filter(|cap| cap.grants_encryption_keys())
+        .map(Capability::scope)
+}
 
 /// Claims signed together so keys cannot be detached from their grant or client.
 ///
@@ -38,15 +54,58 @@ impl GrantApprovalEnvelope {
             grant: sign_jws(keypair, GRANT_JWS_TYP, claims),
             encryption_keys: ScopedEncryptionKeyBundle::from_identity_secret(
                 &identity_secret,
-                claims
-                    .caps
-                    .iter()
-                    .filter(|cap| cap.grants_encryption_keys())
-                    .map(Capability::scope),
+                key_scopes(&claims.caps),
             ),
         };
         Zeroizing::new(sign_jws(keypair, APPROVAL_JWS_TYP, &envelope))
     }
+}
+
+/// A parent grant and the keys for its `e` scopes, signed by the user.
+///
+/// `recipient` is the HPKE public key the approval is encrypted to, so the holder
+/// can tell this approval was made for its own pending request.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ParentApprovalEnvelope {
+    pub(crate) parent: String,
+    pub(crate) recipient: String,
+    pub(crate) encryption_keys: ScopedEncryptionKeyBundle,
+}
+
+impl ParentApprovalEnvelope {
+    /// Sign a parent grant with keys only for scopes explicitly approved with `e`.
+    pub(crate) fn sign(
+        keypair: &Keypair,
+        claims: &GrantClaims,
+        recipient: &[u8; 32],
+    ) -> Zeroizing<String> {
+        let identity_secret = Zeroizing::new(keypair.secret());
+        let envelope = Self {
+            parent: sign_jws(keypair, PARENT_GRANT_JWS_TYP, claims),
+            recipient: URL_SAFE_NO_PAD.encode(recipient),
+            encryption_keys: ScopedEncryptionKeyBundle::from_identity_secret(
+                &identity_secret,
+                key_scopes(&claims.caps),
+            ),
+        };
+        Zeroizing::new(sign_jws(keypair, PARENT_APPROVAL_JWS_TYP, &envelope))
+    }
+}
+
+/// A child grant, its public parent and its narrowed keys, signed by the parent's
+/// `cnf` key.
+///
+/// `recipient` and `state` tie the approval to one pending redirect request. It
+/// never holds the parent's confidential approval or ancestor seeds.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChildApprovalEnvelope {
+    pub(crate) parent: String,
+    pub(crate) child: String,
+    pub(crate) recipient: String,
+    pub(crate) state: String,
+    pub(crate) encryption_keys: ScopedEncryptionKeyBundle,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,9 +116,7 @@ enum ApprovalVersion {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use pubky_common::{
-        StoragePath,
         auth::jws::{ClientId, GrantId, decode_jws_payload},
         capabilities::Capabilities,
         crypto::{PublicKey, Signature},

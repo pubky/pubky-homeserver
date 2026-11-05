@@ -457,6 +457,43 @@ For a browser record, use
 `await pubky.browserSessionStore.restoreEncryptionKeys(storedId)`. It checks
 the account and grant against the record ID and returns the keys directly.
 
+#### Issue child grants through a parent grant
+
+One Ring approval can sign in every first-party app. A holder such as Pubky
+Accounts gets a parent grant, then issues each app a child grant with keys for
+only that app's `e` scopes. The holder can decrypt everything under its approved
+scopes, so read
+[parent and child grants](../../../../docs/delegated-grants.md) first.
+
+```js
+// Get the parent grant from Ring. This opens no session.
+const flow = await pubky.startGrantAuthFlow("/pub/:rwe,/priv/:rwe", AuthFlowKind.signin(), {
+  clientId: "https://accounts.example/auth/callback",
+  parentGrant: true,
+});
+renderQr(flow.authorizationUrl);
+const { id } = await pubky.parentGrantStore.save(await flow.awaitParentGrant());
+
+// When an app redirects here, check its request against your app catalog,
+// then send the user back.
+const request = ChildGrantRequest.parse(location.href);
+const parent = await pubky.parentGrantStore.restore(id);
+location.replace(await parent.issueChild(request));
+```
+
+`issueChild()` rejects requests that exceed the parent, such as keys the user
+declined to share. Send the user to
+`request.declinedUrl("insufficient_permissions")`.
+
+- Before Ring approves a parent, check
+  `await pubky.grantDelegationSupport(user)`. It returns `supported`,
+  `unsupported` (the homeserver needs an upgrade) or `unknown` (retry the check).
+- After the user confirms, `pubky.parentGrantStore.reconnectApp(id, clientId)`
+  lets an app they removed sign in again.
+- `pubky.parentGrantStore.signOut(id)` revokes the parent and all its children.
+  Delivered keys stay usable. `browserSessionStore.clearAll()` leaves saved
+  parents in place.
+
 #### Validate and normalize capabilities
 
 If you accept capability strings from user input (forms, CLI arguments, etc.),

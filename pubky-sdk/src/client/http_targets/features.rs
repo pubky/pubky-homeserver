@@ -5,6 +5,7 @@ use std::{
 };
 
 use lru::LruCache;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use web_time::Instant;
@@ -22,6 +23,27 @@ const INFO_FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);
 const INFO_CACHE_CAPACITY: usize = 256;
 type FeatureCell = Arc<AsyncMutex<Option<CachedFeatures>>>;
 
+/// Whether a homeserver supports a feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureSupport {
+    /// The homeserver advertises the feature.
+    Supported,
+    /// The homeserver answered without advertising the feature, so it needs an upgrade.
+    Unsupported,
+    /// The homeserver gave no usable answer, so the check can be retried.
+    Unknown,
+}
+
+/// What a homeserver answered when asked for its features.
+enum InfoFetch {
+    /// The homeserver listed its features.
+    Listed(Vec<String>),
+    /// The homeserver has no `/info` endpoint, so it predates feature discovery.
+    Missing,
+    /// No usable answer: a connection failure, a server error or a malformed body.
+    Failed,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HomeserverFeatures {
     servers: Arc<Mutex<LruCache<PublicKey, FeatureCell>>>,
@@ -36,12 +58,24 @@ struct InfoResponse {
 #[derive(Debug)]
 struct CachedFeatures {
     features: Vec<String>,
+    /// Whether the last fetch got an answer, rather than falling back after a failure.
+    answered: bool,
     expires_at: Instant,
 }
 
 impl CachedFeatures {
-    fn current(&self) -> Option<&[String]> {
-        (Instant::now() < self.expires_at).then_some(self.features.as_slice())
+    fn is_current(&self) -> bool {
+        Instant::now() < self.expires_at
+    }
+
+    fn support(&self, feature: &str) -> FeatureSupport {
+        if self.features.iter().any(|candidate| candidate == feature) {
+            FeatureSupport::Supported
+        } else if self.answered {
+            FeatureSupport::Unsupported
+        } else {
+            FeatureSupport::Unknown
+        }
     }
 }
 
@@ -73,6 +107,17 @@ impl HomeserverFeatures {
             .await
     }
 
+    /// Like [`Self::supports`], but tells a missing feature apart from a failed check.
+    pub(crate) async fn support(
+        &self,
+        client: &PubkyHttpClient,
+        homeserver: &PublicKey,
+        feature: &str,
+    ) -> FeatureSupport {
+        self.support_for(homeserver, feature, || self.fetch(client, homeserver))
+            .await
+    }
+
     fn cell(&self, homeserver: &PublicKey) -> FeatureCell {
         let mut servers = self.servers.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(cell) = servers.get(homeserver) {
@@ -87,43 +132,62 @@ impl HomeserverFeatures {
     async fn supports_for<F, Fut>(&self, homeserver: &PublicKey, feature: &str, fetch: F) -> bool
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Option<Vec<String>>>,
+        Fut: Future<Output = InfoFetch>,
+    {
+        self.support_for(homeserver, feature, fetch).await == FeatureSupport::Supported
+    }
+
+    async fn support_for<F, Fut>(
+        &self,
+        homeserver: &PublicKey,
+        feature: &str,
+        fetch: F,
+    ) -> FeatureSupport
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = InfoFetch>,
     {
         let cell = self.cell(homeserver);
         let mut cached = cell.lock().await;
-        if let Some(features) = cached.as_ref().and_then(CachedFeatures::current) {
-            return features.iter().any(|candidate| candidate == feature);
+        if let Some(current) = cached.as_ref().filter(|cached| cached.is_current()) {
+            return current.support(feature);
         }
 
-        let (features, ttl) = match fetch().await {
-            Some(features) => (features, INFO_CACHE_TTL),
-            // Keep the last known features through a transient failure
-            None => (
-                cached.take().map_or_else(Vec::new, |stale| stale.features),
-                INFO_FAILURE_CACHE_TTL,
-            ),
+        // Keep the last known features unless the homeserver lists new ones.
+        let mut last_known = || cached.take().map_or_else(Vec::new, |stale| stale.features);
+        let (features, answered, ttl) = match fetch().await {
+            InfoFetch::Listed(features) => (features, true, INFO_CACHE_TTL),
+            InfoFetch::Missing => (last_known(), true, INFO_FAILURE_CACHE_TTL),
+            InfoFetch::Failed => (last_known(), false, INFO_FAILURE_CACHE_TTL),
         };
-        let supports = features.iter().any(|candidate| candidate == feature);
-        *cached = Some(CachedFeatures {
+        let refreshed = CachedFeatures {
             features,
+            answered,
             expires_at: Instant::now() + ttl,
-        });
-        supports
+        };
+        let support = refreshed.support(feature);
+        *cached = Some(refreshed);
+        support
     }
 
-    async fn fetch(&self, client: &PubkyHttpClient, homeserver: &PublicKey) -> Option<Vec<String>> {
+    async fn fetch(&self, client: &PubkyHttpClient, homeserver: &PublicKey) -> InfoFetch {
         let Ok(request) = client.homeserver_info_request(homeserver).await else {
-            return None;
+            return InfoFetch::Failed;
         };
         let Ok(response) = request.timeout(self.request_timeout).send().await else {
-            return None;
+            return InfoFetch::Failed;
         };
+        if response.status() == StatusCode::NOT_FOUND {
+            return InfoFetch::Missing;
+        }
         if !response.status().is_success() {
-            return None;
+            return InfoFetch::Failed;
         }
 
-        let body = read_response_body(response, MAX_INFO_BYTES).await.ok()?;
-        Self::decode(&body)
+        let Ok(body) = read_response_body(response, MAX_INFO_BYTES).await else {
+            return InfoFetch::Failed;
+        };
+        Self::decode(&body).map_or(InfoFetch::Failed, InfoFetch::Listed)
     }
 
     fn decode(body: &[u8]) -> Option<Vec<String>> {
@@ -144,6 +208,7 @@ impl HomeserverFeatures {
         );
         *cached = Some(CachedFeatures {
             features: features.iter().map(ToString::to_string).collect(),
+            answered: true,
             expires_at: Instant::now() + INFO_CACHE_TTL,
         });
     }
@@ -250,12 +315,12 @@ mod tests {
         let first = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             first_calls.fetch_add(1, Ordering::Relaxed);
             tokio::task::yield_now().await;
-            None
+            InfoFetch::Failed
         });
         let second_calls = Arc::clone(&calls);
         let second = discovery.supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async move {
             second_calls.fetch_add(1, Ordering::Relaxed);
-            Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
+            InfoFetch::Listed(vec![PATH_ADDRESSED_STORAGE.to_string()])
         });
 
         let (first, second) = tokio::join!(first, second);
@@ -267,7 +332,7 @@ mod tests {
         let cached = discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
-                Some(Vec::new())
+                InfoFetch::Listed(Vec::new())
             })
             .await;
         assert!(!cached);
@@ -282,7 +347,9 @@ mod tests {
 
         let failed_at = Instant::now();
         discovery
-            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async { None })
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                InfoFetch::Failed
+            })
             .await;
         let failure_expiry = cell.lock().await.as_ref().unwrap().expires_at;
         assert!(failure_expiry >= failed_at + INFO_FAILURE_CACHE_TTL);
@@ -292,7 +359,7 @@ mod tests {
         let succeeded_at = Instant::now();
         discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
-                Some(vec![PATH_ADDRESSED_STORAGE.to_string()])
+                InfoFetch::Listed(vec![PATH_ADDRESSED_STORAGE.to_string()])
             })
             .await;
         let success_expiry = cell.lock().await.as_ref().unwrap().expires_at;
@@ -306,12 +373,15 @@ mod tests {
         let cell = discovery.cell(&homeserver);
         *cell.lock().await = Some(CachedFeatures {
             features: vec![PATH_ADDRESSED_STORAGE.to_string()],
+            answered: true,
             expires_at: Instant::now(),
         });
 
         let failed_at = Instant::now();
         let supported = discovery
-            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async { None })
+            .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
+                InfoFetch::Failed
+            })
             .await;
 
         assert!(supported);
@@ -329,15 +399,49 @@ mod tests {
         let cell = discovery.cell(&homeserver);
         *cell.lock().await = Some(CachedFeatures {
             features: vec![PATH_ADDRESSED_STORAGE.to_string()],
+            answered: true,
             expires_at: Instant::now(),
         });
 
         let supported = discovery
             .supports_for(&homeserver, PATH_ADDRESSED_STORAGE, || async {
-                Some(Vec::new())
+                InfoFetch::Listed(Vec::new())
             })
             .await;
 
         assert!(!supported);
+    }
+
+    #[tokio::test]
+    async fn tells_a_missing_feature_from_a_failed_check() {
+        use FeatureSupport::{Supported, Unknown, Unsupported};
+
+        let feature = PATH_ADDRESSED_STORAGE;
+        let listed = || vec![feature.to_string()];
+        let cases: [(Option<Vec<String>>, InfoFetch, FeatureSupport); 6] = [
+            (None, InfoFetch::Listed(listed()), Supported),
+            (None, InfoFetch::Listed(Vec::new()), Unsupported),
+            (None, InfoFetch::Missing, Unsupported),
+            (None, InfoFetch::Failed, Unknown),
+            // A failure can't turn a known feature off, or confirm a missing one.
+            (Some(listed()), InfoFetch::Failed, Supported),
+            (Some(Vec::new()), InfoFetch::Failed, Unknown),
+        ];
+
+        for (stale, fetched, expected) in cases {
+            let discovery = HomeserverFeatures::default();
+            let homeserver = crate::Keypair::random().public_key();
+            if let Some(features) = stale {
+                *discovery.cell(&homeserver).lock().await = Some(CachedFeatures {
+                    features,
+                    answered: true,
+                    expires_at: Instant::now(),
+                });
+            }
+            let support = discovery
+                .support_for(&homeserver, feature, || async { fetched })
+                .await;
+            assert_eq!(support, expected);
+        }
     }
 }

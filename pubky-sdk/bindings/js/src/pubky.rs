@@ -12,6 +12,7 @@ use crate::actors::{
     deep_links::XCallbackParams,
     event_stream::EventStreamBuilder,
     grant_auth_flow::{GrantAuthFlow, GrantAuthFlowOptions},
+    parent_grant::ParentGrantStore,
     session::Session,
     session_store::BrowserSessionStore,
     signer::Signer,
@@ -160,6 +161,16 @@ impl Pubky {
         options: Ts<GrantAuthFlowOptions>,
     ) -> JsResult<GrantAuthFlow> {
         let options = deserialize_ts(&options)?;
+        // A parent's signing key must stay non-extractable, so it has no fallback.
+        if options.parent_grant == Some(true) {
+            return GrantAuthFlow::start_delegated_with_client(
+                capabilities,
+                kind,
+                options,
+                Some(self.0.client().clone()),
+            )
+            .await;
+        }
         if BrowserGrantKeyStore::can_use_delegation().await {
             let delegated = GrantAuthFlow::start_delegated_with_client(
                 capabilities.clone(),
@@ -248,6 +259,12 @@ impl Pubky {
             .await
     }
 
+    /// Browser-backed store for parent grants, used by holders such as Pubky Accounts.
+    #[wasm_bindgen(js_name = "parentGrantStore", getter)]
+    pub fn parent_grant_store(&self) -> ParentGrantStore {
+        ParentGrantStore(self.0.clone())
+    }
+
     /// Create a `Signer` from an existing `Keypair`.
     ///
     /// @param {Keypair} keypair The user’s keys.
@@ -303,6 +320,32 @@ impl Pubky {
             .get_homeserver_of(user_public_key.as_inner())
             .await?
             .map(Into::into))
+    }
+
+    /// Check whether a user's homeserver supports parent and child grants.
+    ///
+    /// Check this before asking the user to approve a parent grant. `unsupported`
+    /// means the homeserver needs an upgrade, and `unknown` means the check failed,
+    /// so offer a retry. This checks only the homeserver: the signer must also
+    /// support parent-grant links.
+    ///
+    /// @param {PublicKey} userPublicKey The user's public key.
+    /// @returns {Promise<"supported" | "unsupported" | "unknown">}
+    #[wasm_bindgen(
+        js_name = "grantDelegationSupport",
+        unchecked_return_type = "\"supported\" | \"unsupported\" | \"unknown\""
+    )]
+    pub async fn grant_delegation_support(&self, user_public_key: &PublicKey) -> String {
+        match self
+            .0
+            .grant_delegation_support(user_public_key.as_inner())
+            .await
+        {
+            pubky::FeatureSupport::Supported => "supported",
+            pubky::FeatureSupport::Unsupported => "unsupported",
+            pubky::FeatureSupport::Unknown => "unknown",
+        }
+        .to_owned()
     }
 
     /// Access the underlying HTTP client (advanced).

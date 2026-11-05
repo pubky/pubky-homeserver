@@ -14,6 +14,7 @@ pub mod custom_pop;
 pub(crate) mod flow;
 pub(crate) mod grant_exchange;
 pub mod manager;
+pub(crate) mod parent_credential;
 pub(crate) mod pop_signer;
 #[doc(hidden)]
 pub mod shared_session;
@@ -23,4 +24,5 @@ pub use credential::{DelegatedGrantCredentialState, GrantCredential};
 pub use custom_pop::CustomPopError;
 pub use flow::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
 pub use manager::GrantManager;
+pub use parent_credential::ParentGrantCredential;
 pub use view::GrantSessionView;

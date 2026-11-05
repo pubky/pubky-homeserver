@@ -4,8 +4,9 @@ use url::Url;
 
 use crate::actors::auth::deep_links::{
     DEEP_LINK_SCHEMES, direct_signup::DirectSignupDeepLink, error::DeepLinkParseError,
-    seed_export::SeedExportDeepLink, signin::SigninDeepLink, signin_grant::SigninGrantDeepLink,
-    signup::SignupDeepLink, signup_grant::SignupGrantDeepLink, x_callback::XCallbackParams,
+    parent_grant::ParentGrantDeepLink, seed_export::SeedExportDeepLink, signin::SigninDeepLink,
+    signin_grant::SigninGrantDeepLink, signup::SignupDeepLink, signup_grant::SignupGrantDeepLink,
+    x_callback::XCallbackParams,
 };
 
 /// A parsed Pubky deep link.
@@ -25,6 +26,8 @@ pub enum DeepLink {
     SigninGrant(SigninGrantDeepLink),
     /// A signup deep link for the grant flow.
     SignupGrant(SignupGrantDeepLink),
+    /// A request for a parent grant, which authorizes child grants.
+    ParentGrant(ParentGrantDeepLink),
     /// A seed export deep link.
     SeedExport(SeedExportDeepLink),
 }
@@ -39,6 +42,7 @@ impl DeepLink {
             DeepLink::DirectSignup(link) => link.x_callback(),
             DeepLink::SigninGrant(link) => link.x_callback(),
             DeepLink::SignupGrant(link) => link.x_callback(),
+            DeepLink::ParentGrant(link) => link.x_callback(),
             DeepLink::SeedExport(link) => link.x_callback(),
         }
     }
@@ -52,6 +56,7 @@ impl DeepLink {
             Self::DirectSignup(link) => Self::DirectSignup(link.with_x_callback(x_callback)),
             Self::SigninGrant(link) => Self::SigninGrant(link.with_x_callback(x_callback)),
             Self::SignupGrant(link) => Self::SignupGrant(link.with_x_callback(x_callback)),
+            Self::ParentGrant(link) => Self::ParentGrant(link.with_x_callback(x_callback)),
             Self::SeedExport(link) => Self::SeedExport(link.with_x_callback(x_callback)),
         }
     }
@@ -65,6 +70,7 @@ impl DeepLink {
             DeepLink::DirectSignup(signup) => signup.into(),
             DeepLink::SigninGrant(signin) => signin.into(),
             DeepLink::SignupGrant(signup) => signup.into(),
+            DeepLink::ParentGrant(parent) => parent.into(),
             DeepLink::SeedExport(seed_export) => seed_export.into(),
         }
     }
@@ -78,6 +84,7 @@ impl Display for DeepLink {
             DeepLink::DirectSignup(signup) => write!(f, "{signup}"),
             DeepLink::SigninGrant(signin) => write!(f, "{signin}"),
             DeepLink::SignupGrant(signup) => write!(f, "{signup}"),
+            DeepLink::ParentGrant(parent) => write!(f, "{parent}"),
             DeepLink::SeedExport(seed_export) => write!(f, "{seed_export}"),
         }
     }
@@ -100,6 +107,7 @@ impl FromStr for DeepLink {
             )?)),
             "signin_grant" => Ok(DeepLink::SigninGrant(SigninGrantDeepLink::parse_url(&url)?)),
             "signup_grant" => Ok(DeepLink::SignupGrant(SignupGrantDeepLink::parse_url(&url)?)),
+            "parent_grant" => Ok(DeepLink::ParentGrant(ParentGrantDeepLink::parse_url(&url)?)),
             "secret_export" => Ok(DeepLink::SeedExport(SeedExportDeepLink::parse_url(&url)?)),
             "" => {
                 // Backwards compatible with old signin format (no host).
