@@ -4,9 +4,10 @@ use url::Url;
 use super::{
     DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel,
     query_params::{
-        append_grant_approval_format, append_grant_params, append_grant_relay_channel,
-        append_relay_params, parse_capabilities, parse_client_id, parse_client_pk,
-        parse_grant_approval_format, parse_grant_relay_channel, parse_relay,
+        append_expected_signer, append_grant_approval_format, append_grant_params,
+        append_grant_relay_channel, append_relay_params, parse_capabilities, parse_client_id,
+        parse_client_pk, parse_expected_signer, parse_grant_approval_format,
+        parse_grant_relay_channel, parse_relay,
     },
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
 };
@@ -39,6 +40,13 @@ pub struct SigninGrantParams {
     pub client_pk: PublicKey,
     /// Relay payload format understood by the requesting client.
     pub approval_format: GrantApprovalFormat,
+    /// Expected identity, encoded as `spk`: the public key that must approve.
+    ///
+    /// Set it only when the app already knows the signed-in user, for example
+    /// to re-authorize. It is a constraint: signers approve with that key or
+    /// refuse the request, and the grant flow rejects an approval issued by
+    /// any other key. Switching accounts takes a request without it.
+    pub expected_signer: Option<PublicKey>,
 }
 
 impl SigninGrantParams {
@@ -62,6 +70,7 @@ impl SigninGrantParams {
             client_id,
             client_pk,
             approval_format: GrantApprovalFormat::BareGrant,
+            expected_signer: None,
         }
     }
 }
@@ -75,6 +84,7 @@ impl std::fmt::Debug for SigninGrantParams {
             .field("client_id", &self.client_id)
             .field("client_pk", &self.client_pk)
             .field("approval_format", &self.approval_format)
+            .field("expected_signer", &self.expected_signer)
             .finish()
     }
 }
@@ -93,6 +103,7 @@ impl DeepLinkParams for SigninGrantParams {
             client_id: parse_client_id(url)?,
             client_pk: parse_client_pk(url)?,
             approval_format,
+            expected_signer: parse_expected_signer(url)?,
         })
     }
 
@@ -101,6 +112,7 @@ impl DeepLinkParams for SigninGrantParams {
         append_grant_params(url, &self.client_id, &self.client_pk);
         append_grant_approval_format(url, self.approval_format);
         append_grant_relay_channel(url, self.relay_channel);
+        append_expected_signer(url, self.expected_signer.as_ref());
     }
 }
 
@@ -243,6 +255,133 @@ mod tests {
                 Err(DeepLinkParseError::InvalidQueryParameter("af", _))
             ));
         }
+    }
+
+    #[test]
+    fn expected_signer_is_optional() {
+        let client_pk = Keypair::random().public_key();
+        let link: SigninGrantDeepLink = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}",
+            client_pk.z32()
+        )
+        .parse()
+        .unwrap();
+
+        assert_eq!(link.params().expected_signer, None);
+        assert!(!link.to_string().contains("spk="));
+    }
+
+    #[test]
+    fn expected_signer_round_trips() {
+        let user = Keypair::random().public_key();
+        let mut params = SigninGrantParams::new(
+            Capabilities::builder().read_write("/").unwrap().finish(),
+            Url::parse("https://httprelay.pubky.app/inbox/").unwrap(),
+            [42; 32],
+            ClientId::new("franky.pubky.app").unwrap(),
+            Keypair::random().public_key(),
+        );
+        params.expected_signer = Some(user.clone());
+        let link = SigninGrantDeepLink::new(DeepLinkScheme::PubkyAuth, params);
+
+        let url = link.to_url();
+        let spk: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| key == "spk")
+            .map(|(_, value)| value.into_owned())
+            .collect();
+        assert_eq!(spk, vec![user.z32()]);
+        let parsed = SigninGrantDeepLink::parse_url(&url).unwrap();
+        assert_eq!(parsed.params().expected_signer, Some(user));
+        assert_eq!(parsed, link);
+    }
+
+    #[test]
+    fn malformed_or_repeated_expected_signer_is_rejected() {
+        let client_pk = Keypair::random().public_key();
+        let user = Keypair::random().public_key().z32();
+        let base = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}",
+            client_pk.z32()
+        );
+        for query in [
+            "spk=".to_string(),
+            "spk=not-a-public-key".to_string(),
+            format!("spk=pubky{user}"),
+            format!("spk={user}&spk={user}"),
+        ] {
+            assert!(
+                matches!(
+                    format!("{base}&{query}").parse::<SigninGrantDeepLink>(),
+                    Err(DeepLinkParseError::InvalidQueryParameter("spk", _))
+                ),
+                "{query} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn expected_signer_must_be_bare_canonical_z32() {
+        let client_pk = Keypair::random().public_key();
+        let user = Keypair::random().public_key();
+        let z32 = user.z32();
+        let base = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}",
+            client_pk.z32()
+        );
+        let rejects_spk = |value: &str| {
+            let mut url = Url::parse(&base).unwrap();
+            url.query_pairs_mut().append_pair("spk", value);
+            matches!(
+                SigninGrantDeepLink::parse_url(&url),
+                Err(DeepLinkParseError::InvalidQueryParameter("spk", _))
+            )
+        };
+
+        let lenient_forms = [
+            format!("pk:{z32}"),
+            format!("https://{z32}/"),
+            format!("https://{z32}"),
+        ];
+        for value in &lenient_forms {
+            assert_eq!(
+                PublicKey::try_from_z32(value).ok(),
+                Some(user.clone()),
+                "Pkarr is expected to accept {value}"
+            );
+            assert!(rejects_spk(value), "spk={value} should be rejected");
+        }
+        for value in [
+            format!("pubky{z32}"),
+            z32.to_uppercase(),
+            format!(" {z32}"),
+            format!("{z32} "),
+            format!("{z32}/"),
+        ] {
+            assert!(rejects_spk(&value), "spk={value:?} should be rejected");
+        }
+
+        let (stem, last) = z32.split_at(z32.len() - 1);
+        let mut noncanonical = 0;
+        for alt in "ybndrfg8ejkmcpqxot1uwisza345h769".chars() {
+            let candidate = format!("{stem}{alt}");
+            if alt.to_string() == last
+                || PublicKey::try_from_z32(&candidate).ok() != Some(user.clone())
+            {
+                continue;
+            }
+            noncanonical += 1;
+            assert!(
+                rejects_spk(&candidate),
+                "spk={candidate} should be rejected"
+            );
+        }
+        assert!(
+            noncanonical > 0,
+            "expected a noncanonical encoding of {z32}"
+        );
+
+        assert!(!rejects_spk(&z32));
     }
 
     #[test]

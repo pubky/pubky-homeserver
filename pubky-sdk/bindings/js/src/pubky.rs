@@ -141,7 +141,7 @@ impl Pubky {
     /// @param {string} capabilities Comma-separated caps, e.g. `"/pub/app/:rw,/pub/foo/file:r"`.
     /// @param {AuthFlowKind} kind The kind of authentication flow to perform.
     /// @param {GrantAuthFlowOptions} options Options for the grant flow:
-    /// `{ clientId, relay?, xCallback?, approvalFormat? }`.
+    /// `{ clientId, relay?, xCallback?, approvalFormat?, expectedSigner? }`.
     /// @returns {Promise<GrantAuthFlow>}
     /// A running grant auth flow. Show `authorizationUrl` as QR/deeplink,
     /// then `awaitApproval()` to obtain a grant-backed `Session`.

@@ -121,6 +121,8 @@ impl From<DeepLink> for Url {
 
 #[cfg(test)]
 mod tests {
+    use pubky_common::crypto::PublicKey;
+
     use super::*;
 
     #[test]
@@ -195,6 +197,27 @@ mod tests {
         let parsed: DeepLink = deep_link.parse().unwrap();
 
         assert!(matches!(parsed, DeepLink::Signin(_)));
+    }
+
+    #[test]
+    fn test_parse_deep_link_signin_and_signup_grant_ignore_expected_signer() {
+        let signin = "pubkyauth://signin?caps=/pub/pubky.app/:rw&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&relay=https://httprelay.pubky.app/inbox&spk=not-a-public-key";
+        assert!(matches!(signin.parse(), Ok(DeepLink::Signin(_))));
+
+        let signup_grant = "pubkyauth://signup_grant?caps=/pub/pubky.app/:rw&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&relay=https://httprelay.pubky.app/inbox&hs=5jsjx1o6fzu6aeeo697r3i5rx15zq41kikcye8wtwdqm4nb4tryo&cid=franky.pubky.app&cpk=5jsjx1o6fzu6aeeo697r3i5rx15zq41kikcye8wtwdqm4nb4tryo&spk=5jsjx1o6fzu6aeeo697r3i5rx15zq41kikcye8wtwdqm4nb4tryo";
+        assert!(matches!(signup_grant.parse(), Ok(DeepLink::SignupGrant(_))));
+    }
+
+    #[test]
+    fn test_parse_deep_link_signin_grant_with_expected_signer() {
+        let deep_link = "pubkyauth://signin_grant?caps=/pub/pubky.app/:rw&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&relay=https://httprelay.pubky.app/inbox&cid=franky.pubky.app&cpk=5jsjx1o6fzu6aeeo697r3i5rx15zq41kikcye8wtwdqm4nb4tryo&spk=8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty";
+        let Ok(DeepLink::SigninGrant(link)) = deep_link.parse() else {
+            panic!("expected a signin_grant deep link");
+        };
+        assert_eq!(
+            link.params().expected_signer.as_ref().map(PublicKey::z32),
+            Some("8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty".to_string())
+        );
     }
 
     #[test]
