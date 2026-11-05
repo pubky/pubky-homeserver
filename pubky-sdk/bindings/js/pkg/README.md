@@ -659,9 +659,12 @@ interface PubkyError extends Error {
 ```
 
 `RequestError` carries a `RequestErrorData`: `reason` (`Http`, `Timeout`,
-`Connection`, `Body`, `Decode`, `InvalidRequest` or `Other`) and, for HTTP
-failures, `statusCode`. Browser Fetch may only report `Other`. A reason
-describes the failure, not whether retrying a write is safe.
+`Connection`, `TlsVerification`, `Body`, `Decode`, `InvalidRequest` or `Other`)
+and, for HTTP failures, `statusCode`. Browser Fetch may only report `Other`.
+`TlsVerification` means the server certificate was rejected; after a legitimate
+key rotation a stale pkarr cache looks the same, so it does not prove
+interception on its own. A reason describes the failure, not whether retrying a
+write is safe.
 
 ```ts
 import type { PubkyError, RequestErrorData } from "@synonymdev/pubky";

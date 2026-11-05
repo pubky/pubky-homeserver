@@ -640,8 +640,19 @@ impl PubkyHttpClient {
 
 #[cfg(test)]
 mod test {
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::{Keypair, errors::RequestErrorKind};
     use httpmock::MockServer;
+    #[cfg(not(target_arch = "wasm32"))]
+    use pkarr::{
+        SignedPacket,
+        dns::{Name, rdata::SVCB},
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    use pubky_testnet::Testnet;
     use reqwest::{Method, StatusCode};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::net::Ipv4Addr;
     #[cfg(not(target_arch = "wasm32"))]
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -777,10 +788,13 @@ mod test {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = TlsAcceptor::from(std::sync::Arc::new(server_config))
+            // A client that rejects the certificate ends the connection here.
+            let Ok(mut stream) = TlsAcceptor::from(std::sync::Arc::new(server_config))
                 .accept(stream)
                 .await
-                .unwrap();
+            else {
+                return;
+            };
             let mut request = Vec::new();
             let mut buffer = [0; 1024];
             while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -814,6 +828,76 @@ mod test {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "ok");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn untrusted_icann_certificate_reports_tls_verification() {
+        let url = https_server_with_test_certificate().await;
+        let client = PubkyHttpClient::builder().build().unwrap();
+        let error = client
+            .request_async(Method::GET, url)
+            .await
+            .unwrap()
+            .send()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            RequestErrorKind::from_transport(&error),
+            RequestErrorKind::TlsVerification
+        );
+    }
+
+    /// A homeserver presenting a key other than the one in its pkarr record is
+    /// rejected by the `PubkyTLS` verifier, not reported as a plain connection failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn unpublished_server_key_reports_tls_verification() {
+        let testnet = Testnet::new().await.unwrap();
+        let published = Keypair::random();
+        let presented = Keypair::random();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // The client rejects the presented key, so the handshake never completes.
+            let _handshake = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
+                presented.to_rpk_rustls_server_config(),
+            ))
+            .accept(stream)
+            .await;
+        });
+
+        let root: Name = ".".try_into().unwrap();
+        let mut svcb = SVCB::new(1, root.clone());
+        svcb.set_port(port);
+        let packet = SignedPacket::builder()
+            .https(root.clone(), svcb, 60)
+            .address(root, Ipv4Addr::LOCALHOST.into(), 60)
+            .build(&published)
+            .unwrap();
+        let pkarr = testnet.pkarr_client_builder().build().unwrap();
+        pkarr.publish(&packet).await.unwrap();
+
+        let client = testnet.client().unwrap();
+        let url = format!("https://{}/", published.public_key().z32())
+            .parse()
+            .unwrap();
+        let error = client
+            .request_async(Method::GET, url)
+            .await
+            .unwrap()
+            .send()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            RequestErrorKind::from_transport(&error),
+            RequestErrorKind::TlsVerification,
+            "{error:?}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

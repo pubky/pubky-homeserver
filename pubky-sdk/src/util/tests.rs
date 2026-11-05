@@ -118,6 +118,24 @@ async fn request_categories_preserve_transport_causes() {
         RequestErrorKind::Connection
     );
 
+    // A TLS handshake that fails before any certificate is checked, here
+    // against a plain-HTTP listener, is still a connection failure.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let request = client.get(format!("https://{address}/")).send();
+    let (error, _socket) = tokio::join!(request, async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            .await
+            .unwrap();
+        socket
+    });
+    assert_eq!(
+        RequestErrorKind::from_transport(&error.unwrap_err()),
+        RequestErrorKind::Connection
+    );
+
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let request = client.get(format!("http://{address}/")).send();
