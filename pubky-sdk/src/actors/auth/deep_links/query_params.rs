@@ -84,9 +84,9 @@ pub(super) fn parse_expected_signer(url: &Url) -> Result<Option<PublicKey>, Deep
         .map(|(_, value)| value);
     match (values.next(), values.next()) {
         (None, _) => Ok(None),
-        (Some(value), None) => PublicKey::try_from_z32(&value)
+        (Some(value), None) => parse_canonical_z32(&value)
             .map(Some)
-            .map_err(|e| DeepLinkParseError::InvalidQueryParameter("spk", Box::new(e))),
+            .map_err(|e| DeepLinkParseError::InvalidQueryParameter("spk", e)),
         (Some(_), Some(_)) => Err(DeepLinkParseError::InvalidQueryParameter(
             "spk",
             Box::new(io::Error::new(
@@ -95,6 +95,19 @@ pub(super) fn parse_expected_signer(url: &Url) -> Result<Option<PublicKey>, Deep
             )),
         )),
     }
+}
+
+/// Pkarr's parser also accepts `pk:<z32>`, URL forms and noncanonical
+/// encodings; `spk` must be exactly the 52-character z32 that signers compare.
+fn parse_canonical_z32(value: &str) -> Result<PublicKey, Box<dyn std::error::Error + Send + Sync>> {
+    let key = PublicKey::try_from_z32(value)?;
+    if key.z32() != value {
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a bare, canonical z-base-32 public key",
+        )));
+    }
+    Ok(key)
 }
 
 pub(super) fn append_expected_signer(url: &mut Url, expected_signer: Option<&PublicKey>) {

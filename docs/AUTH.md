@@ -83,7 +83,7 @@ specific identity:
 
 | Parameter | Meaning |
 | --- | --- |
-| `spk` | Expected identity: z-base-32 public key that must approve, at most once. |
+| `spk` | Expected identity: z-base-32 public key that must approve, at most once. Exactly the key's canonical 52-character z-base-32; prefixed (`pubky`, `pk:`), URL-shaped and noncanonical encodings are rejected. |
 
 `spk` is a constraint, not a suggestion. Apps send it only when they already
 know the user, for example to re-authorize or to request more capabilities,

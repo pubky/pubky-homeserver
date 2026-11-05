@@ -321,6 +321,70 @@ mod tests {
     }
 
     #[test]
+    fn expected_signer_must_be_bare_canonical_z32() {
+        let client_pk = Keypair::random().public_key();
+        let user = Keypair::random().public_key();
+        let z32 = user.z32();
+        let base = format!(
+            "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}",
+            client_pk.z32()
+        );
+        let rejects_spk = |value: &str| {
+            let mut url = Url::parse(&base).unwrap();
+            url.query_pairs_mut().append_pair("spk", value);
+            matches!(
+                SigninGrantDeepLink::parse_url(&url),
+                Err(DeepLinkParseError::InvalidQueryParameter("spk", _))
+            )
+        };
+
+        let lenient_forms = [
+            format!("pk:{z32}"),
+            format!("https://{z32}/"),
+            format!("https://{z32}"),
+        ];
+        for value in &lenient_forms {
+            assert_eq!(
+                PublicKey::try_from_z32(value).ok(),
+                Some(user.clone()),
+                "Pkarr is expected to accept {value}"
+            );
+            assert!(rejects_spk(value), "spk={value} should be rejected");
+        }
+        for value in [
+            format!("pubky{z32}"),
+            z32.to_uppercase(),
+            format!(" {z32}"),
+            format!("{z32} "),
+            format!("{z32}/"),
+        ] {
+            assert!(rejects_spk(&value), "spk={value:?} should be rejected");
+        }
+
+        let (stem, last) = z32.split_at(z32.len() - 1);
+        let mut noncanonical = 0;
+        for alt in "ybndrfg8ejkmcpqxot1uwisza345h769".chars() {
+            let candidate = format!("{stem}{alt}");
+            if alt.to_string() == last
+                || PublicKey::try_from_z32(&candidate).ok() != Some(user.clone())
+            {
+                continue;
+            }
+            noncanonical += 1;
+            assert!(
+                rejects_spk(&candidate),
+                "spk={candidate} should be rejected"
+            );
+        }
+        assert!(
+            noncanonical > 0,
+            "expected a noncanonical encoding of {z32}"
+        );
+
+        assert!(!rejects_spk(&z32));
+    }
+
+    #[test]
     fn rejects_missing_cid() {
         let pk = Keypair::random().public_key();
         let url = format!(
