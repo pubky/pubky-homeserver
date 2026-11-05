@@ -10,6 +10,7 @@ use pubky_common::{
     auth::grant::GrantClaims,
     auth::grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
     auth::jws::GrantId,
+    capabilities::Capabilities,
     crypto::PublicKey,
 };
 
@@ -93,6 +94,7 @@ impl GrantAuthService {
         let grant = self.verify_grant_and_pop(grant_jws, pop_jws).await?;
         let user = self.find_user(&grant).await?;
         Self::store_grant(&grant, &user, &mut self.sql_db.pool().into()).await?;
+        self.require_stored_grant_matches(&grant).await?;
         self.mint_session(&grant).await
     }
 
@@ -402,6 +404,29 @@ impl GrantAuthService {
         Ok(())
     }
 
+    /// Sessions take their user and capabilities from the stored grant row, and
+    /// `store_grant` keeps an existing row for the same client-chosen ID. Refuse
+    /// to mint from a row the presented grant does not describe, so a grant ID
+    /// cannot be reused by another user or re-signed with other claims. The
+    /// capability list is compared as signed: parsing canonicalizes each entry's
+    /// actions, so the stored list round-trips unchanged.
+    async fn require_stored_grant_matches(
+        &self,
+        grant: &GrantClaims,
+    ) -> Result<(), AuthServiceError> {
+        let stored = self.get_grant(&grant.jti).await?;
+        let matches = stored.user_pubkey == grant.iss
+            && stored.client_id == grant.client_id
+            && stored.client_cnf_key == grant.cnf.z32()
+            && stored.capabilities == Capabilities::from(grant.caps.clone())
+            && stored.issued_at == grant.iat as i64
+            && stored.expires_at == grant.exp as i64;
+        if !matches {
+            return Err(AuthServiceError::GrantClaimsMismatch);
+        }
+        Ok(())
+    }
+
     /// Persist the grant idempotently (ON CONFLICT DO NOTHING).
     async fn store_grant<'a>(
         grant: &GrantClaims,
@@ -552,17 +577,28 @@ mod tests {
             iat: now,
             exp: now + lifetime_secs,
         };
-        let grant_jws = sign_jws(user_kp, GRANT_JWS_TYP, &raw_grant);
+        let (grant_jws, pop_jws) = sign_grant_claims(user_kp, client_kp, hs_pubkey, &raw_grant);
+        (grant_jws, pop_jws, raw_grant)
+    }
+
+    /// Sign `raw_grant` as the user and a fresh PoP proof for it as the client.
+    fn sign_grant_claims(
+        user_kp: &Keypair,
+        client_kp: &Keypair,
+        hs_pubkey: &PublicKey,
+        raw_grant: &GrantClaims,
+    ) -> (JwsCompact, JwsCompact) {
+        let grant_jws = sign_jws(user_kp, GRANT_JWS_TYP, raw_grant);
 
         let pop_claims = PopProofClaims {
             aud: hs_pubkey.clone(),
             gid: raw_grant.jti.clone(),
             nonce: PopNonce::generate(),
-            iat: now,
+            iat: Utc::now().timestamp() as u64,
         };
         let pop_jws = sign_jws(client_kp, POP_JWS_TYP, &pop_claims);
 
-        (grant_jws, pop_jws, raw_grant)
+        (grant_jws, pop_jws)
     }
 
     fn sign_jws<T: serde::Serialize>(kp: &Keypair, typ: &str, claims: &T) -> JwsCompact {
@@ -678,6 +714,148 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AuthServiceError::NonceReplay));
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn create_grant_session_rejects_grant_id_owned_by_another_user() {
+        let service = test_service().await;
+        let (owner_kp, owner_id) = create_test_user(&service).await;
+        let (attacker_kp, _) = create_test_user(&service).await;
+        let hs_pubkey = service.homeserver_public_key();
+
+        let (grant_jws, pop_jws, owner_grant) =
+            sign_grant(&owner_kp, &Keypair::random(), &hs_pubkey);
+        let owner_session = service
+            .create_grant_session(&grant_jws, &pop_jws)
+            .await
+            .unwrap();
+
+        // The attacker signs their own grant and PoP, reusing only the owner's grant ID.
+        let attacker_client_kp = Keypair::random();
+        let attacker_grant = GrantClaims {
+            iss: attacker_kp.public_key(),
+            cnf: attacker_client_kp.public_key(),
+            ..owner_grant.clone()
+        };
+        let (grant_jws, pop_jws) = sign_grant_claims(
+            &attacker_kp,
+            &attacker_client_kp,
+            &hs_pubkey,
+            &attacker_grant,
+        );
+        let err = service
+            .create_grant_session(&grant_jws, &pop_jws)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthServiceError::GrantClaimsMismatch));
+
+        // The owner's bearer and stored grant are untouched.
+        let session = service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&owner_session.token).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(session.user_key, owner_kp.public_key());
+        let stored = service.get_grant(&owner_grant.jti).await.unwrap();
+        assert_eq!(stored.user_id, owner_id);
+        assert_eq!(stored.client_cnf_key, owner_grant.cnf.z32());
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn create_grant_session_rejects_changed_claims_from_same_user() {
+        let service = test_service().await;
+        let (user_kp, _) = create_test_user(&service).await;
+        let client_kp = Keypair::random();
+        let hs_pubkey = service.homeserver_public_key();
+
+        let (grant_jws, pop_jws, original) = sign_grant(&user_kp, &client_kp, &hs_pubkey);
+        service
+            .create_grant_session(&grant_jws, &pop_jws)
+            .await
+            .unwrap();
+
+        let narrower_caps = GrantClaims {
+            caps: vec![Capability::read("/pub/").unwrap()],
+            ..original.clone()
+        };
+        let other_client_id = GrantClaims {
+            client_id: ClientId::new("other.app").unwrap(),
+            ..original.clone()
+        };
+        let issued_earlier = GrantClaims {
+            iat: original.iat - 1,
+            ..original.clone()
+        };
+        let longer_lived = GrantClaims {
+            exp: original.exp + 1,
+            ..original.clone()
+        };
+        let new_client_kp = Keypair::random();
+        let rebound = GrantClaims {
+            cnf: new_client_kp.public_key(),
+            ..original.clone()
+        };
+        for (changed, pop_signer) in [
+            (narrower_caps, &client_kp),
+            (other_client_id, &client_kp),
+            (issued_earlier, &client_kp),
+            (longer_lived, &client_kp),
+            (rebound, &new_client_kp),
+        ] {
+            let (grant_jws, pop_jws) =
+                sign_grant_claims(&user_kp, pop_signer, &hs_pubkey, &changed);
+            let err = service
+                .create_grant_session(&grant_jws, &pop_jws)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AuthServiceError::GrantClaimsMismatch));
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn create_grant_session_allows_re_exchanging_the_same_grant() {
+        let service = test_service().await;
+        let (user_kp, _) = create_test_user(&service).await;
+        let client_kp = Keypair::random();
+        let hs_pubkey = service.homeserver_public_key();
+
+        // Unsorted and duplicated capabilities must still match their stored form.
+        let now = Utc::now().timestamp() as u64;
+        let raw_grant = GrantClaims {
+            iss: user_kp.public_key(),
+            client_id: ClientId::new("test.app").unwrap(),
+            caps: vec![
+                Capability::write("/pub/b/").unwrap(),
+                Capability::read("/pub/a/").unwrap(),
+                Capability::write("/pub/a/").unwrap(),
+                Capability::read("/pub/a/").unwrap(),
+            ],
+            cnf: client_kp.public_key(),
+            jti: GrantId::generate(),
+            iat: now,
+            exp: now + 3600,
+        };
+        let (grant_jws, pop_jws) = sign_grant_claims(&user_kp, &client_kp, &hs_pubkey, &raw_grant);
+        let first = service
+            .create_grant_session(&grant_jws, &pop_jws)
+            .await
+            .unwrap();
+
+        let (grant_jws, pop_jws) = sign_grant_claims(&user_kp, &client_kp, &hs_pubkey, &raw_grant);
+        let second = service
+            .create_grant_session(&grant_jws, &pop_jws)
+            .await
+            .unwrap();
+        assert_ne!(first.token, second.token);
+
+        let session = service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&second.token).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(session.user_key, user_kp.public_key());
+        assert_eq!(session.capabilities, Capabilities::from(raw_grant.caps));
     }
 
     // ── signup_grant_account ────────────────────────────────────────

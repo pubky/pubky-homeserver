@@ -70,6 +70,10 @@ pub enum AuthServiceError {
     #[error("Grant does not belong to authenticated user")]
     GrantOwnershipMismatch,
 
+    /// A grant with this ID is already stored for another user or with other claims.
+    #[error("Grant ID is already stored for another user or with different claims")]
+    GrantClaimsMismatch,
+
     /// Session lacks root capability.
     #[error("Root capability required")]
     RootCapabilityRequired,
