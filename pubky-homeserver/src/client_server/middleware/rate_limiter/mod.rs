@@ -17,6 +17,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
 
+    use crate::ClientIdentityToml;
     use axum::body::Body;
     use axum::http::{Method, StatusCode};
     use axum::middleware;
@@ -26,7 +27,6 @@ mod tests {
     use axum_server::Server;
     use futures_util::StreamExt;
     use reqwest::Client;
-    use tcp_client_addr::IdentityMode;
     use tokio::time::Instant;
     use tower_cookies::CookieManagerLayer;
 
@@ -82,7 +82,9 @@ mod tests {
 
         tokio::spawn(async move {
             server
-                .acceptor(ClientIdentityAcceptor::new(IdentityMode::Direct))
+                .acceptor(
+                    ClientIdentityAcceptor::from_config(&ClientIdentityToml::Direct {}).unwrap(),
+                )
                 .serve(app.into_make_service())
                 .await
                 .unwrap();

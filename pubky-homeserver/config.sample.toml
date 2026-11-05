@@ -29,16 +29,27 @@ icann_listen_socket = "127.0.0.1:6286"
 # `<user-key>` or `<label>.<user-key>`. See docs/WEBSITES.md.
 websites = true
 
-# Configure each listener independently. Direct uses the TCP peer address.
-# Proxy protocol requires a PROXY v1/v2 preface from an immediate peer in
-# trusted_proxies. Keep a proxy listener inaccessible to other clients: an
-# allowed peer can claim any source IP. The proxy must send the real client
-# address, not a value copied from an HTTP forwarding header.
+# Configure each listener independently. Default: "direct" (TCP peer address).
+# Behind a proxy, direct mode shares its IP-based limits across visitors.
 icann_client_identity = { mode = "direct" }
 pubky_client_identity = { mode = "direct" }
-# To use a local PROXY-protocol proxy, replace the ICANN direct line above with:
+
+# For a local proxy that sends a PROXY v1/v2 preface, replace the ICANN line:
 # icann_client_identity = { mode = "proxy_protocol", trusted_proxies = ["127.0.0.1/32"] }
 # For Pubky TLS, the PROXY preface must precede the TLS handshake.
+
+# For a proxy that overwrites a single-IP HTTP header, replace the ICANN line:
+# icann_client_identity = { mode = "http_header", header = "X-Real-IP", trusted_proxies = ["127.0.0.1/32"] }
+# Every request must supply one bare IPv4 or IPv6 address, without a port.
+# Missing, duplicate, or invalid values get 400. Address lists are unsupported.
+# For Cloudflare Tunnel, use header = "CF-Connecting-IP".
+
+# Both proxy modes require a nonempty trusted_proxies list. Trust only the
+# immediate proxy's TCP source address or network: it can claim any client IP.
+# Other peers are disconnected before HTTP processing or the TLS handshake.
+# Both proxy modes also support pubky_client_identity. Direct and PROXY
+# protocol modes ignore HTTP client identity headers. User-based limits
+# remain separate. See docs/DEPLOY.md for setup details.
 
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob

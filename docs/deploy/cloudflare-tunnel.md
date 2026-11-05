@@ -80,8 +80,11 @@ icann_domain = "YOUR_DOMAIN"
 # Pubky TLS is not used with this setup.
 ```
 
-From v0.17.0, visitors share the tunnel's IP-based limits; forwarding headers
-do not restore individual client IPs. User-based limits remain separate.
+By default, visitors share the tunnel's IP-based limits. To use individual
+client IPs, configure
+[HTTP header mode](../DEPLOY.md#client-addresses-and-rate-limits) with
+`CF-Connecting-IP` and trust only the connector's source address.
+User-based limits remain separate.
 
 Restart the homeserver after editing `config.toml`. See [Run](../INSTALL.md#run) in the install guide.
 
