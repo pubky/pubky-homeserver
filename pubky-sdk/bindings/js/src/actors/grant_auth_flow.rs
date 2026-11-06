@@ -11,7 +11,8 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::{
     auth_flow::AuthFlowKind, browser_grant_key_store::BrowserGrantKeyStore,
-    deep_links::XCallbackParams, in_flight::InFlightGuard, session::Session,
+    deep_links::XCallbackParams, in_flight::InFlightGuard, parent_grant::ParentGrant,
+    session::Session,
 };
 use crate::{
     js_error::{JsResult, PubkyError, PubkyErrorName, deserialize_ts},
@@ -45,6 +46,11 @@ pub struct GrantAuthFlowOptions {
     /// flow without it. Sign-up flows reject it.
     #[tsify(optional, type = "string | null")]
     pub(crate) expected_signer: Option<String>,
+    /// Request a parent grant, and finish with `awaitParentGrant()`. A parent
+    /// issues child grants but opens no session. It requires an exact HTTPS
+    /// callback as `clientId` and ignores `approvalFormat`.
+    #[tsify(optional)]
+    pub(crate) parent_grant: Option<bool>,
 }
 
 /// Relay payload format understood by the requesting app.
@@ -131,10 +137,19 @@ impl GrantAuthFlow {
             x_callback,
             approval_format,
             expected_signer,
+            parent_grant,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;
+
+        // A parent's key has to stay in the browser, where it can be saved.
+        if parent_grant == Some(true) {
+            return Err(PubkyError::new(
+                PubkyErrorName::ClientStateError,
+                "Parent grants need a browser-held key. Use `startDelegated` instead.",
+            ));
+        }
 
         let mut builder = PubkyGrantAuthFlow::builder(&caps, kind.0, client_id);
         if let Some(format) = approval_format {
@@ -192,6 +207,7 @@ impl GrantAuthFlow {
             x_callback,
             approval_format,
             expected_signer,
+            parent_grant,
         } = options;
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
@@ -203,6 +219,9 @@ impl GrantAuthFlow {
             .delegated_client_signer(key_id, public_key, sign);
         if let Some(format) = approval_format {
             builder = builder.approval_format(format.into());
+        }
+        if parent_grant == Some(true) {
+            builder = builder.parent_grant();
         }
         if let Some(c) = client {
             builder = builder.client(c);
@@ -354,6 +373,24 @@ impl GrantAuthFlow {
             Err(flow) => {
                 self.restore_inner(flow);
                 Err(self.in_use_error("awaitApproval"))
+            }
+        }
+    }
+
+    /// Block until the user approves a parent grant requested with `parentGrant: true`.
+    ///
+    /// The result covers only what the user approved, which may exclude `e`.
+    /// It creates no session. Save it with `pubky.parentGrantStore.save(parent)`.
+    #[wasm_bindgen(js_name = "awaitParentGrant")]
+    pub async fn await_parent_grant(&self) -> JsResult<ParentGrant> {
+        let _guard = self.begin_call("awaitParentGrant")?;
+        let flow = self.take_inner("awaitParentGrant")?;
+
+        match Rc::try_unwrap(flow) {
+            Ok(flow) => Ok(ParentGrant(flow.await_parent_credential().await?)),
+            Err(flow) => {
+                self.restore_inner(flow);
+                Err(self.in_use_error("awaitParentGrant"))
             }
         }
     }

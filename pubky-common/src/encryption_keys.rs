@@ -140,6 +140,33 @@ impl ScopedEncryptionKeyBundle {
         self.keys.iter().map(|key| &key.scope)
     }
 
+    /// Build a bundle holding only `scopes`, without exposing ancestor seeds.
+    ///
+    /// Yields the same keys as [`Self::from_identity_secret`] for those scopes.
+    /// Entries preserve request order, and no scopes yields an empty bundle.
+    ///
+    /// # Errors
+    /// Returns [`KeyDerivationError::OutsideScope`] if no bundled key covers a
+    /// requested scope, including a sibling or ancestor of a bundled scope.
+    pub fn narrow<'a>(
+        &self,
+        scopes: impl IntoIterator<Item = &'a StoragePath>,
+    ) -> Result<Self, KeyDerivationError> {
+        let keys = scopes
+            .into_iter()
+            .map(|scope| {
+                self.derive_scoped_path(scope).map(|secret| KeyEntry {
+                    scope: scope.clone(),
+                    secret: Box::new(secret),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            version: self.version,
+            keys,
+        })
+    }
+
     /// Derive an owned file content key using the first covering key.
     ///
     /// Directory paths, including `/`, are rejected. Directory seeds remain
@@ -165,7 +192,7 @@ impl ScopedEncryptionKeyBundle {
         self.derive_scoped_path(path)
     }
 
-    // Also supports directory seeds for tests of the derivation hierarchy.
+    // Also derives directory seeds, which narrowing needs.
     fn derive_scoped_path(
         &self,
         path: &StoragePath,
@@ -216,10 +243,10 @@ pub enum KeyDerivationError {
         /// Requested directory path.
         requested: StoragePath,
     },
-    /// No bundled key covers the requested file.
+    /// No bundled key covers the requested path.
     #[error("no bundled key covers requested path {requested}")]
     OutsideScope {
-        /// Requested file path.
+        /// Requested path.
         requested: StoragePath,
     },
 }

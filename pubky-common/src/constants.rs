@@ -20,6 +20,8 @@ pub mod storage {
 pub mod features {
     /// Grant + proof-of-possession logout without a live bearer.
     pub const GRANT_PROOF_LOGOUT: &str = "grant-proof-logout";
+    /// Homeserver accepts parent/child grant chains and manages their lifecycle.
+    pub const GRANT_DELEGATION: &str = "grant-delegation";
     /// Homeserver supports storage URLs containing the resource owner in the path.
     pub const PATH_ADDRESSED_STORAGE: &str = "path-addressed-storage";
     /// Homeserver supports WebDAV `LOCK`/`UNLOCK` on storage files and honours

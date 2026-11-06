@@ -150,6 +150,46 @@ pub enum AuthError {
     /// The auth/relay request expired or was canceled before completion.
     #[error("The provided auth request has expired or was cancelled.")]
     RequestExpired,
+
+    /// A parent grant holder declined a redirect sign-in, so no grant was issued.
+    #[error("Redirect sign-in was declined: {}", .0.as_str())]
+    RedirectDeclined(RedirectDenial),
+}
+
+/// Why a parent grant holder declined a redirect sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectDenial {
+    /// The user or the holder refused the request.
+    AccessDenied,
+    /// The user abandoned the request.
+    Cancelled,
+    /// The request exceeds the parent grant, such as keys the user declined to share.
+    InsufficientPermissions,
+}
+
+impl RedirectDenial {
+    /// The code carried in the callback URL.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AccessDenied => "access_denied",
+            Self::Cancelled => "cancelled",
+            Self::InsufficientPermissions => "insufficient_permissions",
+        }
+    }
+}
+
+impl std::str::FromStr for RedirectDenial {
+    type Err = ();
+
+    fn from_str(code: &str) -> std::result::Result<Self, ()> {
+        match code {
+            "access_denied" => Ok(Self::AccessDenied),
+            "cancelled" => Ok(Self::Cancelled),
+            "insufficient_permissions" => Ok(Self::InsufficientPermissions),
+            _ => Err(()),
+        }
+    }
 }
 
 // --- Consolidated Request Error ---

@@ -206,8 +206,14 @@ async function clearSessionStore(allKeys = false) {
       const records = sessions.getAll();
       records.onsuccess = () => {
         try {
-          if (allKeys) keys.clear();
-          else for (const record of records.result) {
+          if (allKeys) {
+            const stored = keys.getAll();
+            stored.onsuccess = () => {
+              for (const key of stored.result) {
+                if (!key.heldByParentGrant) keys.delete(key.keyId);
+              }
+            };
+          } else for (const record of records.result) {
             if (record.storageMode === "delegated") keys.delete(JSON.parse(record.credential).keyId);
           }
           sessions.clear();
@@ -700,6 +706,8 @@ impl BrowserSessionStore {
     /// grant keys, including keys for pending delegated grant flows. Saved
     /// delegated flow state becomes unrestorable. This does not revoke remote
     /// grants. Browser-managed handles stop working when their saved record is removed.
+    /// Parent grants saved in `parentGrantStore` and their keys stay: sign them
+    /// out with `parentGrantStore.signOut`.
     #[wasm_bindgen(js_name = "clearAll")]
     pub async fn clear_all(&self) -> JsResult<()> {
         JsFuture::from(js_store_clear_all())

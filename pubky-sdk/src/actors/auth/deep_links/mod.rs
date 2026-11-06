@@ -5,6 +5,8 @@
 //! - `DirectSignupDeepLink` - A deep link for registering an account directly on a Pubky homeserver.
 //! - `SigninGrantDeepLink` - A deep link for signing in via the grant flow.
 //! - `SignupGrantDeepLink` - A deep link for signing up via the grant flow.
+//! - `ParentGrantDeepLink` - A deep link asking a signer to approve a parent grant.
+//! - `ChildGrantRequest` - An app's redirect request to a parent grant holder (not a deep link).
 //! - `SeedExportDeepLink` - A deep link for exporting a user secret to a signer like Pubky Ring.
 //! - `DeepLink` - A parsed Pubky deep link.
 //! - `DeepLinkParseError` - Errors that can occur when parsing a deep link.
@@ -39,11 +41,13 @@
 //! Use [`crate::PubkyGrantAuthFlow`] to create signed-approval links; it
 //! generates and retains the required ephemeral HPKE key automatically.
 
+mod child_grant_request;
 mod deep_link;
 mod direct_signup;
 mod error;
 mod grant_approval_format;
 mod grant_relay_channel;
+mod parent_grant;
 mod query_params;
 mod schemes;
 mod seed_export;
@@ -57,11 +61,13 @@ mod x_callback;
 /// Supported deep link schemes.
 pub const DEEP_LINK_SCHEMES: [&str; 2] = ["pubkyauth", "pubkyring"];
 
+pub use child_grant_request::ChildGrantRequest;
 pub use deep_link::DeepLink;
 pub use direct_signup::{DirectSignupDeepLink, DirectSignupIntent, DirectSignupParams};
 pub use error::DeepLinkParseError;
 pub use grant_approval_format::GrantApprovalFormat;
 pub use grant_relay_channel::GrantRelayChannel;
+pub use parent_grant::{ParentGrantDeepLink, ParentGrantIntent, ParentGrantParams};
 pub use schemes::DeepLinkScheme;
 pub use seed_export::{SecretExportIntent, SeedExportDeepLink, SeedExportParams};
 pub use signin::{SigninDeepLink, SigninIntent, SigninParams};

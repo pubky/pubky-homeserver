@@ -46,7 +46,7 @@ use crate::{
 /// Refresh the bearer proactively when it has less than this many seconds left.
 pub(crate) const REFRESH_SLACK_SECS: u64 = 300;
 
-const GRANT_SESSION_PATH: &str = "/auth/grant/session";
+pub(crate) const GRANT_SESSION_PATH: &str = "/auth/grant/session";
 const STORED_GRANT_CREDENTIAL_PREFIX: &str = "pubky-grant-credential-v1";
 const STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX: &str = "pubky-grant-credential-v2";
 const STORED_GRANT_CREDENTIAL_PREFIX_FAMILY: &str = "pubky-grant-credential-";

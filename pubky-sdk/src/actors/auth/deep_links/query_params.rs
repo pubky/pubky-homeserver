@@ -6,6 +6,14 @@ use url::Url;
 
 use super::{DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel};
 
+/// An invalid query parameter, explained by `message`.
+pub(super) fn invalid_parameter(name: &'static str, message: &'static str) -> DeepLinkParseError {
+    DeepLinkParseError::InvalidQueryParameter(
+        name,
+        Box::new(io::Error::new(io::ErrorKind::InvalidInput, message)),
+    )
+}
+
 pub(super) fn parse_grant_approval_format(
     url: &Url,
 ) -> Result<GrantApprovalFormat, DeepLinkParseError> {
@@ -157,7 +165,9 @@ fn missing_ephemeral_public_key() -> DeepLinkParseError {
     )
 }
 
-fn parse_ephemeral_public_key(url: &Url) -> Result<Option<[u8; 32]>, DeepLinkParseError> {
+pub(super) fn parse_ephemeral_public_key(
+    url: &Url,
+) -> Result<Option<[u8; 32]>, DeepLinkParseError> {
     optional_query(url, "epk")
         .map(|encoded| decode_channel_key(&encoded, "epk"))
         .transpose()

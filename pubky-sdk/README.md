@@ -438,6 +438,57 @@ use them. For details and offline key recovery, see the rustdoc of
 When you recover keys from saved material, check that they belong to the user
 and grant you expect.
 
+#### Issue child grants through a parent grant
+
+One Ring approval can sign in every first-party app. A holder such as Pubky
+Accounts gets a parent grant, then issues each app a child grant with keys for
+only that app's `e` scopes. The holder can decrypt everything under its approved
+scopes, so read [parent and child grants](../docs/delegated-grants.md) first.
+
+```rust no_run
+# use pubky::{AuthFlowKind, Capabilities, ClientId, Pubky, PubkyGrantAuthFlow};
+# use pubky::deep_links::ChildGrantRequest;
+# async fn parent_grants(
+#     pubky: Pubky,
+#     app_request: url::Url,
+# ) -> Result<(), Box<dyn std::error::Error>> {
+// Get the parent grant from Ring. This opens no session.
+let caps: Capabilities = "/pub/:rwe,/priv/:rwe".parse()?;
+let flow = PubkyGrantAuthFlow::builder(
+    &caps,
+    AuthFlowKind::signin(),
+    ClientId::new("https://accounts.example/auth/callback").expect("valid client id"),
+)
+.parent_grant()
+.client(pubky.client().clone())
+.start()?;
+println!("Scan to approve: {}", flow.authorization_url());
+let parent = flow.await_parent_credential().await?;
+
+// When an app redirects here, check its request against your app catalog,
+// then send the user to `callback`.
+let request = ChildGrantRequest::parse(&app_request)?;
+let callback = parent.issue_child(&request, None).await?;
+# Ok(()) }
+```
+
+If the request exceeds the parent, such as keys the user declined to share,
+`issue_child` returns `AuthError::RedirectDeclined`. Redirect to
+`request.declined_url(reason)` so the app can tell the user. Redirect only to
+callbacks in your catalog, and show an error for an unknown one.
+
+To keep a parent across restarts, start the flow with your own `client_keypair`,
+store that key and `parent.signed_approval()` securely, and restore with
+`ParentGrantCredential::from_signed_approval`.
+
+- Before Ring approves a parent, check
+  `pubky.grant_delegation_support(&user)`. `Unsupported` means the homeserver
+  needs an upgrade, and `Unknown` means the check can be retried.
+- After the user confirms, `parent.reconnect_app(&client, &callback)` lets an
+  app they removed sign in again.
+- `parent.signout(&client)` revokes the parent and all its children. Delivered
+  keys stay usable.
+
 ## Features
 
 - `json`: enable `Storage` helpers (`.get_json()` / `.put_json()`) and serde on certain types.

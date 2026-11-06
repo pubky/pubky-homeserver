@@ -29,6 +29,7 @@ pub mod prelude;
 pub use pubky::Pubky;
 // Transport
 #[doc(inline)]
+pub use client::FeatureSupport;
 pub use client::core::{PubkyHttpClient, PubkyHttpClientBuilder};
 // High level actors
 #[doc(inline)]
@@ -50,7 +51,7 @@ pub use actors::deep_links;
 #[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use actors::{
     CookieCredential, CookieSessionView, DelegatedGrantCredentialState, GrantCredential,
-    GrantManager, GrantSessionView,
+    GrantManager, GrantSessionView, ParentGrantCredential,
 };
 #[doc(inline)]
 pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
@@ -97,7 +98,7 @@ pub use pubky_common::{
     auth::{
         AuthToken,
         grant::GrantClaims,
-        grant_session_responses::{GrantInfo, GrantSessionInfo, GrantSessionResponse},
+        grant_session_responses::{GrantInfo, GrantKind, GrantSessionInfo, GrantSessionResponse},
         jws::{ClientId, GRANT_JWS_TYP, GrantId, POP_JWS_TYP, PopNonce},
         pop::PopProofClaims,
     },

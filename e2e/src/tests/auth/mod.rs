@@ -1,6 +1,8 @@
 mod account;
+pub(super) mod child_grant;
 mod cookie;
 mod grant;
+mod parent_grant;
 mod pkdns;
 mod signup_tokens;
 
