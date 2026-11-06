@@ -35,11 +35,11 @@ impl SessionStorage {
     /// List a directory (absolute session path).
     ///
     /// @param {Path} path Must end with `/`.
-    /// @param {string|null=} cursor Optional last entry URL to start **after**.
+    /// @param {string|null=} cursor Optional last entry (as returned) to start **after**.
     /// @param {boolean=} reverse Default `false`.
     /// @param {number=} limit Optional result limit.
     /// @param {boolean=} shallow Default `false`.
-    /// @returns {Promise<string[]>} `pubky://…` entry URLs, or an empty array for an empty page.
+    /// @returns {Promise<string[]>} `pubky://<pk><path>` entries, or an empty array for an empty page.
     /// @throws {PubkyError} Missing directory (404), invalid cursor (400), invalid response
     /// entries, or shared errors (see {@link SessionStorage}).
     #[wasm_bindgen]

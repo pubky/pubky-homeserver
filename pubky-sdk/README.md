@@ -228,6 +228,8 @@ Path rules:
 
 - Session storage uses **absolute** paths under `/pub/` or `/priv/`.
 - Public storage uses **addressed** form `pubky<user>/pub/app/file.txt` (preferred) or `pubky://<user>/...`.
+- A path is the file's plain name, such as `/pub/app/My File.txt`; the SDK percent-encodes it when it builds the HTTP URL.
+- Listings and events return `pubky://<user><path>` with the same plain name, which is also the form a listing cursor takes.
 - A storage path cannot be both an exact file and an implicit folder prefix. For example:
   - if `/pub/app/foo` exists, writing `/pub/app/foo/bar.json` returns `409 Conflict`.
   - if descendants under `/pub/app/foo/` exist, writing `/pub/app/foo` returns `409 Conflict`.
