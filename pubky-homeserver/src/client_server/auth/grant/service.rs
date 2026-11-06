@@ -331,14 +331,14 @@ impl GrantAuthService {
                     uexecutor!(*tx),
                 )
                 .await?;
-                revoked.extend(
-                    GrantRepository::revoke_children(
-                        parent_id,
-                        Some(&grant.client_id),
-                        uexecutor!(*tx),
-                    )
-                    .await?,
-                );
+                let current = GrantRepository::revoke_children(
+                    parent_id,
+                    Some(&grant.client_id),
+                    uexecutor!(*tx),
+                )
+                .await?;
+                // `grant` is listed again when it was still the app's current child.
+                revoked.extend(current.into_iter().filter(|id| id != &grant.id));
             }
         } else if grant.kind == GrantKind::Parent {
             GrantRepository::get_for_update(&grant.id, uexecutor!(*tx)).await?;
@@ -489,15 +489,18 @@ impl GrantAuthService {
         let grant = self.get_grant(&session.grant_id).await?;
         grant.require_active(now)?;
         if let Some(parent_id) = &grant.parent_id {
-            self.get_grant(parent_id).await?.require_active(now)?;
-            let blocked = GrantRepository::is_app_blocked(
-                grant.user_id,
-                parent_id,
-                &grant.client_id,
-                &mut self.sql_db.pool().into(),
-            )
-            .await?;
-            if blocked {
+            let parent = map_not_found(
+                GrantRepository::get_parent_state(
+                    grant.user_id,
+                    parent_id,
+                    &grant.client_id,
+                    &mut self.sql_db.pool().into(),
+                )
+                .await,
+                AuthServiceError::GrantNotFound,
+            )?;
+            parent.require_active(now)?;
+            if parent.app_blocked {
                 return Err(AuthServiceError::AppBlocked);
             }
         }
