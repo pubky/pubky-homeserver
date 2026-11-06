@@ -161,6 +161,7 @@ paths:
               example:
                 features:
                 - path-addressed-storage
+                - grant-delegation
                 - webdav-locks
                 - websites
   "/signup_tokens/{token}":
@@ -215,8 +216,8 @@ paths:
         '204':
           description: Account created successfully
         '400':
-          description: Invalid token format, invalid grant format, or signup token
-            required
+          description: Invalid token format, invalid grant format, signup token
+            required, or a `parent` in the body. Signup accepts direct grants only.
         '401':
           description: Invalid grant signature, expired grant, invalid/used signup
             token, or PoP verification failed
@@ -227,6 +228,14 @@ paths:
       tags:
       - Auth - Grant
       summary: Exchange grant + PoP for bearer token
+      description: |-
+        Exchanges a direct grant, or a parent grant and child grant, for a
+        bearer that lasts at most one hour and never outlives the grants.
+
+        The first exchange of a new child revokes the app's previous child under
+        that parent and deletes its sessions. Repeating an exchange only replaces
+        the bearer. A chain requires the `grant-delegation` feature. See
+        [parent and child grants](https://github.com/pubky/pubky-homeserver/blob/main/docs/delegated-grants.md).
       operationId: createGrantSession
       requestBody:
         required: true
@@ -234,6 +243,18 @@ paths:
           application/json:
             schema:
               "$ref": "#/components/schemas/CreateGrantSessionRequest"
+            examples:
+              direct:
+                summary: Direct grant
+                value:
+                  grant: "<grant JWS>"
+                  pop: "<PoP JWS signed by the grant's cnf key>"
+              child:
+                summary: Parent and child grant
+                value:
+                  parent: "<parent JWS>"
+                  grant: "<child JWS>"
+                  pop: "<PoP JWS signed by the child's cnf key>"
       responses:
         '200':
           description: Session created
@@ -242,12 +263,15 @@ paths:
               schema:
                 "$ref": "#/components/schemas/GrantSessionResponse"
         '400':
-          description: Invalid grant format or invalid signup grant
+          description: Invalid grant format, grant type, parent reference, timestamps,
+            callback, or signup grant
         '401':
           description: Invalid grant signature, expired grant, PoP verification failed,
-            nonce replay, or grant revoked/expired
+            nonce replay, or grant revoked/expired. A replaced child is revoked.
         '403':
-          description: Grant ID is already stored for another user or with different claims
+          description: Capabilities exceed the parent or the limit for parent grants, the
+            app is blocked under this parent and must be reconnected, or a grant ID is
+            already stored for another user or with different claims
         '404':
           description: User not found
     get:
@@ -270,20 +294,81 @@ paths:
       tags:
       - Auth - Grant
       summary: Revoke current grant session
-      description: Idempotent — returns 200 even without a valid session.
+      description: |-
+        Idempotent — returns 200 even without a valid session.
+
+        A body revokes without a live bearer, including after a grant expires:
+
+        - `grant` and `pop` revoke a direct grant.
+        - `parent`, `grant` and `pop` sign out one app. They revoke the child and
+          leave the parent and other apps usable, and the app can sign in again
+          with a new child.
+        - A parent grant in `grant`, with `pop` from the parent's key, revokes
+          the parent and all its children.
+
+        An unseen parent or child is recorded as revoked. Each request needs a
+        fresh PoP nonce.
       operationId: deleteGrantSession
       security:
       - bearerAuth: []
       - {}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CreateGrantSessionRequest"
       responses:
         '200':
           description: Session revoked (idempotent)
+        '400':
+          description: Invalid grant format, grant type, parent reference, timestamps,
+            or callback
+        '401':
+          description: Invalid grant signature, PoP verification failed, or nonce replay
+        '403':
+          description: Capabilities exceed the parent or the limit for parent grants, the
+            direct grant does not match the stored owner, or a grant ID is already stored
+            with different claims
+        '404':
+          description: User not found, or an unseen direct grant
+  "/auth/grant/reconnect":
+    post:
+      tags:
+      - Auth - Grant
+      summary: Clear an app's reconnection block
+      description: |-
+        Lets a new child grant sign in after the user removed the app with
+        `DELETE /auth/grant/session/{gid}`. Authorized by the parent's key through
+        a `pubky-reconnect` proof. A revoked child stays revoked. Requires the
+        `grant-delegation` feature.
+      operationId: reconnectGrantApp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ReconnectGrantAppRequest"
+      responses:
+        '204':
+          description: The app is not blocked under this parent
+        '400':
+          description: Invalid parent format, grant type, timestamps, or callback
+        '401':
+          description: Invalid signature or proof, nonce replay, or parent revoked/expired
+        '403':
+          description: The parent exceeds the limit for parent grants, or its grant ID is
+            already stored with different claims
+        '404':
+          description: User not found
   "/auth/grant/sessions":
     get:
       tags:
       - Auth - Grant
       summary: List all active grants
-      description: Requires root capability.
+      description: Requires root capability. Includes active parent grants and
+        their children, identified by `kind` and `parent_id`. A child is left out
+        once its parent is inactive.
       operationId: listGrants
       security:
       - bearerAuth: []
@@ -305,7 +390,12 @@ paths:
       tags:
       - Auth - Grant
       summary: Revoke a specific grant
-      description: Requires root capability. Revokes the grant and all its sessions.
+      description: |-
+        Requires root capability. Revokes the grant and all its sessions.
+
+        Revoking a parent grant also revokes its children and rejects future
+        child exchanges. Revoking a child revokes the app's current child and blocks
+        the app under that parent until `POST /auth/grant/reconnect`.
       operationId: revokeGrant
       security:
       - bearerAuth: []
@@ -1256,12 +1346,33 @@ components:
       - grant
       - pop
       properties:
+        parent:
+          type: string
+          description: Parent grant JWS in compact form (`pubky-parent-grant`,
+            user-signed). Required when `grant` is a child grant.
         grant:
           type: string
-          description: Grant JWS in compact form (user-signed).
+          description: Grant JWS in compact form. A direct grant (`pubky-grant`) is
+            signed by the user. A child grant (`pubky-child-grant`) is signed by the
+            parent's `cnf` key.
         pop:
           type: string
           description: Proof-of-Possession JWS in compact form (client-signed).
+    ReconnectGrantAppRequest:
+      type: object
+      required:
+      - parent
+      - proof
+      properties:
+        parent:
+          type: string
+          description: Parent grant JWS in compact form (`pubky-parent-grant`,
+            user-signed).
+        proof:
+          type: string
+          description: Reconnect proof JWS in compact form (`pubky-reconnect`), signed
+            by the parent's `cnf` key. Its claims are `aud`, `gid` (the parent's
+            `jti`), `nonce`, `iat`, and `client_id` (the app's exact callback).
     GrantSessionResponse:
       type: object
       required:
@@ -1293,7 +1404,8 @@ components:
           description: z-base-32 encoded user public key.
         client_id:
           type: string
-          description: Application identifier (domain string).
+          description: Application identifier. A domain string, or a child grant's
+            exact callback URL.
         capabilities:
           type: array
           items:
@@ -1332,7 +1444,8 @@ components:
           description: Grant identifier (revocation target).
         client_id:
           type: string
-          description: Application identifier.
+          description: Application identifier. A domain string, or a child grant's
+            exact callback URL.
         capabilities:
           type: string
           description: Comma-separated capability string.
@@ -1346,6 +1459,17 @@ components:
           format: int64
           minimum: 0
           description: Expiry timestamp (Unix seconds).
+        kind:
+          type: string
+          enum:
+          - direct
+          - parent
+          - child
+          description: How the grant was authorized. Homeservers without
+            `grant-delegation` omit it, which means `direct`.
+        parent_id:
+          type: string
+          description: The parent grant's ID. Present only for child grants.
     SignupTokenResponse:
       type: object
       required:

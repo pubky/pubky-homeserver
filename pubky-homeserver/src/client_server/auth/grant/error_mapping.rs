@@ -15,6 +15,9 @@ impl From<AuthServiceError> for HttpError {
                 grant_verifier::Error::InvalidSignature | grant_verifier::Error::Expired => {
                     HttpError::unauthorized_with_message(error.to_string())
                 }
+                grant_verifier::Error::CapabilitiesExceeded => {
+                    HttpError::forbidden_with_message(error.to_string())
+                }
                 _ => HttpError::bad_request(error.to_string()),
             },
             AuthServiceError::InvalidPopProof(_) => {
@@ -41,6 +44,9 @@ impl From<AuthServiceError> for HttpError {
             }
             AuthServiceError::GrantExpired => {
                 HttpError::unauthorized_with_message("Grant has expired")
+            }
+            AuthServiceError::AppBlocked => {
+                HttpError::forbidden_with_message("App must be reconnected before it can sign in")
             }
             AuthServiceError::InvalidSignupGrant(message) => HttpError::bad_request(message),
             AuthServiceError::SessionNotFound => {
@@ -91,8 +97,16 @@ mod tests {
             StatusCode::BAD_REQUEST,
         );
         assert_status(
-            AuthServiceError::InvalidGrant(grant_verifier::Error::InvalidHeaderType),
+            AuthServiceError::InvalidGrant(grant_verifier::Error::InvalidHeaderType("pubky-grant")),
             StatusCode::BAD_REQUEST,
+        );
+        assert_status(
+            AuthServiceError::InvalidGrant(grant_verifier::Error::ParentMismatch),
+            StatusCode::BAD_REQUEST,
+        );
+        assert_status(
+            AuthServiceError::InvalidGrant(grant_verifier::Error::CapabilitiesExceeded),
+            StatusCode::FORBIDDEN,
         );
     }
 
@@ -107,11 +121,7 @@ mod tests {
             StatusCode::UNAUTHORIZED,
         );
         assert_status(
-            AuthServiceError::InvalidPopProof(pop_verifier::Error::InvalidFormat),
-            StatusCode::UNAUTHORIZED,
-        );
-        assert_status(
-            AuthServiceError::InvalidPopProof(pop_verifier::Error::InvalidHeaderType),
+            AuthServiceError::InvalidPopProof(pop_verifier::Error::InvalidHeaderType("pubky-pop")),
             StatusCode::UNAUTHORIZED,
         );
     }
@@ -140,6 +150,7 @@ mod tests {
         assert_status(AuthServiceError::NonceReplay, StatusCode::UNAUTHORIZED);
         assert_status(AuthServiceError::GrantRevoked, StatusCode::UNAUTHORIZED);
         assert_status(AuthServiceError::GrantExpired, StatusCode::UNAUTHORIZED);
+        assert_status(AuthServiceError::AppBlocked, StatusCode::FORBIDDEN);
         assert_status(
             AuthServiceError::InvalidSignupGrant("bad signup grant".into()),
             StatusCode::BAD_REQUEST,

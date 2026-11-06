@@ -230,6 +230,9 @@ test("Session: grant-only view exposes metadata; GrantManager manages grants", a
     grants.some((entry) => entry.grantId === info.grantId && entry.clientId === clientId),
     "GrantManager.list includes the active grant",
   );
+  const listed = grants.find((entry) => entry.grantId === info.grantId)!;
+  t.equal(listed.kind, "direct", "GrantInfo reports the grant kind");
+  t.equal(listed.parentId, undefined, "direct grants have no parent");
 
   await grantManager.revoke(info.grantId);
   try {

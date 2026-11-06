@@ -97,7 +97,7 @@ pub use pubky_common::{
     auth::{
         AuthToken,
         grant::GrantClaims,
-        grant_session_responses::{GrantInfo, GrantSessionInfo, GrantSessionResponse},
+        grant_session_responses::{GrantInfo, GrantKind, GrantSessionInfo, GrantSessionResponse},
         jws::{ClientId, GRANT_JWS_TYP, GrantId, POP_JWS_TYP, PopNonce},
         pop::PopProofClaims,
     },

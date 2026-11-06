@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    auth::jws::{GrantId, PopNonce},
+    auth::jws::{ClientId, GrantId, PopNonce},
     crypto::PublicKey,
 };
 
@@ -32,6 +32,21 @@ pub struct PopProofClaims {
     pub nonce: PopNonce,
     /// Issued-at timestamp (Unix seconds).
     pub iat: u64,
+}
+
+/// Proof that the holder of a parent grant's `cnf` key confirmed
+/// reconnecting a blocked app.
+///
+/// `gid` is the parent's `jti` and `client_id` is the app's exact callback. The
+/// `pubky-reconnect` JWS type binds the operation, so an ordinary PoP proof
+/// cannot authorize it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconnectProofClaims {
+    /// Homeserver, parent, nonce and timestamp bindings.
+    #[serde(flatten)]
+    pub pop: PopProofClaims,
+    /// The app callback to unblock.
+    pub client_id: ClientId,
 }
 
 #[cfg(test)]

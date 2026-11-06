@@ -120,3 +120,7 @@ When proof logout is not advertised, the SDK retains bearer-authenticated logout
 and uses the latest shared bearer. Remote revocation on those older servers
 requires that bearer to remain valid. Upgrade all homeserver nodes to support
 logout after expiry; mixed server versions must not advertise proof logout.
+
+Homeservers advertising `grant-delegation` also accept parent/child grant chains
+at `POST /auth/grant/session`. See [parent and child grants](delegated-grants.md)
+for the exchange, replacement and revocation rules.

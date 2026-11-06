@@ -15,8 +15,18 @@ use crate::crypto::{random_bytes, Keypair};
 /// JWS header `typ` for Grant tokens.
 pub const GRANT_JWS_TYP: &str = "pubky-grant";
 
+/// JWS header `typ` for parent grants, which authorize child grants but
+/// never storage sessions.
+pub const PARENT_GRANT_JWS_TYP: &str = "pubky-parent-grant";
+
+/// JWS header `typ` for child grants signed by their parent's `cnf` key.
+pub const CHILD_GRANT_JWS_TYP: &str = "pubky-child-grant";
+
 /// JWS header `typ` for Proof-of-Possession proofs.
 pub const POP_JWS_TYP: &str = "pubky-pop";
+
+/// JWS header `typ` for the proof that clears an app's reconnection block.
+pub const RECONNECT_JWS_TYP: &str = "pubky-reconnect";
 
 /// Maximum length for a [`RandomId`] generated from 128-bit random bytes as base64url.
 const RANDOM_ID_MAX_LENGTH: usize = 22;
