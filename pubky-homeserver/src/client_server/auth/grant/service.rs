@@ -29,7 +29,8 @@ use super::persistence::{
 };
 use super::service_error::AuthServiceError;
 use super::session::GrantSession;
-use crate::client_server::auth::{AuthRevocation, AuthSession, SignupService};
+use crate::client_server::auth::{AuthRevocation, AuthSession};
+use crate::services::signup_service::SignupService;
 
 /// Default session bearer lifetime: 1 hour.
 const DEFAULT_SESSION_TOKEN_LIFETIME_SECS: u64 = 3600;
@@ -58,7 +59,7 @@ impl GrantAuthService {
         Self {
             sql_db: context.sql_db.clone(),
             homeserver_public_key: context.keypair.public_key(),
-            signup_service: SignupService::from_context(context),
+            signup_service: context.signup_service.clone(),
             user_service: context.user_service.clone(),
         }
     }
@@ -112,7 +113,7 @@ impl GrantAuthService {
             .create_user_in_tx(&grant.iss, signup_token, &mut tx)
             .await?;
         tx.commit().await?;
-        self.signup_service.cache_user_quota(&user);
+        self.user_service.cache_user_quota(&user);
         Ok(())
     }
 
@@ -493,10 +494,7 @@ fn map_not_found<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::sql::{
-        signup_code::{SignupCode, SignupCodeRepository},
-        SqlDb,
-    };
+    use crate::persistence::sql::{signup_code::SignupCode, SqlDb};
     use crate::shared::quota::UserQuota;
     use crate::SignupMode;
     use pubky_common::{
@@ -906,23 +904,19 @@ mod tests {
         let (grant_jws, pop_jws, _) =
             sign_signup_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
-        let code_id = SignupCode::random();
-        SignupCodeRepository::create(
-            &code_id,
-            &UserQuota::default(),
-            &mut service.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        let code_id = service
+            .signup_service
+            .create_token(&UserQuota::default())
+            .await
+            .unwrap()
+            .id;
 
         service
             .signup_grant_account(&grant_jws, &pop_jws, Some(&code_id))
             .await
             .unwrap();
 
-        let consumed = SignupCodeRepository::get(&code_id, &mut service.sql_db.pool().into())
-            .await
-            .unwrap();
+        let consumed = service.signup_service.get_token(&code_id).await.unwrap();
         assert_eq!(consumed.used_by, Some(user_kp.public_key()));
     }
 
@@ -970,22 +964,18 @@ mod tests {
         let (grant_jws, pop_jws, _) =
             sign_signup_grant(&user_kp, &client_kp, &service.homeserver_public_key());
 
-        let code_id = SignupCode::random();
-        SignupCodeRepository::create(
-            &code_id,
-            &UserQuota::default(),
-            &mut service.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        let code_id = service
+            .signup_service
+            .create_token(&UserQuota::default())
+            .await
+            .unwrap()
+            .id;
         let prior_user = Keypair::random().public_key();
-        SignupCodeRepository::mark_as_used(
-            &code_id,
-            &prior_user,
-            &mut service.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        service
+            .signup_service
+            .mark_token_used(&code_id, &prior_user)
+            .await
+            .unwrap();
 
         let err = service
             .signup_grant_account(&grant_jws, &pop_jws, Some(&code_id))

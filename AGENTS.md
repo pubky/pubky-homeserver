@@ -14,8 +14,10 @@ See [README.md](README.md) for the repository layout and project overview.
 - Follow neighboring code, crate lints, and workspace dependency conventions.
 - Keep Rust imports at module scope, not inside functions. Use `#[cfg]` on
   imports that only apply to specific targets or features.
-- Keep modules focused. Give each service direct access to the dependencies it
-  needs, such as its own database handle.
+- Keep modules focused. Organise services around capabilities, and give each
+  one direct access to the dependencies it needs, such as its own database
+  handle. The `services` module doc in
+  [services/mod.rs](pubky-homeserver/src/services/mod.rs) explains the layering.
 - Use clear names and existing types and errors. Add comments where the reason
   for a choice isn't obvious.
 - Keep Rust and JS/WASM APIs consistent, accounting for platform differences.

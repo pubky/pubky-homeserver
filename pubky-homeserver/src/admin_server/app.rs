@@ -188,7 +188,7 @@ mod tests {
     use pubky_common::crypto::Keypair;
 
     use crate::admin_server::AdminAuthExt;
-    use crate::persistence::sql::signup_code::{SignupCode, SignupCodeRepository};
+    use crate::persistence::sql::signup_code::SignupCode;
     use crate::shared::quota::{BandwidthQuota, UserQuota};
 
     use super::*;
@@ -376,17 +376,17 @@ mod tests {
         let token4 = SignupCode::new("0000-0000-0004".to_string()).unwrap();
 
         for token in [&token1, &token2, &token3, &token4] {
-            SignupCodeRepository::create(
-                token,
-                &UserQuota::default(),
-                &mut context.sql_db.pool().into(),
-            )
-            .await
-            .unwrap();
+            context
+                .signup_service
+                .create_token_with_id(token, &UserQuota::default())
+                .await
+                .unwrap();
         }
 
         let used_by = Keypair::random().public_key();
-        SignupCodeRepository::mark_as_used(&token1, &used_by, &mut context.sql_db.pool().into())
+        context
+            .signup_service
+            .mark_token_used(&token1, &used_by)
             .await
             .unwrap();
 
@@ -590,7 +590,6 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn test_generate_signup_token_with_limits() {
-        use crate::persistence::sql::signup_code::{SignupCode, SignupCodeRepository};
         use crate::shared::quota::user_quota::QuotaOverride;
 
         let context = AppContext::test().await;
@@ -613,9 +612,7 @@ mod tests {
         // Verify the code was created with custom limits
         let token_str = response.text();
         let code_id = SignupCode::new(token_str).unwrap();
-        let code = SignupCodeRepository::get(&code_id, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
+        let code = context.signup_service.get_token(&code_id).await.unwrap();
         let limits = code.quota();
         assert_eq!(limits.storage_quota_mb, QuotaOverride::Value(1024));
         assert_eq!(limits.rate_read, QuotaOverride::Value(bw("200mb/m")));
