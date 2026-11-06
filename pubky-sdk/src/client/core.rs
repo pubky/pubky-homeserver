@@ -244,14 +244,21 @@ impl PubkyHttpClientBuilder {
     ///
     /// Pkarr endpoint resolution happens before the request is sent and is
     /// bounded by the pkarr client's own relay and DHT timeouts instead.
+    ///
+    /// Values above [`Self::MAX_REQUEST_TIMEOUT`] make [`Self::build`] fail.
     pub fn request_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.request_timeout = Some(timeout);
         self
     }
 
+    /// Longest accepted [`Self::request_timeout`]: `i32::MAX` milliseconds.
+    pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_millis(i32::MAX as u64);
+
     /// Build a [`PubkyHttpClient`].
     ///
     /// # Errors
+    /// - [`crate::errors::BuildError::RequestTimeoutTooLong`] if the request
+    ///   timeout exceeds [`Self::MAX_REQUEST_TIMEOUT`].
     /// - [`crate::errors::BuildError::Pkarr`] if building the PKARR client fails.
     /// - [`crate::errors::BuildError::Http`] if constructing the HTTP client fails.
     ///
@@ -262,6 +269,12 @@ impl PubkyHttpClientBuilder {
     /// # Ok::<_, pubky::BuildError>(())
     /// ```
     pub fn build(&self) -> Result<PubkyHttpClient, BuildError> {
+        if let Some(timeout) = self
+            .request_timeout
+            .filter(|timeout| *timeout > Self::MAX_REQUEST_TIMEOUT)
+        {
+            return Err(BuildError::RequestTimeoutTooLong(timeout));
+        }
         let pkarr = self.pkarr.build()?;
 
         // Compose user agent with optional extra part.
@@ -727,6 +740,23 @@ mod test {
 
         assert_eq!(builder.request_timeout, Some(request_timeout));
         assert_eq!(builder.native_http.read_timeout, Some(read_timeout));
+    }
+
+    #[test]
+    fn request_timeout_is_capped_at_the_browser_timer_limit() {
+        let max = PubkyHttpClientBuilder::MAX_REQUEST_TIMEOUT;
+        assert_eq!(max, Duration::from_millis(2_147_483_647));
+
+        let mut builder = PubkyHttpClient::builder();
+        builder.request_timeout(max);
+        builder.build().unwrap();
+
+        let too_long = max + Duration::from_millis(1);
+        builder.request_timeout(too_long);
+        assert!(matches!(
+            builder.build(),
+            Err(BuildError::RequestTimeoutTooLong(timeout)) if timeout == too_long
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

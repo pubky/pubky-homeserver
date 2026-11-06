@@ -5,6 +5,8 @@
 //! Errors from lower layers (`reqwest`, `pkarr`, `pubky_common`, URL parsing) are
 //! mapped into structured variants so callers can handle them precisely.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 // --- Client Configuration and Build Errors ---
@@ -34,6 +36,11 @@ pub enum BuildError {
     /// Failed to build the HTTP client (reqwest configuration).
     #[error("Failed to build the HTTP client: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// The configured request timeout is longer than browser timers accept; see
+    /// [`PubkyHttpClientBuilder::MAX_REQUEST_TIMEOUT`](crate::PubkyHttpClientBuilder::MAX_REQUEST_TIMEOUT).
+    #[error("request_timeout {0:?} exceeds the maximum of {max:?}", max = crate::PubkyHttpClientBuilder::MAX_REQUEST_TIMEOUT)]
+    RequestTimeoutTooLong(Duration),
 }
 
 // --- The Main Operational Error Enum ---
