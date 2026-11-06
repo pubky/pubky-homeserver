@@ -255,6 +255,16 @@ export async function __pubkyGrantHoldKeyForParent(keyId) {
 }
 
 /**
+ * Undo `__pubkyGrantHoldKeyForParent`, so that `BrowserSessionStore.clearAll()`
+ * removes the key again. Does nothing if the key is missing or isn't held.
+ */
+export async function __pubkyGrantReleaseKeyFromParent(keyId) {
+  requireBrowserCrypto();
+  const existing = await getRecord(keyId);
+  if (existing?.heldByParentGrant) await putRecord({ ...existing, heldByParentGrant: false });
+}
+
+/**
  * Load the public key bytes for a delegated grant key.
  *
  * Used during delegated session restore to verify that saved metadata still
@@ -310,6 +320,9 @@ extern "C" {
 
     #[wasm_bindgen(js_name = __pubkyGrantHoldKeyForParent)]
     fn js_hold_key_for_parent(key_id: String) -> js_sys::Promise;
+
+    #[wasm_bindgen(js_name = __pubkyGrantReleaseKeyFromParent)]
+    fn js_release_key_from_parent(key_id: String) -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkyGrantLoadDelegatedPublicKey)]
     fn js_load_delegated_public_key(key_id: String) -> js_sys::Promise;
@@ -378,6 +391,16 @@ impl BrowserGrantKeyStore {
     /// itself, even after browser sessions are cleared.
     pub(crate) async fn hold_key_for_parent(key_id: String) -> JsResult<()> {
         JsFuture::from(js_hold_key_for_parent(key_id))
+            .await
+            .map_err(js_error)?;
+        Ok(())
+    }
+
+    /// Let `BrowserSessionStore.clearAll()` remove a key that a parent grant held.
+    ///
+    /// Does nothing if the key is missing or isn't held.
+    pub(crate) async fn release_key_from_parent(key_id: String) -> JsResult<()> {
+        JsFuture::from(js_release_key_from_parent(key_id))
             .await
             .map_err(js_error)?;
         Ok(())

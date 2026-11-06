@@ -1,13 +1,31 @@
 //! A signer approves a parent grant, and its holder manages it through the SDK.
 //!
-//! Issuing child grants and signing apps in with them is covered by the SDK's
-//! unit tests and by Pubky Accounts. `child_grant` covers the homeserver's rules.
+//! The last test plays an app's side from the documented formats, so the child
+//! grants the SDK issues are checked against the homeserver. `child_grant` covers
+//! the homeserver's rules.
 
 use super::*;
-use pubky_testnet::pubky::{
-    errors::RequestError, FeatureSupport, ParentGrantCredential, PubkySigner,
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use hpke::{
+    aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, single_shot_open,
+    Deserializable, Kem, OpModeR, Serializable,
 };
-use pubky_testnet::pubky_common::{encryption_keys::ScopedEncryptionKeyBundle, StoragePath};
+use pubky_testnet::pubky::{
+    deep_links::ChildGrantRequest, errors::RequestError, FeatureSupport, ParentGrantCredential,
+    PubkySigner,
+};
+use pubky_testnet::pubky_common::{
+    auth::{
+        grant::ChildGrantClaims,
+        grant_session_responses::GrantSessionResponse,
+        jws::{decode_jws_payload, sign_jws, PopNonce, POP_JWS_TYP},
+        pop::PopProofClaims,
+    },
+    crypto::random_bytes,
+    encryption_keys::ScopedEncryptionKeyBundle,
+    StoragePath,
+};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const ACCOUNTS: &str = "https://accounts.example/auth/callback";
 const CHAT: &str = "https://chat.example/auth/callback";
@@ -165,5 +183,124 @@ async fn delegation_support_is_unknown_without_a_homeserver() {
             .grant_delegation_support(&Keypair::random().public_key())
             .await,
         FeatureSupport::Unknown
+    );
+}
+
+/// Open an approval from a callback URL the way an app does, following the
+/// HPKE format in `docs/scoped-encryption-keys.md`.
+fn open_approval(
+    private_key: &<X25519HkdfSha256 as Kem>::PrivateKey,
+    callback: &reqwest::Url,
+) -> String {
+    let sealed = callback
+        .fragment()
+        .unwrap()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("approval="))
+        .unwrap();
+    let message = URL_SAFE_NO_PAD.decode(sealed).unwrap();
+    let body = message.strip_prefix(b"pubky-hpke-v1\0").unwrap();
+    let (encapped_key, ciphertext) = body.split_at(32);
+    let encapped_key = <X25519HkdfSha256 as Kem>::EncappedKey::from_bytes(encapped_key).unwrap();
+    let approval = single_shot_open::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
+        &OpModeR::Base,
+        private_key,
+        &encapped_key,
+        b"pubky-grant-approval-hpke-v1",
+        ciphertext,
+        b"",
+    )
+    .unwrap();
+    String::from_utf8(approval).unwrap()
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn an_app_signs_in_with_a_child_the_holder_issued() {
+    let testnet = build_full_testnet().await;
+    let (user, signer) = signed_up_user(&testnet).await;
+    let parent = parent_for(&testnet, &signer).await;
+    let server = testnet.homeserver_app();
+    let client = testnet.sdk().unwrap().client().clone();
+    let base_url = server.icann_http_url();
+
+    // The app builds its request from the documented URL format.
+    let app_key = Keypair::random();
+    let (hpke_secret, hpke_public) = X25519HkdfSha256::derive_keypair(&random_bytes::<32>());
+    let epk = URL_SAFE_NO_PAD.encode(hpke_public.to_bytes());
+    let request_url = reqwest::Url::parse_with_params(
+        "https://accounts.example/authorize",
+        [
+            ("cid", CHAT),
+            ("caps", "/pub/chat/:rw,/priv/chat/:rwe"),
+            ("cpk", app_key.public_key().z32().as_str()),
+            ("epk", epk.as_str()),
+            ("state", "state-1"),
+        ],
+    )
+    .unwrap();
+    let request = ChildGrantRequest::parse(&request_url).unwrap();
+
+    // The holder issues the child, and the app opens the approval it gets back.
+    let callback = parent.issue_child(&request, None).await.unwrap();
+    assert_eq!(callback.as_str().split('#').next(), Some(CHAT));
+    let approval = open_approval(&hpke_secret, &callback);
+    let payload: serde_json::Value = decode_jws_payload(&approval).unwrap();
+    assert_eq!(payload["state"], "state-1");
+    assert_eq!(payload["recipient"], epk);
+    let child_jws = payload["child"].as_str().unwrap();
+    let child: ChildGrantClaims = decode_jws_payload(child_jws).unwrap();
+    assert_eq!(child.grant.cnf, app_key.public_key());
+
+    // The homeserver accepts the chain the SDK issued.
+    let pop = PopProofClaims {
+        aud: server.public_key(),
+        gid: child.grant.jti.clone(),
+        nonce: PopNonce::generate(),
+        iat: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    let response = client
+        .request(Method::POST, &format!("{base_url}auth/grant/session"))
+        .json(&serde_json::json!({
+            "parent": payload["parent"],
+            "grant": child_jws,
+            "pop": sign_jws(&app_key, POP_JWS_TYP, &pop),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let session: GrantSessionResponse = response.json().await.unwrap();
+    assert_eq!(session.session.client_id.as_str(), CHAT);
+    assert_eq!(session.session.grant_id, child.grant.jti);
+
+    // The session is limited to the child's capabilities.
+    let put = |path: &'static str| {
+        let url = format!("{base_url}storage/{}{path}", user.public_key().z32());
+        let request = client
+            .request(Method::PUT, &url)
+            .bearer_auth(&session.token)
+            .body(vec![1]);
+        async move { request.send().await.unwrap().status() }
+    };
+    assert_eq!(put("/pub/chat/message").await, StatusCode::CREATED);
+    assert_eq!(put("/pub/other/message").await, StatusCode::FORBIDDEN);
+
+    // The app's keys are the ones the signer derives for the child's `e` scope.
+    let keys: ScopedEncryptionKeyBundle =
+        serde_json::from_value(payload["encryption_keys"].clone()).unwrap();
+    let scope = StoragePath::new("/priv/chat/").unwrap();
+    assert!(keys.scopes().eq([&scope]));
+    let file = StoragePath::new("/priv/chat/message").unwrap();
+    let direct = ScopedEncryptionKeyBundle::from_identity_secret(
+        &user.secret(),
+        std::slice::from_ref(&scope),
+    );
+    assert_eq!(
+        *keys.derive_for_path(&file).unwrap(),
+        *direct.derive_for_path(&file).unwrap()
     );
 }

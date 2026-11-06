@@ -201,9 +201,9 @@ impl ParentGrant {
     /// the parent expires when omitted. Navigate to the returned URL and don't
     /// log it: its fragment carries the encrypted approval.
     ///
-    /// @throws {PubkyError} `AuthenticationError` whose message contains
-    /// `insufficient_permissions` if the request exceeds this parent. Send the
-    /// user to `request.declinedUrl("insufficient_permissions")`.
+    /// @throws {PubkyError} `AuthenticationError` with
+    /// `data.denial === "insufficient_permissions"` if the request exceeds this
+    /// parent. Send the user to `request.declinedUrl(error.data.denial)`.
     #[wasm_bindgen(js_name = "issueChild")]
     pub async fn issue_child(
         &self,
@@ -262,6 +262,10 @@ impl ChildGrantRequest {
     }
 
     /// Build the callback URL that tells the app no child grant was issued.
+    ///
+    /// The URL points at the callback the request named. Redirect to it only
+    /// after you've found `clientId` in your app catalog, or Accounts becomes an
+    /// open redirect. For an unknown callback, show an error instead.
     ///
     /// @param {string} reason `access_denied`, `cancelled` or `insufficient_permissions`.
     #[wasm_bindgen(js_name = "declinedUrl")]
@@ -369,7 +373,12 @@ impl ParentGrantStore {
             parent_grant: parent.0.parent_grant().to_owned(),
             signed_approval: Some(parent.0.signed_approval().to_owned()),
         };
-        store_call(js_put(to_js_record(&record)?)).await?;
+        if let Err(error) = store_call(js_put(to_js_record(&record)?)).await {
+            // Without a record nothing would release the key, so `clearAll()`
+            // could never remove it. The save already failed: report that error.
+            let _ = BrowserGrantKeyStore::release_key_from_parent(record.key_id.clone()).await;
+            return Err(error);
+        }
         Ok(ParentGrantInfo(metadata))
     }
 
@@ -482,6 +491,9 @@ impl ParentGrantStore {
     }
 
     async fn delete(&self, record: &ParentRecord) -> JsResult<()> {
+        // Release the key first. If a later step fails, `clearAll()` can still
+        // remove the key, and the record stays usable for a retry.
+        BrowserGrantKeyStore::release_key_from_parent(record.key_id.clone()).await?;
         store_call(js_delete(&record.metadata.id)).await?;
         BrowserGrantKeyStore::delete_key(record.key_id.clone()).await
     }

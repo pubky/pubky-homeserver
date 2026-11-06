@@ -153,12 +153,16 @@ impl HomeserverFeatures {
             return current.support(feature);
         }
 
-        // Keep the last known features unless the homeserver lists new ones.
-        let mut last_known = || cached.take().map_or_else(Vec::new, |stale| stale.features);
         let (features, answered, ttl) = match fetch().await {
             InfoFetch::Listed(features) => (features, true, INFO_CACHE_TTL),
-            InfoFetch::Missing => (last_known(), true, INFO_FAILURE_CACHE_TTL),
-            InfoFetch::Failed => (last_known(), false, INFO_FAILURE_CACHE_TTL),
+            // An answer too: a homeserver without `/info` has none of the features.
+            InfoFetch::Missing => (Vec::new(), true, INFO_FAILURE_CACHE_TTL),
+            // Keep the last known features through a transient failure.
+            InfoFetch::Failed => (
+                cached.take().map_or_else(Vec::new, |stale| stale.features),
+                false,
+                INFO_FAILURE_CACHE_TTL,
+            ),
         };
         let refreshed = CachedFeatures {
             features,
@@ -418,11 +422,13 @@ mod tests {
 
         let feature = PATH_ADDRESSED_STORAGE;
         let listed = || vec![feature.to_string()];
-        let cases: [(Option<Vec<String>>, InfoFetch, FeatureSupport); 6] = [
+        let cases: [(Option<Vec<String>>, InfoFetch, FeatureSupport); 7] = [
             (None, InfoFetch::Listed(listed()), Supported),
             (None, InfoFetch::Listed(Vec::new()), Unsupported),
             (None, InfoFetch::Missing, Unsupported),
             (None, InfoFetch::Failed, Unknown),
+            // A homeserver that lost `/info` no longer has a feature it once listed.
+            (Some(listed()), InfoFetch::Missing, Unsupported),
             // A failure can't turn a known feature off, or confirm a missing one.
             (Some(listed()), InfoFetch::Failed, Supported),
             (Some(Vec::new()), InfoFetch::Failed, Unknown),

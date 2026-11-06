@@ -474,7 +474,12 @@ let callback = parent.issue_child(&request, None).await?;
 
 If the request exceeds the parent, such as keys the user declined to share,
 `issue_child` returns `AuthError::RedirectDeclined`. Redirect to
-`request.declined_url(reason)` so the app can tell the user.
+`request.declined_url(reason)` so the app can tell the user. Redirect only to
+callbacks in your catalog, and show an error for an unknown one.
+
+To keep a parent across restarts, start the flow with your own `client_keypair`,
+store that key and `parent.signed_approval()` securely, and restore with
+`ParentGrantCredential::from_signed_approval`.
 
 - Before Ring approves a parent, check
   `pubky.grant_delegation_support(&user)`. `Unsupported` means the homeserver

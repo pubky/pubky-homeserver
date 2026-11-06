@@ -1477,6 +1477,7 @@ dependencies = [
  "escargot",
  "eventsource-stream",
  "futures",
+ "hpke",
  "pubky-testnet",
  "rand 0.10.3",
  "reqwest",
