@@ -94,6 +94,12 @@ impl StoragePath {
     pub fn covers_path(&self, path: &StoragePath) -> bool {
         self == path || (self.is_directory() && path.as_str().starts_with(self.as_str()))
     }
+
+    /// Percent-encode this path for use as an HTTP URL path.
+    #[deprecated(note = "Use url_encode_path(path.as_str()) instead.")]
+    pub fn url_encode(&self) -> String {
+        url_encode_path(&self.0)
+    }
 }
 
 /// Percent-encode a decoded storage path for use as an HTTP URL path.
