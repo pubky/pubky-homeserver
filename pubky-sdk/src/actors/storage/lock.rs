@@ -141,7 +141,9 @@ impl SessionStorage {
         Ok(())
     }
 
-    /// `PUT` `body` to the path of a lock this client holds.
+    /// `PUT` `body` to the path of a lock this client holds. `Ok` means the
+    /// homeserver confirmed it stored the file, as for
+    /// [`Self::put`](SessionStorage::put).
     ///
     /// # Errors
     /// A lock that has expired or was unlocked returns 412; take a new one and
@@ -163,6 +165,7 @@ impl SessionStorage {
     }
 
     /// `DELETE` the path of a lock this client holds. The lock stays in place.
+    /// `Ok` means the homeserver confirmed the file is deleted.
     ///
     /// # Errors
     /// A lock that has expired or was unlocked returns 412; take a new one.

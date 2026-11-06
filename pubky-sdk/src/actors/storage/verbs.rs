@@ -98,8 +98,9 @@ impl SessionStorage {
 
     /// HTTP `PUT` (write) for an **absolute path**.
     ///
-    /// Creates or replaces a file and returns the successful response.
-    /// Requires write permission.
+    /// Creates or replaces a file and returns the successful response. `Ok`
+    /// means the homeserver confirmed it stored the file; a pending or partial
+    /// write is never reported as success. Requires write permission.
     ///
     /// # Errors
     /// Directory targets (400), file/directory conflicts (409), and exceeded quotas
@@ -160,6 +161,7 @@ impl SessionStorage {
     }
 
     /// Delete a file at an **absolute path** and return the successful response.
+    /// `Ok` means the homeserver confirmed the file is deleted.
     ///
     /// Requires write permission.
     ///
