@@ -216,7 +216,7 @@ test("SSE limits allow ignored fields, long streams, fragmented UTF-8 and cancel
         for (let i = 0; i < 100; i++) {
           const result = await reader.read();
           t.equal(result.value.cursor, String(i));
-          t.equal(result.value.resource.path, "/pub/caf%C3%A9");
+          t.equal(result.value.resource.path, "/pub/café");
         }
         await reader.cancel();
         t.ok(response.cancelled, "caller cancellation releases the response");

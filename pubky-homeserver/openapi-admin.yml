@@ -181,6 +181,8 @@ paths:
         data: cursor: 42
         data: content_hash: r0NJufX5oaagQE3qNtzJSZvLJcmtwRK3zJqTyuQfMmI=
         ```
+
+        The path after `pubky://<user>` is the stored name, not percent-encoded.
       operationId: getAdminEventStream
       security:
       - adminPassword: []

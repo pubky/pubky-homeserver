@@ -540,7 +540,8 @@ paths:
           maximum: 65535
       - name: cursor
         in: query
-        description: Directory-listing cursor, as a bare entry path or `pubky://` URL.
+        description: Directory-listing cursor, as a bare entry path or `pubky://` URL,
+          as a listing returned it.
         schema:
           type: string
       - name: shallow
@@ -599,7 +600,8 @@ paths:
             text/plain:
               schema:
                 type: string
-                description: Newline-separated `pubky://` URLs for directory listings.
+                description: Newline-separated `pubky://<user><path>` lines for directory
+                  listings; paths are not percent-encoded.
         '304':
           description: Not modified.
           headers:
@@ -798,7 +800,7 @@ paths:
       - name: cursor
         in: query
         description: Pagination cursor (directory listing only). May be a bare path
-          or `pubky://` prefixed.
+          or `pubky://` prefixed, as a listing returned it.
         schema:
           type: string
       - name: shallow
@@ -869,8 +871,8 @@ paths:
             text/plain:
               schema:
                 type: string
-                description: 'Newline-separated list of `pubky://` URLs (for directory
-                  paths).
+                description: 'Newline-separated `pubky://<user><path>` lines (for directory
+                  paths); paths are not percent-encoded.
 
 '
                 example: |
