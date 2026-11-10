@@ -220,9 +220,14 @@ For advanced/manual storage, local grant sessions still expose
 like a bearer token. Delegated browser grant sessions should use
 `browserSessionStore` because their PoP keys are non-extractable.
 
-> `session.export()` is still available for legacy cookie sessions, but new
-> applications should use grant auth plus `browserSessionStore` or
-> `exportLocalSecret()`.
+> [!WARNING]
+> **Cookie authentication is deprecated and no longer receives security
+> updates.** `session.export()` remains available for legacy cookie sessions.
+> [Migrate to grant authentication][grant-auth] with `browserSessionStore` or
+> `exportLocalSecret()`, and review the [known issues][cookie-issues].
+
+[grant-auth]: https://github.com/pubky/pubky-homeserver/blob/main/docs/v0.10-migration/grant-auth.md
+[cookie-issues]: https://github.com/pubky/pubky-homeserver/blob/main/docs/v0.10-migration/cookie-auth.md#known-issues
 
 **Multiple browser tabs**
 
