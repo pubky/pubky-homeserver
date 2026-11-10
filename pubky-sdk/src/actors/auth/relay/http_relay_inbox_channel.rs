@@ -241,8 +241,8 @@ impl HttpRelayInboxChannel {
         let response = request.send().await?;
         match response.status() {
             StatusCode::OK => {
-                let body = response.text().await?;
-                Ok(Some(body.trim() == "true"))
+                let body = read_relay_body(response).await?;
+                Ok(Some(String::from_utf8_lossy(&body).trim() == "true"))
             }
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
@@ -443,7 +443,9 @@ mod tests {
     use httpmock::MockServer;
     use pubky_common::crypto::random_bytes;
 
+    use super::super::response_body::MAX_RELAY_BODY_BYTES;
     use super::*;
+    use crate::errors::AuthError;
 
     #[test]
     fn test_new() {
@@ -594,6 +596,26 @@ mod tests {
         // After ACK
         let status = channel.check_ack(&client).await.unwrap();
         assert_eq!(status, Some(true));
+    }
+
+    #[tokio::test]
+    async fn oversized_ack_bodies_are_rejected() {
+        let server = MockServer::start();
+        let base = Url::parse(&server.base_url()).unwrap();
+        let channel = HttpRelayInboxChannel::new(base, "test".into()).unwrap();
+        let client = PubkyHttpClient::new().unwrap();
+        let size = MAX_RELAY_BODY_BYTES + 1;
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(channel.ack_url().path());
+            then.status(200).body(vec![b'x'; size]);
+        });
+
+        let error = channel.check_ack(&client).await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Authentication(AuthError::Validation(_))
+        ));
     }
 
     #[tokio::test]
