@@ -15,6 +15,7 @@ use sea_query::{
 use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
+use crate::client_server::auth::grant::crypto::grant_verifier::GrantChain;
 use crate::persistence::sql::{
     entities::user::{UserIden, USER_TABLE},
     migrations::m20260325_create_grant_sessions::{GrantIden, GRANTS_TABLE},
@@ -208,6 +209,9 @@ impl GrantRepository {
     }
 
     /// Block an app from silently reconnecting under a parent.
+    ///
+    /// Blocks are stored separately from grants so they survive child replacement
+    /// and signout. Only reconnection or parent revocation clears them.
     pub async fn block_app<'a>(
         user_id: i32,
         parent_id: &GrantId,
@@ -243,6 +247,19 @@ impl GrantRepository {
         .bind(client_id.as_str())
         .execute(con)
         .await?;
+        Ok(())
+    }
+
+    /// Remove all app blocks for a revoked parent.
+    pub async fn delete_app_blocks_for_parent<'a>(
+        parent_id: &GrantId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<(), sqlx::Error> {
+        let con = executor.get_con().await?;
+        sqlx::query("DELETE FROM grant_app_blocks WHERE parent_id = $1")
+            .bind(parent_id.as_str())
+            .execute(con)
+            .await?;
         Ok(())
     }
 
@@ -323,15 +340,34 @@ pub struct NewGrant {
     pub capabilities: Capabilities,
     pub issued_at: u64,
     pub expires_at: u64,
-    pub kind: GrantKind,
-    pub parent_id: Option<GrantId>,
+    kind: GrantKind,
+    parent_id: Option<GrantId>,
     /// Set to record an unseen grant as already revoked.
     pub revoked_at: Option<i64>,
 }
 
 impl NewGrant {
-    /// Build the record for verified grant claims.
-    pub fn from_claims(
+    /// Build a direct grant record from verified claims.
+    pub fn direct(claims: &GrantClaims, user_id: i32) -> Self {
+        Self::from_claims(claims, user_id, GrantKind::Direct, None)
+    }
+
+    /// Build a parent grant record from verified claims.
+    pub fn parent(claims: &GrantClaims, user_id: i32) -> Self {
+        Self::from_claims(claims, user_id, GrantKind::Parent, None)
+    }
+
+    /// Build a child grant record linked to its verified chain's parent.
+    pub fn child(chain: &GrantChain, user_id: i32) -> Self {
+        Self::from_claims(
+            &chain.child.grant,
+            user_id,
+            GrantKind::Child,
+            Some(chain.parent.jti.clone()),
+        )
+    }
+
+    fn from_claims(
         claims: &GrantClaims,
         user_id: i32,
         kind: GrantKind,
