@@ -232,6 +232,11 @@ paths:
         Exchanges a direct grant, or a parent grant and child grant, for a
         bearer that lasts at most one hour and never outlives the grants.
 
+        Accounts must use each app's fixed, registered HTTPS callback as the child's
+        `client_id` and verify requested callbacks against it and the pending
+        sign-in flow. The homeserver keys replacement and blocks on the exact value;
+        it doesn't verify app registration.
+
         The first exchange of a new child revokes the app's previous child under
         that parent and deletes its sessions. Repeating an exchange only replaces
         the bearer. A chain requires the `grant-delegation` feature. See

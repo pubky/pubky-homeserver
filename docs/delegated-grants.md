@@ -67,6 +67,19 @@ The `e` action only covers encryption keys. It gives no storage access. The
 homeserver doesn't look up an app catalog: Accounts decides which apps and
 permissions to allow within the parent's limit.
 
+## App identity
+
+Accounts must use each app's fixed, registered HTTPS callback in canonical form
+as `client_id` for child grants and reconnect proofs. Before signing, it must
+verify that callbacks from requests or redirecting pages match the registration
+and pending sign-in flow exactly, with no wildcards or prefix matching. Keep
+navigation destinations in separate, single-use sign-in state.
+
+The homeserver keys app replacement and blocks on the exact callback. Canonical
+URLs with different paths (such as `/cb` and `/cb/`), query strings or non-default
+ports remain distinct identities. Signing a variant for the same app can bypass
+its block.
+
 ## Exchange a child grant for a session
 
 Send the parent, the child and a proof-of-possession (PoP) signed by the child's

@@ -161,10 +161,10 @@ fn check_usable(raw: &GrantClaims) -> Result<(), Error> {
     Ok(())
 }
 
-/// Check that a delegated grant names an app by an exact HTTPS callback.
+/// Check that a delegated grant's callback is a canonical HTTPS URL.
 ///
-/// Requiring the URL's canonical form gives each app one identity, so a spelling
-/// variant can't create a second child under the same parent.
+/// Accounts must enforce each app's registered callback. Canonical URLs with
+/// different paths, queries or non-default ports remain distinct app identities.
 fn check_callback(raw: &GrantClaims) -> Result<(), Error> {
     let client_id = raw.client_id.as_str();
     let is_exact_callback = Url::parse(client_id).is_ok_and(|url| {
