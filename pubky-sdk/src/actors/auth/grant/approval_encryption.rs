@@ -106,6 +106,45 @@ pub(crate) fn seal(public_key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    #[test]
+    fn restores_unclamped_recipient_and_decrypts_hpke_0_14_1_approval() {
+        // Generated with hpke 0.14.1 using X25519HkdfSha256::derive_keypair
+        // with IKM [42; 32], then single_shot_seal with ChaCha20Poly1305,
+        // HkdfSha256, Base mode, INFO, and empty AAD. The wire includes
+        // WIRE_PREFIX and the encapsulated key. Keep these bytes fixed to
+        // preserve coverage of pre-0.15 private-key serialization.
+        let legacy_secret: [u8; 32] = URL_SAFE_NO_PAD
+            .decode("e33_Qjqh6H-VqFrXk9eC6IysIlKXbMW40EXH7kWzCW4")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let expected_public_key: [u8; 32] = URL_SAFE_NO_PAD
+            .decode("d3MphMWuTHHn_YLzGlf3ChY-Pf3sIC_lP8vtSfE_dSA")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let legacy_wire = URL_SAFE_NO_PAD
+            .decode(concat!(
+                "cHVia3ktaHBrZS12MQDmljIDEps8xWz2NNHaz9q9lW71zk0TQtZp3R1L12kP",
+                "LEyqey9_oerh0svZeIxdIEtJjCJ4Q40_r90w6DKtS4nEaFlbPSijEbv7_rKB7YUKyQ",
+            ))
+            .unwrap();
+
+        assert_ne!(
+            legacy_secret[0] & 0b111,
+            0,
+            "legacy fixture must retain bits cleared by X25519 clamping"
+        );
+        let recipient = ApprovalRecipientSecret::from_bytes(legacy_secret);
+
+        assert_eq!(recipient.public_key(), expected_public_key);
+        let plaintext = recipient
+            .open(&legacy_wire)
+            .expect("restored recipient must decrypt the HPKE 0.14.1 approval");
+        assert_eq!(plaintext.as_slice(), b"signed approval from hpke 0.14.1");
+    }
 
     #[test]
     fn approval_round_trips_and_rejects_wrong_keys_and_unmarked_payloads() {
@@ -123,8 +162,6 @@ mod tests {
 
     #[test]
     fn relay_cannot_encrypt_approval_with_its_channel_id() {
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-
         let (recipient, public_key) = ApprovalRecipientSecret::generate();
         let channel = crate::actors::auth::deep_links::GrantRelayChannel::Hpke {
             ephemeral_public_key: public_key,
