@@ -101,10 +101,18 @@ impl SignupService {
         } else {
             UserQuota::default()
         };
-        let user = self
+        let user = match self
             .user_service
             .create_in_tx(public_key, uexecutor!(*tx))
-            .await?;
+            .await
+        {
+            Ok(user) => Ok(user),
+            // A concurrent signup for the same key can commit between the
+            // existence check and this insert; the unique index on the public
+            // key reports that as a violation rather than a found row.
+            Err(e) if is_unique_violation(&e) => Err(SignupServiceError::UserAlreadyExists),
+            Err(e) => Err(e.into()),
+        }?;
         let user = self
             .user_service
             .set_quota_in_tx(user.id, &quota, uexecutor!(*tx))
@@ -187,6 +195,12 @@ impl SignupService {
     pub async fn token_overview(&self) -> Result<SignupCodeOverview, sqlx::Error> {
         SignupCodeRepository::get_overview(&mut self.sql_db.pool().into()).await
     }
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|error| error.is_unique_violation())
 }
 
 #[cfg(test)]
@@ -345,6 +359,44 @@ mod tests {
         ));
         let used = svc.get_token(&code.id).await.unwrap();
         assert_eq!(used.used_by, Some(winner.public_key));
+    }
+
+    /// Two signups for one key can both pass the existence check before
+    /// either inserts. Holding the first insert uncommitted while the second
+    /// signup runs forces the loser onto the unique index, where it must
+    /// report the same conflict a sequential retry gets.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_concurrent_signups_for_same_key_report_conflict() {
+        let svc = service(SignupMode::TokenRequired).await;
+        let first_token = svc.create_token(&UserQuota::default()).await.unwrap();
+        let second_token = svc.create_token(&UserQuota::default()).await.unwrap();
+        let pubkey = Keypair::random().public_key();
+
+        let mut first = svc.sql_db.pool().begin().await.unwrap();
+        svc.create_user_in_tx(&pubkey, Some(&first_token.id), &mut first)
+            .await
+            .unwrap();
+
+        // The second signup blocks on the unique index until `first` commits.
+        let racing = svc.clone();
+        let racing_key = pubkey.clone();
+        let racing_token = second_token.id.clone();
+        let second = tokio::spawn(async move {
+            racing
+                .create_new_user(&racing_key, Some(&racing_token))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        first.commit().await.unwrap();
+
+        let err = second.await.unwrap().unwrap_err();
+        assert!(matches!(err, SignupServiceError::UserAlreadyExists));
+
+        let winner = svc.get_token(&first_token.id).await.unwrap();
+        assert_eq!(winner.used_by, Some(pubkey));
+        let loser = svc.get_token(&second_token.id).await.unwrap();
+        assert!(loser.used_by.is_none(), "loser's token must roll back");
     }
 
     #[tokio::test]
