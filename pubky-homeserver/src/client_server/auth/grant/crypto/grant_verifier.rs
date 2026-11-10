@@ -30,6 +30,9 @@ use super::{
 /// sessions can't manage grants.
 const PARENT_CEILING: &str = "/pub/:rwe,/priv/:rwe";
 
+/// Maximum parent lifetime: 730 days, matching the SDK's default grant lifetime.
+const MAX_PARENT_GRANT_LIFETIME_SECS: u64 = 2 * 365 * 24 * 3600;
+
 /// A verified parent and child.
 #[derive(Debug, Clone)]
 pub struct GrantChain {
@@ -56,14 +59,14 @@ pub fn verify_grant_for_revocation(compact: &JwsCompact) -> Result<GrantClaims, 
     verify_signed(compact.as_str(), &issuer_key, GRANT_JWS_TYP)
 }
 
-/// Verify a usable parent grant.
+/// Verify a usable parent grant with a lifetime of at most 730 days.
 pub fn verify_parent(compact: &JwsCompact) -> Result<GrantClaims, Error> {
     let parent = verify_parent_for_revocation(compact)?;
-    check_usable(&parent)?;
+    check_parent_usable(&parent)?;
     Ok(parent)
 }
 
-/// Verify a parent grant, allowing expired parents for revocation.
+/// Verify a parent grant, allowing expired or overlong parents for revocation.
 ///
 /// Checks the user's signature, the type, the lifetime order, the callback, and
 /// the parent ceiling.
@@ -81,15 +84,15 @@ pub fn verify_parent_for_revocation(compact: &JwsCompact) -> Result<GrantClaims,
     Ok(parent)
 }
 
-/// Verify a usable parent and child.
+/// Verify a usable parent and child, enforcing the parent's maximum lifetime.
 pub fn verify_chain(parent: &JwsCompact, child: &JwsCompact) -> Result<GrantChain, Error> {
     let chain = verify_chain_for_revocation(parent, child)?;
-    check_usable(&chain.parent)?;
+    check_parent_usable(&chain.parent)?;
     check_usable(&chain.child.grant)?;
     Ok(chain)
 }
 
-/// Verify a parent and child, allowing expired grants for revocation.
+/// Verify a parent and child, allowing expired grants and overlong parents for revocation.
 ///
 /// The child must be signed by the parent's `cnf` key, name the same user and
 /// parent, satisfy `parent.iat <= child.iat < child.exp <= parent.exp`, and stay
@@ -161,6 +164,15 @@ fn check_usable(raw: &GrantClaims) -> Result<(), Error> {
     Ok(())
 }
 
+/// Enforce the parent lifetime limit only when authorizing use, not revocation.
+fn check_parent_usable(raw: &GrantClaims) -> Result<(), Error> {
+    check_usable(raw)?;
+    if raw.exp.saturating_sub(raw.iat) > MAX_PARENT_GRANT_LIFETIME_SECS {
+        return Err(Error::InvalidTimestamps);
+    }
+    Ok(())
+}
+
 /// Check that a delegated grant's callback is a canonical HTTPS URL.
 ///
 /// Accounts must enforce each app's registered callback. Canonical URLs with
@@ -216,7 +228,7 @@ pub enum Error {
     #[error("child grant does not match its parent")]
     ParentMismatch,
 
-    /// The grant lifetimes are inconsistent.
+    /// The grant timestamps are inconsistent or the parent's lifetime is too long.
     #[error("invalid grant timestamps")]
     InvalidTimestamps,
 
@@ -497,6 +509,46 @@ mod tests {
     }
 
     #[test]
+    fn parent_lifetime_is_capped_for_use_but_not_revocation() {
+        let mut chain = ChainFixture::new();
+        let max_exp = chain.parent.iat + 2 * 365 * 24 * 3600;
+        chain.parent.exp = max_exp;
+        chain.child.grant.exp = max_exp;
+        verify_parent(&chain.parent_jws()).unwrap();
+        chain.verify().unwrap();
+
+        // A short-lived child doesn't exempt its parent from the limit.
+        chain.child.grant.exp = chain.child.grant.iat + 3600;
+        for exp in [max_exp + 1, u64::MAX] {
+            chain.parent.exp = exp;
+            assert!(matches!(
+                verify_parent(&chain.parent_jws()),
+                Err(Error::InvalidTimestamps)
+            ));
+            assert!(matches!(chain.verify(), Err(Error::InvalidTimestamps)));
+            verify_parent_for_revocation(&chain.parent_jws()).unwrap();
+            verify_chain_for_revocation(&chain.parent_jws(), &chain.child_jws()).unwrap();
+
+            // The parent limit doesn't change direct grants.
+            verify_grant(&sign(&chain.user, GRANT_JWS_TYP, &chain.parent)).unwrap();
+        }
+    }
+
+    #[test]
+    fn expired_overlong_parents_can_still_be_revoked() {
+        let mut chain = ChainFixture::new();
+        let now = Utc::now().timestamp() as u64;
+        chain.parent.iat = now - 2 * 365 * 24 * 3600 - 60;
+        chain.parent.exp = now - 1;
+        chain.child.grant.iat = chain.parent.iat;
+        chain.child.grant.exp = chain.parent.exp;
+
+        assert!(matches!(chain.verify(), Err(Error::Expired)));
+        verify_parent_for_revocation(&chain.parent_jws()).unwrap();
+        verify_chain_for_revocation(&chain.parent_jws(), &chain.child_jws()).unwrap();
+    }
+
+    #[test]
     fn expiry_and_future_issuance_block_use_but_not_revocation() {
         let mut expired = ChainFixture::new();
         expired.parent.iat = 1000;
@@ -508,9 +560,10 @@ mod tests {
 
         // Only the child has expired.
         let mut expired_child = ChainFixture::new();
-        expired_child.parent.iat = 1000;
-        expired_child.child.grant.iat = 1000;
-        expired_child.child.grant.exp = 2000;
+        let now = Utc::now().timestamp() as u64;
+        expired_child.parent.iat = now - 120;
+        expired_child.child.grant.iat = now - 120;
+        expired_child.child.grant.exp = now - 60;
         assert!(matches!(expired_child.verify(), Err(Error::Expired)));
 
         let mut future = ChainFixture::new();

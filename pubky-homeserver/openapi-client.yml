@@ -231,6 +231,7 @@ paths:
       description: |-
         Exchanges a direct grant, or a parent grant and child grant, for a
         bearer that lasts at most one hour and never outlives the grants.
+        A parent's lifetime (`exp - iat`) must not exceed 730 days (63,072,000 seconds).
 
         Accounts must use each app's fixed, registered HTTPS callback as the child's
         `client_id` and verify requested callbacks against it and the pending
@@ -269,7 +270,7 @@ paths:
                 "$ref": "#/components/schemas/GrantSessionResponse"
         '400':
           description: Invalid grant format, grant type, parent reference, timestamps,
-            callback, or signup grant
+            callback, or signup grant, or parent lifetime exceeds 730 days
         '401':
           description: Invalid grant signature, expired grant, PoP verification failed,
             nonce replay, or grant revoked/expired. A replaced child is revoked.
@@ -302,7 +303,8 @@ paths:
       description: |-
         Idempotent — returns 200 even without a valid session.
 
-        A body revokes without a live bearer, including after a grant expires:
+        A body revokes without a live bearer, including expired grants and parents
+        above the 730-day lifetime limit:
 
         - `grant` and `pop` revoke a direct grant.
         - `parent`, `grant` and `pop` sign out one app. They revoke the child and
@@ -346,7 +348,8 @@ paths:
         Lets a new child grant sign in after the user removed the app with
         `DELETE /auth/grant/session/{gid}`. Authorized by the parent's key through
         a `pubky-reconnect` proof. A revoked child stays revoked. Requires the
-        `grant-delegation` feature.
+        `grant-delegation` feature. The parent's lifetime (`exp - iat`) must not
+        exceed 730 days (63,072,000 seconds).
       operationId: reconnectGrantApp
       requestBody:
         required: true
@@ -358,7 +361,8 @@ paths:
         '204':
           description: The app is not blocked under this parent
         '400':
-          description: Invalid parent format, grant type, timestamps, or callback
+          description: Invalid parent format, grant type, timestamps, or callback,
+            or parent lifetime exceeds 730 days
         '401':
           description: Invalid signature or proof, nonce replay, or parent revoked/expired
         '403':

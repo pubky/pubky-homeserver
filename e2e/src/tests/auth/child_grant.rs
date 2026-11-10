@@ -288,6 +288,23 @@ async fn rejected_chains_return_their_documented_statuses() {
 
 #[tokio::test]
 #[pubky_testnet::test]
+async fn overlong_parents_cannot_exchange_or_reconnect_but_can_sign_out() {
+    let testnet = build_full_testnet().await;
+    let mut d = ParentGrant::new(&testnet).await;
+    d.parent.exp = d.parent.iat + 2 * 365 * 24 * 3600 + 1;
+    let mut app = d.app(CHAT, "/priv/chat/:rw");
+    app.child.grant.exp = app.child.grant.iat + 3600;
+
+    assert_eq!(d.exchange_status(&app).await, StatusCode::BAD_REQUEST);
+    assert_eq!(d.reconnect_status(CHAT).await, StatusCode::BAD_REQUEST);
+
+    let response = d.delete_session(&d.chain_body(&app)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    d.parent_signout().await.unwrap();
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
 async fn signup_accepts_direct_grants_only() {
     let testnet = build_full_testnet().await;
     let d = ParentGrant::new(&testnet).await;

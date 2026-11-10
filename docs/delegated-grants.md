@@ -56,6 +56,7 @@ The homeserver accepts a chain only when all of these are true:
 - The user's key signed the parent, and the parent's `cnf` key signed the child.
 - `child.iss` equals `parent.iss`, and `child.parent_jti` equals `parent.jti`.
 - `parent.iat <= child.iat < child.exp <= parent.exp`.
+- `parent.exp - parent.iat` is at most 730 days (`63,072,000` seconds).
 - Neither grant has expired, and neither `iat` is more than three minutes ahead.
 - The parent stays within `/pub/:rwe` and `/priv/:rwe`, so it can't grant `/:rw`.
 - Each child scope and action is within the parent, compared by path rather than
@@ -99,7 +100,7 @@ outlives the child or the parent.
 
 | Status | Meaning |
 | --- | --- |
-| `400` | The format, grant type, parent reference, timestamps or callback is invalid |
+| `400` | The format, grant type, parent reference, timestamps or callback is invalid, or the parent lifetime exceeds 730 days |
 | `401` | A signature or PoP is invalid, a nonce was replayed, or a grant has expired or been revoked |
 | `403` | The capabilities exceed the limit, the app is blocked and must be reconnected, or a grant ID is already stored for another user or with different claims |
 | `404` | The user doesn't exist on this homeserver |
@@ -133,9 +134,9 @@ Revoking a parent also stops children that were never exchanged. Other parents
 aren't affected. To sign in again after that, the user needs a new parent from
 Ring.
 
-Proof-based signout works after a grant expires and can be retried with a fresh
-nonce. It also works before first use: an unseen parent or child is recorded as
-revoked, without replacing the app's current child.
+Proof-based signout accepts expired grants and parents above the 730-day limit.
+It can be retried with a fresh nonce and also works before first use: an unseen
+parent or child is recorded as revoked, without replacing the app's current child.
 
 Revocation closes the private event streams of every affected child, across
 homeserver instances. A child's bearer stops working as soon as the child or its
@@ -169,7 +170,7 @@ ordinary PoP or a child's key can't authorize it.
 
 A successful call returns `204`, including when the app wasn't blocked. It doesn't
 restore the old child, so issue a new child for the app. It returns `401` if the
-parent has been revoked or expired.
+parent has been revoked or expired, or `400` if its lifetime exceeds 730 days.
 
 ## List grants
 
@@ -189,6 +190,10 @@ in Rust, and `kind` and `parentId` in JavaScript.
 The `m20261103_add_grant_delegation` migration runs automatically at startup. It
 marks existing grants as `direct` and doesn't rewrite them, so existing grants and
 sessions keep working.
+
+Parents with lifetimes above 730 days can no longer exchange or reconnect.
+Revoke them and obtain new parents from Ring. Existing bearers remain valid
+until expiry or revocation.
 
 Upgrade every homeserver node before relying on `grant-delegation`. A node that
 hasn't been upgraded rejects the new token types and won't enforce blocks. Older
