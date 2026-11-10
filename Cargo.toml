@@ -57,6 +57,7 @@ futures-lite = { version = "2", default-features = false }
 futures-util = "0.3"
 hpke = { version = "0.15", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
 # Test relays use in-memory storage; keep SQLite persistence and the CLI disabled.
+http-body-util = "0.1"
 http-relay = { version = "0.7", default-features = false }
 httpdate = "1"
 ipnet = { version = "2", features = ["serde"] }

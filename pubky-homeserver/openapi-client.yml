@@ -686,8 +686,12 @@ paths:
         The path must be under `pub/` or `priv/`. The authenticated user must
         match `user_z32` and have write capability covering the storage path.
         If `Content-Length` is provided, the user's quota is checked before the
-        request body is streamed. A locked path requires the lock token in `If`
-        (see Locking).
+        request body is streamed. Quota is always checked again before publishing
+        the completed upload, including requests without `Content-Length`.
+        Exceeding quota returns `507` and preserves any existing file.
+        A locked path requires the lock token in `If` (see Locking).
+        Uploads are limited to 100 MiB (104857600 bytes), including requests
+        without `Content-Length`. Oversized uploads return `413`.
       operationId: putPathAddressedEntry
       security:
       - bearerAuth: []
@@ -717,6 +721,8 @@ paths:
           description: File/folder path collision, or the file changed since the write was prepared (see Locking); read it again and retry.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
+        '413':
+          description: Upload exceeds 100 MiB (104857600 bytes).
         '423':
           description: The path is locked and the request carries no lock token.
         '507':
@@ -977,6 +983,11 @@ paths:
         covering the path.
 
         If `Content-Length` is provided, a quota pre-check is performed before streaming.
+        Quota is always checked again before publishing the completed upload,
+        including requests without `Content-Length`. Exceeding quota returns
+        `507` and preserves any existing file.
+        Uploads are limited to 100 MiB (104857600 bytes), including requests
+        without `Content-Length`. Oversized uploads return `413`.
       operationId: putEntry
       security:
       - bearerAuth: []
@@ -1003,6 +1014,8 @@ paths:
           description: File/folder path collision, or the file changed since the write was prepared (see Locking)
         '412':
           description: The `If` header names a token that is not the live lock on this path
+        '413':
+          description: Upload exceeds 100 MiB (104857600 bytes).
         '423':
           description: The path is locked and the request carries no lock token (see Locking)
         '507':
