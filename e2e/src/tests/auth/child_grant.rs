@@ -238,15 +238,18 @@ async fn rejected_chains_return_their_documented_statuses() {
     let d = ParentGrant::new(&testnet).await;
     let app = d.app(CHAT, "/priv/chat/:rw");
 
-    // A child signed by someone other than the parent's key.
-    let mut body = d.chain_body(&app);
-    body["grant"] = json!(sign_jws(
-        &Keypair::random(),
-        CHILD_GRANT_JWS_TYP,
-        &app.child
-    ));
-    let response = d.post("auth/grant/session", &body).await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // Signature errors take precedence over type errors.
+    let stranger = Keypair::random();
+    for (signer, typ, expected) in [
+        (&stranger, CHILD_GRANT_JWS_TYP, StatusCode::UNAUTHORIZED),
+        (&stranger, PARENT_GRANT_JWS_TYP, StatusCode::UNAUTHORIZED),
+        (&d.accounts, PARENT_GRANT_JWS_TYP, StatusCode::BAD_REQUEST),
+    ] {
+        let mut body = d.chain_body(&app);
+        body["grant"] = json!(sign_jws(signer, typ, &app.child));
+        let response = d.post("auth/grant/session", &body).await;
+        assert_eq!(response.status(), expected);
+    }
 
     // A wrong parent reference.
     let mut other_parent = d.app(CHAT, "/priv/chat/:rw");

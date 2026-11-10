@@ -105,6 +105,9 @@ outlives the child or the parent.
 | `403` | The capabilities exceed the limit, the app is blocked and must be reconnected, or a grant ID is already stored for another user or with different claims |
 | `404` | The user doesn't exist on this homeserver |
 
+Grant signatures are checked before `typ`. If both are invalid, the response is
+`401`; an invalid type returns `400` only after the signature passes.
+
 `POST /auth/grant/signup` accepts direct grants only.
 
 ## One active child per app

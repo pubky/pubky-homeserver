@@ -108,7 +108,11 @@ tags:
 - name: General
   description: Health check and public info
 - name: Auth - Grant
-  description: Grant-based authentication (current)
+  description: |-
+    Grant-based authentication (current).
+
+    Grant signatures are checked before `typ`. If both are invalid, the response
+    is `401`; an invalid type returns `400` only after the signature passes.
 - name: Auth - Cookie
   description: Cookie-based authentication (deprecated)
 - name: Account
