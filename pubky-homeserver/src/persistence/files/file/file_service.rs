@@ -2,14 +2,14 @@
 use crate::AppContext;
 use crate::{
     persistence::{
-        files::write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
+        files::write_finalization_layer::{would_exceed_quota, write_bytes_delta},
         sql::{
             entry::{EntryEntity, EntryRepository},
             user::UserEntity,
             SqlDb,
         },
     },
-    services::{events_service::EventsService, user_service::FILE_METADATA_SIZE},
+    services::events_service::EventsService,
     shared::webdav::EntryPath,
     ConfigToml,
 };
@@ -118,16 +118,8 @@ impl FileService {
         };
 
         let existing_entry = self.get_info(path).await.ok();
-        let existing_entry_bytes = existing_entry.as_ref().map_or(0, |e| e.content_length);
-        let is_new_file = existing_entry.is_none();
-
-        let mut bytes_delta = content_length as i64 - existing_entry_bytes as i64;
-        if is_new_file {
-            bytes_delta += FILE_METADATA_SIZE as i64;
-        }
-
-        let max_bytes = resolve_storage_max_bytes(user, self.default_storage_mb);
-        if would_exceed_limit(user.used_bytes, bytes_delta, max_bytes) {
+        let bytes_delta = write_bytes_delta(existing_entry.as_ref(), content_length);
+        if would_exceed_quota(user, bytes_delta, self.default_storage_mb) {
             return Err(FileIoError::DiskSpaceQuotaExceeded);
         }
         Ok(())

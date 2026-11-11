@@ -1,12 +1,29 @@
-use crate::persistence::sql::user::UserEntity;
+use crate::persistence::sql::{entry::EntryEntity, user::UserEntity};
+use crate::services::user_service::FILE_METADATA_SIZE;
+
+/// The change in a user's stored bytes from writing `new_length` bytes where
+/// `existing_entry` is. A new entry also pays [`FILE_METADATA_SIZE`].
+pub(crate) fn write_bytes_delta(existing_entry: Option<&EntryEntity>, new_length: u64) -> i64 {
+    match existing_entry {
+        Some(entry) => new_length as i64 - entry.content_length as i64,
+        None => new_length as i64 + FILE_METADATA_SIZE as i64,
+    }
+}
+
+/// Whether adding `bytes_delta` to the user's usage would exceed their storage
+/// quota, with `default_storage_mb` for users without a quota of their own.
+pub(crate) fn would_exceed_quota(
+    user: &UserEntity,
+    bytes_delta: i64,
+    default_storage_mb: Option<u64>,
+) -> bool {
+    let max_bytes = resolve_storage_max_bytes(user, default_storage_mb);
+    would_exceed_limit(user.used_bytes, bytes_delta, max_bytes)
+}
 
 /// Check whether adding `bytes_delta` to `current_bytes` would exceed `max_bytes`.
 /// `None` means unlimited storage.
-pub(crate) fn would_exceed_limit(
-    current_bytes: u64,
-    bytes_delta: i64,
-    max_bytes: Option<u64>,
-) -> bool {
+fn would_exceed_limit(current_bytes: u64, bytes_delta: i64, max_bytes: Option<u64>) -> bool {
     let Some(max) = max_bytes else {
         return false;
     };
@@ -15,10 +32,7 @@ pub(crate) fn would_exceed_limit(
 }
 
 /// Resolve the effective storage limit from the per-user override and system default.
-pub(crate) fn resolve_storage_max_bytes(
-    user: &UserEntity,
-    default_storage_mb: Option<u64>,
-) -> Option<u64> {
+fn resolve_storage_max_bytes(user: &UserEntity, default_storage_mb: Option<u64>) -> Option<u64> {
     user.quota()
         .storage_quota_mb
         .resolve_with_default(default_storage_mb)
