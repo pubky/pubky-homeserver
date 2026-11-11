@@ -1,10 +1,16 @@
 //! Server error
+use std::error::Error as StdError;
+
 use axum::{
     http::{header::RETRY_AFTER, StatusCode},
     response::IntoResponse,
 };
+use http_body_util::LengthLimitError;
 
-use crate::{persistence::files::FileIoError, services::events_service::EventStreamError};
+use crate::{
+    persistence::files::{FileIoError, WriteStreamError},
+    services::events_service::EventStreamError,
+};
 
 pub(crate) type HttpResult<T, E = HttpError> = core::result::Result<T, E>;
 
@@ -162,6 +168,24 @@ impl From<EventStreamError> for HttpError {
     }
 }
 
+impl From<WriteStreamError> for HttpError {
+    fn from(error: WriteStreamError) -> Self {
+        // Body wrappers can nest the limit error. Check the whole source chain
+        // so streaming middleware cannot turn a size rejection into a 400.
+        let mut source: Option<&(dyn StdError + 'static)> = Some(&error);
+        while let Some(error) = source {
+            if error.is::<LengthLimitError>() {
+                return Self::new_with_message(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Upload exceeds the maximum allowed size",
+                );
+            }
+            source = error.source();
+        }
+        Self::bad_request("Stream broken")
+    }
+}
+
 impl From<FileIoError> for HttpError {
     fn from(error: FileIoError) -> Self {
         match error {
@@ -173,7 +197,7 @@ impl From<FileIoError> for HttpError {
             FileIoError::PathCollision => {
                 Self::new_with_message(StatusCode::CONFLICT, "File/folder path collision")
             }
-            FileIoError::StreamBroken(_) => Self::bad_request("Stream broken"),
+            FileIoError::StreamBroken(error) => error.into(),
             FileIoError::BackendRateLimited(error) => {
                 tracing::warn!(%error, "Storage backend rate limited");
                 // Reads and deletes are throttled too, so the message names no operation.
@@ -205,6 +229,40 @@ impl From<pubky_common::auth::Error> for HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use bytes::Bytes;
+    use futures_util::{stream, StreamExt};
+    use http_body_util::Limited;
+
+    #[tokio::test]
+    async fn upload_limit_error_remains_a_413_through_body_wrappers() {
+        for wrapper_count in [0, 1, 3] {
+            let chunks = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"abcd"))]);
+            let body = Body::new(Limited::new(Body::from_stream(chunks), 3));
+            let mut error = body.into_data_stream().next().await.unwrap().unwrap_err();
+            for _ in 0..wrapper_count {
+                error = axum::Error::new(error);
+            }
+            let response =
+                HttpError::from(FileIoError::StreamBroken(WriteStreamError::Axum(error)))
+                    .into_response();
+
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    }
+
+    #[test]
+    fn ordinary_upload_stream_error_remains_a_400() {
+        // Classification must use the error type, not its message.
+        for message in ["upload interrupted", "length limit exceeded"] {
+            let error = axum::Error::new(std::io::Error::other(message));
+            let response =
+                HttpError::from(FileIoError::StreamBroken(WriteStreamError::Axum(error)))
+                    .into_response();
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
 
     /// An object store throttles rapid mutations of one object, which is what
     /// concurrent writes to one path look like. The client must learn that it

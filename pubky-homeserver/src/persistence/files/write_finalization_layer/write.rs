@@ -9,7 +9,6 @@ use crate::persistence::sql::{
     user::UserEntity,
     UnifiedExecutor,
 };
-use crate::services::user_service::FILE_METADATA_SIZE;
 use crate::shared::webdav::EntryPath;
 use opendal::raw::oio;
 use opendal::{Operator, Result};
@@ -19,7 +18,7 @@ use super::{
         already_closed, check_no_path_collision, generation_under_lock, spawn_finalization,
         under_generation, unexpected, Finalizer,
     },
-    resolve_storage_max_bytes, would_exceed_limit, write_lock,
+    would_exceed_quota, write_bytes_delta, write_lock,
 };
 
 struct PreparedWrite {
@@ -35,17 +34,8 @@ impl PreparedWrite {
         file_metadata: &FileMetadata,
         default_storage_mb: Option<u64>,
     ) -> Result<Self> {
-        let existing_bytes = existing_entry
-            .as_ref()
-            .map_or(0, |entry| entry.content_length);
-        let metadata_bytes = if existing_entry.is_none() {
-            FILE_METADATA_SIZE as i64
-        } else {
-            0
-        };
-        let bytes_delta = file_metadata.length as i64 - existing_bytes as i64 + metadata_bytes;
-        let max_bytes = resolve_storage_max_bytes(&user, default_storage_mb);
-        if would_exceed_limit(user.used_bytes, bytes_delta, max_bytes) {
+        let bytes_delta = write_bytes_delta(existing_entry.as_ref(), file_metadata.length as u64);
+        if would_exceed_quota(&user, bytes_delta, default_storage_mb) {
             return Err(opendal::Error::new(
                 opendal::ErrorKind::RateLimited,
                 "User quota exceeded",

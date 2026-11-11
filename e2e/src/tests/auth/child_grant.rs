@@ -239,15 +239,18 @@ async fn rejected_chains_return_their_documented_statuses() {
     let d = ParentGrant::new(&testnet).await;
     let app = d.app(CHAT, "/priv/chat/:rw");
 
-    // A child signed by someone other than the parent's key.
-    let mut body = d.chain_body(&app);
-    body["grant"] = json!(sign_jws(
-        &Keypair::random(),
-        CHILD_GRANT_JWS_TYP,
-        &app.child
-    ));
-    let response = d.post("auth/grant/session", &body).await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // Signature errors take precedence over type errors.
+    let stranger = Keypair::random();
+    for (signer, typ, expected) in [
+        (&stranger, CHILD_GRANT_JWS_TYP, StatusCode::UNAUTHORIZED),
+        (&stranger, PARENT_GRANT_JWS_TYP, StatusCode::UNAUTHORIZED),
+        (&d.accounts, PARENT_GRANT_JWS_TYP, StatusCode::BAD_REQUEST),
+    ] {
+        let mut body = d.chain_body(&app);
+        body["grant"] = json!(sign_jws(signer, typ, &app.child));
+        let response = d.post("auth/grant/session", &body).await;
+        assert_eq!(response.status(), expected);
+    }
 
     // A wrong parent reference.
     let mut other_parent = d.app(CHAT, "/priv/chat/:rw");
@@ -285,6 +288,23 @@ async fn rejected_chains_return_their_documented_statuses() {
     let mut changed = d.app(CHAT, "/priv/chat/:r");
     changed.child.grant.jti = app.child.grant.jti.clone();
     assert_eq!(d.exchange_status(&changed).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[pubky_testnet::test]
+async fn overlong_parents_cannot_exchange_or_reconnect_but_can_sign_out() {
+    let testnet = build_full_testnet().await;
+    let mut d = ParentGrant::new(&testnet).await;
+    d.parent.exp = d.parent.iat + 2 * 365 * 24 * 3600 + 1;
+    let mut app = d.app(CHAT, "/priv/chat/:rw");
+    app.child.grant.exp = app.child.grant.iat + 3600;
+
+    assert_eq!(d.exchange_status(&app).await, StatusCode::BAD_REQUEST);
+    assert_eq!(d.reconnect_status(CHAT).await, StatusCode::BAD_REQUEST);
+
+    let response = d.delete_session(&d.chain_body(&app)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    d.parent_signout().await.unwrap();
 }
 
 #[tokio::test]

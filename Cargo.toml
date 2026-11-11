@@ -24,7 +24,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.17.1"
+version = "0.18.0"
 rust-version = "1.91"
 edition = "2021"
 authors = [
@@ -55,8 +55,10 @@ dirs = "7"
 eventsource-stream = "0.2"
 futures-lite = { version = "2", default-features = false }
 futures-util = "0.3"
-hpke = { version = "0.14.1", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
-http-relay = "0.7"
+hpke = { version = "0.15", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
+# Test relays use in-memory storage; keep SQLite persistence and the CLI disabled.
+http-body-util = "0.1"
+http-relay = { version = "0.7", default-features = false }
 httpdate = "1"
 ipnet = { version = "2", features = ["serde"] }
 js-sys = "0.3"
@@ -66,10 +68,10 @@ mainline = "8"
 pkarr = { version = "8.1", default-features = false }
 pkarr-relay = { version = "2", default-features = false }
 percent-encoding = "2"
-pubky = { path = "pubky-sdk", version = "0.17", default-features = false }
-pubky-common = { path = "pubky-common", version = "0.17" }
-pubky-homeserver = { path = "pubky-homeserver", version = "0.17", default-features = false }
-pubky-testnet = { path = "pubky-testnet", version = "0.17" }
+pubky = { path = "pubky-sdk", version = "0.18", default-features = false }
+pubky-common = { path = "pubky-common", version = "0.18" }
+pubky-homeserver = { path = "pubky-homeserver", version = "0.18", default-features = false }
+pubky-testnet = { path = "pubky-testnet", version = "0.18" }
 pubky_test_utils = { path = "test_utils/pubky_test", version = "0.1" }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }

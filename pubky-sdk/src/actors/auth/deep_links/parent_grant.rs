@@ -11,8 +11,8 @@ use url::Url;
 use super::{
     DeepLinkParseError, GrantRelayChannel,
     query_params::{
-        append_grant_params, append_grant_relay_channel, append_relay_params, invalid_parameter,
-        parse_capabilities, parse_client_id, parse_client_pk, parse_ephemeral_public_key,
+        append_grant_params, append_grant_relay_channel, append_relay_params, invalid_query_input,
+        parse_capabilities, parse_client_id, parse_client_pk, parse_optional_channel_key,
         parse_relay,
     },
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
@@ -56,13 +56,13 @@ impl ParentGrantParams {
 
     pub(crate) fn validate(&self) -> Result<(), DeepLinkParseError> {
         if !caps_within(&parent_grant_ceiling(), self.capabilities.as_slice()) {
-            return Err(invalid_parameter(
+            return Err(invalid_query_input(
                 "caps",
                 "parent grants are limited to /pub/:rwe and /priv/:rwe",
             ));
         }
         if !is_exact_callback(&self.client_id) {
-            return Err(invalid_parameter(
+            return Err(invalid_query_input(
                 "cid",
                 "parent grants require an exact HTTPS callback URL",
             ));
@@ -76,7 +76,7 @@ impl DeepLinkParams for ParentGrantParams {
         let params = Self {
             capabilities: parse_capabilities(url)?,
             relay: parse_relay(url)?,
-            ephemeral_public_key: parse_ephemeral_public_key(url)?
+            ephemeral_public_key: parse_optional_channel_key(url, "epk")?
                 .ok_or(DeepLinkParseError::MissingQueryParameter("epk"))?,
             client_id: parse_client_id(url)?,
             client_pk: parse_client_pk(url)?,

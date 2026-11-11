@@ -10,5 +10,5 @@ pub use delete::WriteFinalizationDeleter;
 #[cfg(test)]
 pub(crate) use layer::test_support;
 pub use layer::WriteFinalizationLayer;
-pub(crate) use quota::{resolve_storage_max_bytes, would_exceed_limit};
+pub(crate) use quota::{would_exceed_quota, write_bytes_delta};
 pub use write::WriteFinalizationWriter;

@@ -624,6 +624,8 @@ Path rules:
 
 - Session storage uses **absolute** paths under `/pub/` or `/priv/`.
 - Public storage uses **addressed** form `pubky<user>/pub/app/file.txt` (preferred) or `pubky://<user>/...`.
+- A path is the file's plain name, such as `/pub/app/My File.txt`; the SDK percent-encodes it when it builds the HTTP URL.
+- `list()` entries and `event.resource.path` carry the same plain name, which is also the form a `list()` cursor takes.
 
 **Convention:** put your app’s public data under a domain-like folder in `/pub`, e.g. `/pub/my-new-app/`.
 

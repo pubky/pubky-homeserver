@@ -9,8 +9,8 @@ use url::{Url, form_urlencoded};
 use super::{
     DeepLinkParseError,
     query_params::{
-        invalid_parameter, parse_capabilities, parse_client_id, parse_client_pk,
-        parse_ephemeral_public_key, required_query,
+        invalid_query_input, parse_capabilities, parse_client_id, parse_client_pk,
+        parse_optional_channel_key, required_query,
     },
 };
 use crate::errors::RedirectDenial;
@@ -56,14 +56,14 @@ impl ChildGrantRequest {
     pub fn parse(url: &Url) -> Result<Self, DeepLinkParseError> {
         let callback = parse_client_id(url)?;
         if !is_exact_callback(&callback) {
-            return Err(invalid_parameter(
+            return Err(invalid_query_input(
                 "cid",
                 "child grants require an exact HTTPS callback URL",
             ));
         }
         let state = required_query(url, "state")?;
         if state.is_empty() || state.len() > MAX_STATE_LENGTH {
-            return Err(invalid_parameter(
+            return Err(invalid_query_input(
                 "state",
                 "state must be 1 to 128 bytes long",
             ));
@@ -72,7 +72,7 @@ impl ChildGrantRequest {
             parse_capabilities(url)?,
             callback,
             parse_client_pk(url)?,
-            parse_ephemeral_public_key(url)?
+            parse_optional_channel_key(url, "epk")?
                 .ok_or(DeepLinkParseError::MissingQueryParameter("epk"))?,
             state,
         ))

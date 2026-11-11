@@ -24,4 +24,4 @@ pub mod timestamp {
 }
 
 pub mod storage_path;
-pub use storage_path::{StoragePath, StoragePathError};
+pub use storage_path::{url_encode_path, StoragePath, StoragePathError};

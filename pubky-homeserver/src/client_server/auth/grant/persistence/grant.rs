@@ -15,6 +15,7 @@ use sea_query::{
 use sea_query_sqlx::SqlxBinder;
 use sqlx::{postgres::PgRow, FromRow, Row};
 
+use crate::client_server::auth::grant::crypto::grant_verifier::GrantChain;
 use crate::persistence::sql::{
     entities::user::{UserIden, USER_TABLE},
     migrations::m20260325_create_grant_sessions::{GrantIden, GRANTS_TABLE},
@@ -129,6 +130,8 @@ impl GrantRepository {
     }
 
     /// Revoke a grant by setting revoked_at to the current unix timestamp.
+    ///
+    /// A grant that is already revoked keeps its original time.
     pub async fn revoke<'a>(
         grant_id: &GrantId,
         executor: &mut UnifiedExecutor<'a>,
@@ -138,6 +141,7 @@ impl GrantRepository {
             .table(GRANTS_TABLE)
             .value(GrantIden::RevokedAt, SimpleExpr::Value(now.into()))
             .and_where(Expr::col(GrantIden::Id).eq(grant_id.to_string()))
+            .and_where(Expr::col(GrantIden::RevokedAt).is_null())
             .to_owned();
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);
@@ -205,6 +209,9 @@ impl GrantRepository {
     }
 
     /// Block an app from silently reconnecting under a parent.
+    ///
+    /// Blocks are stored separately from grants so they survive child replacement
+    /// and signout. Only reconnection or parent revocation clears them.
     pub async fn block_app<'a>(
         user_id: i32,
         parent_id: &GrantId,
@@ -243,6 +250,19 @@ impl GrantRepository {
         Ok(())
     }
 
+    /// Remove all app blocks for a revoked parent.
+    pub async fn delete_app_blocks_for_parent<'a>(
+        parent_id: &GrantId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<(), sqlx::Error> {
+        let con = executor.get_con().await?;
+        sqlx::query("DELETE FROM grant_app_blocks WHERE parent_id = $1")
+            .bind(parent_id.as_str())
+            .execute(con)
+            .await?;
+        Ok(())
+    }
+
     /// Whether an app is blocked under a parent.
     pub async fn is_app_blocked<'a>(
         user_id: i32,
@@ -263,6 +283,52 @@ impl GrantRepository {
         .fetch_one(con)
         .await
     }
+
+    /// Load what a child's session depends on beyond the child itself: its
+    /// parent's lifetime, and whether its app is blocked under that parent.
+    ///
+    /// One query, because every request from a child session checks both.
+    pub async fn get_parent_state<'a>(
+        user_id: i32,
+        parent_id: &GrantId,
+        client_id: &ClientId,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<ParentState, sqlx::Error> {
+        let con = executor.get_con().await?;
+        let (revoked_at, expires_at, app_blocked) = sqlx::query_as(
+            r#"SELECT revoked_at, expires_at, EXISTS (
+                SELECT 1 FROM grant_app_blocks
+                WHERE "user" = $1 AND parent_id = $2 AND client_id = $3
+            )
+            FROM grants WHERE id = $2"#,
+        )
+        .bind(user_id)
+        .bind(parent_id.as_str())
+        .bind(client_id.as_str())
+        .fetch_one(con)
+        .await?;
+        Ok(ParentState {
+            revoked_at,
+            expires_at,
+            app_blocked,
+        })
+    }
+}
+
+/// A parent's lifetime and whether one app is blocked under it.
+#[derive(Debug, Clone, Copy)]
+pub struct ParentState {
+    revoked_at: Option<i64>,
+    expires_at: i64,
+    /// Whether the app is blocked under this parent.
+    pub app_blocked: bool,
+}
+
+impl ParentState {
+    /// Check that the parent is active (not revoked, not expired).
+    pub fn require_active(&self, now_unix: i64) -> Result<(), GrantStatus> {
+        require_active(self.revoked_at, self.expires_at, now_unix)
+    }
 }
 
 /// Data needed to create a new grant.
@@ -274,15 +340,34 @@ pub struct NewGrant {
     pub capabilities: Capabilities,
     pub issued_at: u64,
     pub expires_at: u64,
-    pub kind: GrantKind,
-    pub parent_id: Option<GrantId>,
+    kind: GrantKind,
+    parent_id: Option<GrantId>,
     /// Set to record an unseen grant as already revoked.
     pub revoked_at: Option<i64>,
 }
 
 impl NewGrant {
-    /// Build the record for verified grant claims.
-    pub fn from_claims(
+    /// Build a direct grant record from verified claims.
+    pub fn direct(claims: &GrantClaims, user_id: i32) -> Self {
+        Self::from_claims(claims, user_id, GrantKind::Direct, None)
+    }
+
+    /// Build a parent grant record from verified claims.
+    pub fn parent(claims: &GrantClaims, user_id: i32) -> Self {
+        Self::from_claims(claims, user_id, GrantKind::Parent, None)
+    }
+
+    /// Build a child grant record linked to its verified chain's parent.
+    pub fn child(chain: &GrantChain, user_id: i32) -> Self {
+        Self::from_claims(
+            &chain.child.grant,
+            user_id,
+            GrantKind::Child,
+            Some(chain.parent.jti.clone()),
+        )
+    }
+
+    fn from_claims(
         claims: &GrantClaims,
         user_id: i32,
         kind: GrantKind,
@@ -328,16 +413,25 @@ pub enum GrantStatus {
     Expired,
 }
 
+/// Check that a grant with these timestamps is active (not revoked, not expired).
+fn require_active(
+    revoked_at: Option<i64>,
+    expires_at: i64,
+    now_unix: i64,
+) -> Result<(), GrantStatus> {
+    if revoked_at.is_some() {
+        return Err(GrantStatus::Revoked);
+    }
+    if expires_at <= now_unix {
+        return Err(GrantStatus::Expired);
+    }
+    Ok(())
+}
+
 impl GrantEntity {
     /// Check that this grant is active (not revoked, not expired).
     pub fn require_active(&self, now_unix: i64) -> Result<(), GrantStatus> {
-        if self.revoked_at.is_some() {
-            return Err(GrantStatus::Revoked);
-        }
-        if self.expires_at <= now_unix {
-            return Err(GrantStatus::Expired);
-        }
-        Ok(())
+        require_active(self.revoked_at, self.expires_at, now_unix)
     }
 
     /// Whether this record holds the same authorization claims as `grant`.
@@ -558,6 +652,20 @@ mod tests {
             .await
             .unwrap();
         assert!(entity.revoked_at.is_some());
+
+        // Revoking again keeps the original time.
+        sqlx::query("UPDATE grants SET revoked_at = 1 WHERE id = $1")
+            .bind(grant_id.as_str())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        GrantRepository::revoke(&grant_id, &mut db.pool().into())
+            .await
+            .unwrap();
+        let entity = GrantRepository::get_by_id(&grant_id, &mut db.pool().into())
+            .await
+            .unwrap();
+        assert_eq!(entity.revoked_at, Some(1));
     }
 
     #[tokio::test]
@@ -803,5 +911,52 @@ mod tests {
             .await
             .unwrap();
         assert!(!blocked(parent.id.clone(), app.clone()).await);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn parent_state_reports_the_parent_lifetime_and_the_app_block() {
+        let db = SqlDb::test().await;
+        let user = UserService::new(db.clone())
+            .create(&Keypair::random().public_key())
+            .await
+            .unwrap();
+        let parent = make_new_grant(user.id);
+        GrantRepository::create(&parent, &mut db.pool().into())
+            .await
+            .unwrap();
+        let app = ClientId::new("https://a.example/cb").unwrap();
+        let state = |parent_id: GrantId| {
+            let (db, app) = (db.clone(), app.clone());
+            async move {
+                GrantRepository::get_parent_state(user.id, &parent_id, &app, &mut db.pool().into())
+                    .await
+            }
+        };
+        let now = parent.issued_at as i64;
+
+        let active = state(parent.id.clone()).await.unwrap();
+        assert!(!active.app_blocked);
+        assert_eq!(active.require_active(now), Ok(()));
+        assert_eq!(
+            active.require_active(parent.expires_at as i64),
+            Err(GrantStatus::Expired)
+        );
+
+        GrantRepository::block_app(user.id, &parent.id, &app, &mut db.pool().into())
+            .await
+            .unwrap();
+        GrantRepository::revoke(&parent.id, &mut db.pool().into())
+            .await
+            .unwrap();
+        let ended = state(parent.id.clone()).await.unwrap();
+        assert!(ended.app_blocked);
+        assert_eq!(ended.require_active(now), Err(GrantStatus::Revoked));
+
+        // A missing parent is an error, never an active parent.
+        assert!(matches!(
+            state(GrantId::generate()).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
 }

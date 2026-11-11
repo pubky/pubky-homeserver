@@ -3,7 +3,7 @@ use crate::actors::session::credential::SessionCredential;
 use reqwest::{Method, RequestBuilder, Response};
 use std::sync::Arc;
 
-use super::resource::{IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath};
+use super::resource::{IntoPubkyResource, IntoResourcePath, PubkyResource};
 use crate::{
     PubkyHttpClient, PubkySession, cross_log,
     errors::{RequestError, Result},
@@ -31,6 +31,7 @@ use crate::{
 ///
 /// - Paths under `/pub/` are **publicly readable** by anyone via [`PublicStorage`].
 /// - Paths under `/priv/` are **private** to the signed-in user.
+/// - Paths are plain names, such as `"/pub/my.app/My File.txt"`; see [`ResourcePath`](crate::ResourcePath).
 ///
 /// # Example
 ///
@@ -99,8 +100,7 @@ impl SessionStorage {
         method: Method,
         path: P,
     ) -> Result<RequestBuilder> {
-        let path: ResourcePath = path.into_abs_path()?;
-        let resource = PubkyResource::new(self.user.clone(), path.as_str())?;
+        let resource = PubkyResource::new(self.user.clone(), path)?;
         let url = resource.to_transport_url()?;
         cross_log!(debug, "Session storage {} request {}", method, url);
         self.client.cross_request(method, url).await

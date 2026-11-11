@@ -43,13 +43,14 @@ impl PubkyResource {
         PublicKey::from(self.0.owner.clone())
     }
 
-    /// Get the absolute path (e.g., "/pub/example.txt").
+    /// Get the absolute path (e.g., "/pub/My File.txt").
     #[wasm_bindgen(getter)]
     pub fn path(&self) -> String {
         self.0.path.to_string()
     }
 
-    /// Render as `pubky://<owner>/<path>` (deep-link/URL form).
+    /// Render as `pubky://<owner><path>` (deep-link form), the form listings
+    /// and events use.
     #[wasm_bindgen(js_name = "toPubkyUrl")]
     pub fn to_pubky_url(&self) -> String {
         self.0.to_pubky_url()

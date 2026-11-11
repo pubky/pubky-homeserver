@@ -108,7 +108,11 @@ tags:
 - name: General
   description: Health check and public info
 - name: Auth - Grant
-  description: Grant-based authentication (current)
+  description: |-
+    Grant-based authentication (current).
+
+    Grant signatures are checked before `typ`. If both are invalid, the response
+    is `401`; an invalid type returns `400` only after the signature passes.
 - name: Auth - Cookie
   description: Cookie-based authentication (deprecated)
 - name: Account
@@ -231,6 +235,12 @@ paths:
       description: |-
         Exchanges a direct grant, or a parent grant and child grant, for a
         bearer that lasts at most one hour and never outlives the grants.
+        A parent's lifetime (`exp - iat`) must not exceed 730 days (63,072,000 seconds).
+
+        Accounts must use each app's fixed, registered HTTPS callback as the child's
+        `client_id` and verify requested callbacks against it and the pending
+        sign-in flow. The homeserver keys replacement and blocks on the exact value;
+        it doesn't verify app registration.
 
         The first exchange of a new child revokes the app's previous child under
         that parent and deletes its sessions. Repeating an exchange only replaces
@@ -264,7 +274,7 @@ paths:
                 "$ref": "#/components/schemas/GrantSessionResponse"
         '400':
           description: Invalid grant format, grant type, parent reference, timestamps,
-            callback, or signup grant
+            callback, or signup grant, or parent lifetime exceeds 730 days
         '401':
           description: Invalid grant signature, expired grant, PoP verification failed,
             nonce replay, or grant revoked/expired. A replaced child is revoked.
@@ -297,7 +307,8 @@ paths:
       description: |-
         Idempotent — returns 200 even without a valid session.
 
-        A body revokes without a live bearer, including after a grant expires:
+        A body revokes without a live bearer, including expired grants and parents
+        above the 730-day lifetime limit:
 
         - `grant` and `pop` revoke a direct grant.
         - `parent`, `grant` and `pop` sign out one app. They revoke the child and
@@ -341,7 +352,8 @@ paths:
         Lets a new child grant sign in after the user removed the app with
         `DELETE /auth/grant/session/{gid}`. Authorized by the parent's key through
         a `pubky-reconnect` proof. A revoked child stays revoked. Requires the
-        `grant-delegation` feature.
+        `grant-delegation` feature. The parent's lifetime (`exp - iat`) must not
+        exceed 730 days (63,072,000 seconds).
       operationId: reconnectGrantApp
       requestBody:
         required: true
@@ -353,7 +365,8 @@ paths:
         '204':
           description: The app is not blocked under this parent
         '400':
-          description: Invalid parent format, grant type, timestamps, or callback
+          description: Invalid parent format, grant type, timestamps, or callback,
+            or parent lifetime exceeds 730 days
         '401':
           description: Invalid signature or proof, nonce replay, or parent revoked/expired
         '403':
@@ -630,7 +643,8 @@ paths:
           maximum: 65535
       - name: cursor
         in: query
-        description: Directory-listing cursor, as a bare entry path or `pubky://` URL.
+        description: Directory-listing cursor, as a bare entry path or `pubky://` URL,
+          as a listing returned it.
         schema:
           type: string
       - name: shallow
@@ -689,7 +703,8 @@ paths:
             text/plain:
               schema:
                 type: string
-                description: Newline-separated `pubky://` URLs for directory listings.
+                description: Newline-separated `pubky://<user><path>` lines for directory
+                  listings; paths are not percent-encoded.
         '304':
           description: Not modified.
           headers:
@@ -774,8 +789,12 @@ paths:
         The path must be under `pub/` or `priv/`. The authenticated user must
         match `user_z32` and have write capability covering the storage path.
         If `Content-Length` is provided, the user's quota is checked before the
-        request body is streamed. A locked path requires the lock token in `If`
-        (see Locking).
+        request body is streamed. Quota is always checked again before publishing
+        the completed upload, including requests without `Content-Length`.
+        Exceeding quota returns `507` and preserves any existing file.
+        A locked path requires the lock token in `If` (see Locking).
+        Uploads are limited to 100 MiB (104857600 bytes), including requests
+        without `Content-Length`. Oversized uploads return `413`.
       operationId: putPathAddressedEntry
       security:
       - bearerAuth: []
@@ -805,6 +824,8 @@ paths:
           description: File/folder path collision, or the file changed since the write was prepared (see Locking); read it again and retry.
         '412':
           description: The `If` header names a token that is not the live lock on this path.
+        '413':
+          description: Upload exceeds 100 MiB (104857600 bytes).
         '423':
           description: The path is locked and the request carries no lock token.
         '507':
@@ -888,7 +909,7 @@ paths:
       - name: cursor
         in: query
         description: Pagination cursor (directory listing only). May be a bare path
-          or `pubky://` prefixed.
+          or `pubky://` prefixed, as a listing returned it.
         schema:
           type: string
       - name: shallow
@@ -959,8 +980,8 @@ paths:
             text/plain:
               schema:
                 type: string
-                description: 'Newline-separated list of `pubky://` URLs (for directory
-                  paths).
+                description: 'Newline-separated `pubky://<user><path>` lines (for directory
+                  paths); paths are not percent-encoded.
 
 '
                 example: |
@@ -1065,6 +1086,11 @@ paths:
         covering the path.
 
         If `Content-Length` is provided, a quota pre-check is performed before streaming.
+        Quota is always checked again before publishing the completed upload,
+        including requests without `Content-Length`. Exceeding quota returns
+        `507` and preserves any existing file.
+        Uploads are limited to 100 MiB (104857600 bytes), including requests
+        without `Content-Length`. Oversized uploads return `413`.
       operationId: putEntry
       security:
       - bearerAuth: []
@@ -1091,6 +1117,8 @@ paths:
           description: File/folder path collision, or the file changed since the write was prepared (see Locking)
         '412':
           description: The `If` header names a token that is not the live lock on this path
+        '413':
+          description: Upload exceeds 100 MiB (104857600 bytes).
         '423':
           description: The path is locked and the request carries no lock token (see Locking)
         '507':

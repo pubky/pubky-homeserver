@@ -11,12 +11,18 @@
 //! [`crate::client_server::auth::has_read_permission`] to enforce
 //! capability-based access control.
 
-use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};
+use axum::{
+    middleware,
+    routing::{get, put},
+    Router,
+};
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::client_server::{
     cache_policy::private_cache_policy, middleware::storage_metrics, AppState,
 };
 use crate::observability::Metrics;
+use crate::MAX_UPLOAD_BYTES;
 
 mod authorize;
 pub mod lock;
@@ -24,12 +30,15 @@ pub mod read;
 pub mod write;
 
 pub fn router(metrics: Metrics) -> Router<AppState> {
+    // PUT streams the body directly, so the limit must wrap the body itself.
+    let upload_limit = RequestBodyLimitLayer::new(MAX_UPLOAD_BYTES);
+
     Router::new()
         .route(
             "/storage/{user_z32}/{*path}",
             get(read::get)
                 .head(read::head)
-                .put(write::put)
+                .merge(put(write::put).layer(upload_limit))
                 .delete(write::delete)
                 // LOCK and UNLOCK are not in axum's method filter set.
                 .fallback(lock::dispatch),
@@ -38,11 +47,9 @@ pub fn router(metrics: Metrics) -> Router<AppState> {
             "/{*path}",
             get(read::legacy_get)
                 .head(read::legacy_head)
-                .put(write::legacy_put)
+                .merge(put(write::legacy_put).layer(upload_limit))
                 .delete(write::legacy_delete),
         )
-        // TODO: different max size for sessions and other routes?
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .layer(middleware::from_fn(private_cache_policy))
         .layer(middleware::from_fn_with_state(
             metrics,
