@@ -1,4 +1,4 @@
-use std::io;
+use std::{borrow::Cow, io};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{auth::jws::ClientId, capabilities::Capabilities, crypto::PublicKey};
@@ -9,19 +9,12 @@ use super::{DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel};
 pub(super) fn parse_grant_approval_format(
     url: &Url,
 ) -> Result<GrantApprovalFormat, DeepLinkParseError> {
-    let mut values = url
-        .query_pairs()
-        .filter(|(key, _)| key == "af")
-        .map(|(_, value)| value);
-    match (values.next(), values.next()) {
-        (None, None) => Ok(GrantApprovalFormat::BareGrant),
-        (Some(value), None) if value == "v1" => Ok(GrantApprovalFormat::SignedApprovalV1),
-        _ => Err(DeepLinkParseError::InvalidQueryParameter(
+    match optional_unique_query(url, "af")?.as_deref() {
+        None => Ok(GrantApprovalFormat::BareGrant),
+        Some("v1") => Ok(GrantApprovalFormat::SignedApprovalV1),
+        Some(_) => Err(invalid_query_input(
             "af",
-            Box::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "expected one af=v1 parameter, or none for a bare grant",
-            )),
+            "expected one af=v1 parameter, or none for a bare grant",
         )),
     }
 }
@@ -63,8 +56,7 @@ fn decode_channel_key(raw: &str, name: &'static str) -> Result<[u8; 32], DeepLin
 }
 
 pub(super) fn parse_homeserver(url: &Url) -> Result<PublicKey, DeepLinkParseError> {
-    PublicKey::try_from_z32(&required_query(url, "hs")?)
-        .map_err(|e| DeepLinkParseError::InvalidQueryParameter("hs", Box::new(e)))
+    parse_required_public_key(url, "hs")
 }
 
 pub(super) fn parse_client_id(url: &Url) -> Result<ClientId, DeepLinkParseError> {
@@ -73,41 +65,33 @@ pub(super) fn parse_client_id(url: &Url) -> Result<ClientId, DeepLinkParseError>
 }
 
 pub(super) fn parse_client_pk(url: &Url) -> Result<PublicKey, DeepLinkParseError> {
-    PublicKey::try_from_z32(&required_query(url, "cpk")?)
-        .map_err(|e| DeepLinkParseError::InvalidQueryParameter("cpk", Box::new(e)))
+    parse_required_public_key(url, "cpk")
+}
+
+fn parse_required_public_key(
+    url: &Url,
+    name: &'static str,
+) -> Result<PublicKey, DeepLinkParseError> {
+    PublicKey::try_from_z32(&required_query(url, name)?)
+        .map_err(|e| DeepLinkParseError::InvalidQueryParameter(name, Box::new(e)))
 }
 
 pub(super) fn parse_expected_signer(url: &Url) -> Result<Option<PublicKey>, DeepLinkParseError> {
-    let mut values = url
-        .query_pairs()
-        .filter(|(key, _)| key == "spk")
-        .map(|(_, value)| value);
-    match (values.next(), values.next()) {
-        (None, _) => Ok(None),
-        (Some(value), None) => parse_canonical_z32(&value)
-            .map(Some)
-            .map_err(|e| DeepLinkParseError::InvalidQueryParameter("spk", e)),
-        (Some(_), Some(_)) => Err(DeepLinkParseError::InvalidQueryParameter(
-            "spk",
-            Box::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "expected at most one spk parameter",
-            )),
-        )),
-    }
-}
+    let Some(value) = optional_unique_query(url, "spk")? else {
+        return Ok(None);
+    };
+    let key = PublicKey::try_from_z32(&value)
+        .map_err(|error| DeepLinkParseError::InvalidQueryParameter("spk", Box::new(error)))?;
 
-/// Pkarr's parser also accepts `pk:<z32>`, URL forms and noncanonical
-/// encodings; `spk` must be exactly the 52-character z32 that signers compare.
-fn parse_canonical_z32(value: &str) -> Result<PublicKey, Box<dyn std::error::Error + Send + Sync>> {
-    let key = PublicKey::try_from_z32(value)?;
+    // Pkarr also accepts prefixes, URLs and noncanonical encodings, but the
+    // spk wire format requires a bare, canonical z32 key.
     if key.z32() != value {
-        return Err(Box::new(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(invalid_query_input(
+            "spk",
             "expected a bare, canonical z-base-32 public key",
-        )));
+        ));
     }
-    Ok(key)
+    Ok(Some(key))
 }
 
 pub(super) fn append_expected_signer(url: &mut Url, expected_signer: Option<&PublicKey>) {
@@ -121,23 +105,21 @@ pub(super) fn parse_grant_relay_channel(
     url: &Url,
     approval_format: GrantApprovalFormat,
 ) -> Result<GrantRelayChannel, DeepLinkParseError> {
-    let ephemeral_public_key = parse_ephemeral_public_key(url)?;
-    let shared_secret = optional_query(url, "secret")
-        .map(|secret| decode_channel_key(&secret, "secret"))
-        .transpose()?;
+    let ephemeral_public_key = parse_optional_channel_key(url, "epk")?;
+    let shared_secret = parse_optional_channel_key(url, "secret")?;
 
     match (ephemeral_public_key, shared_secret, approval_format) {
         (Some(ephemeral_public_key), None, _) => Ok(GrantRelayChannel::Hpke {
             ephemeral_public_key,
         }),
-        (Some(_), Some(_), _) => Err(DeepLinkParseError::InvalidQueryParameter(
+        (Some(_), Some(_), _) => Err(invalid_query_input(
             "secret",
-            Box::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "secret must be omitted when epk is present",
-            )),
+            "secret must be omitted when epk is present",
         )),
-        (None, _, GrantApprovalFormat::SignedApprovalV1) => Err(missing_ephemeral_public_key()),
+        (None, _, GrantApprovalFormat::SignedApprovalV1) => Err(invalid_query_input(
+            "epk",
+            "af=v1 requires one epk parameter",
+        )),
         (None, Some(secret), GrantApprovalFormat::BareGrant) => {
             Ok(GrantRelayChannel::SharedSecret(secret))
         }
@@ -147,19 +129,12 @@ pub(super) fn parse_grant_relay_channel(
     }
 }
 
-fn missing_ephemeral_public_key() -> DeepLinkParseError {
-    DeepLinkParseError::InvalidQueryParameter(
-        "epk",
-        Box::new(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "af=v1 requires one epk parameter",
-        )),
-    )
-}
-
-fn parse_ephemeral_public_key(url: &Url) -> Result<Option<[u8; 32]>, DeepLinkParseError> {
-    optional_query(url, "epk")
-        .map(|encoded| decode_channel_key(&encoded, "epk"))
+fn parse_optional_channel_key(
+    url: &Url,
+    name: &'static str,
+) -> Result<Option<[u8; 32]>, DeepLinkParseError> {
+    optional_query(url, name)
+        .map(|encoded| decode_channel_key(&encoded, name))
         .transpose()
 }
 
@@ -167,10 +142,37 @@ pub(super) fn required_query(url: &Url, key: &'static str) -> Result<String, Dee
     optional_query(url, key).ok_or(DeepLinkParseError::MissingQueryParameter(key))
 }
 
+/// Returns the first value, preserving legacy handling of repeated parameters.
 pub(super) fn optional_query(url: &Url, key: &str) -> Option<String> {
     url.query_pairs()
         .find(|(param_key, _)| param_key == key)
-        .map(|(_, value)| value.to_string())
+        .map(|(_, value)| value.into_owned())
+}
+
+/// Returns the value if present and rejects repeated parameter names.
+fn optional_unique_query(
+    url: &Url,
+    key: &'static str,
+) -> Result<Option<String>, DeepLinkParseError> {
+    let mut values = url
+        .query_pairs()
+        .filter(|(param_key, _)| param_key == key)
+        .map(|(_, value)| value);
+    let value = values.next();
+    if values.next().is_some() {
+        return Err(invalid_query_input(
+            key,
+            format!("expected at most one {key} parameter"),
+        ));
+    }
+    Ok(value.map(Cow::into_owned))
+}
+
+fn invalid_query_input(name: &'static str, message: impl Into<String>) -> DeepLinkParseError {
+    DeepLinkParseError::InvalidQueryParameter(
+        name,
+        Box::new(io::Error::new(io::ErrorKind::InvalidInput, message.into())),
+    )
 }
 
 pub(super) fn append_signin_params(

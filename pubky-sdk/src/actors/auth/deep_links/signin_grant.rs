@@ -249,7 +249,13 @@ mod tests {
             "pubkyauth://signin_grant?caps=/:rw&relay=http://localhost/inbox&secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8&cid=test.app&cpk={}",
             client_pk.z32()
         );
-        for query in ["af=v2", "af=", "af=v1&af=v1", "af=v1&af=v2"] {
+        for query in [
+            "af=v2",
+            "af=",
+            "af=v1&af=v1",
+            "af=v1&af=v2",
+            "af=v1&%61f=v1",
+        ] {
             assert!(matches!(
                 format!("{base}&{query}").parse::<SigninGrantDeepLink>(),
                 Err(DeepLinkParseError::InvalidQueryParameter("af", _))
@@ -309,6 +315,8 @@ mod tests {
             "spk=not-a-public-key".to_string(),
             format!("spk=pubky{user}"),
             format!("spk={user}&spk={user}"),
+            format!("spk={user}&sp%6b={user}"),
+            format!("sp%6b={user}&spk={user}"),
         ] {
             assert!(
                 matches!(
