@@ -5,7 +5,7 @@
 
 use super::crypto::{grant_verifier, pop_verifier};
 use super::persistence::{grant::GrantStatus, grant_session::SessionIssueError};
-use crate::client_server::auth::SignupServiceError;
+use crate::services::signup_service::SignupServiceError;
 
 /// Domain errors from auth service operations.
 #[derive(Debug, thiserror::Error)]

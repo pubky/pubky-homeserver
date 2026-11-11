@@ -5,12 +5,13 @@ use pubky_common::{
 };
 
 use crate::persistence::sql::{signup_code::SignupCode, uexecutor, SqlDb};
+use crate::services::signup_service::SignupService;
 use crate::services::user_service::UserService;
 use crate::shared::{HttpError, HttpResult};
 
 use super::persistence::{SessionEntity, SessionRepository, SessionSecret};
 use super::verifier::CookieAuthVerifier;
-use crate::client_server::auth::{AuthRevocation, AuthSession, SignupService};
+use crate::client_server::auth::{AuthRevocation, AuthSession};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CookieAuthService {
@@ -27,7 +28,7 @@ impl CookieAuthService {
             sql_db: context.sql_db.clone(),
             user_service: context.user_service.clone(),
             verifier: CookieAuthVerifier::default(),
-            signup_service: SignupService::from_context(context),
+            signup_service: context.signup_service.clone(),
         }
     }
 

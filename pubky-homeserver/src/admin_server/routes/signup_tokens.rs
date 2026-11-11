@@ -4,7 +4,6 @@ use super::super::app_state::AppState;
 use crate::{
     persistence::sql::signup_code::{
         SignupCode, SignupCodeEntity, SignupCodeListQuery, SignupCodeListState,
-        SignupCodeRepository,
     },
     shared::{quota::UserQuota, HttpResult},
 };
@@ -68,9 +67,11 @@ pub async fn list_signup_tokens(
     State(state): State<AppState>,
     Query(params): Query<SignupTokensQuery>,
 ) -> HttpResult<(StatusCode, Json<SignupTokensResponse>)> {
-    let page =
-        SignupCodeRepository::list(params.list_query(), &mut state.context.sql_db.pool().into())
-            .await?;
+    let page = state
+        .context
+        .signup_service
+        .list_tokens(params.list_query())
+        .await?;
     let items = page.items.into_iter().map(SignupTokenItem::from).collect();
 
     Ok((
@@ -90,11 +91,7 @@ mod tests {
 
     use super::*;
     use crate::admin_server::AdminAuthExt;
-    use crate::{
-        persistence::sql::signup_code::{SignupCode, SignupCodeRepository},
-        shared::quota::UserQuota,
-        AppContext,
-    };
+    use crate::{persistence::sql::signup_code::SignupCode, shared::quota::UserQuota, AppContext};
 
     fn create_test_server(context: &Arc<AppContext>) -> TestServer {
         AppState::test_server(context)
@@ -117,7 +114,9 @@ mod tests {
 
         let used_by = Keypair::random().public_key();
         let token_id = SignupCode::new(token.clone()).unwrap();
-        SignupCodeRepository::mark_as_used(&token_id, &used_by, &mut context.sql_db.pool().into())
+        context
+            .signup_service
+            .mark_token_used(&token_id, &used_by)
             .await
             .unwrap();
 
@@ -211,13 +210,11 @@ mod tests {
 
         let used_by = Keypair::random().public_key();
         let used_token_id = SignupCode::new(used_token.clone()).unwrap();
-        SignupCodeRepository::mark_as_used(
-            &used_token_id,
-            &used_by,
-            &mut context.sql_db.pool().into(),
-        )
-        .await
-        .unwrap();
+        context
+            .signup_service
+            .mark_token_used(&used_token_id, &used_by)
+            .await
+            .unwrap();
 
         let response = server
             .get("/signup_tokens?state=used")
@@ -258,13 +255,11 @@ mod tests {
         let token3 = SignupCode::new("0000-0000-0003".to_string()).unwrap();
 
         for token in [&token1, &token2, &token3] {
-            SignupCodeRepository::create(
-                token,
-                &UserQuota::default(),
-                &mut context.sql_db.pool().into(),
-            )
-            .await
-            .unwrap();
+            context
+                .signup_service
+                .create_token_with_id(token, &UserQuota::default())
+                .await
+                .unwrap();
         }
 
         let response = server
