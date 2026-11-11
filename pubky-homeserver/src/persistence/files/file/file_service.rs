@@ -1,11 +1,15 @@
 #[cfg(test)]
 use crate::AppContext;
 use crate::{
-    persistence::sql::{
-        entry::{EntryEntity, EntryRepository},
-        SqlDb,
+    persistence::{
+        files::write_finalization_layer::{resolve_storage_max_bytes, would_exceed_limit},
+        sql::{
+            entry::{EntryEntity, EntryRepository},
+            user::UserEntity,
+            SqlDb,
+        },
     },
-    services::events_service::EventsService,
+    services::{events_service::EventsService, user_service::FILE_METADATA_SIZE},
     shared::webdav::EntryPath,
     ConfigToml,
 };
@@ -25,13 +29,20 @@ use super::super::{FileIoError, FileStream, OpendalService, WriteStreamError};
 pub struct FileService {
     pub(crate) opendal: OpendalService,
     pub(crate) db: SqlDb,
+    /// The storage limit for users without their own, in megabytes. `None` is unlimited.
+    default_storage_mb: Option<u64>,
 }
 
 impl FileService {
-    pub fn new(opendal_service: OpendalService, db: SqlDb) -> Self {
+    pub fn new(
+        opendal_service: OpendalService,
+        db: SqlDb,
+        default_storage_mb: Option<u64>,
+    ) -> Self {
         Self {
             opendal: opendal_service,
             db,
+            default_storage_mb,
         }
     }
 
@@ -49,7 +60,11 @@ impl FileService {
             events_service,
             user_service,
         )?;
-        Ok(Self::new(opendal_service, db))
+        Ok(Self::new(
+            opendal_service,
+            db,
+            config.storage.default_quota_mb,
+        ))
     }
 
     /// Get the metadata of a file.
@@ -59,6 +74,63 @@ impl FileService {
             Err(sqlx::Error::RowNotFound) => Err(FileIoError::NotFound),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// List the entries under `dir`, as paths, in path order.
+    ///
+    /// `shallow` lists the direct children only, with sub-directories as
+    /// paths ending in `/`; otherwise every file below `dir` is listed.
+    /// `cursor` is the path to continue after. Errors with
+    /// [`FileIoError::NotFound`] when nothing is stored under `dir`.
+    pub async fn list(
+        &self,
+        dir: &EntryPath,
+        limit: Option<u16>,
+        cursor: Option<EntryPath>,
+        reverse: bool,
+        shallow: bool,
+    ) -> Result<Vec<EntryPath>, FileIoError> {
+        let mut executor = self.db.pool().into();
+        if !EntryRepository::contains_directory(dir, &mut executor).await? {
+            return Err(FileIoError::NotFound);
+        }
+        let entries = if shallow {
+            EntryRepository::list_shallow(dir, limit, cursor, reverse, &mut executor).await?
+        } else {
+            EntryRepository::list_deep(dir, limit, cursor, reverse, &mut executor).await?
+        };
+        Ok(entries)
+    }
+
+    /// Reject a write of `content_length` bytes to `path` up front when it
+    /// would exceed the user's storage quota, so the body need not be read
+    /// first. The write path enforces the quota again on the actual bytes.
+    ///
+    /// Passes when there is no size hint, no quota, or the hint fits.
+    pub async fn check_size_hint(
+        &self,
+        user: &UserEntity,
+        content_length: Option<u64>,
+        path: &EntryPath,
+    ) -> Result<(), FileIoError> {
+        let Some(content_length) = content_length else {
+            return Ok(());
+        };
+
+        let existing_entry = self.get_info(path).await.ok();
+        let existing_entry_bytes = existing_entry.as_ref().map_or(0, |e| e.content_length);
+        let is_new_file = existing_entry.is_none();
+
+        let mut bytes_delta = content_length as i64 - existing_entry_bytes as i64;
+        if is_new_file {
+            bytes_delta += FILE_METADATA_SIZE as i64;
+        }
+
+        let max_bytes = resolve_storage_max_bytes(user, self.default_storage_mb);
+        if would_exceed_limit(user.used_bytes, bytes_delta, max_bytes) {
+            return Err(FileIoError::DiskSpaceQuotaExceeded);
+        }
+        Ok(())
     }
 
     /// The size of the stored blob, for the `Content-Length` of a response
@@ -119,7 +191,11 @@ impl FileService {
 impl FileService {
     pub fn new_from_context(context: &AppContext) -> Result<Self, FileIoError> {
         let opendal_service = OpendalService::new(context)?;
-        Ok(Self::new(opendal_service, context.sql_db.clone()))
+        Ok(Self::new(
+            opendal_service,
+            context.sql_db.clone(),
+            context.config_toml.storage.default_quota_mb,
+        ))
     }
 
     /// Get the content of a file as a stream of bytes.
@@ -491,5 +567,121 @@ mod tests {
             user_service.get(&pubkey).await.unwrap().used_bytes,
             test_data.len() as u64 + FILE_METADATA_SIZE
         );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_list_shallow_deep_and_missing_directory() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let pubkey = pubky_common::crypto::Keypair::random().public_key();
+        context.user_service.create(&pubkey).await.unwrap();
+
+        let path = |p: &str| EntryPath::new(pubkey.clone(), StoragePath::new(p).unwrap());
+        for file in ["/pub/app/a.txt", "/pub/app/sub/b.txt"] {
+            file_service
+                .write(&path(file), Buffer::from(b"x".as_slice()))
+                .await
+                .unwrap();
+        }
+
+        let dir = path("/pub/app/");
+        let shallow = file_service
+            .list(&dir, None, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            shallow
+                .iter()
+                .map(|e| e.path().as_str())
+                .collect::<Vec<_>>(),
+            ["/pub/app/a.txt", "/pub/app/sub/"]
+        );
+        let deep = file_service
+            .list(&dir, None, None, false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            deep.iter().map(|e| e.path().as_str()).collect::<Vec<_>>(),
+            ["/pub/app/a.txt", "/pub/app/sub/b.txt"]
+        );
+
+        match file_service
+            .list(&path("/pub/missing/"), None, None, false, true)
+            .await
+        {
+            Err(FileIoError::NotFound) => {}
+            other => panic!("a directory with no entries should be NotFound: {other:?}"),
+        }
+    }
+
+    /// Build the args and call `check_size_hint` for a path under `user`.
+    async fn check_hint(
+        file_service: &FileService,
+        user: &UserEntity,
+        path: &str,
+        size_hint: Option<u64>,
+    ) -> Result<(), FileIoError> {
+        let entry_path = EntryPath::new(user.public_key.clone(), StoragePath::new(path).unwrap());
+        file_service
+            .check_size_hint(user, size_hint, &entry_path)
+            .await
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_no_size_hint_always_ok() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let pk = pubky_common::crypto::Keypair::random().public_key();
+        let user = context.user_service.create_with_quota_mb(&pk, 1).await;
+
+        // No size hint → always OK regardless of quota
+        check_hint(&file_service, &user, "/test.txt", None)
+            .await
+            .expect("no size hint should always pass");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_new_file_accounts_for_metadata_overhead() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let pk = pubky_common::crypto::Keypair::random().public_key();
+        let user = context.user_service.create_with_quota_mb(&pk, 1).await;
+
+        let one_mb = 1024u64 * 1024;
+        let max_content = one_mb - FILE_METADATA_SIZE;
+
+        // Exactly at limit: content + metadata == quota → OK
+        check_hint(&file_service, &user, "/test.txt", Some(max_content))
+            .await
+            .expect("content + metadata exactly at quota should pass");
+
+        // One byte over: content + metadata > quota → fail
+        match check_hint(&file_service, &user, "/test.txt", Some(max_content + 1)).await {
+            Err(FileIoError::DiskSpaceQuotaExceeded) => {}
+            other => panic!("content + metadata one byte over quota should fail: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_unlimited_quota_allows_anything() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        // No system default → unlimited for Default users
+        let pk = pubky_common::crypto::Keypair::random().public_key();
+        let user = context.user_service.create(&pk).await.unwrap();
+
+        // Even a huge hint should pass with unlimited quota
+        check_hint(
+            &file_service,
+            &user,
+            "/test.txt",
+            Some(10 * 1024 * 1024 * 1024),
+        )
+        .await
+        .expect("unlimited quota should accept any size");
     }
 }

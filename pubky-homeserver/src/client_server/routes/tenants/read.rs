@@ -1,4 +1,5 @@
-use crate::persistence::sql::entry::{EntryEntity, EntryRepository};
+use crate::persistence::files::FileIoError;
+use crate::persistence::sql::entry::EntryEntity;
 use crate::shared::{HttpError, HttpResult};
 use crate::{
     client_server::{
@@ -113,16 +114,6 @@ async fn list(
     entry_path: &EntryPath,
     params: ListQueryParams,
 ) -> HttpResult<Response<Body>> {
-    let contains_dir =
-        EntryRepository::contains_directory(entry_path, &mut state.context.sql_db.pool().into())
-            .await?;
-    if !contains_dir {
-        return Err(HttpError::new_with_message(
-            StatusCode::NOT_FOUND,
-            "Directory Not Found",
-        ));
-    }
-
     let parsed_cursor = match parse_cursor(params.cursor) {
         Ok(cursor) => cursor,
         Err(_) => {
@@ -133,25 +124,23 @@ async fn list(
         }
     };
 
-    let entries = if params.shallow {
-        EntryRepository::list_shallow(
+    let entries = state
+        .context
+        .file_service
+        .list(
             entry_path,
             params.limit,
             parsed_cursor,
             params.reverse,
-            &mut state.context.sql_db.pool().into(),
+            params.shallow,
         )
-        .await?
-    } else {
-        EntryRepository::list_deep(
-            entry_path,
-            params.limit,
-            parsed_cursor,
-            params.reverse,
-            &mut state.context.sql_db.pool().into(),
-        )
-        .await?
-    };
+        .await
+        .map_err(|e| match e {
+            FileIoError::NotFound => {
+                HttpError::new_with_message(StatusCode::NOT_FOUND, "Directory Not Found")
+            }
+            e => e.into(),
+        })?;
     let pubky_urls = entries
         .iter()
         .map(|entry| format!("pubky://{}", entry))
@@ -1026,6 +1015,19 @@ mod tests {
         let second_entry = second.text();
         assert_eq!(second_entry.lines().count(), 1);
         assert_ne!(first_entry, second_entry);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn listing_a_missing_directory_is_a_directory_not_found() {
+        let (_, _, server, public_key, _) = create_environment().await.unwrap();
+
+        let response = server
+            .get(&format!("/storage/{}/pub/missing/", public_key.z32()))
+            .expect_failure()
+            .await;
+        assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(response.text(), "Directory Not Found");
     }
 
     #[tokio::test]
