@@ -61,6 +61,27 @@ async function inStore(mode, operation) {
 export function __pubkyParentGrantPut(record) {
   return inStore("readwrite", store => store.put(record));
 }
+
+/**
+ * Save a record unless the saved one is being signed out. The check and the write
+ * share one transaction, so a sign-out can't land between them. Resolves to whether
+ * the record was saved.
+ */
+export async function __pubkyParentGrantSave(record) {
+  const previous = await inStore("readwrite", store => {
+    const get = store.get(record.id);
+    get.onsuccess = () => {
+      if (!get.result?.logoutPending) store.put(record);
+    };
+    return get;
+  });
+  return !previous?.logoutPending;
+}
+
+/** Whether a saved parent's sign-out has started. False for a parent that was never saved. */
+export async function __pubkyParentGrantLogoutPending(id) {
+  return Boolean((await inStore("readonly", store => store.get(id)))?.logoutPending);
+}
 export function __pubkyParentGrantGet(id) {
   return inStore("readonly", store => store.get(id));
 }
@@ -83,6 +104,10 @@ export async function __pubkyParentGrantKeyIds() {
 extern "C" {
     #[wasm_bindgen(js_name = __pubkyParentGrantPut)]
     fn js_put(record: JsValue) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkyParentGrantSave)]
+    fn js_save(record: JsValue) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkyParentGrantLogoutPending)]
+    fn js_logout_pending(id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantGet)]
     fn js_get(id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantDelete)]
@@ -105,6 +130,10 @@ fn client_state_error(message: impl Into<String>) -> PubkyError {
 
 fn invalid_record() -> PubkyError {
     client_state_error("Invalid stored parent grant record.")
+}
+
+fn signing_out() -> PubkyError {
+    client_state_error("Parent grant is being signed out.")
 }
 
 async fn store_call(promise: js_sys::Promise) -> JsResult<JsValue> {
@@ -218,17 +247,35 @@ impl ParentGrant {
     /// @throws {PubkyError} `AuthenticationError` with
     /// `data.denial === "insufficient_permissions"` if the request exceeds this
     /// parent. Send the user to `request.declinedUrl(error.data.denial)`.
+    /// @throws {PubkyError} `ClientStateError` once `signOut` has started for
+    /// this parent, in this tab or another.
     #[wasm_bindgen(js_name = "issueChild")]
     pub async fn issue_child(
         &self,
         request: &ChildGrantRequest,
         expires_at: Option<f64>,
     ) -> JsResult<String> {
+        // The signing key outlives a failed revocation so it can be retried, and a
+        // parent restored earlier still holds it.
+        // ponytail: a sign-out that starts after this check still gets this one
+        // child. Closing that needs a lock across tabs.
+        let pending = store_call(js_logout_pending(&self.record_id())).await?;
+        if pending.is_truthy() {
+            return Err(signing_out());
+        }
         let url = self
             .0
             .issue_child(&request.0, expires_at.map(|value| value as u64))
             .await?;
         Ok(url.to_string())
+    }
+}
+
+impl ParentGrant {
+    /// The ID of this parent's record in `ParentGrantStore`.
+    fn record_id(&self) -> String {
+        let claims = self.0.claims();
+        format!("{}:{}", claims.iss.z32(), claims.jti)
     }
 }
 
@@ -367,20 +414,13 @@ impl ParentGrantStore {
         let key_id = parent.0.delegated_key_id().ok_or_else(|| {
             client_state_error("Only parent grants with a browser-held key can be saved.")
         })?;
-        let claims = parent.0.claims();
-        let public_key = claims.iss.z32();
-        let grant_id = claims.jti.to_string();
-        let id = format!("{public_key}:{grant_id}");
-        // Saving again would bring back a parent whose sign-out hasn't finished.
-        if matches!(self.load(&id).await, Ok(saved) if saved.metadata.logout_pending) {
-            return Err(client_state_error("Parent grant is being signed out."));
-        }
         // `clearAll()` may have removed the key since the flow finished.
         BrowserGrantKeyStore::load_public_key(key_id.clone()).await?;
+        let claims = parent.0.claims();
         let metadata = ParentMetadata {
-            id,
-            public_key,
-            grant_id,
+            id: parent.record_id(),
+            public_key: claims.iss.z32(),
+            grant_id: claims.jti.to_string(),
             client_id: claims.client_id.to_string(),
             capabilities: parent.capabilities(),
             expires_at: claims.exp as f64,
@@ -393,7 +433,11 @@ impl ParentGrantStore {
             parent_grant: parent.0.parent_grant().to_owned(),
             signed_approval: Some(parent.0.signed_approval().to_owned()),
         };
-        store_call(js_put(to_js_record(&record)?)).await?;
+        // Saving again would bring back a parent whose sign-out hasn't finished.
+        let saved = store_call(js_save(to_js_record(&record)?)).await?;
+        if !saved.is_truthy() {
+            return Err(signing_out());
+        }
         Ok(ParentGrantInfo(metadata))
     }
 

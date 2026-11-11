@@ -253,6 +253,8 @@ test("ParentGrantStore: signing out retries and leaves delivered keys alone", as
   const { sdk, parent } = await userWithParent();
   const { id } = await sdk.parentGrantStore.save(parent);
   const keys = parent.encryptionKeys;
+  // Another tab restored the parent just before the sign-out.
+  const otherTab = await Pubky.testnet().parentGrantStore.restore(id);
 
   // The revocation request is lost, so sign-out stays pending.
   const realFetch = globalThis.fetch;
@@ -264,12 +266,20 @@ test("ParentGrantStore: signing out retries and leaves delivered keys alone", as
     return await realFetch(input, init);
   };
   try {
+    // A save racing the sign-out can't undo it, whichever of the two lands first.
+    const racingSave = sdk.parentGrantStore.save(parent).catch(() => {});
     await expectRejection(sdk.parentGrantStore.signOut(id));
+    await racingSave;
   } finally {
     globalThis.fetch = realFetch;
   }
   const pending = (await sdk.parentGrantStore.list()).find((item) => item.id === id)!;
   t.equal(pending.logoutPending, true);
+
+  // Parents already in memory stop issuing, though the key is kept for the retry.
+  for (const held of [parent, otherTab]) {
+    assertRejects(t, await expectRejection(issue(held)), "ClientStateError", /signed out/);
+  }
 
   // Saving again can't bring the parent back while its sign-out is pending.
   assertRejects(t, await expectRejection(sdk.parentGrantStore.save(parent)), "ClientStateError", /signed out/);
