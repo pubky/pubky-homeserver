@@ -12,6 +12,7 @@ use super::{
     browser_grant_key_store::BrowserGrantKeyStore,
     encryption_keys::EncryptionKeys,
     grant_session::{decode_delegated_grant_state, encode_delegated_grant_state},
+    parent_grant,
     session::Session,
 };
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
@@ -192,8 +193,11 @@ export async function __pubkySessionStoreList() {
   }
 }
 
-/** Clear saved sessions and their keys, or every key when clearing all auth state. */
-async function clearSessionStore(allKeys = false) {
+/**
+ * Clear saved sessions and their keys. Given `keepKeyIds`, clear every other
+ * key too: the ones listed belong to saved parent grants.
+ */
+async function clearSessionStore(keepKeyIds) {
   requireIndexedDb();
   const db = await openSessionStoreDb();
   try {
@@ -206,11 +210,11 @@ async function clearSessionStore(allKeys = false) {
       const records = sessions.getAll();
       records.onsuccess = () => {
         try {
-          if (allKeys) {
-            const stored = keys.getAll();
+          if (keepKeyIds) {
+            const stored = keys.getAllKeys();
             stored.onsuccess = () => {
-              for (const key of stored.result) {
-                if (!key.heldByParentGrant) keys.delete(key.keyId);
+              for (const keyId of stored.result) {
+                if (!keepKeyIds.includes(keyId)) keys.delete(keyId);
               }
             };
           } else for (const record of records.result) {
@@ -319,8 +323,8 @@ export async function __pubkySessionStoreClear() {
   await navigator.locks.request(SESSION_STORE_LOCK, () => clearSessionStore());
   sessionChanged(null, "cleared");
 }
-export async function __pubkySessionStoreClearAll() {
-  await navigator.locks.request(SESSION_STORE_LOCK, () => clearSessionStore(true));
+export async function __pubkySessionStoreClearAll(keepKeyIds) {
+  await navigator.locks.request(SESSION_STORE_LOCK, () => clearSessionStore(keepKeyIds));
   sessionChanged(null, "cleared");
 }
 "#)]
@@ -361,7 +365,7 @@ extern "C" {
     fn js_store_clear() -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkySessionStoreClearAll)]
-    fn js_store_clear_all() -> js_sys::Promise;
+    fn js_store_clear_all(keep_key_ids: JsValue) -> js_sys::Promise;
 }
 
 /// Public session details shared by stored records and metadata-only reads.
@@ -710,7 +714,10 @@ impl BrowserSessionStore {
     /// out with `parentGrantStore.signOut`.
     #[wasm_bindgen(js_name = "clearAll")]
     pub async fn clear_all(&self) -> JsResult<()> {
-        JsFuture::from(js_store_clear_all())
+        // ponytail: read before the clear, not in one transaction. A parent saved
+        // in between loses its key, and `restore` then reports the key missing.
+        let keep = parent_grant::saved_key_ids().await?;
+        JsFuture::from(js_store_clear_all(keep))
             .await
             .map_err(store_error)?;
         Ok(())

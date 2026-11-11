@@ -327,8 +327,8 @@ impl Pubky {
     /// Check this before asking the user to approve a parent grant. `unsupported`
     /// means the homeserver needs an upgrade, and `unknown` means the check couldn't
     /// finish, including when the user has no homeserver record, so offer a retry.
-    /// This checks only the homeserver: the signer must also support parent-grant
-    /// links.
+    /// To tell that case apart, use `getHomeserverOf`. This checks only the
+    /// homeserver: the signer must also support parent-grant links.
     ///
     /// @param {PublicKey} userPublicKey The user's public key.
     /// @returns {Promise<"supported" | "unsupported" | "unknown">}

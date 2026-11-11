@@ -2,7 +2,8 @@
 //!
 //! Parent records use their own database, so the session database's schema doesn't
 //! change. Signing keys stay non-extractable WebCrypto keys in the existing delegated
-//! key store, marked so that `BrowserSessionStore.clearAll()` leaves them in place.
+//! key store, and `BrowserSessionStore.clearAll()` leaves the keys of saved parents
+//! in place.
 //! Approvals are stored as plaintext in IndexedDB, the same as signed approvals in
 //! `BrowserSessionStore`.
 
@@ -72,6 +73,12 @@ export async function __pubkyParentGrantList() {
   const records = await inStore("readonly", store => store.getAll());
   return records.map(({ signedApproval, parentGrant, keyId, ...metadata }) => metadata);
 }
+
+/** Ids of the signing keys that saved parents need, also to finish a pending sign-out. */
+export async function __pubkyParentGrantKeyIds() {
+  const records = await inStore("readonly", store => store.getAll());
+  return records.map(record => record.keyId);
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = __pubkyParentGrantPut)]
@@ -82,6 +89,14 @@ extern "C" {
     fn js_delete(id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantList)]
     fn js_list() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkyParentGrantKeyIds)]
+    fn js_key_ids() -> js_sys::Promise;
+}
+
+/// Ids of the signing keys of saved parents, as a JS array.
+/// `BrowserSessionStore.clearAll()` leaves these keys in place.
+pub(crate) async fn saved_key_ids() -> JsResult<JsValue> {
+    store_call(js_key_ids()).await
 }
 
 fn client_state_error(message: impl Into<String>) -> PubkyError {
@@ -360,8 +375,8 @@ impl ParentGrantStore {
         if matches!(self.load(&id).await, Ok(saved) if saved.metadata.logout_pending) {
             return Err(client_state_error("Parent grant is being signed out."));
         }
-        // Before the record exists, so a saved parent can always find its key.
-        BrowserGrantKeyStore::hold_key_for_parent(key_id.clone()).await?;
+        // `clearAll()` may have removed the key since the flow finished.
+        BrowserGrantKeyStore::load_public_key(key_id.clone()).await?;
         let metadata = ParentMetadata {
             id,
             public_key,
@@ -378,22 +393,19 @@ impl ParentGrantStore {
             parent_grant: parent.0.parent_grant().to_owned(),
             signed_approval: Some(parent.0.signed_approval().to_owned()),
         };
-        if let Err(error) = store_call(js_put(to_js_record(&record)?)).await {
-            // Without a record nothing would release the key, so `clearAll()`
-            // could never remove it. The save already failed: report that error.
-            let _ = BrowserGrantKeyStore::release_key_from_parent(record.key_id.clone()).await;
-            return Err(error);
-        }
+        store_call(js_put(to_js_record(&record)?)).await?;
         Ok(ParentGrantInfo(metadata))
     }
 
     /// List saved parent grants. The result holds no secrets.
     #[wasm_bindgen]
     pub async fn list(&self) -> JsResult<Vec<ParentGrantInfo>> {
-        let records: Vec<ParentMetadata> =
-            serde_wasm_bindgen::from_value(store_call(js_list()).await?)
-                .map_err(|_| invalid_record())?;
-        Ok(records.into_iter().map(ParentGrantInfo).collect())
+        // Skip records this version can't read, so that one can't hide the rest.
+        Ok(js_sys::Array::from(&store_call(js_list()).await?)
+            .iter()
+            .filter_map(|record| serde_wasm_bindgen::from_value(record).ok())
+            .map(ParentGrantInfo)
+            .collect())
     }
 
     /// Restore a saved parent grant, verifying its signatures, identity, key
@@ -496,9 +508,7 @@ impl ParentGrantStore {
     }
 
     async fn delete(&self, record: &ParentRecord) -> JsResult<()> {
-        // Release the key first. If a later step fails, `clearAll()` can still
-        // remove the key, and the record stays usable for a retry.
-        BrowserGrantKeyStore::release_key_from_parent(record.key_id.clone()).await?;
+        // Record first: once it's gone, `clearAll()` removes a key left behind here.
         store_call(js_delete(&record.metadata.id)).await?;
         BrowserGrantKeyStore::delete_key(record.key_id.clone()).await
     }

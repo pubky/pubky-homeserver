@@ -114,7 +114,8 @@ impl HomeserverFeatures {
         homeserver: &PublicKey,
         feature: &str,
     ) -> FeatureSupport {
-        self.support_for(homeserver, feature, || self.fetch(client, homeserver))
+        // An explicit check is a retry, so it doesn't wait out a cached failure.
+        self.support_for(homeserver, feature, true, || self.fetch(client, homeserver))
             .await
     }
 
@@ -134,13 +135,14 @@ impl HomeserverFeatures {
         F: FnOnce() -> Fut,
         Fut: Future<Output = InfoFetch>,
     {
-        self.support_for(homeserver, feature, fetch).await == FeatureSupport::Supported
+        self.support_for(homeserver, feature, false, fetch).await == FeatureSupport::Supported
     }
 
     async fn support_for<F, Fut>(
         &self,
         homeserver: &PublicKey,
         feature: &str,
+        retry_failed: bool,
         fetch: F,
     ) -> FeatureSupport
     where
@@ -149,7 +151,10 @@ impl HomeserverFeatures {
     {
         let cell = self.cell(homeserver);
         let mut cached = cell.lock().await;
-        if let Some(current) = cached.as_ref().filter(|cached| cached.is_current()) {
+        if let Some(current) = cached
+            .as_ref()
+            .filter(|cached| cached.is_current() && (cached.answered || !retry_failed))
+        {
             return current.support(feature);
         }
 
@@ -444,7 +449,20 @@ mod tests {
                 });
             }
             let support = discovery
-                .support_for(&homeserver, feature, || async { fetched })
+                .support_for(&homeserver, feature, false, || async { fetched })
+                .await;
+            assert_eq!(support, expected);
+        }
+
+        // An explicit check retries at once instead of waiting out a cached failure.
+        let discovery = HomeserverFeatures::default();
+        let homeserver = crate::Keypair::random().public_key();
+        for (fetched, expected) in [
+            (InfoFetch::Failed, Unknown),
+            (InfoFetch::Listed(listed()), Supported),
+        ] {
+            let support = discovery
+                .support_for(&homeserver, feature, true, || async { fetched })
                 .await;
             assert_eq!(support, expected);
         }

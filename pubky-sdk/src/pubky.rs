@@ -313,8 +313,9 @@ impl Pubky {
     /// Check this before asking the user to approve a parent grant.
     /// [`FeatureSupport::Unsupported`] means the homeserver needs an upgrade, and
     /// [`FeatureSupport::Unknown`] means the check couldn't finish, including when
-    /// the user has no homeserver record, so offer a retry. This checks only the
-    /// homeserver: the signer must also support parent-grant links.
+    /// the user has no homeserver record, so offer a retry. To tell that case
+    /// apart, use [`Self::get_homeserver_of`]. This checks only the homeserver:
+    /// the signer must also support parent-grant links.
     pub async fn grant_delegation_support(&self, user_public_key: &PublicKey) -> FeatureSupport {
         let Ok(Some(homeserver)) = self.get_homeserver_of(user_public_key).await else {
             return FeatureSupport::Unknown;

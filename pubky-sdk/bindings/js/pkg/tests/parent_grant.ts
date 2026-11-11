@@ -340,5 +340,10 @@ test("ParentGrantStore: rejects missing keys and corrupted records", async (t) =
   assertRejects(t, await expectRejection(sdk.parentGrantStore.restore(id)), "ClientStateError", /not found/);
   await sdk.parentGrantStore.remove(id);
   assertRejects(t, await expectRejection(sdk.parentGrantStore.restore(id)), "ClientStateError", /not found/);
+
+  // A record this version can't read is left out of listings instead of breaking them.
+  await edit("pubky-delegated-auth", "parentGrants", (store) => store.put({ id: "unreadable" }));
+  t.notOk((await sdk.parentGrantStore.list()).some((item) => item.id === "unreadable"));
+  await edit("pubky-delegated-auth", "parentGrants", (store) => store.delete("unreadable"));
   t.end();
 });
