@@ -152,7 +152,8 @@ impl SessionStorage {
     ///
     /// @param {Path} path File path; must not end with `/`.
     /// @param {Uint8Array} body
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves once the homeserver confirmed it stored the
+    /// file; a pending or partial write never resolves as success.
     /// @throws {PubkyError} Upload or shared write/request errors (see {@link SessionStorage}).
     #[wasm_bindgen(js_name = "putBytes")]
     pub async fn put_bytes(
@@ -168,7 +169,7 @@ impl SessionStorage {
     ///
     /// @param {Path} path File path; must not end with `/`.
     /// @param {Blob} body A Blob or File to upload.
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves as {@link SessionStorage.putBytes}.
     /// @throws {PubkyError} `InvalidInput` if body is not a Blob or File;
     /// otherwise upload or shared write/request errors (see {@link SessionStorage}).
     /// @example
@@ -187,7 +188,7 @@ impl SessionStorage {
     ///
     /// @param {Path} path File path; must not end with `/`.
     /// @param {string} body
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves as {@link SessionStorage.putBytes}.
     /// @throws {PubkyError} Upload or shared write/request errors (see {@link SessionStorage}).
     #[wasm_bindgen(js_name = "putText")]
     pub async fn put_text(
@@ -203,7 +204,7 @@ impl SessionStorage {
     ///
     /// @param {Path} path File path (e.g. `"/pub/app/data.json"`); must not end with `/`.
     /// @param {any} body JSON-serializable value.
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves as {@link SessionStorage.putBytes}.
     /// @throws {PubkyError} `InvalidInput` if `body` cannot be converted to JSON;
     /// otherwise serialization, upload, or shared write/request errors (see {@link SessionStorage}).
     #[wasm_bindgen(js_name = "putJson")]
@@ -220,7 +221,8 @@ impl SessionStorage {
     /// Delete a file. Directory targets are unsupported.
     ///
     /// @param {Path} path File path; must not end with `/`.
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves once the homeserver confirmed the file is
+    /// deleted.
     /// @throws {PubkyError} Missing file (404), directory target (400), or shared errors
     /// (see {@link SessionStorage}).
     #[wasm_bindgen]

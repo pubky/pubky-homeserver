@@ -134,7 +134,7 @@ impl SessionStorage {
     ///
     /// @param {StorageLock} lock A lock this client holds.
     /// @param {Uint8Array} body
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves as {@link SessionStorage.putBytes}.
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
     /// `RequestError` and status `412`; take a new one and read the file again. A file
     /// that changed since the write was prepared rejects with status `409`, which can
@@ -151,7 +151,7 @@ impl SessionStorage {
     ///
     /// @param {StorageLock} lock A lock you hold. The upload uses the lock's path.
     /// @param {Blob} body A Blob or File to upload.
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves as {@link SessionStorage.putBytes}.
     /// @throws {PubkyError} An expired or released lock rejects with status `412`.
     /// A file that changed since the write was prepared rejects with status `409`.
     /// See {@link SessionStorage.putBytesLocked} for recovery and
@@ -175,7 +175,7 @@ impl SessionStorage {
     ///
     /// @param {StorageLock} lock A lock this client holds.
     /// @param {string} body
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves as {@link SessionStorage.putBytes}.
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
     /// `RequestError` and status `412`; take a new one and read the file again. A file
     /// that changed since the write was prepared rejects with status `409`, which can
@@ -192,7 +192,7 @@ impl SessionStorage {
     /// `DELETE` the path of a lock this client holds. The lock stays in place.
     ///
     /// @param {StorageLock} lock A lock this client holds.
-    /// @returns {Promise<void>}
+    /// @returns {Promise<void>} Resolves as {@link SessionStorage.delete}.
     /// @throws {PubkyError} A lock that has expired or was unlocked rejects with
     /// `RequestError` and status `412`; take a new one.
     /// Otherwise as {@link SessionStorage.delete}.
