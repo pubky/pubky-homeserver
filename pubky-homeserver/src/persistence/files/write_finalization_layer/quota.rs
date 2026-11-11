@@ -4,9 +4,14 @@ use crate::services::user_service::FILE_METADATA_SIZE;
 /// The change in a user's stored bytes from writing `new_length` bytes where
 /// `existing_entry` is. A new entry also pays [`FILE_METADATA_SIZE`].
 pub(crate) fn write_bytes_delta(existing_entry: Option<&EntryEntity>, new_length: u64) -> i64 {
+    // `new_length` may be a client's Content-Length. Past `i64::MAX` it
+    // saturates rather than wrapping negative, which would pass the quota.
+    let new_length = i64::try_from(new_length).unwrap_or(i64::MAX);
     match existing_entry {
-        Some(entry) => new_length as i64 - entry.content_length as i64,
-        None => new_length as i64 + FILE_METADATA_SIZE as i64,
+        Some(entry) => {
+            new_length.saturating_sub(i64::try_from(entry.content_length).unwrap_or(i64::MAX))
+        }
+        None => new_length.saturating_add(FILE_METADATA_SIZE as i64),
     }
 }
 
@@ -41,7 +46,14 @@ fn resolve_storage_max_bytes(user: &UserEntity, default_storage_mb: Option<u64>)
 
 #[cfg(test)]
 mod tests {
-    use super::would_exceed_limit;
+    use super::{would_exceed_limit, write_bytes_delta, FILE_METADATA_SIZE};
+
+    #[test]
+    fn write_bytes_delta_charges_metadata_for_new_entries_and_saturates() {
+        assert_eq!(write_bytes_delta(None, 10), 10 + FILE_METADATA_SIZE as i64);
+        assert_eq!(write_bytes_delta(None, u64::MAX), i64::MAX);
+        assert_eq!(write_bytes_delta(None, i64::MAX as u64), i64::MAX);
+    }
 
     #[test]
     fn quota_limit_math_handles_boundaries_and_negative_deltas() {

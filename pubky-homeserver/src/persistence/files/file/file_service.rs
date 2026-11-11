@@ -117,7 +117,11 @@ impl FileService {
             return Ok(());
         };
 
-        let existing_entry = self.get_info(path).await.ok();
+        let existing_entry = match self.get_info(path).await {
+            Ok(entry) => Some(entry),
+            Err(FileIoError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
         let bytes_delta = write_bytes_delta(existing_entry.as_ref(), content_length);
         if would_exceed_quota(user, bytes_delta, self.default_storage_mb) {
             return Err(FileIoError::DiskSpaceQuotaExceeded);
@@ -654,6 +658,22 @@ mod tests {
         match check_hint(&file_service, &user, "/test.txt", Some(max_content + 1)).await {
             Err(FileIoError::DiskSpaceQuotaExceeded) => {}
             other => panic!("content + metadata one byte over quota should fail: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_size_hint_fails_when_the_database_is_unavailable() {
+        let context = AppContext::test().await;
+        let file_service = FileService::new_from_context(&context).unwrap();
+        let pk = pubky_common::crypto::Keypair::random().public_key();
+        let user = context.user_service.create(&pk).await.unwrap();
+
+        context.sql_db.pool().close().await;
+
+        match check_hint(&file_service, &user, "/test.txt", Some(100)).await {
+            Err(FileIoError::SqlDb(_)) => {}
+            other => panic!("a database error must not pass as a new file: {other:?}"),
         }
     }
 
