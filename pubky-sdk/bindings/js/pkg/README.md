@@ -482,8 +482,9 @@ location.replace(await parent.issueChild(request));
 ```
 
 `issueChild()` rejects requests that exceed the parent, such as keys the user
-declined to share. Send the user to
-`request.declinedUrl("insufficient_permissions")`.
+declined to share. The error has `data.denial === "insufficient_permissions"`:
+send the user to `request.declinedUrl(error.data.denial)`. Redirect only to
+callbacks in your catalog, and show an error for an unknown one.
 
 - Before Ring approves a parent, check
   `await pubky.grantDelegationSupport(user)`. It returns `supported`,

@@ -115,6 +115,10 @@ impl ChildGrantRequest {
     }
 
     /// Build the callback URL that tells the app no child grant was issued.
+    ///
+    /// The URL points at the callback the request named. Redirect to it only
+    /// after you've found [`Self::callback`] in your app catalog, or the holder
+    /// becomes an open redirect. For an unknown callback, show an error instead.
     #[must_use]
     pub fn declined_url(&self, reason: RedirectDenial) -> Url {
         self.callback_url("error", reason.as_str())

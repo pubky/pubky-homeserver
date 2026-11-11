@@ -85,9 +85,18 @@ Parse the app's request and check it against your catalog first. The SDK only
 checks the request against the parent's limits. Accounts decides which apps exist
 and what each one may ask for.
 
+Redirect only to a callback that's in your catalog. `declinedUrl()` points at the
+callback the request named, so redirecting for an unknown app would make Accounts
+an open redirect. Show an error page instead.
+
 ```js
 const request = ChildGrantRequest.parse(location.href);
-if (!catalogAllows(request.clientId, request.capabilities)) {
+const app = catalog.get(request.clientId);
+if (!app) {
+  showUnknownAppError();
+  return;
+}
+if (!app.allows(request.capabilities)) {
   location.replace(request.declinedUrl("access_denied"));
   return;
 }
@@ -96,8 +105,8 @@ const parent = await pubky.parentGrantStore.restore(id);
 try {
   location.replace(await parent.issueChild(request));
 } catch (error) {
-  if (!error.message.includes("insufficient_permissions")) throw error;
-  location.replace(request.declinedUrl("insufficient_permissions"));
+  if (error.data?.denial !== "insufficient_permissions") throw error;
+  location.replace(request.declinedUrl(error.data.denial));
 }
 ```
 

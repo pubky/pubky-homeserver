@@ -182,11 +182,14 @@ test("parent grant: issues children within its limits only", async (t) => {
 
   const { parent: storageOnly } = await userWithParent("/pub/:rw,/priv/:rw");
   t.deepEqual(storageOnly.encryptionKeys.scopes, [], "the user declined keys");
-  assertRejects(
-    t,
-    await expectRejection(storageOnly.issueChild(ChildGrantRequest.parse(childRequestUrl()))),
-    "AuthenticationError",
-    /insufficient_permissions/,
+  const declined = await expectRejection(
+    storageOnly.issueChild(ChildGrantRequest.parse(childRequestUrl())),
+  );
+  assertRejects(t, declined, "AuthenticationError", /insufficient_permissions/);
+  t.deepEqual(
+    (declined as { data?: unknown }).data,
+    { reason: "RedirectDeclined", denial: "insufficient_permissions" },
+    "the denial code is machine-readable",
   );
   await issue(storageOnly, "/pub/chat/:rw" as Capabilities);
   t.end();

@@ -16,7 +16,7 @@ use pubky_common::{
         jws::{CHILD_GRANT_JWS_TYP, ClientId, GrantId, PopNonce, RECONNECT_JWS_TYP},
         pop::{PopProofClaims, ReconnectProofClaims},
     },
-    crypto::PublicKey,
+    crypto::{Keypair, PublicKey},
     encryption_keys::ScopedEncryptionKeyBundle,
 };
 use reqwest::Method;
@@ -87,9 +87,26 @@ impl ParentGrantCredential {
     }
 
     /// The confidential signed approval, for secure persistence. Contains raw keys.
+    ///
+    /// Restore the credential with [`Self::from_signed_approval`].
     #[must_use]
     pub fn signed_approval(&self) -> &str {
         self.signed_approval.as_str()
+    }
+
+    /// Restore a credential from its [`Self::signed_approval`] and the signing
+    /// key you set with the flow builder's `client_keypair`.
+    ///
+    /// Verifies the approval's signatures, limits and key scopes again.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::Validation`] if the approval is invalid or `keypair`
+    /// isn't the key in the parent's `cnf`.
+    pub fn from_signed_approval(signed_approval: &str, keypair: Keypair) -> Result<Self> {
+        Self::new(
+            ParentApproval::decode(signed_approval)?,
+            GrantPopSigner::local(keypair),
+        )
     }
 
     /// Restore a credential whose signing key is held outside the SDK.
@@ -120,7 +137,9 @@ impl ParentGrantCredential {
     /// The child gets exactly the requested capabilities, and keys for exactly
     /// its `e` scopes. It lasts until `expires_at`, or until the parent expires
     /// when that's `None`. Check the request against your app catalog first.
-    /// If you can't issue, send the user to [`ChildGrantRequest::declined_url`].
+    /// If you can't issue to an app in your catalog, send the user to
+    /// [`ChildGrantRequest::declined_url`]. Never redirect to a callback that
+    /// isn't in your catalog.
     ///
     /// The approval is encrypted to the app, and the returned URL carries it in
     /// the fragment. Don't log the URL.
@@ -281,7 +300,7 @@ async fn revoke(
 
 #[cfg(test)]
 mod tests {
-    use pubky_common::{StoragePath, auth::jws::decode_jws_payload, crypto::Keypair};
+    use pubky_common::{StoragePath, auth::jws::decode_jws_payload};
 
     use super::*;
     use crate::actors::auth::grant::{
@@ -455,6 +474,34 @@ mod tests {
         .unwrap();
         let (request, _) = request("/pub/chat/:r");
         delegated.issue_child(&request, None).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn saved_approval_and_key_restore_the_credential() {
+        let user = Keypair::random();
+        let key = Keypair::random();
+        let now = now_unix();
+        let claims = GrantClaims {
+            iss: user.public_key(),
+            client_id: ClientId::new(ACCOUNTS).unwrap(),
+            caps: vec!["/priv/:rwe".parse().unwrap()],
+            cnf: key.public_key(),
+            jti: GrantId::generate(),
+            iat: now,
+            exp: now + 3600,
+        };
+        let saved = ParentApprovalEnvelope::sign(&user, &claims, &[1; 32]);
+
+        let restored = ParentGrantCredential::from_signed_approval(&saved, key).unwrap();
+        assert_eq!(restored.claims(), &claims);
+        assert_eq!(restored.encryption_keys().scopes().len(), 1);
+        let (request, _) = request("/priv/chat/:rwe");
+        restored.issue_child(&request, None).await.unwrap();
+
+        // Another key can't stand in for the one in the parent's `cnf`.
+        ParentGrantCredential::from_signed_approval(&saved, Keypair::random()).unwrap_err();
+        ParentGrantCredential::from_signed_approval("not an approval", Keypair::random())
+            .unwrap_err();
     }
 
     #[tokio::test]
