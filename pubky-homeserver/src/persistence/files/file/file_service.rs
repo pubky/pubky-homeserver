@@ -76,7 +76,8 @@ impl FileService {
         }
     }
 
-    /// List the entries under `dir`, as paths, in path order.
+    /// List the entries under `dir`, as paths, in path order, or descending
+    /// when `reverse` is set.
     ///
     /// `shallow` lists the direct children only, with sub-directories as
     /// paths ending in `/`; otherwise every file below `dir` is listed.
@@ -567,14 +568,20 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn test_list_shallow_deep_and_missing_directory() {
+    async fn test_list_shallow_deep_paging_and_missing_directory() {
         let context = AppContext::test().await;
         let file_service = FileService::new_from_context(&context).unwrap();
         let pubkey = pubky_common::crypto::Keypair::random().public_key();
         context.user_service.create(&pubkey).await.unwrap();
 
         let path = |p: &str| EntryPath::new(pubkey.clone(), StoragePath::new(p).unwrap());
-        for file in ["/pub/app/a.txt", "/pub/app/sub/b.txt"] {
+        let paths = |entries: &[EntryPath]| {
+            entries
+                .iter()
+                .map(|e| e.path().as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        for file in ["/pub/app/a.txt", "/pub/app/sub/b.txt", "/pub/app/c.txt"] {
             file_service
                 .write(&path(file), Buffer::from(b"x".as_slice()))
                 .await
@@ -582,24 +589,37 @@ mod tests {
         }
 
         let dir = path("/pub/app/");
-        let shallow = file_service
-            .list(&dir, None, None, false, true)
-            .await
-            .unwrap();
+        let list = |limit, cursor, reverse, shallow| {
+            let dir = dir.clone();
+            let file_service = &file_service;
+            async move {
+                file_service
+                    .list(&dir, limit, cursor, reverse, shallow)
+                    .await
+            }
+        };
+
+        let shallow = list(None, None, false, true).await.unwrap();
         assert_eq!(
-            shallow
-                .iter()
-                .map(|e| e.path().as_str())
-                .collect::<Vec<_>>(),
-            ["/pub/app/a.txt", "/pub/app/sub/"]
+            paths(&shallow),
+            ["/pub/app/a.txt", "/pub/app/c.txt", "/pub/app/sub/"]
         );
-        let deep = file_service
-            .list(&dir, None, None, false, false)
+        let deep = list(None, None, false, false).await.unwrap();
+        assert_eq!(
+            paths(&deep),
+            ["/pub/app/a.txt", "/pub/app/c.txt", "/pub/app/sub/b.txt"]
+        );
+
+        let first = list(Some(1), None, false, true).await.unwrap();
+        assert_eq!(paths(&first), ["/pub/app/a.txt"]);
+        let after_first = list(Some(1), Some(path("/pub/app/a.txt")), false, true)
             .await
             .unwrap();
+        assert_eq!(paths(&after_first), ["/pub/app/c.txt"]);
+        let reversed = list(None, None, true, false).await.unwrap();
         assert_eq!(
-            deep.iter().map(|e| e.path().as_str()).collect::<Vec<_>>(),
-            ["/pub/app/a.txt", "/pub/app/sub/b.txt"]
+            paths(&reversed),
+            ["/pub/app/sub/b.txt", "/pub/app/c.txt", "/pub/app/a.txt"]
         );
 
         match file_service
