@@ -142,7 +142,7 @@ impl Pubky {
     /// @param {string} capabilities Comma-separated caps, e.g. `"/pub/app/:rw,/pub/foo/file:r"`.
     /// @param {AuthFlowKind} kind The kind of authentication flow to perform.
     /// @param {GrantAuthFlowOptions} options Options for the grant flow:
-    /// `{ clientId, relay?, xCallback?, approvalFormat?, expectedSigner? }`.
+    /// `{ clientId, relay?, xCallback?, approvalFormat?, expectedSigner?, parentGrant? }`.
     /// @returns {Promise<GrantAuthFlow>}
     /// A running grant auth flow. Show `authorizationUrl` as QR/deeplink,
     /// then `awaitApproval()` to obtain a grant-backed `Session`.
@@ -325,9 +325,10 @@ impl Pubky {
     /// Check whether a user's homeserver supports parent and child grants.
     ///
     /// Check this before asking the user to approve a parent grant. `unsupported`
-    /// means the homeserver needs an upgrade, and `unknown` means the check failed,
-    /// so offer a retry. This checks only the homeserver: the signer must also
-    /// support parent-grant links.
+    /// means the homeserver needs an upgrade, and `unknown` means the check couldn't
+    /// finish, including when the user has no homeserver record, so offer a retry.
+    /// This checks only the homeserver: the signer must also support parent-grant
+    /// links.
     ///
     /// @param {PublicKey} userPublicKey The user's public key.
     /// @returns {Promise<"supported" | "unsupported" | "unknown">}

@@ -108,7 +108,7 @@ impl GrantAuthFlow {
     /// The kind of authentication flow to perform.
     ///
     /// @param {GrantAuthFlowOptions} options
-    /// Options for the grant flow: `{ clientId, relay?, xCallback?, approvalFormat?, expectedSigner? }`.
+    /// Options for the grant flow: `{ clientId, relay?, xCallback?, approvalFormat?, expectedSigner?, parentGrant? }`.
     ///
     /// @returns {GrantAuthFlow}
     /// A running grant auth flow. Call `authorizationUrl()` to show the deep link,
@@ -212,11 +212,7 @@ impl GrantAuthFlow {
         let client_id = ClientId::new(&client_id).map_err(|e| {
             pubky::Error::Authentication(pubky::errors::AuthError::Validation(e.to_string()))
         })?;
-        let (key_id, public_key) = BrowserGrantKeyStore::ensure_key(None).await?;
-        let sign = BrowserGrantKeyStore::signer(key_id.clone());
-
-        let mut builder = PubkyGrantAuthFlow::builder(&caps, kind.0, client_id)
-            .delegated_client_signer(key_id, public_key, sign);
+        let mut builder = PubkyGrantAuthFlow::builder(&caps, kind.0, client_id);
         if let Some(format) = approval_format {
             builder = builder.approval_format(format.into());
         }
@@ -240,8 +236,19 @@ impl GrantAuthFlow {
                 builder.expected_signer(PublicKey::try_from(expected_signer)?.as_inner().clone());
         }
 
-        let flow = builder.start()?;
-        Ok(flow.into())
+        // Create the key last, and drop it if the flow can't start: nothing uses it yet.
+        let (key_id, public_key) = BrowserGrantKeyStore::ensure_key(None).await?;
+        let sign = BrowserGrantKeyStore::signer(key_id.clone());
+        match builder
+            .delegated_client_signer(key_id.clone(), public_key, sign)
+            .start()
+        {
+            Ok(flow) => Ok(flow.into()),
+            Err(error) => {
+                let _ = BrowserGrantKeyStore::delete_key(key_id).await;
+                Err(error.into())
+            }
+        }
     }
 
     /// Resume a previously saved pending grant auth flow (standalone).

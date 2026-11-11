@@ -1,7 +1,10 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{
     auth::{
-        grant::{GrantClaims, caps_within, is_exact_callback, parent_grant_ceiling},
+        grant::{
+            GrantClaims, MAX_PARENT_GRANT_LIFETIME_SECS, caps_within, is_exact_callback,
+            parent_grant_ceiling,
+        },
         jws::PARENT_GRANT_JWS_TYP,
     },
     crypto::{PublicKey, Signature},
@@ -69,10 +72,13 @@ impl ParentApproval {
 }
 
 /// Verify the user's signature on a parent grant and the limits on any parent.
+///
+/// Leaves expiry to the homeserver, which checks it against its own clock.
 fn verify_parent_grant(compact: &str) -> Result<GrantClaims> {
     let claims: GrantClaims = decode_payload(compact)?;
     verify_jws(compact, &claims.iss, PARENT_GRANT_JWS_TYP)?;
     if claims.iat >= claims.exp
+        || claims.exp - claims.iat > MAX_PARENT_GRANT_LIFETIME_SECS
         || !is_exact_callback(&claims.client_id)
         || !caps_within(&parent_grant_ceiling(), &claims.caps)
     {
@@ -598,7 +604,9 @@ mod delegation_tests {
         crypto::Keypair,
     };
 
-    use super::super::approval_envelope::{CHILD_APPROVAL_JWS_TYP, ChildApprovalEnvelope};
+    use super::super::approval_envelope::{
+        CHILD_APPROVAL_JWS_TYP, ChildApprovalEnvelope, key_scopes,
+    };
     use super::*;
 
     struct Chain {
@@ -643,13 +651,6 @@ mod delegation_tests {
         }
     }
 
-    fn key_scopes(caps: &[Capability]) -> Vec<StoragePath> {
-        caps.iter()
-            .filter(|cap| cap.grants_encryption_keys())
-            .map(|cap| cap.scope().clone())
-            .collect()
-    }
-
     impl Chain {
         fn keys(&self, scopes: &[StoragePath]) -> ScopedEncryptionKeyBundle {
             ScopedEncryptionKeyBundle::from_identity_secret(&self.user.secret(), scopes)
@@ -678,7 +679,7 @@ mod delegation_tests {
         }
 
         fn child_approval(&self) -> String {
-            let scopes = key_scopes(&self.child.grant.caps);
+            let scopes: Vec<_> = key_scopes(&self.child.grant.caps).cloned().collect();
             sign_jws(
                 &self.accounts,
                 CHILD_APPROVAL_JWS_TYP,
@@ -699,7 +700,7 @@ mod delegation_tests {
     #[test]
     fn parent_approval_rejects_wrong_signers_types_and_key_scopes() {
         let chain = chain();
-        let scopes = key_scopes(&chain.parent.caps);
+        let scopes: Vec<_> = key_scopes(&chain.parent.caps).cloned().collect();
         let valid = chain.parent_envelope(&scopes);
         for approval in [
             sign_jws(&Keypair::random(), PARENT_APPROVAL_JWS_TYP, &valid),
@@ -733,10 +734,11 @@ mod delegation_tests {
 
     #[test]
     fn parent_approval_rejects_grants_a_parent_can_never_hold() {
-        let mutations: [fn(&mut GrantClaims); 3] = [
+        let mutations: [fn(&mut GrantClaims); 4] = [
             |parent| parent.caps = vec![Capability::root()],
             |parent| parent.client_id = ClientId::new("accounts.example").unwrap(),
             |parent| parent.exp = parent.iat,
+            |parent| parent.exp = parent.iat + MAX_PARENT_GRANT_LIFETIME_SECS + 1,
         ];
         for mutate in mutations {
             let mut chain = chain();

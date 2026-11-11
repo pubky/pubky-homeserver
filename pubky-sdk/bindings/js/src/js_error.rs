@@ -415,7 +415,7 @@ impl WasmDescribe for PubkyError {
 mod tests {
     use super::*;
     use pubky::custom_pop::CustomPopError;
-    use pubky::errors::RequestError;
+    use pubky::errors::{AuthError, RedirectDenial, RequestError};
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -555,8 +555,6 @@ mod tests {
 
     #[test]
     fn declined_redirects_carry_their_denial_code() {
-        use pubky::errors::{AuthError, RedirectDenial};
-
         for denial in [
             RedirectDenial::AccessDenied,
             RedirectDenial::Cancelled,

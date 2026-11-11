@@ -489,7 +489,8 @@ store that key and `parent.signed_approval()` securely, and restore with
 - After the user confirms, `parent.reconnect_app(&client, &callback)` lets an
   app they removed sign in again.
 - `parent.signout(&client)` revokes the parent and all its children. Delivered
-  keys stay usable.
+  keys stay usable. To retry after a restart, keep `parent.parent_grant()` and
+  the key, and call `ParentGrantCredential::revoke_with_keypair`.
 
 ## Features
 

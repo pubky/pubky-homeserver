@@ -13,7 +13,7 @@ use super::{
     query_params::{
         append_grant_params, append_grant_relay_channel, append_relay_params, invalid_query_input,
         parse_capabilities, parse_client_id, parse_client_pk, parse_optional_channel_key,
-        parse_relay,
+        parse_relay, reject_repeated_query,
     },
     typed_deep_link::{DeepLinkIntent, DeepLinkParams, TypedDeepLink},
 };
@@ -73,6 +73,7 @@ impl ParentGrantParams {
 
 impl DeepLinkParams for ParentGrantParams {
     fn parse(url: &Url) -> Result<Self, DeepLinkParseError> {
+        reject_repeated_query(url, &["caps", "relay", "cid", "cpk", "epk"])?;
         let params = Self {
             capabilities: parse_capabilities(url)?,
             relay: parse_relay(url)?,
@@ -130,6 +131,11 @@ mod tests {
             ("/pub/:rwe", "accounts.example"),
             ("/pub/:rwe", "http://accounts.example/auth/callback"),
             ("/pub/:rwe", "https://ACCOUNTS.example/auth/callback"),
+            // A repeated parameter.
+            (
+                "/pub/:rwe",
+                "https://accounts.example/auth/callback&cid=https://evil.example/cb",
+            ),
         ] {
             assert!(
                 url(caps, client_id).parse::<ParentGrantDeepLink>().is_err(),

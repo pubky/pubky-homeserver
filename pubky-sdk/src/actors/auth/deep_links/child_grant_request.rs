@@ -10,7 +10,7 @@ use super::{
     DeepLinkParseError,
     query_params::{
         invalid_query_input, parse_capabilities, parse_client_id, parse_client_pk,
-        parse_optional_channel_key, required_query,
+        parse_optional_channel_key, reject_repeated_query, required_query,
     },
 };
 use crate::errors::RedirectDenial;
@@ -51,9 +51,10 @@ impl ChildGrantRequest {
     /// Parse the request from the URL the app redirected to.
     ///
     /// # Errors
-    /// Rejects missing or malformed parameters and callbacks that aren't exact
-    /// HTTPS URLs.
+    /// Rejects missing, malformed or repeated parameters and callbacks that
+    /// aren't exact HTTPS URLs.
     pub fn parse(url: &Url) -> Result<Self, DeepLinkParseError> {
+        reject_repeated_query(url, &["cid", "caps", "cpk", "epk", "state"])?;
         let callback = parse_client_id(url)?;
         if !is_exact_callback(&callback) {
             return Err(invalid_query_input(
@@ -188,6 +189,10 @@ mod tests {
             replace("https%3A%2F%2Fchat", "https%3A%2F%2FCHAT"),
             replace("state=state-1", "state="),
             replace("state=state-1", &format!("state={}", "s".repeat(129))),
+            replace(
+                "state=state-1",
+                "state=state-1&cid=https%3A%2F%2Fevil.example%2Fcb",
+            ),
         ] {
             assert!(ChildGrantRequest::parse(&url).is_err(), "{url}");
         }

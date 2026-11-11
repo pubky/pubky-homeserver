@@ -1,12 +1,15 @@
 use std::str::FromStr;
 
 use js_sys::Uint8Array;
+use tsify::Ts;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    js_error::{JsResult, PubkyError, PubkyErrorName},
+    js_error::{JsResult, PubkyError, PubkyErrorName, serialize_ts},
     wrappers::keys::PublicKey,
 };
+
+use super::XCallbackParams;
 
 /// Parsed parent-grant deeplink, for signer UIs that show it before approving.
 #[wasm_bindgen]
@@ -58,6 +61,12 @@ impl ParentGrantDeepLink {
     #[wasm_bindgen(js_name = "ephemeralPublicKey", getter)]
     pub fn ephemeral_public_key(&self) -> Uint8Array {
         Uint8Array::from(self.0.params().ephemeral_public_key.as_slice())
+    }
+
+    /// Optional x-callback-url metadata carried by this deep link.
+    #[wasm_bindgen(js_name = "xCallback", getter)]
+    pub fn x_callback(&self) -> JsResult<Ts<XCallbackParams>> {
+        serialize_ts(&XCallbackParams::from(self.0.x_callback()))
     }
 
     /// Serialize this link back to its URL.

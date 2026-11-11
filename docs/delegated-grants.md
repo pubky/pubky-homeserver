@@ -45,7 +45,8 @@ const support = await pubky.grantDelegationSupport(userPublicKey);
 
 The result is `supported`, `unsupported` or `unknown`. For `unsupported`, tell the
 user that their homeserver needs an upgrade. For `unknown`, the check couldn't
-finish, for example because the homeserver was unreachable, so offer a retry.
+finish, for example because the homeserver was unreachable or the user has no
+homeserver record, so offer a retry.
 The check covers only the homeserver: Ring must also support `parent_grant` links.
 
 ### Get a parent grant in Accounts

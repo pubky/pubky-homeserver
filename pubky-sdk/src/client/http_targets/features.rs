@@ -222,6 +222,7 @@ impl HomeserverFeatures {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::FeatureSupport::{Supported, Unknown, Unsupported};
     use super::*;
     use pubky_common::constants::features::PATH_ADDRESSED_STORAGE;
 
@@ -418,8 +419,6 @@ mod tests {
 
     #[tokio::test]
     async fn tells_a_missing_feature_from_a_failed_check() {
-        use FeatureSupport::{Supported, Unknown, Unsupported};
-
         let feature = PATH_ADDRESSED_STORAGE;
         let listed = || vec![feature.to_string()];
         let cases: [(Option<Vec<String>>, InfoFetch, FeatureSupport); 7] = [

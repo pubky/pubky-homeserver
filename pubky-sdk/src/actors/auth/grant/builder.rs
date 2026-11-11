@@ -192,14 +192,20 @@ impl GrantAuthFlowBuilder {
             parent_grant,
         } = self;
 
-        // A parent link always asks for keys; the format applies to direct grants.
-        if !parent_grant {
+        let is_signup = matches!(auth_kind, AuthFlowKind::SignUp { .. });
+        if parent_grant {
+            // A parent link can't name a signer, so rejecting keeps the check from being lost.
+            if is_signup || expected_signer.is_some() {
+                return Err(AuthError::Validation(
+                    "parent grants only support sign-in flows without an expected signer".into(),
+                )
+                .into());
+            }
+        } else {
+            // A parent link always asks for keys; the format applies to direct grants.
             approval_format.validate_capabilities(&caps)?;
         }
-        // A parent link can't name a signer, so rejecting keeps the check from being lost.
-        if expected_signer.is_some()
-            && (parent_grant || matches!(auth_kind, AuthFlowKind::SignUp { .. }))
-        {
+        if expected_signer.is_some() && is_signup {
             return Err(AuthError::Validation(
                 "an expected signer applies to sign-in flows only".into(),
             )
@@ -233,12 +239,6 @@ impl GrantAuthFlowBuilder {
                 client_id,
                 client_pk,
             )?,
-            AuthFlowKind::SignUp { .. } if parent_grant => {
-                return Err(AuthError::Validation(
-                    "parent grants only support sign-in flows".into(),
-                )
-                .into());
-            }
             AuthFlowKind::SignIn => DeepLink::SigninGrant(SigninGrantDeepLink::new(
                 DeepLinkScheme::PubkyAuth,
                 SigninGrantParams {

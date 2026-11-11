@@ -40,21 +40,26 @@ async fn signed_up_user(testnet: &EphemeralTestnet) -> (Keypair, PubkySigner) {
     (user, signer)
 }
 
-fn parent_flow(testnet: &EphemeralTestnet) -> PubkyGrantAuthFlow {
+fn parent_flow(testnet: &EphemeralTestnet, key: Keypair) -> PubkyGrantAuthFlow {
     PubkyGrantAuthFlow::builder(
         &"/pub/:rwe,/priv/:rwe".parse().unwrap(),
         AuthFlowKind::signin(),
         ClientId::new(ACCOUNTS).unwrap(),
     )
     .parent_grant()
+    .client_keypair(key)
     .relay(testnet.http_relay().local_link_url())
     .client(testnet.sdk().unwrap().client().clone())
     .start()
     .unwrap()
 }
 
-async fn parent_for(testnet: &EphemeralTestnet, signer: &PubkySigner) -> ParentGrantCredential {
-    let flow = parent_flow(testnet);
+async fn parent_for(
+    testnet: &EphemeralTestnet,
+    signer: &PubkySigner,
+    key: Keypair,
+) -> ParentGrantCredential {
+    let flow = parent_flow(testnet, key);
     signer.approve_auth(flow.authorization_url()).await.unwrap();
     flow.await_parent_credential().await.unwrap()
 }
@@ -74,7 +79,7 @@ async fn signer_approval_gives_the_holder_a_parent_and_its_keys() {
         FeatureSupport::Supported
     );
 
-    let parent = parent_for(&testnet, &signer).await;
+    let parent = parent_for(&testnet, &signer, Keypair::random()).await;
     assert_eq!(parent.claims().iss, user.public_key());
     assert_eq!(parent.claims().client_id.as_str(), ACCOUNTS);
     let scopes = ["/pub/", "/priv/"].map(|scope| StoragePath::new(scope).unwrap());
@@ -96,7 +101,7 @@ async fn signer_approval_gives_the_holder_a_parent_and_its_keys() {
 async fn declining_keys_still_approves_storage() {
     let testnet = build_full_testnet().await;
     let (_, signer) = signed_up_user(&testnet).await;
-    let flow = parent_flow(&testnet);
+    let flow = parent_flow(&testnet, Keypair::random());
     signer
         .approve_auth_with_capabilities(
             flow.authorization_url(),
@@ -116,10 +121,11 @@ async fn parent_and_session_flows_cannot_be_mixed_up() {
     let testnet = build_full_testnet().await;
     let (user, signer) = signed_up_user(&testnet).await;
 
-    // A parent request can't complete as a session.
-    let flow = parent_flow(&testnet);
+    // A parent request can't complete as a session, and trying doesn't use up the approval.
+    let flow = parent_flow(&testnet, Keypair::random());
     signer.approve_auth(flow.authorization_url()).await.unwrap();
-    flow.await_credential().await.unwrap_err();
+    flow.try_poll_credential_once().await.unwrap_err();
+    flow.await_parent_credential().await.unwrap();
 
     // A session request can't complete as a parent.
     let flow = PubkyGrantAuthFlow::builder(
@@ -158,7 +164,8 @@ async fn parent_and_session_flows_cannot_be_mixed_up() {
 async fn the_homeserver_accepts_reconnects_and_sign_outs_from_the_holder() {
     let testnet = build_full_testnet().await;
     let (_, signer) = signed_up_user(&testnet).await;
-    let parent = parent_for(&testnet, &signer).await;
+    let key = Keypair::random();
+    let parent = parent_for(&testnet, &signer, key.clone()).await;
     let client = testnet.sdk().unwrap().client().clone();
     let chat = ClientId::new(CHAT).unwrap();
 
@@ -166,8 +173,11 @@ async fn the_homeserver_accepts_reconnects_and_sign_outs_from_the_holder() {
     parent.reconnect_app(&client, &chat).await.unwrap();
     parent.reconnect_app(&client, &chat).await.unwrap();
 
-    // Signing out can be repeated, and ends the parent's authority.
-    parent.signout(&client).await.unwrap();
+    // Signing out needs only the public grant and its key, can be repeated, and
+    // ends the parent's authority.
+    ParentGrantCredential::revoke_with_keypair(&client, parent.parent_grant(), key)
+        .await
+        .unwrap();
     parent.signout(&client).await.unwrap();
     let error = parent.reconnect_app(&client, &chat).await.unwrap_err();
     assert!(has_status(&error, StatusCode::UNAUTHORIZED), "{error:?}");
@@ -219,7 +229,7 @@ fn open_approval(
 async fn an_app_signs_in_with_a_child_the_holder_issued() {
     let testnet = build_full_testnet().await;
     let (user, signer) = signed_up_user(&testnet).await;
-    let parent = parent_for(&testnet, &signer).await;
+    let parent = parent_for(&testnet, &signer, Keypair::random()).await;
     let server = testnet.homeserver_app();
     let client = testnet.sdk().unwrap().client().clone();
     let base_url = server.icann_http_url();

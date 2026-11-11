@@ -168,6 +168,17 @@ fn optional_unique_query(
     Ok(value.map(Cow::into_owned))
 }
 
+/// Reject repeated parameters. New formats have no legacy links to stay
+/// compatible with, and a repeat could be read differently elsewhere.
+pub(super) fn reject_repeated_query(
+    url: &Url,
+    names: &[&'static str],
+) -> Result<(), DeepLinkParseError> {
+    names
+        .iter()
+        .try_for_each(|name| optional_unique_query(url, name).map(drop))
+}
+
 pub(super) fn invalid_query_input(
     name: &'static str,
     message: impl Into<String>,

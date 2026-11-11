@@ -17,6 +17,9 @@ use crate::{
     keys::Keypair,
 };
 
+/// Maximum parent lifetime: 730 days, matching the SDK's default grant lifetime.
+pub const MAX_PARENT_GRANT_LIFETIME_SECS: u64 = 2 * 365 * 24 * 3600;
+
 /// The most a parent grant can authorize. Excludes `/:rw`, so delegated
 /// sessions can't manage grants.
 pub fn parent_grant_ceiling() -> Capabilities {

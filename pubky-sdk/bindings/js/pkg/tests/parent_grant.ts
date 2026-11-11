@@ -271,6 +271,9 @@ test("ParentGrantStore: signing out retries and leaves delivered keys alone", as
   const pending = (await sdk.parentGrantStore.list()).find((item) => item.id === id)!;
   t.equal(pending.logoutPending, true);
 
+  // Saving again can't bring the parent back while its sign-out is pending.
+  assertRejects(t, await expectRejection(sdk.parentGrantStore.save(parent)), "ClientStateError", /signed out/);
+
   // Restoring finishes the sign-out instead of enabling issuance.
   assertRejects(t, await expectRejection(sdk.parentGrantStore.restore(id)), "ClientStateError", /signed out/);
   t.notOk((await sdk.parentGrantStore.list()).some((item) => item.id === id), "the record is gone");

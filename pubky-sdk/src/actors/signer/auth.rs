@@ -21,7 +21,6 @@ use crate::{
         grant::{
             approval_envelope::{GrantApprovalEnvelope, ParentApprovalEnvelope},
             constants::DEFAULT_GRANT_LIFETIME_SECS,
-            credential::now_unix,
         },
     },
     cross_log,
@@ -286,18 +285,7 @@ impl PubkySigner {
         relay_channel: GrantRelayChannel,
     ) -> Result<Vec<u8>> {
         format.validate_capabilities(capabilities)?;
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let claims = GrantClaims {
-            iss: self.keypair.public_key(),
-            client_id,
-            caps: capabilities.as_slice().to_vec(),
-            cnf: client_pk,
-            jti: GrantId::generate(),
-            iat: now,
-            exp: now + DEFAULT_GRANT_LIFETIME_SECS,
-        };
+        let claims = self.approved_claims(capabilities, client_id, client_pk);
         let payload =
             match format {
                 GrantApprovalFormat::BareGrant => Zeroizing::new(
@@ -322,19 +310,35 @@ impl PubkySigner {
         capabilities: &Capabilities,
         params: &ParentGrantParams,
     ) -> Result<Vec<u8>> {
-        let now = now_unix();
-        let claims = GrantClaims {
-            iss: self.keypair.public_key(),
-            client_id: params.client_id.clone(),
-            caps: capabilities.as_slice().to_vec(),
-            cnf: params.client_pk.clone(),
-            jti: GrantId::generate(),
-            iat: now,
-            exp: now + DEFAULT_GRANT_LIFETIME_SECS,
-        };
+        let claims = self.approved_claims(
+            capabilities,
+            params.client_id.clone(),
+            params.client_pk.clone(),
+        );
         let payload =
             ParentApprovalEnvelope::sign(&self.keypair, &claims, &params.ephemeral_public_key);
         approval_encryption::seal(&params.ephemeral_public_key, payload.as_bytes())
+    }
+
+    /// Claims for a new grant of the approved capabilities and default lifetime.
+    fn approved_claims(
+        &self,
+        capabilities: &Capabilities,
+        client_id: ClientId,
+        client_pk: PublicKey,
+    ) -> GrantClaims {
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        GrantClaims {
+            iss: self.keypair.public_key(),
+            client_id,
+            caps: capabilities.as_slice().to_vec(),
+            cnf: client_pk,
+            jti: GrantId::generate(),
+            iat: now,
+            exp: now + DEFAULT_GRANT_LIFETIME_SECS,
+        }
     }
 
     fn build_encrypted_token(

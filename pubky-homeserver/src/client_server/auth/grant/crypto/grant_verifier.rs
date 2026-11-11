@@ -14,6 +14,7 @@ use pubky_common::{
     auth::{
         grant::{
             caps_within, is_exact_callback, parent_grant_ceiling, ChildGrantClaims, GrantClaims,
+            MAX_PARENT_GRANT_LIFETIME_SECS,
         },
         jws::{CHILD_GRANT_JWS_TYP, GRANT_JWS_TYP, PARENT_GRANT_JWS_TYP},
     },
@@ -26,9 +27,6 @@ use super::{
     jws_crypto::{self, JwsCompact},
     pop_verifier::POP_MAX_AGE_SECS,
 };
-
-/// Maximum parent lifetime: 730 days, matching the SDK's default grant lifetime.
-const MAX_PARENT_GRANT_LIFETIME_SECS: u64 = 2 * 365 * 24 * 3600;
 
 /// A verified parent and child.
 #[derive(Debug, Clone)]

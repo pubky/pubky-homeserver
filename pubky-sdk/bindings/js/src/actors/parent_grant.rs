@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
+use zeroize::Zeroize;
 
 use super::{
     browser_grant_key_store::BrowserGrantKeyStore, encryption_keys::EncryptionKeys,
@@ -136,8 +137,6 @@ struct ParentRecord {
 
 impl Drop for ParentRecord {
     fn drop(&mut self) {
-        use zeroize::Zeroize;
-
         // JS/IndexedDB retain their own copies; clear the Rust-owned secret.
         self.signed_approval.zeroize();
     }
@@ -346,19 +345,25 @@ pub struct ParentGrantStore(pub(crate) pubky::Pubky);
 impl ParentGrantStore {
     /// Save a parent grant so it survives reloads and browser restarts.
     ///
-    /// Only parents with a browser-held signing key can be saved.
+    /// Only parents with a browser-held signing key can be saved. Rejects a
+    /// parent whose sign-out is still pending.
     #[wasm_bindgen]
     pub async fn save(&self, parent: &ParentGrant) -> JsResult<ParentGrantInfo> {
         let key_id = parent.0.delegated_key_id().ok_or_else(|| {
             client_state_error("Only parent grants with a browser-held key can be saved.")
         })?;
-        // Before the record exists, so a saved parent can always find its key.
-        BrowserGrantKeyStore::hold_key_for_parent(key_id.clone()).await?;
         let claims = parent.0.claims();
         let public_key = claims.iss.z32();
         let grant_id = claims.jti.to_string();
+        let id = format!("{public_key}:{grant_id}");
+        // Saving again would bring back a parent whose sign-out hasn't finished.
+        if matches!(self.load(&id).await, Ok(saved) if saved.metadata.logout_pending) {
+            return Err(client_state_error("Parent grant is being signed out."));
+        }
+        // Before the record exists, so a saved parent can always find its key.
+        BrowserGrantKeyStore::hold_key_for_parent(key_id.clone()).await?;
         let metadata = ParentMetadata {
-            id: format!("{public_key}:{grant_id}"),
+            id,
             public_key,
             grant_id,
             client_id: claims.client_id.to_string(),

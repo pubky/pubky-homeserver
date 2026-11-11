@@ -436,6 +436,7 @@ impl PubkyGrantAuthFlow {
             approval_key_secret,
             ..
         } = self;
+        check_flow_kind(&auth_url, true)?;
         let message = relay_listener.await_message().await?;
         decode_parent_credential(
             &message,
@@ -469,11 +470,13 @@ impl PubkyGrantAuthFlow {
         auth_url: &Url,
         approval_key_secret: Option<&ApprovalRecipientSecret>,
     ) -> Result<GrantApproval> {
+        check_flow_kind(auth_url, false)?;
         let message = relay_listener.await_message().await?;
         decode_relay_approval(&message, auth_url, approval_key_secret)
     }
 
     fn try_decoded_approval(&self) -> Result<Option<GrantApproval>> {
+        check_flow_kind(&self.auth_url, false)?;
         let Some(message) = self.relay_listener.try_message() else {
             return Ok(None);
         };
@@ -483,6 +486,24 @@ impl PubkyGrantAuthFlow {
             self.approval_key_secret.as_ref(),
         )?))
     }
+}
+
+/// Check the flow's kind before the relay is read, so calling the wrong method
+/// can't use up the user's approval.
+fn check_flow_kind(auth_url: &Url, parent: bool) -> Result<()> {
+    let is_parent = matches!(
+        DeepLink::from_str(auth_url.as_str()),
+        Ok(DeepLink::ParentGrant(_))
+    );
+    if is_parent == parent {
+        return Ok(());
+    }
+    let message = if parent {
+        "this flow did not request a parent grant"
+    } else {
+        "this flow requested a parent grant, not a session"
+    };
+    Err(AuthError::Validation(message.into()).into())
 }
 
 fn decode_relay_approval(

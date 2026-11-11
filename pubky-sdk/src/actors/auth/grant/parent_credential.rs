@@ -215,7 +215,9 @@ impl ParentGrantCredential {
     /// Revoke this parent, all its children and their sessions.
     ///
     /// Works after the parent expires and can be retried. Delivered keys can't be
-    /// taken back, so delete your local copy of the approval first.
+    /// taken back, so delete your local copy of the approval first. Keep
+    /// [`Self::parent_grant`] and the signing key until this succeeds, so that
+    /// [`Self::revoke_with_keypair`] can retry after a restart.
     ///
     /// # Errors
     /// Propagates homeserver lookup, signing, transport and server errors.
@@ -261,7 +263,28 @@ impl ParentGrantCredential {
         Ok(())
     }
 
-    /// Finish revoking a parent whose confidential approval was already deleted.
+    /// Revoke a parent from its public grant ([`Self::parent_grant`]) and signing
+    /// key, to retry a sign-out after the confidential approval was deleted.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::Validation`] for a malformed grant, and otherwise
+    /// fails like [`Self::signout`].
+    pub async fn revoke_with_keypair(
+        client: &PubkyHttpClient,
+        parent_grant: &str,
+        keypair: Keypair,
+    ) -> Result<()> {
+        let claims = decode_parent(parent_grant)?;
+        revoke(
+            client,
+            parent_grant,
+            &claims,
+            &GrantPopSigner::local(keypair),
+        )
+        .await
+    }
+
+    /// Like [`Self::revoke_with_keypair`], for a signing key held outside the SDK.
     ///
     /// The parent's `cnf` names the signing key, so only its id is needed.
     #[doc(hidden)]
@@ -271,11 +294,15 @@ impl ParentGrantCredential {
         key_id: String,
         sign: DelegatedSignFn,
     ) -> Result<()> {
-        let claims = GrantClaims::decode(parent_jws)
-            .map_err(|error| AuthError::Validation(format!("invalid parent grant: {error}")))?;
+        let claims = decode_parent(parent_jws)?;
         let signer = GrantPopSigner::delegated(key_id, claims.cnf.clone(), sign);
         revoke(client, parent_jws, &claims, &signer).await
     }
+}
+
+fn decode_parent(parent_jws: &str) -> Result<GrantClaims> {
+    GrantClaims::decode(parent_jws)
+        .map_err(|error| AuthError::Validation(format!("invalid parent grant: {error}")).into())
 }
 
 async fn revoke(
