@@ -3,7 +3,7 @@
 use pubky_common::auth::jws::GrantId;
 use sea_query::{Expr, ExprTrait, Iden, PostgresQueryBuilder, Query};
 use sea_query_sqlx::SqlxBinder;
-use sqlx::{postgres::PgRow, FromRow, Row};
+use sqlx::{postgres::PgRow, FromRow, Postgres, Row, Transaction};
 
 use crate::client_server::auth::grant::crypto::session_token::SessionTokenHash;
 use crate::persistence::sql::{
@@ -21,11 +21,21 @@ impl GrantSessionRepository {
         db: &SqlDb,
     ) -> Result<(), SessionIssueError> {
         let mut tx = db.pool().begin().await?;
+        Self::replace_in_tx(session, &mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// [`Self::replace_for_grant`] as part of the caller's transaction.
+    pub async fn replace_in_tx(
+        session: &NewGrantSession,
+        tx: &mut Transaction<'static, Postgres>,
+    ) -> Result<(), SessionIssueError> {
         let grant_id = session.grant_id.to_string();
         let grant =
             sqlx::query("SELECT revoked_at, expires_at FROM grants WHERE id = $1 FOR UPDATE")
                 .bind(&grant_id)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
         if grant.try_get::<Option<i64>, _>("revoked_at")?.is_some() {
             return Err(SessionIssueError::Revoked);
@@ -35,7 +45,7 @@ impl GrantSessionRepository {
         }
         sqlx::query("DELETE FROM grant_sessions WHERE grant_id = $1")
             .bind(&grant_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         sqlx::query(
             "INSERT INTO grant_sessions (token_hash, grant_id, expires_at) VALUES ($1, $2, $3)",
@@ -43,9 +53,8 @@ impl GrantSessionRepository {
         .bind(session.token_hash.as_ref())
         .bind(&grant_id)
         .bind(session.expires_at as i64)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 
@@ -143,8 +152,11 @@ pub enum SessionIssueError {
 mod tests {
     use super::*;
     use pubky_common::{
-        auth::jws::{ClientId, GrantId},
-        capabilities::{Capabilities, Capability},
+        auth::{
+            grant::GrantClaims,
+            jws::{ClientId, GrantId},
+        },
+        capabilities::Capability,
         crypto::Keypair,
     };
 
@@ -158,15 +170,18 @@ mod tests {
         let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
         let now = chrono::Utc::now().timestamp() as u64;
         let grant_id = GrantId::generate();
-        let new_grant = NewGrant {
-            id: grant_id.clone(),
-            user_id: user.id,
-            client_id: ClientId::new("test.app").unwrap(),
-            client_cnf_key: Keypair::random().public_key().z32(),
-            capabilities: Capabilities::builder().cap(Capability::root()).finish(),
-            issued_at: now,
-            expires_at: now + 3600,
-        };
+        let new_grant = NewGrant::direct(
+            &GrantClaims {
+                iss: pubkey,
+                client_id: ClientId::new("test.app").unwrap(),
+                cnf: Keypair::random().public_key(),
+                caps: vec![Capability::root()],
+                jti: grant_id.clone(),
+                iat: now,
+                exp: now + 3600,
+            },
+            user.id,
+        );
         GrantRepository::create(&new_grant, &mut db.pool().into())
             .await
             .unwrap();
@@ -257,15 +272,18 @@ mod tests {
         let now = chrono::Utc::now().timestamp() as u64;
         let pubkey = Keypair::random().public_key();
         let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
-        let new_grant_b = NewGrant {
-            id: grant_b_id.clone(),
-            user_id: user.id,
-            client_id: ClientId::new("other.app").unwrap(),
-            client_cnf_key: Keypair::random().public_key().z32(),
-            capabilities: Capabilities::builder().cap(Capability::root()).finish(),
-            issued_at: now,
-            expires_at: now + 3600,
-        };
+        let new_grant_b = NewGrant::direct(
+            &GrantClaims {
+                iss: pubkey,
+                client_id: ClientId::new("other.app").unwrap(),
+                cnf: Keypair::random().public_key(),
+                caps: vec![Capability::root()],
+                jti: grant_b_id.clone(),
+                iat: now,
+                exp: now + 3600,
+            },
+            user.id,
+        );
         GrantRepository::create(&new_grant_b, &mut db.pool().into())
             .await
             .unwrap();

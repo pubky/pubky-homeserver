@@ -3,19 +3,23 @@
 //! Route handlers call `AuthService` methods instead of orchestrating
 //! verification, persistence, and minting steps directly.
 
+mod delegation;
+
+use std::collections::HashSet;
+
 use crate::persistence::sql::{signup_code::SignupCode, uexecutor, SqlDb, UnifiedExecutor};
 use crate::services::user_service::{UserEntity, UserService};
 use chrono::Utc;
 use pubky_common::{
     auth::grant::GrantClaims,
-    auth::grant_session_responses::{GrantSessionInfo, GrantSessionResponse},
+    auth::grant_session_responses::{GrantKind, GrantSessionInfo, GrantSessionResponse},
     auth::jws::GrantId,
-    capabilities::Capabilities,
     crypto::PublicKey,
 };
+use sqlx::{Postgres, Transaction};
 
 use super::crypto::{
-    grant_verifier::{verify_grant, verify_grant_for_revocation},
+    grant_verifier::{is_parent_grant, verify_grant, verify_grant_for_revocation},
     jws_crypto::JwsCompact,
     pop_verifier::{
         PopProof, PopVerificationContext, POP_MAX_AGE_SECS, POP_NONCE_GC_THRESHOLD_SECS,
@@ -94,8 +98,8 @@ impl GrantAuthService {
     ) -> Result<GrantSessionResponse, AuthServiceError> {
         let grant = self.verify_grant_and_pop(grant_jws, pop_jws).await?;
         let user = self.find_user(&grant).await?;
-        Self::store_grant(&grant, &user, &mut self.sql_db.pool().into()).await?;
-        self.require_stored_grant_matches(&grant).await?;
+        let new_grant = NewGrant::direct(&grant, user.id);
+        Self::store_grant(&new_grant, &mut self.sql_db.pool().into()).await?;
         self.mint_session(&grant).await
     }
 
@@ -119,14 +123,19 @@ impl GrantAuthService {
 
     /// Revoke with grant + PoP, even after bearer or grant expiry.
     /// Fresh proofs allow retries after revocation.
+    ///
+    /// A parent grant in place of the grant signs out the parent and all
+    /// its children.
     pub async fn signout_with_proof(
         &self,
         grant_jws: &JwsCompact,
         pop_jws: &JwsCompact,
     ) -> Result<(), AuthServiceError> {
+        if is_parent_grant(grant_jws) {
+            return self.signout_parent_with_proof(grant_jws, pop_jws).await;
+        }
         let grant = verify_grant_for_revocation(grant_jws)?;
-        let pop = self.verify_pop_proof(pop_jws, &grant)?;
-        self.check_nonce_replay(&pop).await?;
+        self.verify_and_track_pop(pop_jws, &grant).await?;
         let stored = self.get_grant(&grant.jti).await?;
         if stored.user_pubkey != grant.iss || stored.client_cnf_key != grant.cnf.z32() {
             return Err(AuthServiceError::GrantOwnershipMismatch);
@@ -135,6 +144,9 @@ impl GrantAuthService {
     }
 
     /// Revoke a grant after verifying it belongs to the authenticated user.
+    ///
+    /// Revoking a child this way is the user's decision to remove the app, so it
+    /// also blocks the app under that parent until it is reconnected.
     pub async fn revoke_user_grant(
         &self,
         grant_id: &GrantId,
@@ -145,25 +157,93 @@ impl GrantAuthService {
         if grant.user_id != user_id {
             return Err(AuthServiceError::GrantOwnershipMismatch);
         }
-        self.revoke_grant(grant_id).await
+        let mut tx = self.sql_db.pool().begin().await?;
+        Self::revoke_in_tx(&grant, true, &mut tx).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Revoke a grant and delete all its sessions atomically.
     async fn revoke_grant(&self, grant_id: &GrantId) -> Result<(), AuthServiceError> {
         let mut tx = self.sql_db.pool().begin().await?;
-        GrantRepository::revoke(grant_id, uexecutor!(tx)).await?;
-        GrantSessionRepository::delete_all_for_grant(grant_id, uexecutor!(tx)).await?;
-        AuthRevocation::notify_grant_in_transaction(grant_id, uexecutor!(tx)).await?;
+        let grant = map_not_found(
+            GrantRepository::get_by_id(grant_id, uexecutor!(tx)).await,
+            AuthServiceError::GrantNotFound,
+        )?;
+        Self::revoke_in_tx(&grant, false, &mut tx).await?;
         tx.commit().await?;
         Ok(())
     }
 
+    /// Revoke a grant according to its stored kind and end the affected sessions.
+    ///
+    /// A parent takes all its children with it. `block_app` applies to a child:
+    /// it blocks the app under the parent and revokes the app's current child,
+    /// which may have replaced `grant`.
+    async fn revoke_in_tx(
+        grant: &GrantEntity,
+        block_app: bool,
+        tx: &mut Transaction<'static, Postgres>,
+    ) -> Result<(), AuthServiceError> {
+        let mut revoked = vec![grant.id.clone()];
+        if let Some(parent_id) = &grant.parent_id {
+            GrantRepository::get_for_update(parent_id, uexecutor!(*tx)).await?;
+            if block_app {
+                GrantRepository::block_app(
+                    grant.user_id,
+                    parent_id,
+                    &grant.client_id,
+                    uexecutor!(*tx),
+                )
+                .await?;
+                let current = GrantRepository::revoke_children(
+                    parent_id,
+                    Some(&grant.client_id),
+                    uexecutor!(*tx),
+                )
+                .await?;
+                // `grant` is listed again when it was still the app's current child.
+                revoked.extend(current.into_iter().filter(|id| id != &grant.id));
+            }
+        } else if grant.kind == GrantKind::Parent {
+            GrantRepository::get_for_update(&grant.id, uexecutor!(*tx)).await?;
+            revoked
+                .extend(GrantRepository::revoke_children(&grant.id, None, uexecutor!(*tx)).await?);
+            GrantRepository::delete_app_blocks_for_parent(&grant.id, uexecutor!(*tx)).await?;
+        }
+        GrantRepository::revoke(&grant.id, uexecutor!(*tx)).await?;
+        Self::end_sessions(&revoked, tx).await
+    }
+
+    /// Delete revoked grants' sessions and queue their stream shutdown signals.
+    async fn end_sessions(
+        grant_ids: &[GrantId],
+        tx: &mut Transaction<'static, Postgres>,
+    ) -> Result<(), AuthServiceError> {
+        for grant_id in grant_ids {
+            GrantSessionRepository::delete_all_for_grant(grant_id, uexecutor!(*tx)).await?;
+            AuthRevocation::notify_grant_in_transaction(grant_id, uexecutor!(*tx)).await?;
+        }
+        Ok(())
+    }
+
     /// List all active (non-revoked, non-expired) grants for a user.
+    ///
+    /// A child appears only while its parent is active too.
     pub async fn list_active_grants(
         &self,
         user_id: i32,
     ) -> Result<Vec<GrantEntity>, AuthServiceError> {
-        Ok(GrantRepository::list_active_for_user(user_id, &mut self.sql_db.pool().into()).await?)
+        let mut grants =
+            GrantRepository::list_active_for_user(user_id, &mut self.sql_db.pool().into()).await?;
+        let active: HashSet<GrantId> = grants.iter().map(|grant| grant.id.clone()).collect();
+        grants.retain(|grant| {
+            grant
+                .parent_id
+                .as_ref()
+                .is_none_or(|parent_id| active.contains(parent_id))
+        });
+        Ok(grants)
     }
 
     /// Return session info for a grant session.
@@ -274,6 +354,22 @@ impl GrantAuthService {
 
         let grant = self.get_grant(&session.grant_id).await?;
         grant.require_active(now)?;
+        if let Some(parent_id) = &grant.parent_id {
+            let parent = map_not_found(
+                GrantRepository::get_parent_state(
+                    grant.user_id,
+                    parent_id,
+                    &grant.client_id,
+                    &mut self.sql_db.pool().into(),
+                )
+                .await,
+                AuthServiceError::GrantNotFound,
+            )?;
+            parent.require_active(now)?;
+            if parent.app_blocked {
+                return Err(AuthServiceError::AppBlocked);
+            }
+        }
         Ok(grant)
     }
 
@@ -285,8 +381,7 @@ impl GrantAuthService {
     ) -> Result<GrantClaims, AuthServiceError> {
         let grant = self.verify_grant(grant_jws)?;
         self.check_grant_not_revoked(&grant).await?;
-        let pop = self.verify_pop_proof(pop_jws, &grant)?;
-        self.check_nonce_replay(&pop).await?;
+        self.verify_and_track_pop(pop_jws, &grant).await?;
         Ok(grant)
     }
 
@@ -300,8 +395,7 @@ impl GrantAuthService {
         Self::require_signup_client_id(&grant)?;
         Self::require_root_capability_claim(&grant)?;
         Self::require_short_signup_lifetime(&grant)?;
-        let pop = self.verify_pop_proof(pop_jws, &grant)?;
-        self.check_nonce_replay(&pop).await?;
+        self.verify_and_track_pop(pop_jws, &grant).await?;
         Ok(grant)
     }
 
@@ -357,19 +451,21 @@ impl GrantAuthService {
         )
     }
 
-    /// Verify the PoP proof signature, audience, grant binding, and timestamp window.
-    fn verify_pop_proof(
+    /// Verify the PoP proof signature, audience, grant binding, and timestamp window,
+    /// then record its nonce so the proof can't be replayed.
+    async fn verify_and_track_pop(
         &self,
         compact: &JwsCompact,
         grant: &GrantClaims,
-    ) -> Result<PopProof, AuthServiceError> {
+    ) -> Result<(), AuthServiceError> {
         let hs_pubkey_z32 = self.homeserver_public_key.z32();
         let context = PopVerificationContext {
             cnf_key: &grant.cnf,
             expected_audience: &hs_pubkey_z32,
             expected_grant_id: &grant.jti,
         };
-        Ok(PopProof::verify(compact, &context)?)
+        let pop = PopProof::verify(compact, &context)?;
+        self.check_nonce_replay(&pop).await
     }
 
     /// Reject replayed PoP nonces. Garbage-collects expired nonces first.
@@ -405,46 +501,24 @@ impl GrantAuthService {
         Ok(())
     }
 
-    /// Sessions take their user and capabilities from the stored grant row, and
-    /// `store_grant` keeps an existing row for the same client-chosen ID. Refuse
-    /// to mint from a row the presented grant does not describe, so a grant ID
-    /// cannot be reused by another user or re-signed with other claims. The
-    /// capability list is compared as signed: parsing canonicalizes each entry's
-    /// actions, so the stored list round-trips unchanged.
-    async fn require_stored_grant_matches(
-        &self,
-        grant: &GrantClaims,
-    ) -> Result<(), AuthServiceError> {
-        let stored = self.get_grant(&grant.jti).await?;
-        let matches = stored.user_pubkey == grant.iss
-            && stored.client_id == grant.client_id
-            && stored.client_cnf_key == grant.cnf.z32()
-            && stored.capabilities == Capabilities::from(grant.caps.clone())
-            && stored.issued_at == grant.iat as i64
-            && stored.expires_at == grant.exp as i64;
-        if !matches {
+    /// Record a grant on first use, lock it, and return its current state.
+    ///
+    /// Sessions take their user and capabilities from the stored row, and an
+    /// existing row for the same client-chosen ID is kept. Refuse a grant that
+    /// row doesn't describe, so a grant ID can't be reused by another user or
+    /// re-signed with other claims. The capability list is compared as signed:
+    /// parsing canonicalizes each entry's actions, so the stored list round-trips
+    /// unchanged.
+    async fn store_grant<'a>(
+        new_grant: &NewGrant,
+        executor: &mut UnifiedExecutor<'a>,
+    ) -> Result<GrantEntity, AuthServiceError> {
+        GrantRepository::create(new_grant, executor).await?;
+        let stored = GrantRepository::get_for_update(&new_grant.id, executor).await?;
+        if !stored.has_same_claims(new_grant) {
             return Err(AuthServiceError::GrantClaimsMismatch);
         }
-        Ok(())
-    }
-
-    /// Persist the grant idempotently (ON CONFLICT DO NOTHING).
-    async fn store_grant<'a>(
-        grant: &GrantClaims,
-        user: &UserEntity,
-        executor: &mut UnifiedExecutor<'a>,
-    ) -> Result<(), AuthServiceError> {
-        let new_grant = NewGrant {
-            id: grant.jti.clone(),
-            user_id: user.id,
-            client_id: grant.client_id.clone(),
-            client_cnf_key: grant.cnf.z32(),
-            capabilities: grant.caps.clone().into(),
-            issued_at: grant.iat,
-            expires_at: grant.exp,
-        };
-        GrantRepository::create(&new_grant, executor).await?;
-        Ok(())
+        Ok(stored)
     }
 
     /// Generate a fresh opaque bearer, persist its hash, and return the wire response.
@@ -452,6 +526,16 @@ impl GrantAuthService {
         &self,
         grant: &GrantClaims,
     ) -> Result<GrantSessionResponse, AuthServiceError> {
+        let (new_session, response) = self.prepare_session(grant);
+        GrantSessionRepository::replace_for_grant(&new_session, &self.sql_db).await?;
+        Ok(response)
+    }
+
+    /// Generate a bearer and build its session record and wire response.
+    ///
+    /// The bearer can't outlive `grant`. A child never outlives its parent, so
+    /// this also caps a child's bearer at the parent's expiry.
+    fn prepare_session(&self, grant: &GrantClaims) -> (NewGrantSession, GrantSessionResponse) {
         let now = Utc::now().timestamp() as u64;
         let expires_at = (now + DEFAULT_SESSION_TOKEN_LIFETIME_SECS).min(grant.exp);
         let bearer = SessionBearer::generate();
@@ -462,9 +546,7 @@ impl GrantAuthService {
             grant_id: grant.jti.clone(),
             expires_at,
         };
-        GrantSessionRepository::replace_for_grant(&new_session, &self.sql_db).await?;
-
-        Ok(GrantSessionResponse {
+        let response = GrantSessionResponse {
             token: bearer.into_string(),
             session: GrantSessionInfo {
                 homeserver: self.homeserver_public_key.clone(),
@@ -476,7 +558,8 @@ impl GrantAuthService {
                 grant_expires_at: grant.exp,
                 created_at: now,
             },
-        })
+        };
+        (new_session, response)
     }
 }
 
@@ -508,7 +591,7 @@ mod tests {
 
     // ── Helpers ─────────────────────────────────────────────────────
 
-    async fn test_service() -> GrantAuthService {
+    pub(super) async fn test_service() -> GrantAuthService {
         test_service_with_signup_mode(SignupMode::Open).await
     }
 
@@ -530,13 +613,13 @@ mod tests {
         ))
     }
 
-    async fn create_test_user(service: &GrantAuthService) -> (Keypair, i32) {
+    pub(super) async fn create_test_user(service: &GrantAuthService) -> (Keypair, i32) {
         let kp = Keypair::random();
         let user = service.user_service.create(&kp.public_key()).await.unwrap();
         (kp, user.id)
     }
 
-    fn sign_grant(
+    pub(super) fn sign_grant(
         user_kp: &Keypair,
         client_kp: &Keypair,
         hs_pubkey: &PublicKey,
@@ -599,9 +682,26 @@ mod tests {
         (grant_jws, pop_jws)
     }
 
-    fn sign_jws<T: serde::Serialize>(kp: &Keypair, typ: &str, claims: &T) -> JwsCompact {
+    pub(super) fn sign_jws<T: serde::Serialize>(kp: &Keypair, typ: &str, claims: &T) -> JwsCompact {
         let token = pubky_common::auth::jws::sign_jws(kp, typ, claims);
         JwsCompact::parse(&token).unwrap()
+    }
+
+    pub(super) fn pop_for(
+        service: &GrantAuthService,
+        key: &Keypair,
+        grant_id: &GrantId,
+    ) -> JwsCompact {
+        sign_jws(
+            key,
+            POP_JWS_TYP,
+            &PopProofClaims {
+                aud: service.homeserver_public_key(),
+                gid: grant_id.clone(),
+                nonce: PopNonce::generate(),
+                iat: Utc::now().timestamp() as u64,
+            },
+        )
     }
 
     // ── create_grant_session ────────────────────────────────────────
@@ -1376,7 +1476,8 @@ mod tests {
             0,
         );
         let stored_user = service.find_user(&grant).await.unwrap();
-        GrantAuthService::store_grant(&grant, &stored_user, &mut service.sql_db.pool().into())
+        let new_grant = NewGrant::direct(&grant, stored_user.id);
+        GrantAuthService::store_grant(&new_grant, &mut service.sql_db.pool().into())
             .await
             .unwrap();
 
@@ -1443,5 +1544,76 @@ mod tests {
             .resolve_grant_session_by_bearer(&SessionBearer::parse(&a.token).unwrap())
             .await
             .unwrap();
+    }
+
+    // ── Repeated grant IDs ──────────────────────────────────────────
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn repeated_grant_id_with_changed_claims_is_rejected() {
+        let service = test_service().await;
+        let (user, _) = create_test_user(&service).await;
+        let (other_user, _) = create_test_user(&service).await;
+        let client = Keypair::random();
+        let hs = service.homeserver_public_key();
+        let (grant_jws, pop, grant) = sign_grant(&user, &client, &hs);
+        let response = service
+            .create_grant_session(&grant_jws, &pop)
+            .await
+            .unwrap();
+
+        // The same grant keeps working.
+        let same = pop_for(&service, &client, &grant.jti);
+        service
+            .create_grant_session(&grant_jws, &same)
+            .await
+            .unwrap();
+        let bearer = SessionBearer::parse(&response.token).unwrap();
+        assert!(service
+            .resolve_grant_session_by_bearer(&bearer)
+            .await
+            .is_err());
+
+        let with_caps = GrantClaims {
+            caps: vec!["/pub/:r".parse().unwrap()],
+            ..grant.clone()
+        };
+        let with_expiry = GrantClaims {
+            exp: grant.exp + 60,
+            ..grant.clone()
+        };
+        let with_client = GrantClaims {
+            client_id: ClientId::new("other.app").unwrap(),
+            ..grant.clone()
+        };
+        let with_user = GrantClaims {
+            iss: other_user.public_key(),
+            ..grant.clone()
+        };
+        for (signer, claims) in [
+            (&user, &with_caps),
+            (&user, &with_expiry),
+            (&user, &with_client),
+            (&other_user, &with_user),
+        ] {
+            let jws = sign_jws(signer, GRANT_JWS_TYP, claims);
+            let proof = pop_for(&service, &client, &grant.jti);
+            assert!(matches!(
+                service.create_grant_session(&jws, &proof).await,
+                Err(AuthServiceError::GrantClaimsMismatch)
+            ));
+        }
+
+        // The original grant still resolves to its own user and capabilities.
+        let proof = pop_for(&service, &client, &grant.jti);
+        let response = service
+            .create_grant_session(&grant_jws, &proof)
+            .await
+            .unwrap();
+        let session = service
+            .resolve_grant_session_by_bearer(&SessionBearer::parse(&response.token).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(session.user_key, user.public_key());
     }
 }

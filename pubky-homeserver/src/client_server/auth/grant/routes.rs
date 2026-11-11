@@ -24,10 +24,21 @@ use crate::shared::{HttpError, HttpResult};
 /// JSON request body for grant-based session creation.
 #[derive(Deserialize)]
 pub struct CreateGrantSessionRequest {
-    /// Grant JWS (user-signed).
+    /// Parent grant JWS (user-signed), present when `grant` is a child grant.
+    pub parent: Option<JwsCompact>,
+    /// Grant JWS, signed by the user or, for a child grant, by the parent's key.
     pub grant: JwsCompact,
     /// PoP proof JWS (client-signed).
     pub pop: JwsCompact,
+}
+
+/// JSON request body for reconnecting a blocked app.
+#[derive(Deserialize)]
+pub struct ReconnectRequest {
+    /// Parent grant JWS (user-signed).
+    pub parent: JwsCompact,
+    /// `pubky-reconnect` proof JWS, signed by the parent's key.
+    pub proof: JwsCompact,
 }
 
 /// Query parameters for the signup endpoint.
@@ -43,6 +54,8 @@ fn grant_info_from_entity(g: GrantEntity) -> GrantInfo {
         capabilities: g.capabilities.to_string(),
         issued_at: g.issued_at as u64,
         expires_at: g.expires_at as u64,
+        kind: g.kind,
+        parent_id: g.parent_id,
     }
 }
 
@@ -55,16 +68,38 @@ fn parse_signup_token(token: Option<String>) -> HttpResult<Option<SignupCode>> {
 
 // ── Grant session creation ─────────────────────────────────────────────────
 
-/// `POST /auth/grant/session` — exchange grant + PoP for an opaque bearer.
+/// `POST /auth/grant/session` — exchange a grant or parent/child chain + PoP for
+/// an opaque bearer.
 pub async fn create_grant_session(
     State(state): State<AuthState>,
     Json(request): Json<CreateGrantSessionRequest>,
 ) -> HttpResult<impl IntoResponse> {
-    let response = state
-        .grant_auth_service
-        .create_grant_session(&request.grant, &request.pop)
-        .await?;
+    let service = &state.grant_auth_service;
+    let response = match &request.parent {
+        Some(parent) => {
+            service
+                .create_child_grant_session(parent, &request.grant, &request.pop)
+                .await?
+        }
+        None => {
+            service
+                .create_grant_session(&request.grant, &request.pop)
+                .await?
+        }
+    };
     Ok(Json(response))
+}
+
+/// `POST /auth/grant/reconnect` — clear an app's reconnection block under a parent.
+pub async fn reconnect(
+    State(state): State<AuthState>,
+    Json(request): Json<ReconnectRequest>,
+) -> HttpResult<impl IntoResponse> {
+    state
+        .grant_auth_service
+        .reconnect_app(&request.parent, &request.proof)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /auth/grant/signup` — create a new user with a grant + PoP proof.
@@ -76,6 +111,9 @@ pub async fn signup(
     Query(params): Query<SignupParams>,
     Json(request): Json<CreateGrantSessionRequest>,
 ) -> HttpResult<impl IntoResponse> {
+    if request.parent.is_some() {
+        return Err(HttpError::bad_request("Signup accepts direct grants only"));
+    }
     let signup_token = parse_signup_token(params.signup_token)?;
     state
         .grant_auth_service
@@ -104,7 +142,9 @@ pub async fn get_session(
 
 /// `DELETE /auth/grant/session` — idempotently revokes the grant (if any).
 ///
-/// Clients may send grant + PoP JSON to revoke without a live bearer.
+/// Clients may send grant + PoP JSON to revoke without a live bearer. A parent +
+/// child + PoP body signs out one app; a parent grant in place of the grant
+/// signs out the parent and all its children.
 /// Takes `Option<AuthSession>` rather than `AuthSession` so a second signout with an
 /// already-revoked bearer is a 200 no-op rather than a 401.
 pub async fn signout(
@@ -113,10 +153,17 @@ pub async fn signout(
     proof: Option<Json<CreateGrantSessionRequest>>,
 ) -> HttpResult<impl IntoResponse> {
     if let Some(Json(proof)) = proof {
-        state
-            .grant_auth_service
-            .signout_with_proof(&proof.grant, &proof.pop)
-            .await?;
+        let service = &state.grant_auth_service;
+        match &proof.parent {
+            Some(parent) => {
+                service
+                    .signout_child_with_proof(parent, &proof.grant, &proof.pop)
+                    .await?;
+            }
+            None => {
+                service.signout_with_proof(&proof.grant, &proof.pop).await?;
+            }
+        }
     } else if let Some(AuthSession::Grant(session)) = auth {
         state
             .grant_auth_service
@@ -150,7 +197,8 @@ pub async fn list_grants(
 
 /// `DELETE /session/{gid}` — revoke a specific grant and all its sessions.
 ///
-/// Requires root capability.
+/// Revoking a parent also revokes its children. Revoking a child also blocks the
+/// app under that parent until it is reconnected. Requires root capability.
 pub async fn revoke_grant(
     State(state): State<AuthState>,
     auth: AuthSession,

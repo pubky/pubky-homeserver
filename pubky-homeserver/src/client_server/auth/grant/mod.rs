@@ -20,10 +20,13 @@
 //! | Token | Signer | Lifetime | Purpose |
 //! |-------|--------|----------|---------|
 //! | **Grant** (`pubky-grant`) | User keypair | Long-lived | Delegates scoped capabilities to a client app |
+//! | **Parent grant** (`pubky-parent-grant`) | User keypair | Long-lived | Authorizes child grants, not storage sessions |
+//! | **Child grant** (`pubky-child-grant`) | Parent's `cnf` key | Up to the parent's expiry | Delegates part of the parent's capabilities to one app |
 //! | **PoP proof** (`pubky-pop`) | Client keypair | ±3 min | Proves possession of the key bound by Grant `cnf` |
+//! | **Reconnect proof** (`pubky-reconnect`) | Parent's `cnf` key | ±3 min | Clears an app's reconnection block |
 //! | **Session bearer** | 32 random bytes (OsRng), SHA-256 hashed at rest | 1 hour | Opaque `Authorization: Bearer` token for API requests |
 //!
-//! The Grant and PoP tokens use EdDSA (Ed25519) in JWS Compact Serialization. The
+//! All grant and proof tokens use EdDSA (Ed25519) in JWS Compact Serialization. The
 //! session bearer carries no claims — it is 256 bits of CSPRNG output presented
 //! verbatim by the client and hashed on the homeserver side for lookup.
 //!
@@ -62,6 +65,14 @@
 //!
 //! - **Nonce**: each PoP nonce is tracked in `pop_nonces` (unique constraint, GC after 360 s).
 //! - **Audience**: PoP `aud` must match this homeserver's public key.
+//!
+//! ## 5. Parent and child grants
+//!
+//! A child grant adds the parent JWS to the session exchange. Each user, parent and
+//! app callback has at most one active child, enforced by a partial unique index.
+//! Exchange, replacement, revocation and reconnect all lock the parent row first, so
+//! lifecycle changes under one parent apply one at a time. See
+//! `docs/delegated-grants.md` for the rules.
 
 pub(crate) mod bearer;
 pub mod crypto;

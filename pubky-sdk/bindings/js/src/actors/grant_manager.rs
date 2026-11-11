@@ -22,7 +22,8 @@ impl GrantManager {
     /// List all active grants for this user.
     ///
     /// Requires a root-capability session. Non-root sessions surface the
-    /// homeserver `403` as the standard request error.
+    /// homeserver `403` as the standard request error. Each entry's `kind` and
+    /// `parentId` group child grants under their parent grant.
     ///
     /// @returns {Promise<GrantInfo[]>}
     #[wasm_bindgen]
@@ -31,6 +32,9 @@ impl GrantManager {
     }
 
     /// Revoke a specific grant by id.
+    ///
+    /// Revoking a parent grant also revokes its children. Revoking a child
+    /// also blocks that app under its parent until Accounts reconnects it.
     ///
     /// Requires a root-capability session. Malformed ids throw
     /// `InvalidInput`.
