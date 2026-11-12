@@ -58,7 +58,7 @@ pub async fn feed_stream(
         state
             .context
             .events_service
-            .all_events_stream(state.context.metrics.clone(), filter)
+            .all_events_stream(filter)
             .map(|event| Ok::<_, Infallible>(event.to_sse_event())),
     )
     .keep_alive(KeepAlive::default());

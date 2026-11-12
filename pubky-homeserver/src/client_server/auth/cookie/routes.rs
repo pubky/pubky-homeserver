@@ -39,7 +39,6 @@ pub async fn signup(
         .cookie_auth_service
         .signup(&body, signup_token.as_ref())
         .await?;
-    state.metrics.record_signup();
     create_session_cookie_response(cookies, host.hostname(), session)
 }
 

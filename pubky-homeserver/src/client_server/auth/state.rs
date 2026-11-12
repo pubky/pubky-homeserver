@@ -1,7 +1,6 @@
 //! Auth-specific sub-state for the auth module.
 
 use crate::app_context::AppContext;
-use crate::observability::Metrics;
 use crate::shared::HttpResult;
 
 use super::cookie::service::CookieAuthService;
@@ -13,7 +12,6 @@ use super::{AuthSession, GrantAuthService, RevocationListener};
 pub struct AuthState {
     pub(crate) grant_auth_service: GrantAuthService,
     pub(crate) cookie_auth_service: CookieAuthService,
-    pub(crate) metrics: Metrics,
     /// Cross-instance signals that close private SSE streams after revocation.
     pub(crate) revocation_listener: RevocationListener,
 }
@@ -23,7 +21,6 @@ impl AuthState {
         Self {
             grant_auth_service: GrantAuthService::from_context(context),
             cookie_auth_service: CookieAuthService::from_context(context),
-            metrics: context.metrics.clone(),
             revocation_listener: context.revocation_listener.clone(),
         }
     }

@@ -6,6 +6,7 @@
 
 use pubky_common::crypto::PublicKey;
 
+use crate::observability::Metrics;
 use crate::persistence::sql::signup_code::{
     SignupCode, SignupCodeEntity, SignupCodeListPage, SignupCodeListQuery, SignupCodeOverview,
     SignupCodeRepository,
@@ -45,15 +46,22 @@ pub struct SignupService {
     sql_db: SqlDb,
     signup_mode: SignupMode,
     user_service: UserService,
+    metrics: Metrics,
 }
 
 impl SignupService {
     /// Creates a signup service with the configured signup policy.
-    pub fn new(sql_db: SqlDb, signup_mode: SignupMode, user_service: UserService) -> Self {
+    pub fn new(
+        sql_db: SqlDb,
+        signup_mode: SignupMode,
+        user_service: UserService,
+        metrics: Metrics,
+    ) -> Self {
         Self {
             sql_db,
             signup_mode,
             user_service,
+            metrics,
         }
     }
 
@@ -78,15 +86,14 @@ impl SignupService {
             .create_user_in_tx(public_key, signup_token, &mut tx)
             .await?;
         tx.commit().await?;
+        self.metrics.record_signup();
         self.user_service.cache_user_quota(&user);
         Ok(user)
     }
 
-    /// Creates a new user inside an existing transaction.
-    ///
-    /// Used by auth flows that must atomically create the user and persist
-    /// method-specific session state, such as grant signup.
-    pub(crate) async fn create_user_in_tx(
+    /// The transactional body of [`Self::create_new_user`], separate so a test
+    /// can hold it uncommitted while a concurrent signup races it.
+    async fn create_user_in_tx(
         &self,
         public_key: &PublicKey,
         signup_token: Option<&SignupCode>,
@@ -232,7 +239,12 @@ mod tests {
 
     async fn service(signup_mode: SignupMode) -> SignupService {
         let db = SqlDb::test().await;
-        SignupService::new(db.clone(), signup_mode, UserService::new(db))
+        SignupService::new(
+            db.clone(),
+            signup_mode,
+            UserService::new(db),
+            Metrics::new().unwrap(),
+        )
     }
 
     fn all_tokens() -> SignupCodeListQuery {
@@ -247,7 +259,14 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_requires_signup_token_follows_signup_mode() {
         let db = SqlDb::test().await;
-        let service = |mode| SignupService::new(db.clone(), mode, UserService::new(db.clone()));
+        let service = |mode| {
+            SignupService::new(
+                db.clone(),
+                mode,
+                UserService::new(db.clone()),
+                Metrics::new().unwrap(),
+            )
+        };
 
         assert!(!service(SignupMode::Open).requires_signup_token());
         assert!(service(SignupMode::TokenRequired).requires_signup_token());
@@ -397,6 +416,29 @@ mod tests {
         assert_eq!(winner.used_by, Some(pubkey));
         let loser = svc.get_token(&second_token.id).await.unwrap();
         assert!(loser.used_by.is_none(), "loser's token must roll back");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_failed_signup_is_not_counted() {
+        let db = SqlDb::test().await;
+        let metrics = Metrics::new().unwrap();
+        let svc = SignupService::new(
+            db.clone(),
+            SignupMode::Open,
+            UserService::new(db),
+            metrics.clone(),
+        );
+        let pubkey = Keypair::random().public_key();
+
+        svc.create_new_user(&pubkey, None).await.unwrap();
+        svc.create_new_user(&pubkey, None).await.unwrap_err();
+
+        let output = metrics.render().unwrap();
+        assert!(
+            output.contains("signup_count_total{otel_scope_name=\"pubky_homeserver\"} 1"),
+            "one signup expected in: {output}"
+        );
     }
 
     #[tokio::test]

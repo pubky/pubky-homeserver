@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 
 use super::{EventsService, Mode};
 use crate::{
-    observability::{ConnectionGuard, Metrics},
+    observability::ConnectionGuard,
     persistence::sql::events::{EventCursor, EventEntity, PathFilter},
 };
 
@@ -131,7 +131,6 @@ pub(super) struct StreamOptions {
 /// the guard fails, or when the client falls behind the channel.
 pub(super) fn stream_events(
     service: EventsService,
-    metrics: Metrics,
     mut cursor: StreamCursor,
     options: StreamOptions,
     mut guard: impl StreamGuard,
@@ -139,6 +138,7 @@ pub(super) fn stream_events(
     let half_capacity = service.channel_capacity() / 2;
     let reverse = options.mode.reverse();
     let live = options.mode.live();
+    let metrics = service.metrics().clone();
 
     async_stream::stream! {
         // Connection metrics on any exit path.

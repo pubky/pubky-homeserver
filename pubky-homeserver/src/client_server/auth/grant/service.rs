@@ -107,13 +107,9 @@ impl GrantAuthService {
         signup_token: Option<&SignupCode>,
     ) -> Result<(), AuthServiceError> {
         let grant = self.verify_signup_grant_and_pop(grant_jws, pop_jws).await?;
-        let mut tx = self.sql_db.pool().begin().await?;
-        let user = self
-            .signup_service
-            .create_user_in_tx(&grant.iss, signup_token, &mut tx)
+        self.signup_service
+            .create_new_user(&grant.iss, signup_token)
             .await?;
-        tx.commit().await?;
-        self.user_service.cache_user_quota(&user);
         Ok(())
     }
 
@@ -494,6 +490,7 @@ fn map_not_found<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observability::Metrics;
     use crate::persistence::sql::{signup_code::SignupCode, SqlDb};
     use crate::shared::quota::UserQuota;
     use crate::SignupMode;
@@ -516,7 +513,12 @@ mod tests {
         let db = SqlDb::test().await;
         let hs_kp = Keypair::random();
         let user_service = crate::services::user_service::UserService::new(db.clone());
-        let signup_service = SignupService::new(db.clone(), signup_mode, user_service.clone());
+        let signup_service = SignupService::new(
+            db.clone(),
+            signup_mode,
+            user_service.clone(),
+            Metrics::new().unwrap(),
+        );
         GrantAuthService::new(db, hs_kp.public_key(), signup_service, user_service)
     }
 

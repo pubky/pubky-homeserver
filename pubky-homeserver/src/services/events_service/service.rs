@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use futures_util::Stream;
 use tokio::sync::broadcast;
 
@@ -22,6 +24,7 @@ pub(crate) const PG_NOTIFY_CHANNEL: &str = "events";
 #[derive(Clone, Debug)]
 pub struct EventsService {
     sql_db: SqlDb,
+    metrics: Metrics,
     event_tx: broadcast::Sender<EventEntity>,
     channel_capacity: usize,
 }
@@ -81,13 +84,19 @@ pub(crate) struct UserEventsFilter {
 impl EventsService {
     /// Create a new EventsService with a broadcast channel.
     /// The channel_capacity determines how many events can be buffered before old ones are dropped.
-    pub fn new(sql_db: SqlDb, channel_capacity: usize) -> Self {
+    pub fn new(sql_db: SqlDb, metrics: Metrics, channel_capacity: usize) -> Self {
         let (event_tx, _rx) = broadcast::channel(channel_capacity);
         Self {
             sql_db,
+            metrics,
             event_tx,
             channel_capacity,
         }
+    }
+
+    /// The metrics this service records to.
+    pub(super) fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
     /// Subscribe to the event broadcast channel.
@@ -165,13 +174,17 @@ impl EventsService {
         cursor: Option<EventCursor>,
         limit: Option<u16>,
     ) -> Result<Vec<EventEntity>, sqlx::Error> {
-        EventRepository::get_by_cursor(
+        let query_start = Instant::now();
+        let events = EventRepository::get_by_cursor(
             cursor,
             limit,
             EventVisibility::Public,
             &mut self.sql_db.pool().into(),
         )
-        .await
+        .await?;
+        self.metrics
+            .record_events_db_query(query_start.elapsed().as_millis());
+        Ok(events)
     }
 
     /// All events (public and private) by a single global cursor.
@@ -227,12 +240,10 @@ impl EventsService {
     /// admin-authenticated routes may call it.
     pub(crate) fn all_events_stream(
         &self,
-        metrics: Metrics,
         filter: AllEventsFilter,
     ) -> impl Stream<Item = EventEntity> {
         stream_events(
             self.clone(),
-            metrics,
             StreamCursor::Global {
                 last: filter.start_cursor,
                 user_ids: filter.user_ids,
@@ -251,13 +262,11 @@ impl EventsService {
     /// the credential behind it is revoked. Yields only events under the authorized paths.
     pub(crate) fn user_events_stream(
         &self,
-        metrics: Metrics,
         filter: UserEventsFilter,
         guard: impl StreamGuard,
     ) -> impl Stream<Item = EventEntity> {
         stream_events(
             self.clone(),
-            metrics,
             StreamCursor::PerUser(filter.user_cursors.into_iter().collect()),
             StreamOptions {
                 paths: filter.allowed_paths,
@@ -281,7 +290,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_events_service_create_and_broadcast() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 100);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 100);
         let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
@@ -321,7 +330,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_events_service_get_public_by_cursor() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 100);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 100);
         let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
@@ -374,9 +383,30 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
+    async fn test_get_public_by_cursor_records_query_duration() {
+        let db = SqlDb::test().await;
+        let metrics = Metrics::new().unwrap();
+        let events_service = EventsService::new(db, metrics.clone(), 100);
+
+        events_service
+            .get_public_by_cursor(None, None)
+            .await
+            .unwrap();
+
+        let output = metrics.render().unwrap();
+        assert!(
+            output.contains(
+                "events_db_query_duration_ms_count{otel_scope_name=\"pubky_homeserver\"} 1"
+            ),
+            "one feed query expected in: {output}"
+        );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
     async fn test_events_service_get_all_events_includes_private() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 100);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 100);
         let user_service = UserService::new(db.clone());
 
         let user_pubkey = Keypair::random().public_key();
