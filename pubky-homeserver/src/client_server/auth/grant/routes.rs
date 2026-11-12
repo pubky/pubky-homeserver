@@ -119,7 +119,6 @@ pub async fn signup(
         .grant_auth_service
         .signup_grant_account(&request.grant, &request.pop, signup_token.as_ref())
         .await?;
-    state.metrics.record_signup();
     Ok(StatusCode::NO_CONTENT)
 }
 

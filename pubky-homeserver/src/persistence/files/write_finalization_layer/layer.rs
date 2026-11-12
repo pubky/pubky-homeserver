@@ -375,6 +375,7 @@ pub(crate) mod test_support {
     use pubky_common::crypto::Keypair;
     use tempfile::TempDir;
 
+    use crate::observability::Metrics;
     use crate::persistence::files::test_support::{get_fs_operator, get_memory_operator};
     use crate::persistence::sql::{
         events::{EventEntity, EventRepository, EventVisibility},
@@ -387,7 +388,7 @@ pub(crate) mod test_support {
         Finalizer::new(
             UserService::new(db.clone()),
             db.clone(),
-            EventsService::new(db.clone(), 100),
+            EventsService::new(db.clone(), Metrics::new().unwrap(), 100),
             None,
             CollisionPolicy::Enforce,
         )
@@ -422,7 +423,7 @@ pub(crate) mod test_support {
         backend.layer(WriteFinalizationLayer::new(
             UserService::new(db.clone()),
             db.clone(),
-            EventsService::new(db.clone(), 100),
+            EventsService::new(db.clone(), Metrics::new().unwrap(), 100),
             None,
             true,
         ))

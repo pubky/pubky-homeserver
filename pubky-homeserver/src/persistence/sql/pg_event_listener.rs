@@ -286,6 +286,7 @@ impl Drop for PgEventListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observability::Metrics;
     use crate::persistence::sql::events::{EventRepository, EventType};
     use crate::persistence::sql::SqlDb;
     use crate::services::events_service::EventsService;
@@ -328,12 +329,12 @@ mod tests {
     async fn test_cross_instance_propagation() {
         let db = SqlDb::test().await;
 
-        let events_service_a = EventsService::new(db.clone(), 100);
+        let events_service_a = EventsService::new(db.clone(), Metrics::new().unwrap(), 100);
         let _listener_a = PgEventListener::start(db.pool(), events_service_a.clone())
             .await
             .unwrap();
 
-        let events_service_b = EventsService::new(db.clone(), 100);
+        let events_service_b = EventsService::new(db.clone(), Metrics::new().unwrap(), 100);
         let _listener_b = PgEventListener::start(db.pool(), events_service_b.clone())
             .await
             .unwrap();
@@ -394,7 +395,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_fallback_polling_delivers_gap_events() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 100);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 100);
 
         let _listener = PgEventListener::start_with_poll_interval(
             db.pool(),
@@ -486,7 +487,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_listener_restart_skips_gap_and_resumes() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 100);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 100);
 
         let keypair = Keypair::random();
         let pubkey = keypair.public_key();
@@ -559,7 +560,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_batch_boundary_over_100_events() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 250);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 250);
 
         let _listener = PgEventListener::start(db.pool(), events_service.clone())
             .await
@@ -606,7 +607,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_concurrent_writers() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 500);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 500);
 
         let _listener = PgEventListener::start(db.pool(), events_service.clone())
             .await
@@ -688,7 +689,7 @@ mod tests {
     #[pubky_test_utils::test]
     async fn test_concurrent_barrier_inserts_no_skipped_events() {
         let db = SqlDb::test().await;
-        let events_service = EventsService::new(db.clone(), 500);
+        let events_service = EventsService::new(db.clone(), Metrics::new().unwrap(), 500);
 
         let _listener = PgEventListener::start_with_poll_interval(
             db.pool(),
@@ -778,7 +779,8 @@ mod tests {
         let db = SqlDb::test().await;
         // Use a very small channel capacity to force overflow
         let channel_capacity = 4;
-        let events_service = EventsService::new(db.clone(), channel_capacity);
+        let events_service =
+            EventsService::new(db.clone(), Metrics::new().unwrap(), channel_capacity);
 
         let _listener = PgEventListener::start_with_poll_interval(
             db.pool(),

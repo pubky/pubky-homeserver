@@ -17,7 +17,7 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt};
 use pubky_common::crypto::PublicKey;
-use std::{convert::Infallible, time::Instant};
+use std::convert::Infallible;
 use tower_cookies::Cookies;
 
 use crate::{
@@ -116,16 +116,11 @@ pub async fn feed(
         .parse::<EventCursor>()
         .map_err(|_| HttpError::bad_request(format!("Invalid cursor: {cursor}")))?;
 
-    let query_start = Instant::now();
     let events = state
         .context
         .events_service
         .get_public_by_cursor(Some(cursor), params.limit)
         .await?;
-    state
-        .context
-        .metrics
-        .record_events_db_query(query_start.elapsed().as_millis());
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -208,7 +203,6 @@ pub async fn feed_stream(
         .context
         .events_service
         .user_events_stream(
-            state.context.metrics.clone(),
             UserEventsFilter {
                 user_cursors,
                 allowed_paths,

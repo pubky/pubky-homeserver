@@ -169,7 +169,8 @@ impl AppContext {
             .await
             .map_err(AppContextConversionError::Migrations)?;
 
-        let events_service = EventsService::new(sql_db.clone(), 1000);
+        let metrics = Metrics::new().map_err(AppContextConversionError::Metrics)?;
+        let events_service = EventsService::new(sql_db.clone(), metrics.clone(), 1000);
 
         let pg_event_listener = PgEventListener::start(sql_db.pool(), events_service.clone())
             .await
@@ -183,6 +184,7 @@ impl AppContext {
             sql_db.clone(),
             conf.general.signup_mode.clone(),
             user_service.clone(),
+            metrics.clone(),
         );
 
         let file_service = FileService::new_from_config(
@@ -207,7 +209,7 @@ impl AppContext {
             keypair,
             data_dir: Arc::new(dir),
             events_service,
-            metrics: Metrics::new().map_err(AppContextConversionError::Metrics)?,
+            metrics,
             _pg_event_listener: Arc::new(pg_event_listener),
             revocation_listener,
             user_service,

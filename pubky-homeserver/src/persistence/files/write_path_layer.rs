@@ -209,6 +209,7 @@ impl<R: oio::Delete> oio::Delete for WritePathDeleter<R> {
 mod tests {
     use opendal::raw::oio::Delete;
 
+    use crate::observability::Metrics;
     use crate::persistence::files::test_support::{get_fs_operator, get_memory_operator};
     use crate::persistence::files::write_finalization_layer::WriteFinalizationLayer;
     use crate::persistence::sql::SqlDb;
@@ -341,7 +342,7 @@ mod tests {
         let write_finalization_layer = WriteFinalizationLayer::new(
             user_service.clone(),
             db.clone(),
-            EventsService::new(db.clone(), 100),
+            EventsService::new(db.clone(), Metrics::new().unwrap(), 100),
             None,
             true,
         );
