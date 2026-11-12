@@ -87,7 +87,8 @@ pub enum Error {
 ///
 /// This deliberately omits request URLs, response bodies, grants, proofs, and
 /// bearer values from both [`std::fmt::Display`] and [`std::fmt::Debug`]. A
-/// request status is retained when the refresh server returned one.
+/// request status is retained when the refresh server returned one, except
+/// for [`Self::Oversized`], which reports the exceeded limit instead.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CredentialRefreshError {
@@ -96,6 +97,13 @@ pub enum CredentialRefreshError {
     Request {
         /// HTTP status returned by the refresh endpoint, when available.
         status: Option<reqwest::StatusCode>,
+    },
+
+    /// The refresh response body exceeded the client's limit.
+    #[error("Grant credential refresh response exceeds the {limit}-byte limit")]
+    Oversized {
+        /// The byte limit, inclusive, that the response exceeded.
+        limit: usize,
     },
 }
 
@@ -198,6 +206,9 @@ pub enum RequestErrorKind {
     Decode,
     /// The request could not be constructed or its arguments were invalid.
     InvalidRequest,
+    /// A response body or event exceeded a client-side byte limit. The server
+    /// answered, so this says nothing about the session or the stored data.
+    Oversized,
     /// No more specific category is available from the transport.
     Other,
 }
@@ -211,9 +222,15 @@ impl RequestErrorKind {
     /// response body that stalls past the deadline would otherwise be reported
     /// as [`Self::Decode`]. A rejected server certificate is reported as
     /// [`Self::TlsVerification`] even though reqwest files it as a connection
-    /// failure. Browser errors are not parsed to guess native causes.
+    /// failure. Browser errors are not parsed to guess native causes, with one
+    /// exception: a browser response body cut short by the request deadline is
+    /// recognised by reqwest's own abort reason and reported as [`Self::Timeout`].
     pub fn from_transport(error: &reqwest::Error) -> Self {
         if error.is_timeout() {
+            return Self::Timeout;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if is_browser_body_timeout(error) {
             return Self::Timeout;
         }
         if let Some(status) = error.status() {
@@ -239,6 +256,22 @@ impl RequestErrorKind {
             Self::Other
         }
     }
+}
+
+/// Whether a browser response body read failed because the request deadline expired.
+///
+/// reqwest enforces the deadline by aborting the fetch with a fixed reason. It
+/// turns that reason into a typed timeout only while awaiting the response
+/// headers; a body read that is aborted later surfaces as a decode error whose
+/// source is the formatted reason, so `is_timeout` misses it.
+#[cfg(target_arch = "wasm32")]
+fn is_browser_body_timeout(error: &reqwest::Error) -> bool {
+    /// Debug form of the abort reason in reqwest's `wasm::AbortGuard::timeout`.
+    const TIMEOUT_ABORT_REASON: &str = "JsValue(\"reqwest::errors::TimedOut\")";
+
+    error.is_decode()
+        && std::error::Error::source(error)
+            .is_some_and(|source| source.to_string() == TIMEOUT_ABORT_REASON)
 }
 
 /// Whether the transport error was caused by the server certificate being rejected.
@@ -298,6 +331,15 @@ pub enum RequestError {
         /// Error message from the JSON deserializer (with context if available).
         message: String,
     },
+
+    /// A response body or event exceeded a client-side byte limit.
+    #[error("{label} exceeds the {limit}-byte limit")]
+    Oversized {
+        /// The byte limit, inclusive, that was exceeded.
+        limit: usize,
+        /// What was being read, for example `Session response`.
+        label: String,
+    },
 }
 
 impl RequestError {
@@ -310,6 +352,7 @@ impl RequestError {
             },
             Self::Validation { .. } => RequestErrorKind::InvalidRequest,
             Self::DecodeJson { .. } => RequestErrorKind::Decode,
+            Self::Oversized { .. } => RequestErrorKind::Oversized,
         }
     }
 }
@@ -368,6 +411,13 @@ mod tests {
                     message: "private payload".into(),
                 },
                 RequestErrorKind::Decode,
+            ),
+            (
+                RequestError::Oversized {
+                    limit: 16,
+                    label: "private label".into(),
+                },
+                RequestErrorKind::Oversized,
             ),
         ] {
             assert_eq!(error.kind(), expected);

@@ -234,6 +234,10 @@ impl EventStreamBuilder {
     /// - `{ name: "ValidationError" }` if `live=true` and `reverse=true` (invalid combination)
     /// - Propagates HTTP request errors
     ///
+    /// Reading the stream rejects with `{ name: "RequestError" }` and ends it:
+    /// `data.reason` is `"Oversized"` when an event exceeds `maxEventBytes`, or
+    /// the transport's reason when the connection fails mid-stream.
+    ///
     /// @example
     /// ```typescript
     /// const stream = await builder.subscribe();

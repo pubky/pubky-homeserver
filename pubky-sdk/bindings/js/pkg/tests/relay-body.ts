@@ -67,7 +67,12 @@ test("relay body limits apply to inbox and link WASM flows", async (t) => {
             }),
           ]);
           t.equal(error.message.includes(LIMIT_ERROR), oversized, `${transport}: ${name}`);
-          t.equal(error.name, "AuthenticationError", "validation error reaches JS");
+          t.equal(error.name, oversized ? "RequestError" : "AuthenticationError",
+            "overflow is a request error, not a rejected approval");
+          if (oversized) {
+            t.deepEqual((error as { data?: unknown }).data, { reason: "Oversized" },
+              "overflow reason reaches JS");
+          }
           t.equal(requests, 1, "failure does not retry or downgrade");
           t.equal(acknowledgements, !oversized && transport === "inbox" ? 1 : 0,
             "only completely received inbox messages are acknowledged");

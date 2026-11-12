@@ -85,7 +85,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::{fmt::Display, io::Cursor, num::NonZeroUsize, pin::Pin};
+use std::{io::Cursor, num::NonZeroUsize, pin::Pin};
 
 use crate::PublicKey;
 use base64::Engine;
@@ -539,11 +539,10 @@ impl EventStreamBuilder {
         })
     }
 
-    fn sse_stream<S, B, E>(source: S, limit: usize) -> impl Stream<Item = Result<MessageEvent>>
+    fn sse_stream<S, B>(source: S, limit: usize) -> impl Stream<Item = Result<MessageEvent>>
     where
-        S: Stream<Item = std::result::Result<B, E>>,
+        S: Stream<Item = reqwest::Result<B>>,
         B: AsRef<[u8]>,
-        E: Display,
     {
         let limit =
             NonZeroUsize::new(limit).expect("event byte limit was validated before decoding");
@@ -556,19 +555,13 @@ impl EventStreamBuilder {
         // Consume the decoder state on error so the attached response body is
         // dropped before yielding the error; sse-core can otherwise recover after overflow.
         stream::try_unfold(Box::pin(events), move |mut events| async move {
-            while let Some(event) =
-                events
-                    .try_next()
-                    .await
-                    .map_err(|error| RequestError::Validation {
-                        message: match error {
-                            SseStreamError::PayloadTooLarge(_) => {
-                                format!("SSE event exceeds the configured limit of {limit} bytes")
-                            }
-                            SseStreamError::Inner(error) => format!("SSE stream error: {error}"),
-                        },
-                    })?
-            {
+            while let Some(event) = events.try_next().await.map_err(|error| match error {
+                SseStreamError::PayloadTooLarge(_) => RequestError::Oversized {
+                    limit: limit.get(),
+                    label: "SSE event".into(),
+                },
+                SseStreamError::Inner(error) => RequestError::Transport(error),
+            })? {
                 if let SseEvent::Message(event) = event {
                     return Ok(Some((event, events)));
                 }
@@ -591,7 +584,10 @@ impl EventStreamBuilder {
     /// - Returns [`Error::Request`] if the homeserver cannot be resolved
     /// - Returns [`Error::Request`] if `live=true` and `reverse=true` (invalid combination)
     /// - Returns [`Error::Request`] if `max_event_bytes` is zero
-    /// - If configured, exceeding the SSE byte limit yields one error and ends the stream
+    /// - If configured, exceeding the SSE byte limit yields one
+    ///   [`RequestError::Oversized`] and ends the stream
+    /// - A transport failure mid-stream yields one [`RequestError::Transport`]
+    ///   and ends the stream
     /// - Propagates HTTP request errors
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn subscribe(self) -> Result<Pin<Box<dyn Stream<Item = Result<Event>> + Send>>> {
@@ -613,7 +609,10 @@ impl EventStreamBuilder {
     /// - Returns [`Error::Request`] if the homeserver cannot be resolved
     /// - Returns [`Error::Request`] if `live=true` and `reverse=true` (invalid combination)
     /// - Returns [`Error::Request`] if `max_event_bytes` is zero
-    /// - If configured, exceeding the SSE byte limit yields one error and ends the stream
+    /// - If configured, exceeding the SSE byte limit yields one
+    ///   [`RequestError::Oversized`] and ends the stream
+    /// - A transport failure mid-stream yields one [`RequestError::Transport`]
+    ///   and ends the stream
     /// - Propagates HTTP request errors
     #[cfg(target_arch = "wasm32")]
     pub async fn subscribe(self) -> Result<Pin<Box<dyn Stream<Item = Result<Event>>>>> {
