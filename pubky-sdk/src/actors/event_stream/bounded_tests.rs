@@ -1,5 +1,5 @@
 use super::EventStreamBuilder;
-use crate::errors::Result;
+use crate::errors::{Error, RequestError, Result};
 use futures_util::{FutureExt, StreamExt, TryStreamExt, stream};
 use sse_core::MessageEvent;
 use std::{
@@ -11,9 +11,17 @@ use std::{
 };
 
 async fn collect(chunks: Vec<Vec<u8>>, limit: usize) -> Result<Vec<MessageEvent>> {
-    EventStreamBuilder::sse_stream(stream::iter(chunks.into_iter().map(Ok::<_, &str>)), limit)
-        .try_collect()
-        .await
+    EventStreamBuilder::sse_stream(
+        stream::iter(chunks.into_iter().map(Ok::<_, reqwest::Error>)),
+        limit,
+    )
+    .try_collect()
+    .await
+}
+
+/// A transport error that needs no connection to produce.
+fn transport_error() -> reqwest::Error {
+    reqwest::Client::new().get("not a URL").build().unwrap_err()
 }
 
 struct DropFlag(Arc<AtomicBool>);
@@ -63,11 +71,10 @@ async fn exact_limit_accepts_and_next_byte_rejects() {
         let error = collect(body.bytes().map(|b| vec![b]).collect(), 4)
             .await
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("SSE event exceeds the configured limit")
-        );
+        assert!(matches!(
+            error,
+            Error::Request(RequestError::Oversized { limit: 4, .. })
+        ));
     }
     // Field prefixes, framing and the leading BOM do not consume the payload budget.
     collect(vec![b"\xef\xbb\xbfdata: x\n\n".to_vec()], 1)
@@ -115,7 +122,7 @@ async fn ready_chunks_yield_to_allow_cancellation() {
         vec![body.clone()],
         body.chunks(1024).map(<[u8]>::to_vec).collect(),
     ] {
-        let source = stream::iter(chunks.into_iter().map(Ok::<_, &str>));
+        let source = stream::iter(chunks.into_iter().map(Ok::<_, reqwest::Error>));
         let mut decoded = Box::pin(EventStreamBuilder::sse_stream(source, 1));
         assert!(decoded.next().now_or_never().is_none());
         assert_eq!(decoded.next().await.unwrap().unwrap().data, "x");
@@ -145,7 +152,7 @@ async fn overflow_drops_source_before_yielding_without_waiting_for_eof() {
                 count.fetch_add(1, Ordering::SeqCst);
                 async move {
                     match chunks.next() {
-                        Some(chunk) => Some((Ok::<_, &str>(chunk), (chunks, guard))),
+                        Some(chunk) => Some((Ok::<_, reqwest::Error>(chunk), (chunks, guard))),
                         None => std::future::pending().await,
                     }
                 }
@@ -157,7 +164,10 @@ async fn overflow_drops_source_before_yielding_without_waiting_for_eof() {
             .unwrap()
             .unwrap()
             .unwrap_err();
-        assert!(error.to_string().contains("16 bytes"));
+        assert!(matches!(
+            error,
+            Error::Request(RequestError::Oversized { limit: 16, .. })
+        ));
         assert!(
             dropped.load(Ordering::SeqCst),
             "body must drop while decoder is retained"
@@ -172,19 +182,20 @@ async fn overflow_drops_source_before_yielding_without_waiting_for_eof() {
 async fn transport_error_terminates_and_eof_discards_partial_event() {
     for limit in [32, usize::MAX] {
         let results: Vec<_> = EventStreamBuilder::sse_stream(
-            stream::iter([Ok("data: x\n\n"), Err("broken"), Ok("data: never\n\n")]),
+            stream::iter([
+                Ok("data: x\n\n"),
+                Err(transport_error()),
+                Ok("data: never\n\n"),
+            ]),
             limit,
         )
         .collect()
         .await;
         assert_eq!(results.len(), 2);
-        assert!(
-            results[1]
-                .as_ref()
-                .unwrap_err()
-                .to_string()
-                .contains("broken")
-        );
+        assert!(matches!(
+            results[1],
+            Err(Error::Request(RequestError::Transport(_)))
+        ));
         for body in [
             &b"data: x"[..],
             b"data: x\n",
@@ -204,7 +215,7 @@ async fn transport_error_terminates_and_eof_discards_partial_event() {
 
 #[tokio::test]
 async fn cr_terminated_event_does_not_wait_for_another_byte() {
-    let source = stream::iter([Ok::<_, &str>("data: x\r\r")]).chain(stream::pending());
+    let source = stream::iter([Ok::<_, reqwest::Error>("data: x\r\r")]).chain(stream::pending());
     let mut decoded = Box::pin(EventStreamBuilder::sse_stream(source, 32));
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), decoded.next())

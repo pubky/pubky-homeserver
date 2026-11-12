@@ -193,7 +193,7 @@ impl HomeserverFeatures {
             return InfoFetch::Failed;
         }
 
-        let Ok(body) = read_response_body(response, MAX_INFO_BYTES).await else {
+        let Ok(body) = read_response_body(response, MAX_INFO_BYTES, "/info response").await else {
             return InfoFetch::Failed;
         };
         Self::decode(&body).map_or(InfoFetch::Failed, InfoFetch::Listed)
@@ -268,13 +268,13 @@ mod tests {
                 &body,
             )
             .await;
-            let result = read_response_body(response, MAX_INFO_BYTES).await;
+            let result = read_response_body(response, MAX_INFO_BYTES, "/info response").await;
             if size <= MAX_INFO_BYTES {
                 assert_eq!(result.unwrap(), body);
             } else {
                 assert!(matches!(
                     result.unwrap_err(),
-                    crate::util::ResponseBodyError::TooLarge
+                    crate::Error::Request(crate::errors::RequestError::Oversized { .. })
                 ));
             }
         }

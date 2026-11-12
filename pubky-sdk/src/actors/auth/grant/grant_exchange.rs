@@ -34,11 +34,14 @@ async fn decode_refreshed_grant_session(response: Response) -> Result<GrantSessi
     let status = response.status();
     read_json_body(response, MAX_GRANT_SESSION_BYTES, "grant session response")
         .await
-        .map_err(|_error| {
-            CredentialRefreshError::Request {
+        .map_err(|error| match error {
+            Error::Request(RequestError::Oversized { limit, .. }) => {
+                CredentialRefreshError::Oversized { limit }.into()
+            }
+            _ => CredentialRefreshError::Request {
                 status: Some(status),
             }
-            .into()
+            .into(),
         })
 }
 
@@ -201,15 +204,9 @@ mod redaction_tests {
 
     #[tokio::test]
     async fn refreshed_grant_session_failures_stay_redacted() {
-        let declared = MAX_GRANT_SESSION_BYTES + 1;
         let body = b"not json";
-        // Oversized, undecodable, and truncated mid-body (connection dropped).
+        // Undecodable, and truncated mid-body (connection dropped).
         for (framing, wire, drop_connection) in [
-            (
-                format!("Content-Length: {declared}\r\n"),
-                b"".as_slice(),
-                false,
-            ),
             (
                 format!("Content-Length: {}\r\n", body.len()),
                 body.as_slice(),
@@ -233,5 +230,19 @@ mod redaction_tests {
                 })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_refreshed_grant_session_reports_the_limit() {
+        let declared = MAX_GRANT_SESSION_BYTES + 1;
+        let (response, _connection) =
+            serve_response(200, &format!("Content-Length: {declared}\r\n"), b"").await;
+        let error = decode_refreshed_grant_session(response).await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::CredentialRefresh(CredentialRefreshError::Oversized {
+                limit: MAX_GRANT_SESSION_BYTES
+            })
+        ));
     }
 }

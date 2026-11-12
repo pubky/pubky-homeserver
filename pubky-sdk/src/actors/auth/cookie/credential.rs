@@ -31,13 +31,15 @@ use reqwest::{Method, RequestBuilder, Response};
 
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::credential::{SessionCredential, credential_session_missing};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::errors::AuthError;
 use crate::util::read_response_body;
 use crate::{
     Error, PubkyHttpClient,
     actors::session::SessionInfo,
     client::user_endpoint_url,
     cross_log,
-    errors::{AuthError, PkarrError, Result},
+    errors::{PkarrError, Result},
 };
 
 const SESSION_PATH: &str = "/session";
@@ -50,15 +52,7 @@ const MAX_SESSION_BYTES: usize = 64 * 1024;
 
 /// Read a session response within [`MAX_SESSION_BYTES`].
 async fn read_session_body(response: Response) -> Result<Vec<u8>> {
-    read_response_body(response, MAX_SESSION_BYTES)
-        .await
-        .map_err(|error| {
-            error.into_error(|| {
-                AuthError::Validation(format!(
-                    "Session response exceeds the {MAX_SESSION_BYTES}-byte limit"
-                ))
-            })
-        })
+    read_response_body(response, MAX_SESSION_BYTES, "Session response").await
 }
 
 /// Cookie-based session credential (legacy).
@@ -452,6 +446,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn session_bodies_are_bounded() {
+        use crate::errors::RequestError;
         use crate::util::tests::serve_response;
 
         let body = b"not a session record";
@@ -463,12 +458,12 @@ mod tests {
         let (response, _connection) =
             serve_response(200, &format!("Content-Length: {declared}\r\n"), b"").await;
         let error = read_session_body(response).await.unwrap_err();
-        let Error::Authentication(AuthError::Validation(message)) = error else {
+        let Error::Request(RequestError::Oversized { limit, label }) = error else {
             panic!("unexpected error: {error:?}");
         };
         assert_eq!(
-            message,
-            format!("Session response exceeds the {MAX_SESSION_BYTES}-byte limit")
+            (limit, label.as_str()),
+            (MAX_SESSION_BYTES, "Session response")
         );
     }
 }
