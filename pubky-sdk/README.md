@@ -285,6 +285,14 @@ signer.pkdns().get_homeserver().await?;
 
 ### Pubky QR auth for third-party and keyless apps
 
+> [!WARNING]
+> **Cookie authentication is deprecated and no longer receives security
+> updates.** [Migrate to grant authentication][grant-auth] and review the
+> [known issues][cookie-issues].
+
+[grant-auth]: https://github.com/pubky/pubky-homeserver/blob/main/docs/v0.10-migration/grant-auth.md
+[cookie-issues]: https://github.com/pubky/pubky-homeserver/blob/main/docs/v0.10-migration/cookie-auth.md#known-issues
+
 Request an authorization URL and await approval.
 
 **Typical usage:**

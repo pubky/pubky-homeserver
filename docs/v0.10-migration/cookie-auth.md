@@ -1,6 +1,69 @@
-# Not Recommended: Keep Cookie Authentication
+# Cookie Authentication Is Strongly Discouraged
 
-Cookie authentication is deprecated and insecure. Prefer the new [grant authentication system](./grant-auth.md). This guide shows how to keep using cookie authentication while migrating from `v0.9` to `v0.10`.
+> [!WARNING]
+> **Cookie authentication is deprecated and no longer receives security
+> updates.** We will not provide further security fixes for the legacy cookie
+> authentication system in the homeserver or SDKs, including the known issues
+> below. [Migrate to grant authentication](./grant-auth.md).
+
+Cookie authentication remains available only for compatibility until its
+[planned removal][cookie-removal]. The
+[minimum migration period](../STORAGE_ADDRESSING_MIGRATION.md#migration-clock)
+does not extend security support. This policy applies to legacy cookie
+authentication, not to grant authentication or the rest of the project.
+
+The API mappings below help existing applications migrate from `v0.9` to
+`v0.10` while retaining cookie authentication. Using the renamed APIs does not
+resolve these security issues.
+
+## Known issues
+
+Reviewed on 2026-11-10. Reported concerns are identified separately from
+reproduced behavior; this list is not exhaustive.
+
+### Security issues
+
+- **Websites share cookie permissions** ([homeserver #520][shared-cookie]).
+  Different apps in the same browser use the same homeserver cookie, so one
+  app can exercise another app's permissions.
+- **Active content shares the session-cookie origin.**
+  Tenant HTML/SVG served on the API origin
+  may act with a visiting user's cookie-session permissions. This is a
+  conditional, source-reviewed concern; a browser/session exploit has not
+  been reproduced in the report.
+- **Possible cross-homeserver token replay.**
+  Legacy `AuthToken` signatures do not bind the token to a homeserver. A
+  malicious or compromised homeserver may be able to reuse a valid token at
+  another homeserver where the user has an account. This report has not been
+  reproduced and does not establish a grant-authentication bypass.
+
+### Session and compatibility limitations
+
+- **Signing in to another app overwrites the browser cookie**
+  ([homeserver #261][cookie-overwrite]). The first app can lose its session.
+  The issue was closed as not planned because cookie auth is deprecated, not
+  because the cookie behavior was fixed.
+- **Cookie identity is coupled to the resource owner**
+  ([homeserver #122][private-data]). The legacy cookie lookup cannot represent
+  a different authenticated user accessing the owner's private data.
+- **Restoring a cookie session loses its selected homeserver**
+  ([homeserver #670][session-restore]). The exported cookie secret does not
+  record the homeserver, so restore resolves the user's PKDNS homeserver
+  instead. The issue also tracks a separate grant-session limitation.
+
+### Previously fixed issue
+
+- **Short authentication tokens could panic during verification.**
+  This is fixed in the current source by
+  [homeserver PR #736][short-token-fix], which checks the input length before
+  reading the version. Deployment status was not verified for this notice.
+
+[cookie-removal]: https://github.com/pubky/pubky-homeserver/issues/529
+[shared-cookie]: https://github.com/pubky/pubky-homeserver/issues/520
+[cookie-overwrite]: https://github.com/pubky/pubky-homeserver/issues/261
+[private-data]: https://github.com/pubky/pubky-homeserver/issues/122
+[session-restore]: https://github.com/pubky/pubky-homeserver/issues/670
+[short-token-fix]: https://github.com/pubky/pubky-homeserver/pull/736
 
 
 ## TLDR
