@@ -14,6 +14,10 @@ const INDEX_NAME: &str = "idx_events_path_id";
 /// is a contiguous index range only in byte order; this also lets the per-user
 /// index serve prefixes. Postgres rebuilds that index as part of the statement;
 /// the table itself is not rewritten.
+///
+/// Changing the column type discards its planner statistics, and without them
+/// the planner keeps choosing the primary-key walk, so the migration analyzes
+/// the table instead of waiting for autovacuum.
 pub struct M20261113EventsPathIndexMigration;
 
 #[async_trait]
@@ -25,6 +29,7 @@ impl MigrationTrait for M20261113EventsPathIndexMigration {
         sqlx::query(&format!("CREATE INDEX {INDEX_NAME} ON events (path, id)"))
             .execute(&mut **tx)
             .await?;
+        sqlx::query("ANALYZE events").execute(&mut **tx).await?;
         Ok(())
     }
 
@@ -104,6 +109,14 @@ mod tests {
             plan.contains("path >= '/pub/app/'"),
             "prefix is not an index range in: {plan}"
         );
+
+        let path_statistics: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stats WHERE tablename = 'events' AND attname = 'path'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(path_statistics, 1, "the migration must leave path analyzed");
 
         let paths: Vec<String> =
             sqlx::query_scalar("SELECT path FROM events WHERE path LIKE '/pub/app/%'")
