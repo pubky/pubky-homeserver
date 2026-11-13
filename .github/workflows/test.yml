@@ -114,9 +114,19 @@ jobs:
         with:
           tool: wasm-pack
 
+      # The unit tests are configured with `run_in_browser`, so `--node` skips
+      # them and still exits 0. The runner's preinstalled chromedriver matches
+      # its Chrome; the one wasm-pack downloads tracks the newest Chrome and
+      # can refuse an older one.
       - name: Run wasm-pack unit tests
         working-directory: pubky-sdk/bindings/js
-        run: wasm-pack test --node
+        run: |
+          set -o pipefail
+          wasm-pack test --headless --chrome \
+            --chromedriver "$CHROMEWEBDRIVER/chromedriver" 2>&1 | tee wasm-unit.log
+          # A suite that is skipped also exits 0: require at least one test to run.
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' wasm-unit.log \
+            || { echo "::error::No WASM unit tests ran"; exit 1; }
 
   # Each JS test suite runs on a runner of its own, against a testnet of its
   # own, so the suites run at the same time.
