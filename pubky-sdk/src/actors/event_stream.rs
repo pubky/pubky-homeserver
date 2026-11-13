@@ -122,6 +122,9 @@ pub struct Event {
 pub struct EventStreamBuilder {
     client: PubkyHttpClient,
     users: Vec<(PublicKey, Option<EventCursor>)>,
+    /// Stream every user instead of `users`, resuming after `cursor`.
+    all_users: bool,
+    cursor: Option<EventCursor>,
     homeserver: Option<PublicKey>,
     limit: Option<u16>,
     max_event_bytes: usize,
@@ -185,6 +188,8 @@ impl EventStreamBuilder {
         Self {
             client,
             users: vec![(user.clone(), cursor)],
+            all_users: false,
+            cursor: None,
             homeserver: None,
             limit: None,
             max_event_bytes: usize::MAX,
@@ -232,6 +237,8 @@ impl EventStreamBuilder {
         Self {
             client,
             users: Vec::new(),
+            all_users: false,
+            cursor: None,
             homeserver: Some(homeserver.clone()),
             limit: None,
             max_event_bytes: usize::MAX,
@@ -292,10 +299,41 @@ impl EventStreamBuilder {
         Ok(self)
     }
 
+    /// Stream every user's events on the homeserver instead of a user list,
+    /// resuming after `cursor` (`None` = from the beginning).
+    ///
+    /// Only public (`/pub/...`) events are served, and a batch request without
+    /// [`Self::limit`] closes after 100 events. Needs the homeserver given via
+    /// [`Self::for_homeserver`] and cannot be combined with [`Self::add_users`].
+    ///
+    /// # Example
+    /// ```no_run
+    /// use pubky::{Pubky, PublicKey, EventCursor};
+    ///
+    /// # async fn example() -> pubky::Result<()> {
+    /// let pubky = Pubky::new()?;
+    /// let homeserver = PublicKey::try_from("h9m4r...").unwrap();
+    ///
+    /// let stream = pubky.event_stream_for(&homeserver)
+    ///     .all_users(Some(EventCursor::new(100)))
+    ///     .live()
+    ///     .subscribe()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub const fn all_users(mut self, cursor: Option<EventCursor>) -> Self {
+        self.all_users = true;
+        self.cursor = cursor;
+        self
+    }
+
     /// Set maximum number of events to receive before closing the connection.
     ///
     /// If omitted:
-    /// - With `live=false`: sends all historical events, then closes
+    /// - With `live=false`: sends all historical events, then closes (100 for
+    ///   an [`Self::all_users`] stream)
     /// - With `live=true`: sends all historical events, then enters live mode (infinite stream)
     #[must_use]
     pub const fn limit(mut self, limit: u16) -> Self {
@@ -389,6 +427,7 @@ impl EventStreamBuilder {
     ///
     /// Constructs a URL like:
     /// `https://{homeserver}/events-stream?user=pk1&user=pk2:cursor&limit=100&live=true&path=/pub/`
+    /// or, for every user, `https://{homeserver}/events-stream?cursor=42&live=true`
     fn build_request_url(&self, homeserver: &PublicKey) -> Result<Url> {
         let mut url = Url::parse(&format!("https://{}/events-stream", homeserver.z32()))?;
 
@@ -400,6 +439,9 @@ impl EventStreamBuilder {
                 } else {
                     query.append_pair("user", &user.z32());
                 }
+            }
+            if let Some(cursor) = self.cursor {
+                query.append_pair("cursor", &cursor.to_string());
             }
             if let Some(limit) = self.limit {
                 query.append_pair("limit", &limit.to_string());
@@ -454,7 +496,12 @@ impl EventStreamBuilder {
             }));
         }
 
-        if self.users.is_empty() {
+        if self.all_users && !self.users.is_empty() {
+            return Err(Error::from(RequestError::Validation {
+                message: "Cannot combine all_users with specific users".into(),
+            }));
+        }
+        if !self.all_users && self.users.is_empty() {
             return Err(Error::from(RequestError::Validation {
                 message: "At least one user must be specified".into(),
             }));
@@ -468,18 +515,26 @@ impl EventStreamBuilder {
         // Resolve the target homeserver from the subscription (explicit if given,
         // else the first user's). A session only decides WHETHER a credential is
         // attached, never WHERE the request goes.
-        let homeserver = if let Some(hs) = &self.homeserver {
-            hs.clone()
-        } else {
-            Pkdns::with_client(self.client.clone())
-                .require_homeserver_of(&self.users[0].0)
-                .await?
+        let homeserver = match (&self.homeserver, self.users.first()) {
+            (Some(hs), _) => hs.clone(),
+            (None, Some((user, _))) => {
+                Pkdns::with_client(self.client.clone())
+                    .require_homeserver_of(user)
+                    .await?
+            }
+            // `for_user` always has a user, `for_homeserver` a homeserver, and
+            // the checks above reject `all_users` on a builder with users.
+            (None, None) => unreachable!("a builder always has a homeserver or a user"),
         };
 
         cross_log!(
             info,
-            "Subscribing to event stream for {} user(s) on homeserver {}",
-            self.users.len(),
+            "Subscribing to event stream for {} on homeserver {}",
+            if self.all_users {
+                "every user".to_string()
+            } else {
+                format!("{} user(s)", self.users.len())
+            },
             homeserver
         );
 
@@ -1327,6 +1382,51 @@ mod tests {
             path_params,
             vec!["/pub/".to_string(), "/priv/app/".to_string()]
         );
+    }
+
+    #[test]
+    fn build_request_url_all_users_emits_global_cursor() {
+        let client = crate::PubkyHttpClient::testnet().unwrap();
+        let keys = test_pubkeys(1);
+        let homeserver = &keys[0];
+
+        let url = EventStreamBuilder::for_homeserver(client.clone(), homeserver)
+            .all_users(Some(EventCursor::new(42)))
+            .limit(10)
+            .build_request_url(homeserver)
+            .unwrap();
+        let query: Vec<_> = url.query_pairs().collect();
+        assert!(!query.iter().any(|(k, _)| k == "user"), "{query:?}");
+        assert!(query.iter().any(|(k, v)| k == "cursor" && v == "42"));
+        assert!(query.iter().any(|(k, v)| k == "limit" && v == "10"));
+
+        let url = EventStreamBuilder::for_homeserver(client, homeserver)
+            .all_users(None)
+            .build_request_url(homeserver)
+            .unwrap();
+        assert_eq!(url.query_pairs().count(), 0, "{url}");
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_all_users_combined_with_specific_users() {
+        let client = crate::PubkyHttpClient::testnet().unwrap();
+        let keys = test_pubkeys(2);
+        let result = EventStreamBuilder::for_homeserver(client, &keys[0])
+            .add_users([(&keys[1], None)])
+            .unwrap()
+            .all_users(None)
+            .subscribe()
+            .await;
+        match result {
+            Ok(_) => panic!("Expected error, but subscribe succeeded"),
+            Err(e) => {
+                let err = e.to_string();
+                assert!(
+                    err.contains("Cannot combine all_users with specific users"),
+                    "Got: {err}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

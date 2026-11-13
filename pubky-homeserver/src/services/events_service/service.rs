@@ -1,9 +1,7 @@
 use std::time::Instant;
 
-use futures_util::Stream;
 use tokio::sync::broadcast;
 
-use super::stream::{stream_events, NoGuard, StreamCursor, StreamGuard, StreamOptions};
 use crate::observability::Metrics;
 use crate::persistence::sql::{
     events::{EventCursor, EventEntity, EventRepository, EventType, EventVisibility, PathFilter},
@@ -50,35 +48,6 @@ impl Mode {
     pub(crate) fn live(self) -> bool {
         matches!(self, Self::ForwardLive)
     }
-}
-
-/// Resolved filter for the admin all-events stream. The route builds this after authorizing the
-/// request (pubkeys → user ids, cursor parsed); it drives [`EventsService::all_events_stream`].
-pub(crate) struct AllEventsFilter {
-    /// Starting cursor (global). `None` = from the beginning.
-    pub start_cursor: Option<EventCursor>,
-    /// User filter. `None` = all users (firehose).
-    pub user_ids: Option<Vec<i32>>,
-    /// Path filters
-    pub paths: Vec<PathFilter>,
-    /// Ordering + live behavior.
-    pub mode: Mode,
-    /// Maximum total events to send before closing.
-    pub limit: Option<u16>,
-}
-
-/// Resolved filter for a client user-events stream. The route builds this after authorizing the
-/// request (pubkeys → user ids, paths checked against the session); it drives
-/// [`EventsService::user_events_stream`].
-pub(crate) struct UserEventsFilter {
-    /// Users to stream, each with its optional resume cursor.
-    pub user_cursors: Vec<(i32, Option<EventCursor>)>,
-    /// Authorized path filters; an event is sent only if it matches at least one.
-    pub allowed_paths: Vec<PathFilter>,
-    /// Ordering + live behavior.
-    pub mode: Mode,
-    /// Maximum total events to send before closing.
-    pub limit: Option<u16>,
 }
 
 impl EventsService {
@@ -232,49 +201,6 @@ impl EventsService {
             &mut self.sql_db.pool().into(),
         )
         .await
-    }
-
-    /// Stream **all** events (the admin firehose): replay history over a single advancing global
-    /// cursor, then — in `ForwardLive` mode — stay open on the broadcast channel. Yields domain
-    /// [`EventEntity`]s for the caller to frame (e.g. SSE). Exposes private paths, so only
-    /// admin-authenticated routes may call it.
-    pub(crate) fn all_events_stream(
-        &self,
-        filter: AllEventsFilter,
-    ) -> impl Stream<Item = EventEntity> {
-        stream_events(
-            self.clone(),
-            StreamCursor::Global {
-                last: filter.start_cursor,
-                user_ids: filter.user_ids,
-            },
-            StreamOptions {
-                paths: filter.paths,
-                mode: filter.mode,
-                limit: filter.limit,
-            },
-            NoGuard,
-        )
-    }
-
-    /// Stream the given users' events: replay history from each user's own cursor, then — in
-    /// `ForwardLive` mode — stay open on the broadcast channel. The `guard` closes the stream once
-    /// the credential behind it is revoked. Yields only events under the authorized paths.
-    pub(crate) fn user_events_stream(
-        &self,
-        filter: UserEventsFilter,
-        guard: impl StreamGuard,
-    ) -> impl Stream<Item = EventEntity> {
-        stream_events(
-            self.clone(),
-            StreamCursor::PerUser(filter.user_cursors.into_iter().collect()),
-            StreamOptions {
-                paths: filter.allowed_paths,
-                mode: filter.mode,
-                limit: filter.limit,
-            },
-            guard,
-        )
     }
 }
 

@@ -170,8 +170,11 @@ paths:
         - **Batch mode** (`live=false` or omitted): fetches historical events then closes.
         - **Live mode** (`live=true`): fetches historical events, then streams new events in real-time.
 
-        Omit `user` to stream every user, or repeat it to filter by z-base-32 public key.
-        The standalone `cursor` parameter is a single global cursor over the combined feed.
+        A request resumes in one of two forms. The global form takes an optional `cursor`
+        over the combined feed and an optional repeatable `user` filter; omit `user` to
+        stream every user, in which case a batch request without `limit` closes after 100
+        events. The per-user form appends a cursor to each value as `<pubkey>:<cursor>`.
+        Combining `cursor` with a per-user cursor returns `400`.
         Slow clients that fall behind in live mode will have their connection closed.
 
         Each SSE message has an event type (`PUT` or `DEL`) and multiline data:
@@ -191,9 +194,11 @@ paths:
         in: query
         required: false
         description: |-
-          Optional z-base-32 user public key filter. Repeat for multiple users.
-          Omit the parameter to stream every user. Per-user cursor suffixes are not accepted.
-          Duplicate values are ignored; more than 50 distinct users returns `400`.
+          User public keys (z-base-32), repeated for multiple users. Omit to stream
+          every user. Append `:cursor` to an individual value to resume that user's
+          feed; cursors must be numeric event IDs and non-numeric cursors return HTTP 400.
+          A repeated public key counts once and resumes from the last cursor given
+          for it; more than 50 distinct users returns `400`.
         schema:
           type: array
           items:
@@ -204,17 +209,23 @@ paths:
           single:
             value:
             - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo
+          withCursor:
+            value:
+            - o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo:42
       - name: cursor
         in: query
         description: >-
-          Resume the combined feed after this numeric event ID.
-          Omit the cursor or use `0` to start from the beginning.
-          Non-numeric cursors return HTTP 400.
+          Resume the combined feed after this numeric event ID; applies to every
+          listed user, or to every user when `user` is omitted. Omit the cursor
+          or use `0` to start from the beginning. Non-numeric cursors return HTTP 400,
+          as does combining it with a per-user cursor.
         schema:
           type: string
       - name: limit
         in: query
-        description: Maximum total events to send.
+        description: >-
+          Maximum total events to send. Defaults to 100 for a batch request with
+          no `user`; otherwise unlimited.
         schema:
           type: integer
           minimum: 1
@@ -265,8 +276,9 @@ paths:
                 type: string
         '400':
           description: |-
-            Invalid user public key or global cursor, excessive user parameters, zero/invalid
-            limit, incompatible `live=true` and `reverse=true`, or invalid path.
+            Invalid user public key or cursor, `cursor` combined with a per-user cursor,
+            excessive user parameters, zero/invalid limit, incompatible `live=true` and
+            `reverse=true`, or invalid path.
         '401':
           description: Missing or invalid `X-Admin-Password`.
         '404':
