@@ -51,6 +51,9 @@ pub enum AppContextConversionError {
     /// Failed to build pkarr client.
     #[error("Failed to build pkarr client: {0}")]
     Pkarr(pkarr::errors::BuildError),
+    /// A `pkdns.dht_relay_nodes` entry in the config is not a valid relay URL.
+    #[error("Invalid relay URL in config key `pkdns.dht_relay_nodes`: {0}")]
+    RelayNodes(pkarr::errors::InvalidRelayUrl),
     /// Failed to start the Postgres event listener.
     #[error("Failed to start Postgres event listener: {0}")]
     PgEventListener(sqlx::Error),
@@ -199,7 +202,7 @@ impl AppContext {
             user_service.clone(),
         )
         .map_err(AppContextConversionError::Storage)?;
-        let pkarr_builder = Self::build_pkarr_builder_from_config(&conf);
+        let pkarr_builder = Self::build_pkarr_builder_from_config(&conf)?;
 
         Ok(Self {
             sql_db,
@@ -225,7 +228,9 @@ impl AppContext {
 
 impl AppContext {
     /// Build the pkarr client builder based on the config.
-    fn build_pkarr_builder_from_config(config_toml: &ConfigToml) -> pkarr::ClientBuilder {
+    fn build_pkarr_builder_from_config(
+        config_toml: &ConfigToml,
+    ) -> Result<pkarr::ClientBuilder, AppContextConversionError> {
         let mut builder = pkarr::ClientBuilder::default();
         if let Some(bootstrap_nodes) = &config_toml.pkdns.dht_bootstrap_nodes {
             let nodes = bootstrap_nodes
@@ -243,7 +248,7 @@ impl AppContext {
         if let Some(relays) = &config_toml.pkdns.dht_relay_nodes {
             builder
                 .relays(relays)
-                .expect("parameters are already urls and therefore valid.");
+                .map_err(AppContextConversionError::RelayNodes)?;
         }
         if let Some(timeout_ms) = config_toml.pkdns.dht_request_timeout_ms {
             builder.dht_request_timeout(Duration::from_millis(timeout_ms.get()));
@@ -251,7 +256,7 @@ impl AppContext {
         if let Some(timeout_ms) = config_toml.pkdns.relay_request_timeout_ms {
             builder.relay_request_timeout(Duration::from_millis(timeout_ms.get()));
         }
-        builder
+        Ok(builder)
     }
 }
 
@@ -287,7 +292,8 @@ mod tests {
         for (overrides, dht_timeout, relay_timeout) in cases {
             let config = ConfigToml::from_str_with_defaults(&format!("[pkdns]\n{overrides}"))
                 .expect("timeout configuration should parse");
-            let builder = AppContext::build_pkarr_builder_from_config(&config);
+            let builder = AppContext::build_pkarr_builder_from_config(&config)
+                .expect("pkarr builder should build from a valid config");
             let builder_debug = format!("{builder:?}");
 
             assert!(
@@ -301,13 +307,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn invalid_relay_node_is_an_error() {
+        let config = ConfigToml::from_str_with_defaults(
+            "[pkdns]\ndht_relay_nodes = [\"ftp://relay.example.com\"]",
+        )
+        .expect("a non-http URL is still a valid URL for the config parser");
+
+        let result = AppContext::build_pkarr_builder_from_config(&config);
+
+        assert!(
+            matches!(result, Err(AppContextConversionError::RelayNodes(_))),
+            "expected RelayNodes error, got {result:?}"
+        );
+    }
+
     /// The default test config must keep the pkarr client off the public network,
     /// whatever database it points at.
     #[test]
     fn default_test_config_does_not_use_default_network() {
         let mut config = ConfigToml::default_test_config();
         config.general.database_url = ConfigToml::default().general.database_url;
-        let builder = AppContext::build_pkarr_builder_from_config(&config);
+        let builder = AppContext::build_pkarr_builder_from_config(&config)
+            .expect("pkarr builder should build from a valid config");
         let builder_debug = format!("{builder:?}");
 
         let bootstrap_nodes = config
