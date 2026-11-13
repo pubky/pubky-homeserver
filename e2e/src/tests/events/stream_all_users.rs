@@ -65,6 +65,48 @@ async fn events_stream_all_users_via_sdk() {
     assert_eq!(event.resource.path.to_string(), "/pub/bob-live.txt");
 }
 
+/// An all-users stream narrowed to one app's directory returns only that directory's events,
+/// from every user.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn events_stream_all_users_filters_by_path() {
+    use futures::StreamExt;
+
+    let testnet = build_full_testnet().await;
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+
+    for name in ["alice", "bob"] {
+        let signer = pubky.signer(Keypair::random());
+        let session = signer
+            .signup_cookie(&server.public_key(), None)
+            .await
+            .unwrap();
+        let storage = session.storage();
+        storage
+            .put(format!("/pub/my_app/{name}.txt"), vec![1])
+            .await
+            .unwrap();
+        storage
+            .put(format!("/pub/other_app/{name}.txt"), vec![1])
+            .await
+            .unwrap();
+    }
+
+    let mut stream = pubky
+        .event_stream_for(&server.public_key())
+        .all_users(None)
+        .path("/pub/my_app/")
+        .subscribe()
+        .await
+        .unwrap();
+    let mut paths = Vec::new();
+    while let Some(event) = stream.next().await {
+        paths.push(event.unwrap().resource.path.to_string());
+    }
+    assert_eq!(paths, ["/pub/my_app/alice.txt", "/pub/my_app/bob.txt"]);
+}
+
 /// An all-users batch request without `limit` closes after 100 events, like the legacy
 /// `/events/` feed; the next request resumes from the last cursor seen.
 #[tokio::test]
