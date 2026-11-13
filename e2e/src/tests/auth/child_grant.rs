@@ -1,7 +1,8 @@
 //! End-to-end coverage for parent/child grants over HTTP.
 //!
-//! The SDK can't issue child grants yet, so these tests sign the chain themselves
-//! and call the homeserver API directly.
+//! These tests sign the chain themselves and call the homeserver API directly, so
+//! they can reach cases the SDK refuses to produce. See `parent_grant` for the SDK's
+//! parent-grant holder.
 
 use super::*;
 use pubky_testnet::pubky_common::auth::{

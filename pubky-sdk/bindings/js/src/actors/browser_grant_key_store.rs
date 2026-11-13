@@ -239,6 +239,10 @@ export async function __pubkyGrantEnsureDelegatedKey(keyId) {
   return { keyId: resolvedKeyId, publicKey: publicKeyRaw };
 }
 
+export function __pubkyGrantDeleteDelegatedKey(keyId) {
+  return deleteRecord(keyId);
+}
+
 /**
  * Load the public key bytes for a delegated grant key.
  *
@@ -289,6 +293,9 @@ extern "C" {
 
     #[wasm_bindgen(js_name = __pubkyGrantEnsureDelegatedKey)]
     fn js_ensure_delegated_key(key_id: Option<String>) -> js_sys::Promise;
+
+    #[wasm_bindgen(js_name = __pubkyGrantDeleteDelegatedKey)]
+    fn js_delete_delegated_key(key_id: String) -> js_sys::Promise;
 
     #[wasm_bindgen(js_name = __pubkyGrantLoadDelegatedPublicKey)]
     fn js_load_delegated_public_key(key_id: String) -> js_sys::Promise;
@@ -349,6 +356,14 @@ impl BrowserGrantKeyStore {
             .await
             .map_err(js_error)?;
         public_key_from_js(value)
+    }
+
+    /// Delete a browser-held delegated grant key.
+    pub(crate) async fn delete_key(key_id: String) -> JsResult<()> {
+        JsFuture::from(js_delete_delegated_key(key_id))
+            .await
+            .map_err(js_error)?;
+        Ok(())
     }
 
     /// Build the Rust delegated signing callback for a browser-held grant key.

@@ -129,7 +129,7 @@ pub(super) fn parse_grant_relay_channel(
     }
 }
 
-fn parse_optional_channel_key(
+pub(super) fn parse_optional_channel_key(
     url: &Url,
     name: &'static str,
 ) -> Result<Option<[u8; 32]>, DeepLinkParseError> {
@@ -168,7 +168,21 @@ fn optional_unique_query(
     Ok(value.map(Cow::into_owned))
 }
 
-fn invalid_query_input(name: &'static str, message: impl Into<String>) -> DeepLinkParseError {
+/// Reject repeated parameters. New formats have no legacy links to stay
+/// compatible with, and a repeat could be read differently elsewhere.
+pub(super) fn reject_repeated_query(
+    url: &Url,
+    names: &[&'static str],
+) -> Result<(), DeepLinkParseError> {
+    names
+        .iter()
+        .try_for_each(|name| optional_unique_query(url, name).map(drop))
+}
+
+pub(super) fn invalid_query_input(
+    name: &'static str,
+    message: impl Into<String>,
+) -> DeepLinkParseError {
     DeepLinkParseError::InvalidQueryParameter(
         name,
         Box::new(io::Error::new(io::ErrorKind::InvalidInput, message.into())),

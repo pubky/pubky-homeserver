@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 use pubky_common::{
     auth::{
         AuthToken,
-        grant::GrantClaims,
+        grant::{GrantClaims, caps_within},
         jws::{ClientId, GRANT_JWS_TYP, GrantId},
     },
     crypto::{PublicKey, encrypt},
@@ -14,9 +14,14 @@ use pubky_common::{
 use crate::{
     Capabilities,
     actors::auth::{
-        deep_links::{DeepLink, DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel},
+        deep_links::{
+            DeepLink, DeepLinkParseError, GrantApprovalFormat, GrantRelayChannel, ParentGrantParams,
+        },
         grant::approval_encryption,
-        grant::{approval_envelope::GrantApprovalEnvelope, constants::DEFAULT_GRANT_LIFETIME_SECS},
+        grant::{
+            approval_envelope::{GrantApprovalEnvelope, ParentApprovalEnvelope},
+            constants::DEFAULT_GRANT_LIFETIME_SECS,
+        },
     },
     cross_log,
     errors::{AuthError, Result},
@@ -28,6 +33,9 @@ impl PubkySigner {
     /// Approve all requested capabilities from another app (wallet / signer side).
     ///
     /// Use [`Self::approve_auth_with_capabilities`] to approve fewer capabilities.
+    ///
+    /// Parent grant links receive a signed approval with the parent grant and
+    /// keys for the approved `e` scopes.
     ///
     /// Signed approval links use a domain-separated hash of `epk` as the relay
     /// channel ID and encrypt the approval directly with HPKE. Legacy links
@@ -143,6 +151,10 @@ impl PubkySigner {
         Ok(deep_link)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "A flat match with one arm per link type"
+    )]
     async fn approve_auth_deeplink(
         &self,
         deep_link: DeepLink,
@@ -223,6 +235,19 @@ impl PubkySigner {
                     )?;
                     (params.relay.clone(), params.relay_channel, payload)
                 }
+                DeepLink::ParentGrant(d) => {
+                    let params = d.params();
+                    let caps = select_capabilities(&params.capabilities, approved)?;
+                    cross_log!(
+                        info,
+                        "Approving parent grant via relay {} (client_id={}, caps={:?})",
+                        params.relay,
+                        params.client_id,
+                        caps
+                    );
+                    let payload = self.build_encrypted_parent_approval(caps, params)?;
+                    (params.relay.clone(), params.relay_channel(), payload)
+                }
                 DeepLink::SeedExport(_) => {
                     return Err(AuthError::Validation(
                         "approve_auth does not handle seed_export deep links".into(),
@@ -260,18 +285,7 @@ impl PubkySigner {
         relay_channel: GrantRelayChannel,
     ) -> Result<Vec<u8>> {
         format.validate_capabilities(capabilities)?;
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let claims = GrantClaims {
-            iss: self.keypair.public_key(),
-            client_id,
-            caps: capabilities.as_slice().to_vec(),
-            cnf: client_pk,
-            jti: GrantId::generate(),
-            iat: now,
-            exp: now + DEFAULT_GRANT_LIFETIME_SECS,
-        };
+        let claims = self.approved_claims(capabilities, client_id, client_pk);
         let payload =
             match format {
                 GrantApprovalFormat::BareGrant => Zeroizing::new(
@@ -286,6 +300,44 @@ impl PubkySigner {
             GrantRelayChannel::Hpke {
                 ephemeral_public_key,
             } => approval_encryption::seal(&ephemeral_public_key, payload.as_bytes()),
+        }
+    }
+
+    /// The holder can decrypt existing and future data under the approved `e`
+    /// scopes and share narrower keys, so ask the user to consent to `e` separately.
+    fn build_encrypted_parent_approval(
+        &self,
+        capabilities: &Capabilities,
+        params: &ParentGrantParams,
+    ) -> Result<Vec<u8>> {
+        let claims = self.approved_claims(
+            capabilities,
+            params.client_id.clone(),
+            params.client_pk.clone(),
+        );
+        let payload =
+            ParentApprovalEnvelope::sign(&self.keypair, &claims, &params.ephemeral_public_key);
+        approval_encryption::seal(&params.ephemeral_public_key, payload.as_bytes())
+    }
+
+    /// Claims for a new grant of the approved capabilities and default lifetime.
+    fn approved_claims(
+        &self,
+        capabilities: &Capabilities,
+        client_id: ClientId,
+        client_pk: PublicKey,
+    ) -> GrantClaims {
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        GrantClaims {
+            iss: self.keypair.public_key(),
+            client_id,
+            caps: capabilities.as_slice().to_vec(),
+            cnf: client_pk,
+            jti: GrantId::generate(),
+            iat: now,
+            exp: now + DEFAULT_GRANT_LIFETIME_SECS,
         }
     }
 
@@ -317,19 +369,12 @@ fn select_capabilities<'a>(
     let Some(approved) = approved else {
         return Ok(requested);
     };
-    // Check actions separately so split read/write requests can cover one approval.
-    for capability in approved.iter() {
-        for action in capability.actions() {
-            if !requested.iter().any(|requested| {
-                requested.scope_covers_path(capability.scope())
-                    && requested.actions().contains(action)
-            }) {
-                return Err(AuthError::Validation(
-                    "approved capabilities exceed the pending request".into(),
-                )
-                .into());
-            }
-        }
+    // Checked per action, so split read/write requests can cover one approval.
+    if !caps_within(requested, approved.as_slice()) {
+        return Err(AuthError::Validation(
+            "approved capabilities exceed the pending request".into(),
+        )
+        .into());
     }
     Ok(approved)
 }

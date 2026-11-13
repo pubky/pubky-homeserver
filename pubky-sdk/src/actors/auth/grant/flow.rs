@@ -50,19 +50,21 @@
 
 use std::{fmt, str::FromStr};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{
-    auth::jws::ClientId,
+    auth::{grant::caps_within, jws::ClientId},
     crypto::{Keypair, PublicKey},
 };
 use url::Url;
 
 use crate::actors::Pkdns;
 use crate::actors::auth::deep_links::{DeepLink, GrantRelayChannel};
-use crate::actors::auth::grant::approval::GrantApproval;
+use crate::actors::auth::grant::approval::{GrantApproval, ParentApproval};
 use crate::actors::auth::grant::approval_encryption::ApprovalRecipientSecret;
 use crate::actors::auth::grant::builder::GrantAuthFlowBuilder;
 use crate::actors::auth::grant::credential::GrantCredential;
 use crate::actors::auth::grant::grant_exchange::credential_from_grant_exchange;
+use crate::actors::auth::grant::parent_credential::ParentGrantCredential;
 use crate::actors::auth::grant::pop_signer::{DelegatedSignFn, GrantPopSigner};
 use crate::actors::auth::kind::AuthFlowKind;
 use crate::actors::auth::relay::{AuthRelayMessage, auth_relay_listener::AuthRelayListener};
@@ -415,6 +417,35 @@ impl PubkyGrantAuthFlow {
         Ok(Some(credential))
     }
 
+    /// Block until the signer approves a parent grant requested with
+    /// [`GrantAuthFlowBuilder::parent_grant`], and verify its approval.
+    ///
+    /// This creates no session. The credential issues child grants, and its keys
+    /// cover exactly the `e` scopes the user approved, which may be none.
+    ///
+    /// # Errors
+    /// - Rejects flows that didn't request a parent grant.
+    /// - Rejects approvals that don't match the pending request.
+    /// - Returns [`crate::errors::Error::Authentication`] if the relay channel
+    ///   expires before approval.
+    pub async fn await_parent_credential(self) -> Result<ParentGrantCredential> {
+        let Self {
+            relay_listener,
+            client_signer,
+            auth_url,
+            approval_key_secret,
+            ..
+        } = self;
+        check_flow_kind(&auth_url, true)?;
+        let message = relay_listener.await_message().await?;
+        decode_parent_credential(
+            &message,
+            &auth_url,
+            approval_key_secret.as_ref(),
+            client_signer,
+        )
+    }
+
     async fn exchange_for_credential(
         client: &PubkyHttpClient,
         approval: GrantApproval,
@@ -439,11 +470,13 @@ impl PubkyGrantAuthFlow {
         auth_url: &Url,
         approval_key_secret: Option<&ApprovalRecipientSecret>,
     ) -> Result<GrantApproval> {
+        check_flow_kind(auth_url, false)?;
         let message = relay_listener.await_message().await?;
         decode_relay_approval(&message, auth_url, approval_key_secret)
     }
 
     fn try_decoded_approval(&self) -> Result<Option<GrantApproval>> {
+        check_flow_kind(&self.auth_url, false)?;
         let Some(message) = self.relay_listener.try_message() else {
             return Ok(None);
         };
@@ -453,6 +486,24 @@ impl PubkyGrantAuthFlow {
             self.approval_key_secret.as_ref(),
         )?))
     }
+}
+
+/// Check the flow's kind before the relay is read, so calling the wrong method
+/// can't use up the user's approval.
+fn check_flow_kind(auth_url: &Url, parent: bool) -> Result<()> {
+    let is_parent = matches!(
+        DeepLink::from_str(auth_url.as_str()),
+        Ok(DeepLink::ParentGrant(_))
+    );
+    if is_parent == parent {
+        return Ok(());
+    }
+    let message = if parent {
+        "this flow did not request a parent grant"
+    } else {
+        "this flow requested a parent grant, not a session"
+    };
+    Err(AuthError::Validation(message.into()).into())
 }
 
 fn decode_relay_approval(
@@ -529,20 +580,45 @@ fn decode_and_validate_approval(
     }
     // Signers may narrow scopes or actions. Each approved action must be
     // covered by a requested capability, including split read/write requests.
-    for approved in &approval.claims.caps {
-        for action in approved.actions() {
-            if !capabilities.iter().any(|requested| {
-                requested.scope_covers_path(approved.scope())
-                    && requested.actions().contains(action)
-            }) {
-                return Err(AuthError::Validation(
-                    "approved capabilities exceed the pending request".into(),
-                )
-                .into());
-            }
-        }
+    if !caps_within(capabilities, &approval.claims.caps) {
+        return Err(AuthError::Validation(
+            "approved capabilities exceed the pending request".into(),
+        )
+        .into());
     }
     Ok(approval)
+}
+
+/// Decrypt and verify a parent approval, then bind it to the pending request.
+fn decode_parent_credential(
+    message: &AuthRelayMessage,
+    auth_url: &Url,
+    approval_key_secret: Option<&ApprovalRecipientSecret>,
+    client_signer: GrantPopSigner,
+) -> Result<ParentGrantCredential> {
+    let invalid = |message: &str| AuthError::Validation(message.to_owned());
+    let request = DeepLink::from_str(auth_url.as_str())
+        .map_err(|_err| invalid("invalid grant request URL"))?;
+    let DeepLink::ParentGrant(link) = request else {
+        return Err(invalid("this flow did not request a parent grant").into());
+    };
+    let params = link.params();
+    validate_approval_key(params.relay_channel(), approval_key_secret)?;
+    let secret = approval_key_secret.ok_or_else(|| invalid("missing HPKE key"))?;
+    let plain = secret.open(message.as_bytes())?;
+    let text = std::str::from_utf8(&plain).map_err(|_err| invalid("invalid approval encoding"))?;
+    let approval = ParentApproval::decode(text)?;
+    if approval.recipient != URL_SAFE_NO_PAD.encode(params.ephemeral_public_key)
+        || approval.claims.cnf != params.client_pk
+        || approval.claims.client_id != params.client_id
+    {
+        return Err(invalid("approved parent grant does not match the pending request").into());
+    }
+    // Signers may narrow scopes or actions, including declining `e`.
+    if !caps_within(&params.capabilities, &approval.claims.caps) {
+        return Err(invalid("approved capabilities exceed the pending request").into());
+    }
+    ParentGrantCredential::new(approval, client_signer)
 }
 
 fn grant_deep_link_parts(deep_link: &DeepLink) -> Result<(&Url, GrantRelayChannel, &PublicKey)> {
@@ -555,6 +631,11 @@ fn grant_deep_link_parts(deep_link: &DeepLink) -> Result<(&Url, GrantRelayChanne
         DeepLink::SignupGrant(link) => Ok((
             &link.params().relay,
             link.params().relay_channel,
+            &link.params().client_pk,
+        )),
+        DeepLink::ParentGrant(link) => Ok((
+            &link.params().relay,
+            link.params().relay_channel(),
             &link.params().client_pk,
         )),
         _ => Err(AuthError::Validation(

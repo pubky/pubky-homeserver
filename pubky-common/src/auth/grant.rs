@@ -8,13 +8,51 @@
 //! [`ChildGrantClaims`] are signed by the parent's `cnf` key instead of the user.
 
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::{
     auth::jws::{self, ClientId, GrantId},
-    capabilities::Capability,
+    capabilities::{Capabilities, Capability},
     crypto::PublicKey,
     keys::Keypair,
 };
+
+/// Maximum parent lifetime: 730 days, matching the SDK's default grant lifetime.
+pub const MAX_PARENT_GRANT_LIFETIME_SECS: u64 = 2 * 365 * 24 * 3600;
+
+/// The most a parent grant can authorize. Excludes `/:rw`, so delegated
+/// sessions can't manage grants.
+pub fn parent_grant_ceiling() -> Capabilities {
+    "/pub/:rwe,/priv/:rwe"
+        .parse()
+        .expect("invariant: the parent ceiling is a valid capability list")
+}
+
+/// Whether `client_id` is an exact HTTPS callback URL in canonical form.
+///
+/// Requiring the canonical form gives each app one identity, so a spelling
+/// variant can't create a second child under the same parent.
+pub fn is_exact_callback(client_id: &ClientId) -> bool {
+    let client_id = client_id.as_str();
+    Url::parse(client_id).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.as_str() == client_id
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+    })
+}
+
+/// Whether `limit` permits every scope and action in `caps`.
+///
+/// Compares canonical paths and actions, not string prefixes.
+pub fn caps_within(limit: &Capabilities, caps: &[Capability]) -> bool {
+    caps.iter().all(|cap| {
+        cap.actions()
+            .iter()
+            .all(|action| limit.permits(cap.scope(), *action))
+    })
+}
 
 /// Grant JWS claims — the serializable JWS claims.
 ///

@@ -59,8 +59,9 @@
 
 use std::str::FromStr;
 
-use crate::PublicKey;
 use crate::actors::auth::cookie::secret::import_session_secret;
+use crate::{FeatureSupport, PublicKey};
+use pubky_common::constants::features;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::actors::auth::cookie::secret::session_from_secret_file;
@@ -307,6 +308,24 @@ impl Pubky {
             .await
     }
 
+    /// Check whether a user's homeserver supports parent and child grants.
+    ///
+    /// Check this before asking the user to approve a parent grant.
+    /// [`FeatureSupport::Unsupported`] means the homeserver needs an upgrade, and
+    /// [`FeatureSupport::Unknown`] means the check couldn't finish, including when
+    /// the user has no homeserver record, so offer a retry. To tell that case
+    /// apart, use [`Self::get_homeserver_of`]. This checks only the homeserver:
+    /// the signer must also support parent-grant links.
+    pub async fn grant_delegation_support(&self, user_public_key: &PublicKey) -> FeatureSupport {
+        let Ok(Some(homeserver)) = self.get_homeserver_of(user_public_key).await else {
+            return FeatureSupport::Unknown;
+        };
+        self.client
+            .features
+            .support(&self.client, &homeserver, features::GRANT_DELEGATION)
+            .await
+    }
+
     /// Create an event stream builder for a single user.
     ///
     /// This is the simplest way to subscribe to events for one user. The homeserver
@@ -506,7 +525,7 @@ fn parse_auth_deep_link(
             ),
             s.x_callback().clone(),
         )),
-        DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) => Err(AuthError::Validation(
+        DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) | DeepLink::ParentGrant(_) => Err(AuthError::Validation(
             "grant auth flows cannot be resumed from the authorization URL alone; the PoP client private key is required and is not encoded in the deep link."
                 .into(),
         )

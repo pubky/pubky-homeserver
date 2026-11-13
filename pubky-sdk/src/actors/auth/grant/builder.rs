@@ -9,8 +9,9 @@ use pubky_common::{
 
 use crate::actors::DEFAULT_HTTP_RELAY_INBOX;
 use crate::actors::auth::deep_links::{
-    DeepLink, DeepLinkScheme, GrantApprovalFormat, GrantRelayChannel, SigninGrantDeepLink,
-    SigninGrantParams, SignupGrantDeepLink, SignupGrantParams, XCallbackParams,
+    DeepLink, DeepLinkScheme, GrantApprovalFormat, GrantRelayChannel, ParentGrantDeepLink,
+    ParentGrantParams, SigninGrantDeepLink, SigninGrantParams, SignupGrantDeepLink,
+    SignupGrantParams, XCallbackParams,
 };
 use crate::actors::auth::grant::approval_encryption::ApprovalRecipientSecret;
 use crate::actors::auth::grant::flow::PubkyGrantAuthFlow;
@@ -38,6 +39,7 @@ pub struct GrantAuthFlowBuilder {
     x_callback: XCallbackParams,
     approval_format: GrantApprovalFormat,
     expected_signer: Option<PublicKey>,
+    parent_grant: bool,
 }
 
 impl fmt::Debug for GrantAuthFlowBuilder {
@@ -53,6 +55,7 @@ impl fmt::Debug for GrantAuthFlowBuilder {
             .field("x_callback", &self.x_callback)
             .field("approval_format", &self.approval_format)
             .field("expected_signer", &self.expected_signer)
+            .field("parent_grant", &self.parent_grant)
             .finish()
     }
 }
@@ -71,7 +74,22 @@ impl GrantAuthFlowBuilder {
             x_callback: XCallbackParams::default(),
             approval_format: GrantApprovalFormat::BareGrant,
             expected_signer: None,
+            parent_grant: false,
         }
+    }
+
+    /// Request a parent grant, which authorizes child grants but no storage session.
+    ///
+    /// Complete the flow with
+    /// [`await_parent_credential`](PubkyGrantAuthFlow::await_parent_credential).
+    /// The capabilities must stay within `/pub/:rwe` and `/priv/:rwe`, and the
+    /// client ID must be an exact HTTPS callback URL. Signers that predate
+    /// delegation reject the request. This ignores [`Self::approval_format`] and
+    /// only supports sign-in flows.
+    #[must_use]
+    pub fn parent_grant(mut self) -> Self {
+        self.parent_grant = true;
+        self
     }
 
     /// Choose the relay approval format. Defaults to a bare grant for
@@ -155,7 +173,8 @@ impl GrantAuthFlowBuilder {
     ///
     /// # Errors
     /// - Returns [`crate::errors::Error::Authentication`] if an expected signer
-    ///   is set on a sign-up flow.
+    ///   is set on a sign-up or parent-grant flow, if a parent grant is requested
+    ///   on a sign-up flow, or if a parent grant request exceeds its limits.
     /// - Propagates failures from constructing the default [`PubkyHttpClient`]
     ///   or starting the [`AuthRelayListener`].
     pub fn start(self) -> Result<PubkyGrantAuthFlow> {
@@ -170,10 +189,23 @@ impl GrantAuthFlowBuilder {
             x_callback,
             approval_format,
             expected_signer,
+            parent_grant,
         } = self;
 
-        approval_format.validate_capabilities(&caps)?;
-        if expected_signer.is_some() && matches!(auth_kind, AuthFlowKind::SignUp { .. }) {
+        let is_signup = matches!(auth_kind, AuthFlowKind::SignUp { .. });
+        if parent_grant {
+            // A parent link can't name a signer, so rejecting keeps the check from being lost.
+            if is_signup || expected_signer.is_some() {
+                return Err(AuthError::Validation(
+                    "parent grants only support sign-in flows without an expected signer".into(),
+                )
+                .into());
+            }
+        } else {
+            // A parent link always asks for keys; the format applies to direct grants.
+            approval_format.validate_capabilities(&caps)?;
+        }
+        if expected_signer.is_some() && is_signup {
             return Err(AuthError::Validation(
                 "an expected signer applies to sign-in flows only".into(),
             )
@@ -187,7 +219,7 @@ impl GrantAuthFlowBuilder {
 
         let client_pk = client_signer.public_key();
         let (approval_key_secret, relay_channel) =
-            if approval_format == GrantApprovalFormat::SignedApprovalV1 {
+            if parent_grant || approval_format == GrantApprovalFormat::SignedApprovalV1 {
                 let (secret, public_key) = ApprovalRecipientSecret::generate();
                 (
                     Some(secret),
@@ -200,6 +232,13 @@ impl GrantAuthFlowBuilder {
             };
 
         let auth_url = match auth_kind {
+            AuthFlowKind::SignIn if parent_grant => parent_grant_link(
+                caps,
+                base_relay.clone(),
+                relay_channel,
+                client_id,
+                client_pk,
+            )?,
             AuthFlowKind::SignIn => DeepLink::SigninGrant(SigninGrantDeepLink::new(
                 DeepLinkScheme::PubkyAuth,
                 SigninGrantParams {
@@ -247,4 +286,34 @@ impl GrantAuthFlowBuilder {
             approval_key_secret,
         ))
     }
+}
+
+/// Build the link requesting a parent grant, checking the limits on every parent.
+fn parent_grant_link(
+    capabilities: Capabilities,
+    relay: Url,
+    relay_channel: GrantRelayChannel,
+    client_id: ClientId,
+    client_pk: PublicKey,
+) -> Result<DeepLink> {
+    let GrantRelayChannel::Hpke {
+        ephemeral_public_key,
+    } = relay_channel
+    else {
+        unreachable!("parent grant flows always use HPKE");
+    };
+    let params = ParentGrantParams {
+        capabilities,
+        relay,
+        ephemeral_public_key,
+        client_id,
+        client_pk,
+    };
+    params
+        .validate()
+        .map_err(|error| AuthError::Validation(error.to_string()))?;
+    Ok(DeepLink::ParentGrant(ParentGrantDeepLink::new(
+        DeepLinkScheme::PubkyAuth,
+        params,
+    )))
 }

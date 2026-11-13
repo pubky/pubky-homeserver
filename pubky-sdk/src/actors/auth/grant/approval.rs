@@ -1,13 +1,21 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{
-    auth::grant::GrantClaims,
+    auth::{
+        grant::{
+            GrantClaims, MAX_PARENT_GRANT_LIFETIME_SECS, caps_within, is_exact_callback,
+            parent_grant_ceiling,
+        },
+        jws::PARENT_GRANT_JWS_TYP,
+    },
     crypto::{PublicKey, Signature},
     encryption_keys::ScopedEncryptionKeyBundle,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use zeroize::Zeroizing;
 
-use super::approval_envelope::{APPROVAL_JWS_TYP, GrantApprovalEnvelope};
+use super::approval_envelope::{
+    APPROVAL_JWS_TYP, GrantApprovalEnvelope, PARENT_APPROVAL_JWS_TYP, ParentApprovalEnvelope,
+};
 use crate::actors::auth::{deep_links::GrantApprovalFormat, relay::AuthRelayMessage};
 use crate::errors::{AuthError, Result};
 
@@ -27,6 +35,56 @@ pub(crate) struct GrantApproval {
 pub(crate) struct VerifiedApproval {
     pub(crate) encryption_keys: ScopedEncryptionKeyBundle,
     pub(crate) signed_approval: SignedApproval,
+}
+
+/// Verified parent approval. Holds the keys for every approved `e` scope.
+#[derive(Debug)]
+pub(crate) struct ParentApproval {
+    pub(crate) parent_jws: String,
+    pub(crate) claims: GrantClaims,
+    pub(crate) recipient: String,
+    pub(crate) encryption_keys: ScopedEncryptionKeyBundle,
+    pub(crate) signed_approval: SignedApproval,
+}
+
+impl ParentApproval {
+    /// Verify the user's signatures, the parent's limits and its key scopes.
+    pub(crate) fn decode(text: &str) -> Result<Self> {
+        // Skip the key bundle until its signer has authenticated it.
+        #[derive(Deserialize)]
+        struct Unverified {
+            parent: String,
+        }
+
+        let unverified: Unverified = decode_payload(text)?;
+        let claims = verify_parent_grant(&unverified.parent)?;
+        verify_jws(text, &claims.iss, PARENT_APPROVAL_JWS_TYP)?;
+        let envelope: ParentApprovalEnvelope = decode_payload(text)?;
+        validate_key_scopes_match_grant(&envelope.encryption_keys, &claims)?;
+        Ok(Self {
+            parent_jws: envelope.parent,
+            claims,
+            recipient: envelope.recipient,
+            encryption_keys: envelope.encryption_keys,
+            signed_approval: SignedApproval::new(text),
+        })
+    }
+}
+
+/// Verify the user's signature on a parent grant and the limits on any parent.
+///
+/// Leaves expiry to the homeserver, which checks it against its own clock.
+fn verify_parent_grant(compact: &str) -> Result<GrantClaims> {
+    let claims: GrantClaims = decode_payload(compact)?;
+    verify_jws(compact, &claims.iss, PARENT_GRANT_JWS_TYP)?;
+    if claims.iat >= claims.exp
+        || claims.exp - claims.iat > MAX_PARENT_GRANT_LIFETIME_SECS
+        || !is_exact_callback(&claims.client_id)
+        || !caps_within(&parent_grant_ceiling(), &claims.caps)
+    {
+        return Err(invalid_approval("invalid parent grant"));
+    }
+    Ok(claims)
 }
 
 /// Confidential signed approval retained for authenticated key restoration.
@@ -86,7 +144,7 @@ impl GrantApproval {
                 let unverified: ApprovalGrant = decode_payload(text)?;
                 // The outer signature binds the issuer, exact grant, and keys.
                 let claims: GrantClaims = decode_payload(&unverified.grant)?;
-                verify_approval_signature(text, &claims.iss)?;
+                verify_jws(text, &claims.iss, APPROVAL_JWS_TYP)?;
                 let envelope: GrantApprovalEnvelope = decode_payload(text)?;
                 validate_key_scopes_match_grant(&envelope.encryption_keys, &claims)?;
                 Ok(Self {
@@ -156,7 +214,8 @@ fn jws_parts(compact: &str) -> Result<(&str, &str, &str)> {
     Ok((header, payload, signature))
 }
 
-fn verify_approval_signature(compact: &str, issuer: &PublicKey) -> Result<()> {
+/// Verify a JWS has the expected type and was signed by `signer`.
+pub(super) fn verify_jws(compact: &str, signer: &PublicKey, typ: &str) -> Result<()> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Header {
@@ -170,7 +229,7 @@ fn verify_approval_signature(compact: &str, issuer: &PublicKey) -> Result<()> {
         .map_err(|_err| invalid_approval("invalid JWS header encoding"))?;
     let header: Header = serde_json::from_slice(&header)
         .map_err(|_err| invalid_approval("invalid or unsupported JWS header"))?;
-    if header.alg != "EdDSA" || header.typ != APPROVAL_JWS_TYP {
+    if header.alg != "EdDSA" || header.typ != typ {
         return Err(invalid_approval("unexpected JWS algorithm or type"));
     }
     let signature: [u8; 64] = URL_SAFE_NO_PAD
@@ -180,7 +239,7 @@ fn verify_approval_signature(compact: &str, issuer: &PublicKey) -> Result<()> {
         .map_err(|_err| invalid_approval("invalid JWS signature length"))?;
     // Borrow the original signing input; an approval payload contains secrets.
     let (input, _) = compact.rsplit_once('.').expect("JWS was split above");
-    issuer
+    signer
         .verify(input.as_bytes(), &Signature::from_bytes(&signature))
         .map_err(|_err| invalid_approval("invalid JWS signature"))
 }
@@ -530,5 +589,176 @@ mod tests {
         }
         let message = AuthRelayMessage::new(b"secret payload".to_vec());
         assert!(!format!("{message:?}").contains("secret payload"));
+    }
+}
+
+#[cfg(test)]
+mod delegation_tests {
+    use pubky_common::{
+        StoragePath,
+        auth::{
+            grant::ChildGrantClaims,
+            jws::{CHILD_GRANT_JWS_TYP, ClientId, GRANT_JWS_TYP, GrantId, sign_jws},
+        },
+        capabilities::Capability,
+        crypto::Keypair,
+    };
+
+    use super::super::approval_envelope::{
+        CHILD_APPROVAL_JWS_TYP, ChildApprovalEnvelope, key_scopes,
+    };
+    use super::*;
+
+    struct Chain {
+        user: Keypair,
+        accounts: Keypair,
+        parent: GrantClaims,
+        child: ChildGrantClaims,
+    }
+
+    fn chain() -> Chain {
+        let user = Keypair::random();
+        let accounts = Keypair::random();
+        let parent = GrantClaims {
+            iss: user.public_key(),
+            client_id: ClientId::new("https://accounts.example/auth/callback").unwrap(),
+            caps: vec!["/pub/:rwe".parse().unwrap(), "/priv/:rwe".parse().unwrap()],
+            cnf: accounts.public_key(),
+            jti: GrantId::generate(),
+            iat: 100,
+            exp: 200,
+        };
+        let child = ChildGrantClaims {
+            grant: GrantClaims {
+                iss: user.public_key(),
+                client_id: ClientId::new("https://chat.example/auth/callback").unwrap(),
+                caps: vec![
+                    "/pub/chat/:rw".parse().unwrap(),
+                    "/priv/chat/:rwe".parse().unwrap(),
+                ],
+                cnf: Keypair::random().public_key(),
+                jti: GrantId::generate(),
+                iat: 110,
+                exp: 190,
+            },
+            parent_jti: parent.jti.clone(),
+        };
+        Chain {
+            user,
+            accounts,
+            parent,
+            child,
+        }
+    }
+
+    impl Chain {
+        fn keys(&self, scopes: &[StoragePath]) -> ScopedEncryptionKeyBundle {
+            ScopedEncryptionKeyBundle::from_identity_secret(&self.user.secret(), scopes)
+        }
+
+        fn parent_jws(&self) -> String {
+            sign_jws(&self.user, PARENT_GRANT_JWS_TYP, &self.parent)
+        }
+
+        fn parent_envelope(&self, scopes: &[StoragePath]) -> ParentApprovalEnvelope {
+            ParentApprovalEnvelope {
+                parent: self.parent_jws(),
+                recipient: "recipient".into(),
+                encryption_keys: self.keys(scopes),
+            }
+        }
+
+        fn child_envelope(&self, scopes: &[StoragePath]) -> ChildApprovalEnvelope {
+            ChildApprovalEnvelope {
+                parent: self.parent_jws(),
+                child: sign_jws(&self.accounts, CHILD_GRANT_JWS_TYP, &self.child),
+                recipient: "recipient".into(),
+                state: "state".into(),
+                encryption_keys: self.keys(scopes),
+            }
+        }
+
+        fn child_approval(&self) -> String {
+            let scopes: Vec<_> = key_scopes(&self.child.grant.caps).cloned().collect();
+            sign_jws(
+                &self.accounts,
+                CHILD_APPROVAL_JWS_TYP,
+                &self.child_envelope(&scopes),
+            )
+        }
+    }
+
+    #[test]
+    fn parent_approval_verifies_and_keeps_its_keys() {
+        let chain = chain();
+        let approval = ParentApprovalEnvelope::sign(&chain.user, &chain.parent, &[1; 32]);
+        let decoded = ParentApproval::decode(&approval).unwrap();
+        assert_eq!(decoded.claims, chain.parent);
+        assert_eq!(decoded.encryption_keys.scopes().len(), 2);
+    }
+
+    #[test]
+    fn parent_approval_rejects_wrong_signers_types_and_key_scopes() {
+        let chain = chain();
+        let scopes: Vec<_> = key_scopes(&chain.parent.caps).cloned().collect();
+        let valid = chain.parent_envelope(&scopes);
+        for approval in [
+            sign_jws(&Keypair::random(), PARENT_APPROVAL_JWS_TYP, &valid),
+            sign_jws(&chain.user, APPROVAL_JWS_TYP, &valid),
+            sign_jws(&chain.user, CHILD_APPROVAL_JWS_TYP, &valid),
+            // Missing and excess keys.
+            sign_jws(
+                &chain.user,
+                PARENT_APPROVAL_JWS_TYP,
+                &chain.parent_envelope(&scopes[..1]),
+            ),
+            sign_jws(
+                &chain.user,
+                PARENT_APPROVAL_JWS_TYP,
+                &chain.parent_envelope(&[
+                    scopes[0].clone(),
+                    scopes[1].clone(),
+                    StoragePath::new("/other/").unwrap(),
+                ]),
+            ),
+        ] {
+            ParentApproval::decode(&approval).unwrap_err();
+        }
+
+        // The inner grant has to be a parent, signed by the user.
+        let mut wrong_inner = chain.parent_envelope(&scopes);
+        wrong_inner.parent = sign_jws(&chain.user, GRANT_JWS_TYP, &chain.parent);
+        let approval = sign_jws(&chain.user, PARENT_APPROVAL_JWS_TYP, &wrong_inner);
+        ParentApproval::decode(&approval).unwrap_err();
+    }
+
+    #[test]
+    fn parent_approval_rejects_grants_a_parent_can_never_hold() {
+        let mutations: [fn(&mut GrantClaims); 4] = [
+            |parent| parent.caps = vec![Capability::root()],
+            |parent| parent.client_id = ClientId::new("accounts.example").unwrap(),
+            |parent| parent.exp = parent.iat,
+            |parent| parent.exp = parent.iat + MAX_PARENT_GRANT_LIFETIME_SECS + 1,
+        ];
+        for mutate in mutations {
+            let mut chain = chain();
+            mutate(&mut chain.parent);
+            let approval = ParentApprovalEnvelope::sign(&chain.user, &chain.parent, &[1; 32]);
+            ParentApproval::decode(&approval).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn formats_never_stand_in_for_each_other() {
+        let chain = chain();
+        let child = chain.child_approval();
+        GrantApproval::decode_text(&child, GrantApprovalFormat::SignedApprovalV1).unwrap_err();
+        ParentApproval::decode(&child).unwrap_err();
+
+        let parent = ParentApprovalEnvelope::sign(&chain.user, &chain.parent, &[1; 32]);
+        GrantApproval::decode_text(&parent, GrantApprovalFormat::SignedApprovalV1).unwrap_err();
+
+        let direct = GrantApprovalEnvelope::sign(&chain.user, &chain.child.grant);
+        ParentApproval::decode(&direct).unwrap_err();
     }
 }

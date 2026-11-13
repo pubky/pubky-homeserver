@@ -29,6 +29,7 @@ pub mod prelude;
 pub use pubky::Pubky;
 // Transport
 #[doc(inline)]
+pub use client::FeatureSupport;
 pub use client::core::{PubkyHttpClient, PubkyHttpClientBuilder};
 // High level actors
 #[doc(inline)]
@@ -50,7 +51,7 @@ pub use actors::deep_links;
 #[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use actors::{
     CookieCredential, CookieSessionView, DelegatedGrantCredentialState, GrantCredential,
-    GrantManager, GrantSessionView,
+    GrantManager, GrantSessionView, ParentGrantCredential,
 };
 #[doc(inline)]
 pub use actors::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};

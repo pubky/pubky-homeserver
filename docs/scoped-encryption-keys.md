@@ -56,6 +56,17 @@ Signed V1 approvals derive and deliver keys only for the approved `e` scopes;
 declining `e` still returns a signed approval with an empty key bundle. The
 request's client identity, relay channel, and approval format stay the same.
 
+## Receive keys through a parent grant
+
+First-party apps can get keys without a separate Ring approval. The user approves
+`e` once for a parent grant holder such as Pubky Accounts. The holder then gives
+each app keys for exactly the app's `e` scopes, along with its child grant.
+
+These keys are the same ones the signer would derive for those scopes. An app
+can't derive keys for a sibling or parent scope, but the holder can derive every
+key under its approved scopes, including for existing data. For the flow, see
+[parent and child grants](delegated-grants.md#sign-in-apps).
+
 ## Choose scopes and actions
 
 The `e` action is separate from storage access:
@@ -95,6 +106,9 @@ independently.
 
 A signed approval always uses the `v2` token and record formats, even if the
 signer declined `e` and the key bundle is empty.
+
+[Parent and child approvals](delegated-grants.md#approval-formats) have no version
+number of their own. They use their own link type and JWS types instead of `af`.
 
 ## Compatibility and deployment
 
@@ -189,6 +203,9 @@ How each storage option keeps the signed approval:
   signed approval don't. IndexedDB is the trust boundary: any script on the same
   origin, or anyone with a copy of the browser profile, can read the saved keys.
   Don't log or export browser records.
+- **Parent grant store:** `parentGrantStore.save()` stores a holder's approval as
+  plaintext in IndexedDB too, with the same trust boundary. That approval holds
+  the keys for every scope the holder was approved for.
 
 Offline recovery returns the keys from saved restore material without network
 access. It verifies the approval signature, its binding to the grant, and the

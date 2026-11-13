@@ -242,6 +242,14 @@ impl From<pubky::Error> for PubkyError {
             pubky::Error::Build(_) => PubkyErrorName::InternalError,
         };
 
+        // A declined redirect carries its denial code, so callers needn't read the message.
+        if let pubky::Error::Authentication(pubky::errors::AuthError::RedirectDeclined(denial)) =
+            &err
+        {
+            let data = json!({ "reason": "RedirectDeclined", "denial": denial.as_str() });
+            return Self::new(name, &err).with_data(data);
+        }
+
         // Only errors that carry an HTTP status populate `data.statusCode`.
         if let pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
             status: Some(status),
@@ -407,7 +415,7 @@ impl WasmDescribe for PubkyError {
 mod tests {
     use super::*;
     use pubky::custom_pop::CustomPopError;
-    use pubky::errors::RequestError;
+    use pubky::errors::{AuthError, RedirectDenial, RequestError};
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -543,5 +551,21 @@ mod tests {
         ));
         assert_eq!(transport.name.as_str(), "CredentialRefreshError");
         assert_eq!(transport.data, None);
+    }
+
+    #[test]
+    fn declined_redirects_carry_their_denial_code() {
+        for denial in [
+            RedirectDenial::AccessDenied,
+            RedirectDenial::Cancelled,
+            RedirectDenial::InsufficientPermissions,
+        ] {
+            let actual = PubkyError::from(pubky::Error::from(AuthError::RedirectDeclined(denial)));
+            assert_eq!(actual.name.as_str(), "AuthenticationError");
+            assert_eq!(
+                actual.data,
+                Some(json!({ "reason": "RedirectDeclined", "denial": denial.as_str() }))
+            );
+        }
     }
 }

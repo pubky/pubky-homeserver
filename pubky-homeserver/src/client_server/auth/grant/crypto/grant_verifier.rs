@@ -12,26 +12,21 @@
 
 use pubky_common::{
     auth::{
-        grant::{ChildGrantClaims, GrantClaims},
+        grant::{
+            caps_within, is_exact_callback, parent_grant_ceiling, ChildGrantClaims, GrantClaims,
+            MAX_PARENT_GRANT_LIFETIME_SECS,
+        },
         jws::{CHILD_GRANT_JWS_TYP, GRANT_JWS_TYP, PARENT_GRANT_JWS_TYP},
     },
     capabilities::{Capabilities, Capability},
     crypto::PublicKey,
 };
 use serde::de::DeserializeOwned;
-use url::Url;
 
 use super::{
     jws_crypto::{self, JwsCompact},
     pop_verifier::POP_MAX_AGE_SECS,
 };
-
-/// The most a parent grant can authorize. Excludes `/:rw`, so delegated
-/// sessions can't manage grants.
-const PARENT_CEILING: &str = "/pub/:rwe,/priv/:rwe";
-
-/// Maximum parent lifetime: 730 days, matching the SDK's default grant lifetime.
-const MAX_PARENT_GRANT_LIFETIME_SECS: u64 = 2 * 365 * 24 * 3600;
 
 /// A verified parent and child.
 #[derive(Debug, Clone)]
@@ -77,10 +72,7 @@ pub fn verify_parent_for_revocation(compact: &JwsCompact) -> Result<GrantClaims,
         return Err(Error::InvalidTimestamps);
     }
     check_callback(&parent)?;
-    let ceiling: Capabilities = PARENT_CEILING
-        .parse()
-        .expect("invariant: the parent ceiling is a valid capability list");
-    check_permitted(&ceiling, &parent.caps)?;
+    check_permitted(&parent_grant_ceiling(), &parent.caps)?;
     Ok(parent)
 }
 
@@ -178,15 +170,7 @@ fn check_parent_usable(raw: &GrantClaims) -> Result<(), Error> {
 /// Accounts must enforce each app's registered callback. Canonical URLs with
 /// different paths, queries or non-default ports remain distinct app identities.
 fn check_callback(raw: &GrantClaims) -> Result<(), Error> {
-    let client_id = raw.client_id.as_str();
-    let is_exact_callback = Url::parse(client_id).is_ok_and(|url| {
-        url.scheme() == "https"
-            && url.as_str() == client_id
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.fragment().is_none()
-    });
-    if !is_exact_callback {
+    if !is_exact_callback(&raw.client_id) {
         return Err(Error::InvalidCallback);
     }
     Ok(())
@@ -194,12 +178,7 @@ fn check_callback(raw: &GrantClaims) -> Result<(), Error> {
 
 /// Check every scope and action against `limit`.
 fn check_permitted(limit: &Capabilities, caps: &[Capability]) -> Result<(), Error> {
-    let permitted = caps.iter().all(|cap| {
-        cap.actions()
-            .iter()
-            .all(|action| limit.permits(cap.scope(), *action))
-    });
-    if !permitted {
+    if !caps_within(limit, caps) {
         return Err(Error::CapabilitiesExceeded);
     }
     Ok(())
