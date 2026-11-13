@@ -301,6 +301,12 @@ impl ConfigToml {
         config.admin.listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
         config.pkdns.icann_domain =
             Some(Domain::from_str("localhost").expect("localhost is a valid domain"));
+        // Keep tests off the public DHT: custom bootstrap nodes replace the mainnet ones
+        // and disable the default relays. Nothing listens on this address; a testnet
+        // overwrites it with its own bootstrap nodes.
+        config.pkdns.dht_bootstrap_nodes = Some(vec![
+            DomainPort::from_str("127.0.0.1:9").expect("127.0.0.1:9 is a valid domain:port")
+        ]);
         config.pkdns.dht_relay_nodes = None;
         config.storage.backend = StorageConfigToml::InMemory;
         config.logging = None;
