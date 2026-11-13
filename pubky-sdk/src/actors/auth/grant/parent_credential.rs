@@ -487,6 +487,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_parent_cannot_issue_children() {
+        let user = Keypair::random();
+        let key = Keypair::random();
+        let claims = GrantClaims {
+            iss: user.public_key(),
+            client_id: ClientId::new(ACCOUNTS).unwrap(),
+            caps: vec!["/pub/:rw".parse().unwrap()],
+            cnf: key.public_key(),
+            jti: GrantId::generate(),
+            iat: 1,
+            exp: 2,
+        };
+        let signed = ParentApprovalEnvelope::sign(&user, &claims, &[1; 32]);
+        // Restoration permits expired grants so their holder can still revoke
+        // them. Issuance must reject the expired authority itself.
+        let holder = ParentGrantCredential::from_signed_approval(&signed, key).unwrap();
+        let (request, _) = request("/pub/chat/:r");
+        for expires_at in [None, Some(now_unix() + 60)] {
+            let error = holder.issue_child(&request, expires_at).await.unwrap_err();
+            assert!(
+                matches!(&error, crate::Error::Authentication(AuthError::Validation(message))
+                    if message == "parent grant has expired"),
+                "{expires_at:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_redacts_the_approval_scoped_keys_and_signing_secret() {
+        let holder = holder(&Keypair::random(), "/pub/:rwe,/priv/:rwe");
+        let debug = format!("{holder:?}");
+        assert!(debug.contains("signed_approval: <redacted>"));
+        assert!(!debug.contains(holder.signed_approval()));
+        assert!(!debug.contains(holder.signed_approval().split('.').nth(1).unwrap()));
+
+        let bundle = serde_json::to_value(holder.encryption_keys()).unwrap();
+        let keys = bundle["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        for entry in keys {
+            let encoded = entry["secret"].as_str().unwrap();
+            let bytes = URL_SAFE_NO_PAD.decode(encoded).unwrap();
+            assert!(!debug.contains(encoded), "scoped key leaked as base64url");
+            assert!(
+                !debug.contains(&format!("{bytes:?}")),
+                "scoped key leaked as bytes"
+            );
+        }
+
+        let secret = holder.client_signer.local_secret().unwrap();
+        assert!(!debug.contains(&URL_SAFE_NO_PAD.encode(secret)));
+        assert!(!debug.contains(&format!("{secret:?}")));
+    }
+
+    #[tokio::test]
     async fn signing_failures_never_produce_a_child() {
         let user = Keypair::random();
         let local = holder(&user, "/pub/:rw");
