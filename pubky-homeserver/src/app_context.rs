@@ -5,6 +5,7 @@
 //! Create with a `DataDir` instance: `AppContext::try_from(data_dir)`
 //!
 
+use crate::services::lock_service::LockService;
 use crate::services::signup_service::SignupService;
 use crate::services::user_service::UserService;
 #[cfg(any(test, feature = "testing"))]
@@ -99,6 +100,8 @@ pub struct AppContext {
     pub(crate) user_service: UserService,
     /// Signup service for the signup policy, signup tokens and user creation on signup.
     pub(crate) signup_service: SignupService,
+    /// Lock service for the write locks on storage paths.
+    pub(crate) lock_service: LockService,
 }
 
 impl AppContext {
@@ -180,6 +183,7 @@ impl AppContext {
             .map_err(AppContextConversionError::RevocationListener)?;
 
         let user_service = UserService::new(sql_db.clone());
+        let lock_service = LockService::new(sql_db.clone());
         let signup_service = SignupService::new(
             sql_db.clone(),
             conf.general.signup_mode.clone(),
@@ -214,6 +218,7 @@ impl AppContext {
             revocation_listener,
             user_service,
             signup_service,
+            lock_service,
         })
     }
 }

@@ -6,8 +6,9 @@
 //! Locks expire after the granted `Timeout`, so a client that disappears blocks
 //! a path for at most [`MAX_LOCK_TIMEOUT_SECS`].
 //!
-//! A write checks the lock before it starts, see [`with_write_lock`]. An
-//! unlocked write holds nothing: a lock taken while it is still streaming does
+//! A write checks the lock before it starts, see
+//! [`LockService::run_write`](crate::services::lock_service::LockService::run_write).
+//! An unlocked write holds nothing: a lock taken while it is still streaming does
 //! not stop it from landing. A write that presents a token runs under that lock
 //! and keeps it alive until the write ends, so a slow upload cannot outlive its
 //! lock; should the lock be lost anyway, the write is refused before it is
@@ -22,35 +23,21 @@
 //! an unmapped path records the lock but creates nothing), and entity tags or
 //! the `Not` operator in `If`.
 
-use std::{future::Future, time::Duration};
-
 use axum::{
     body::Body,
     extract::State,
     http::{header, HeaderMap, Method, Response, StatusCode, Uri},
     response::IntoResponse,
 };
-use tokio::task::JoinHandle;
 
 use super::authorize::authorize_write;
 use crate::{
     client_server::{auth::AuthSession, AppState},
-    persistence::files::write_finalization_layer::write_lock,
-    persistence::sql::{
-        entry_lock::{EntryLockEntity, EntryLockRepository},
-        SqlDb, UnifiedExecutor,
-    },
+    persistence::sql::entry_lock::EntryLockEntity,
+    services::lock_service::{LockError, DEFAULT_LOCK_TIMEOUT_SECS, MAX_LOCK_TIMEOUT_SECS},
     shared::{webdav::EntryPath, HttpError, HttpResult},
 };
 
-/// Lock lifetime granted when the request carries no usable `Timeout`.
-const DEFAULT_LOCK_TIMEOUT_SECS: i64 = 30;
-/// Longest lock lifetime granted, whatever the client asks for.
-const MAX_LOCK_TIMEOUT_SECS: i64 = 60;
-/// How far ahead a write in flight keeps its lock alive.
-const WRITE_LOCK_HORIZON_SECS: i64 = 30;
-/// How often a write in flight extends its lock. Three chances per horizon.
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(WRITE_LOCK_HORIZON_SECS as u64 / 3);
 /// Largest `lockinfo` body read. A real one is a few hundred bytes.
 const MAX_LOCKINFO_BYTES: usize = 16 * 1024;
 const LOCK_TOKEN_SCHEME: &str = "opaquelocktoken:";
@@ -80,99 +67,6 @@ pub async fn dispatch(
     }
 }
 
-/// Run `write` on `entry_path` if the path's lock allows it.
-///
-/// - No token and no live lock: the write runs, holding nothing.
-/// - No token and a live lock: 423 Locked.
-/// - The `If` header names the live lock: the write runs under that lock, which
-///   is kept alive until the write ends. Checking and extending the lock is one
-///   statement, so it cannot expire between the two. The token is also handed
-///   to the write itself, which is refused if the lock is gone by the time it
-///   comes to change the file.
-/// - Tokens that name no live lock on this path: 412 Precondition Failed. A
-///   client whose lock expired learns that instead of silently writing unlocked.
-pub async fn with_write_lock<T>(
-    sql_db: &SqlDb,
-    entry_path: &EntryPath,
-    headers: &HeaderMap,
-    write: impl Future<Output = HttpResult<T>>,
-) -> HttpResult<T> {
-    let (lock_token, _keepalive) = check_lock(sql_db, entry_path, headers).await?.unzip();
-    write_lock::run_under(lock_token, write).await
-}
-
-/// The check of [`with_write_lock`], returning the token and keep-alive of a
-/// write under a held lock. A separate function so its pool connection is
-/// returned before the write runs: an upload can take a long time, and holding
-/// a connection for its duration would starve the write itself of one.
-async fn check_lock(
-    sql_db: &SqlDb,
-    entry_path: &EntryPath,
-    headers: &HeaderMap,
-) -> HttpResult<Option<(String, KeepAlive)>> {
-    let mut executor: UnifiedExecutor = sql_db.pool().into();
-    let held = if_header_tokens(headers);
-    if held.is_empty() {
-        return match EntryLockRepository::get_active(entry_path, &mut executor).await? {
-            None => Ok(None),
-            Some(_) => Err(HttpError::locked()),
-        };
-    }
-
-    let live =
-        EntryLockRepository::keep_alive(entry_path, &held, WRITE_LOCK_HORIZON_SECS, &mut executor)
-            .await?
-            .ok_or_else(HttpError::lock_token_mismatch)?;
-    let keepalive = KeepAlive::spawn(
-        sql_db.clone(),
-        entry_path.clone(),
-        live.token.clone(),
-        KEEPALIVE_INTERVAL,
-    );
-    Ok(Some((live.token, keepalive)))
-}
-
-/// Pushes a lock's expiry out every `interval` for as long as it is held.
-/// Dropping it, on completion or because the client went away, stops that.
-struct KeepAlive(JoinHandle<()>);
-
-impl KeepAlive {
-    fn spawn(sql_db: SqlDb, entry_path: EntryPath, token: String, interval: Duration) -> Self {
-        Self(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                let extended = EntryLockRepository::keep_alive(
-                    &entry_path,
-                    std::slice::from_ref(&token),
-                    WRITE_LOCK_HORIZON_SECS,
-                    &mut sql_db.pool().into(),
-                )
-                .await;
-                match extended {
-                    Ok(Some(_)) => {}
-                    // Expired through failed keep-alives, or the holder unlocked
-                    // it. The write is not stopped here: its finalization
-                    // refuses it once it finds the lock gone.
-                    Ok(None) => {
-                        tracing::warn!(path = %entry_path, "Lock lost while its write is in flight");
-                        return;
-                    }
-                    // Try again on the next tick.
-                    Err(error) => {
-                        tracing::warn!(path = %entry_path, %error, "Failed to keep lock alive")
-                    }
-                }
-            }
-        }))
-    }
-}
-
-impl Drop for KeepAlive {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 async fn lock(
     state: &AppState,
     session: Option<AuthSession>,
@@ -195,14 +89,14 @@ async fn lock(
         check_lockinfo(body).await?;
     }
 
-    let sql_db = &state.context.sql_db;
+    let lock_service = &state.context.lock_service;
     let lifetime = requested_timeout(headers);
     let lock = if is_new {
-        create_lock(sql_db, entry_path, lifetime).await?
+        lock_service.create(entry_path, lifetime).await?
     } else {
-        EntryLockRepository::refresh(entry_path, &presented, lifetime, &mut sql_db.pool().into())
+        lock_service
+            .refresh(entry_path, &presented, lifetime)
             .await?
-            .ok_or_else(HttpError::lock_token_mismatch)?
     };
     lock_response(&lock, lock_root, lifetime, is_new)
 }
@@ -223,20 +117,6 @@ async fn check_lockinfo(lockinfo: Body) -> HttpResult<()> {
     Ok(())
 }
 
-/// Grant a new lock, sweeping expired ones first.
-async fn create_lock(
-    sql_db: &SqlDb,
-    entry_path: &EntryPath,
-    lifetime_secs: i64,
-) -> HttpResult<EntryLockEntity> {
-    let token = uuid::Uuid::new_v4().to_string();
-    let mut executor: UnifiedExecutor = sql_db.pool().into();
-    EntryLockRepository::delete_expired(&mut executor).await?;
-    EntryLockRepository::acquire(entry_path, &token, lifetime_secs, &mut executor)
-        .await?
-        .ok_or_else(HttpError::locked)
-}
-
 async fn unlock(
     state: &AppState,
     session: Option<AuthSession>,
@@ -248,13 +128,25 @@ async fn unlock(
 
     let token = lock_token_header(headers)
         .ok_or_else(|| HttpError::bad_request("Missing or malformed Lock-Token header"))?;
-    let released =
-        EntryLockRepository::release(entry_path, &token, &mut state.context.sql_db.pool().into())
-            .await?;
+    let released = state
+        .context
+        .lock_service
+        .release(entry_path, &token)
+        .await?;
     if !released {
         return Err(HttpError::conflict("No lock with this token on this path"));
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+impl From<LockError> for HttpError {
+    fn from(error: LockError) -> Self {
+        match error {
+            LockError::Locked => HttpError::locked(),
+            LockError::TokenMismatch => HttpError::lock_token_mismatch(),
+            LockError::Db(error) => error.into(),
+        }
+    }
 }
 
 /// The `lockdiscovery` body of a lock just granted or refreshed for `remaining`
@@ -313,7 +205,7 @@ fn requested_timeout(headers: &HeaderMap) -> i64 {
 
 /// Every lock token in the `If` header. Resource tags and `Not` are ignored:
 /// a token counts wherever it appears.
-fn if_header_tokens(headers: &HeaderMap) -> Vec<String> {
+pub(super) fn if_header_tokens(headers: &HeaderMap) -> Vec<String> {
     headers
         .get_all("if")
         .iter()
@@ -383,7 +275,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        app_context::AppContext, client_server::ClientServer, shared::webdav::StoragePath,
+        app_context::AppContext,
+        client_server::ClientServer,
+        persistence::sql::{entry_lock::EntryLockRepository, SqlDb, UnifiedExecutor},
+        shared::webdav::StoragePath,
     };
 
     const LOCKINFO: &str = r#"<?xml version="1.0" encoding="utf-8"?><D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>"#;
@@ -512,150 +407,11 @@ mod tests {
         format!("({token})")
     }
 
-    async fn test_path() -> (Arc<AppContext>, EntryPath) {
-        let context = AppContext::test().await;
-        let path = EntryPath::new(
-            Keypair::random().public_key(),
-            StoragePath::new("/pub/state.bin").unwrap(),
-        );
-        (context, path)
-    }
-
     async fn expires_at(db: &SqlDb, path: &EntryPath) -> Option<i64> {
         EntryLockRepository::get_active(path, &mut db.pool().into())
             .await
             .unwrap()
             .map(|lock| lock.expires_at)
-    }
-
-    /// An unlocked write holds nothing, a write under the client's own lock
-    /// keeps that lock alive over the write's horizon and leaves it in place,
-    /// and everything else is refused before the write starts.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn write_runs_only_when_the_lock_allows_it() {
-        // One connection: a write that needs the database while the lock
-        // check still holds its connection would time out. Uploads are long,
-        // so the check must give its connection back before the write runs.
-        let db = SqlDb::test_with_pool_options(1, Duration::from_secs(2)).await;
-        let path = EntryPath::new(
-            Keypair::random().public_key(),
-            StoragePath::new("/pub/state.bin").unwrap(),
-        );
-        let status_of = |result: HttpResult<()>| result.err().map(|e| e.into_response().status());
-        let write = |headers: HeaderMap, body: HttpResult<()>| {
-            let (db, path) = (db.clone(), path.clone());
-            async move {
-                with_write_lock(&db, &path, &headers, async {
-                    db.pool()
-                        .acquire()
-                        .await
-                        .expect("the lock check must not hold a connection over the write");
-                    body
-                })
-                .await
-            }
-        };
-
-        // Free path: the write runs, and a failure changes nothing.
-        write(HeaderMap::new(), Ok(())).await.unwrap();
-        let failed = write(HeaderMap::new(), Err(HttpError::not_found())).await;
-        assert_eq!(status_of(failed), Some(StatusCode::NOT_FOUND));
-        assert_eq!(expires_at(&db, &path).await, None);
-        let stale = write(headers_with("if", "(<opaquelocktoken:stale>)"), Ok(())).await;
-        assert_eq!(status_of(stale), Some(StatusCode::PRECONDITION_FAILED));
-
-        // Locked path.
-        let granted = EntryLockRepository::acquire(&path, "t", 5, &mut db.pool().into())
-            .await
-            .unwrap()
-            .unwrap();
-        let unlocked = write(HeaderMap::new(), Ok(())).await;
-        assert_eq!(status_of(unlocked), Some(StatusCode::LOCKED));
-        let wrong = write(headers_with("if", "(<opaquelocktoken:other>)"), Ok(())).await;
-        assert_eq!(status_of(wrong), Some(StatusCode::PRECONDITION_FAILED));
-        write(headers_with("if", "(<opaquelocktoken:t>)"), Ok(()))
-            .await
-            .unwrap();
-        // Granted 5 seconds, now at least the full horizon, and still held.
-        let extended = expires_at(&db, &path).await.unwrap();
-        assert!(extended >= granted.expires_at + WRITE_LOCK_HORIZON_SECS - 5);
-        let unlocked = write(HeaderMap::new(), Ok(())).await;
-        assert_eq!(status_of(unlocked), Some(StatusCode::LOCKED));
-    }
-
-    /// A token is only good on the path it was granted for: presenting it on
-    /// another path of the same user, or the same path of another user, is a
-    /// mismatch, and the lock it names is neither extended nor released.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn token_is_refused_on_any_other_path() {
-        let (context, path) = test_path().await;
-        let granted =
-            EntryLockRepository::acquire(&path, "t", 5, &mut context.sql_db.pool().into())
-                .await
-                .unwrap()
-                .unwrap();
-
-        let sibling = EntryPath::new(
-            path.pubkey().clone(),
-            StoragePath::new("/pub/other.bin").unwrap(),
-        );
-        let same_path_other_user =
-            EntryPath::new(Keypair::random().public_key(), path.path().clone());
-        for other in [&sibling, &same_path_other_user] {
-            let headers = headers_with("if", "(<opaquelocktoken:t>)");
-            let result = with_write_lock(&context.sql_db, other, &headers, async { Ok(()) }).await;
-            assert_eq!(
-                result.err().map(|e| e.into_response().status()),
-                Some(StatusCode::PRECONDITION_FAILED),
-                "token for {path} must be refused on {other}"
-            );
-            assert_eq!(expires_at(&context.sql_db, other).await, None);
-        }
-        assert_eq!(
-            expires_at(&context.sql_db, &path).await,
-            Some(granted.expires_at)
-        );
-    }
-
-    /// A write in flight pushes its lock's expiry out, and stops doing so once
-    /// its keep-alive is dropped.
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn keepalive_extends_a_lock_that_is_running_out() {
-        let (context, path) = test_path().await;
-        let granted =
-            EntryLockRepository::acquire(&path, "t", 5, &mut context.sql_db.pool().into())
-                .await
-                .unwrap()
-                .unwrap();
-
-        let keepalive = KeepAlive::spawn(
-            context.sql_db.clone(),
-            path.clone(),
-            "t".to_string(),
-            Duration::from_millis(20),
-        );
-        let mut extended = None;
-        for _ in 0..100 {
-            // Granted 5 seconds, extended to the full horizon.
-            extended = expires_at(&context.sql_db, &path)
-                .await
-                .filter(|at| *at >= granted.expires_at + WRITE_LOCK_HORIZON_SECS - 5);
-            if extended.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(extended.is_some(), "the keep-alive never extended the lock");
-
-        drop(keepalive);
-        EntryLockRepository::expire(&path, &mut context.sql_db.pool().into())
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(expires_at(&context.sql_db, &path).await, None);
     }
 
     #[tokio::test]

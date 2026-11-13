@@ -7,7 +7,7 @@ use axum::{
 };
 use futures_util::stream::StreamExt;
 
-use super::{authorize::authorize_write, lock};
+use super::{authorize::authorize_write, lock::if_header_tokens};
 use crate::{
     client_server::{auth::AuthSession, middleware::request_tenant::RequestTenant, AppState},
     persistence::files::WriteStreamError,
@@ -36,10 +36,12 @@ pub async fn delete(
 ) -> HttpResult<impl IntoResponse> {
     authorize_write(&state, &session, &entry_path, false).await?;
 
-    lock::with_write_lock(&state.context.sql_db, &entry_path, &headers, async {
-        Ok(state.context.file_service.delete(&entry_path).await?)
-    })
-    .await?;
+    let delete = state.context.file_service.delete(&entry_path);
+    state
+        .context
+        .lock_service
+        .run_write(&entry_path, &if_header_tokens(&headers), delete)
+        .await??;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -81,13 +83,15 @@ pub async fn put(
     let converted_stream =
         body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
 
-    lock::with_write_lock(&state.context.sql_db, &entry_path, &headers, async {
-        let file_service = &state.context.file_service;
-        Ok(file_service
-            .write_stream(&entry_path, converted_stream)
-            .await?)
-    })
-    .await?;
+    let write = state
+        .context
+        .file_service
+        .write_stream(&entry_path, converted_stream);
+    state
+        .context
+        .lock_service
+        .run_write(&entry_path, &if_header_tokens(&headers), write)
+        .await??;
     Ok((StatusCode::CREATED, ()))
 }
 

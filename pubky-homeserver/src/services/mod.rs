@@ -26,5 +26,6 @@
 //! not fit, say why in the code.
 
 pub mod events_service;
+pub(crate) mod lock_service;
 pub mod signup_service;
 pub mod user_service;
