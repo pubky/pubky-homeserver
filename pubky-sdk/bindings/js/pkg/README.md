@@ -683,8 +683,10 @@ interface PubkyError extends Error {
 ```
 
 `RequestError` carries a `RequestErrorData`: `reason` (`Http`, `Timeout`,
-`Connection`, `TlsVerification`, `Body`, `Decode`, `InvalidRequest` or `Other`)
-and, for HTTP failures, `statusCode`. Browser Fetch may only report `Other`.
+`Connection`, `TlsVerification`, `Body`, `Decode`, `InvalidRequest`, `Oversized`
+or `Other`) and, for HTTP failures, `statusCode`. Browser Fetch may only report
+`Other`. `Oversized` means a response body or event exceeded a client-side byte
+limit; it does not mean the homeserver rejected the session.
 `TlsVerification` means the server certificate was rejected; after a legitimate
 key rotation a stale pkarr cache looks the same, so it does not prove
 interception on its own. A reason describes the failure, not whether retrying a
@@ -699,10 +701,12 @@ if (error.name === "RequestError") {
 ```
 
 `CredentialRefreshError` represents secret-safe refresh request failures. It
-includes `data: { statusCode: number }` when the refresh endpoint responded, while
-transport failures omit `data`. Local authentication, resolution, parsing, and
-build failures keep their normal error names. This distinguishes unavailable
-grant refresh from a failure returned by the requested storage operation.
+includes `data: { statusCode: number }` when the refresh endpoint responded and
+`data: { reason: "Oversized" }` when its response exceeded the client's byte
+limit, while transport failures omit `data`. Local authentication, resolution,
+parsing, and build failures keep their normal error names. This distinguishes
+unavailable grant refresh from a failure returned by the requested storage
+operation.
 
 Example:
 

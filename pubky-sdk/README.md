@@ -88,7 +88,8 @@ let pubky = Pubky::with_client(client);
 The setting applies to checked requests made through that client except
 credential refresh. Refresh HTTP failures always skip and cancel response
 bodies regardless of `max_error_body_bytes`. Refresh request failures surface
-as `Error::CredentialRefresh(CredentialRefreshError)`. Other error categories
+as `Error::CredentialRefresh(CredentialRefreshError)`; a refresh response over
+the client's byte limit is its `Oversized` variant. Other error categories
 keep their original variants. The refresh request error retains an optional
 HTTP status but redacts HTTP response bodies and request URLs from `Display`
 and `Debug`. Other checked request errors use the captured message. Set the
@@ -527,8 +528,10 @@ panics on grant sessions.
 ## Request errors
 
 [`errors::RequestError::kind`] classifies a failure as an HTTP status, timeout,
-connection, body, decoding or invalid-request error, or `Other` when the
-transport gives no more detail (browser Fetch exposes less than native). The
+connection, body, decoding, invalid-request or oversized-response error, or
+`Other` when the transport gives no more detail (browser Fetch exposes less
+than native). `Oversized` means a response body or event exceeded a client-side
+byte limit, not that the homeserver rejected the session. The
 category carries no URL, body or credentials; the original error keeps the
 diagnostics. A category describes what was observed, not whether a retry is
 safe: a timeout does not prove a write was not committed.

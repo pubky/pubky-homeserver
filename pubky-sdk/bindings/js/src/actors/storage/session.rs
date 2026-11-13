@@ -18,7 +18,9 @@ const TS_PATH: &'static str = r#"export type Path = `/pub/${string}` | `/priv/${
 /// Failures reject with a {@link PubkyError}. Path validation, transport, and HTTP
 /// failures use `RequestError`; only HTTP errors include `data.statusCode`.
 /// Automatic grant refresh failures use `CredentialRefreshError`, with the
-/// refresh HTTP status in `data.statusCode` when available. URL parsing failures
+/// refresh HTTP status in `data.statusCode` when available, or
+/// `data.reason` set to `"Oversized"` when the refresh response exceeded the
+/// client's byte limit. URL parsing failures
 /// use `InvalidInput`. Other credential preparation and reading response bodies
 /// can also fail.
 ///
