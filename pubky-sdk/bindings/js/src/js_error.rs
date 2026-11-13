@@ -595,13 +595,15 @@ mod tests {
             .timeout(std::time::Duration::from_millis(50))
             .send()
             .await;
-        let chunk = match response {
-            Ok(response) => response.bytes_stream().next().await,
-            Err(error) => Some(Err(error)),
-        };
         Reflect::set(&js_sys::global(), &"fetch".into(), &original).unwrap();
 
-        let error = chunk
+        // The deadline must expire during the body read, not while awaiting
+        // the headers, which reqwest already reports as a typed timeout.
+        let response = response.expect("headers must arrive before the deadline");
+        let error = response
+            .bytes_stream()
+            .next()
+            .await
             .expect("the stalled body must fail")
             .expect_err("the stalled body must not yield");
         assert_eq!(
