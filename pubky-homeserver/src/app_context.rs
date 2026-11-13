@@ -227,17 +227,6 @@ impl AppContext {
     /// Build the pkarr client builder based on the config.
     fn build_pkarr_builder_from_config(config_toml: &ConfigToml) -> pkarr::ClientBuilder {
         let mut builder = pkarr::ClientBuilder::default();
-        #[cfg(any(test, feature = "testing"))]
-        // In test builds, no explicit database_url means we're in a test environment
-        // where we must avoid contacting the public DHT.
-        if config_toml.general.database_url.is_none() {
-            builder
-                .no_default_network()
-                // Keep the client buildable without contacting the public DHT.
-                // Explicit testnet bootstrap nodes below replace this sentinel.
-                .bootstrap(&["127.0.0.1:9"])
-                .dht_report_policy(pkarr::dht::ReportPolicy::testnet());
-        }
         if let Some(bootstrap_nodes) = &config_toml.pkdns.dht_bootstrap_nodes {
             let nodes = bootstrap_nodes
                 .iter()
@@ -312,22 +301,25 @@ mod tests {
         }
     }
 
-    /// Verifies that the test pkarr builder doesn't contact the public DHT
-    /// when database_url is None (the default test config).
+    /// The default test config must keep the pkarr client off the public network,
+    /// whatever database it points at.
     #[test]
-    fn pkarr_builder_does_not_use_default_network() {
-        let config = ConfigToml::default_test_config();
-        assert!(
-            config.general.database_url.is_none(),
-            "default_test_config should have database_url = None"
-        );
+    fn default_test_config_does_not_use_default_network() {
+        let mut config = ConfigToml::default_test_config();
+        config.general.database_url = ConfigToml::default().general.database_url;
         let builder = AppContext::build_pkarr_builder_from_config(&config);
         let builder_debug = format!("{builder:?}");
 
-        assert!(
-            builder_debug.contains("127.0.0.1:9"),
-            "expected sentinel bootstrap node in builder: {builder_debug}"
-        );
+        let bootstrap_nodes = config
+            .pkdns
+            .dht_bootstrap_nodes
+            .expect("default_test_config should set bootstrap nodes");
+        for node in bootstrap_nodes {
+            assert!(
+                builder_debug.contains(&node.to_string()),
+                "expected bootstrap node {node} in builder: {builder_debug}"
+            );
+        }
         for relay in pkarr::DEFAULT_RELAYS {
             assert!(
                 !builder_debug.contains(relay),

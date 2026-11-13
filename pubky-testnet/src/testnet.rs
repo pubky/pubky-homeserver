@@ -251,6 +251,28 @@ mod test {
         assert_eq!(testnet.http_relays.len(), 1);
     }
 
+    /// A homeserver created by the testnet must not reach the public DHT or the
+    /// default relays.
+    #[tokio::test]
+    #[crate::test]
+    async fn homeserver_pkarr_builder_uses_only_the_testnet_network() {
+        let mut testnet = Testnet::new().await.unwrap();
+        let expected_bootstrap = format!("bootstrap: Some([{}])", testnet.dht.bootstrap.join(", "));
+
+        let homeserver = testnet.create_homeserver().await.unwrap();
+        let builder_debug = format!("{:?}", homeserver.pkarr_builder());
+
+        assert!(
+            builder_debug.contains(&expected_bootstrap),
+            "expected only the testnet bootstrap nodes ({expected_bootstrap}): {builder_debug}"
+        );
+        // The testnet has no pkarr relay, so the homeserver must have none either.
+        assert!(
+            builder_debug.contains("relays: None"),
+            "expected no relays: {builder_debug}"
+        );
+    }
+
     /// Boostrap node conversion
     #[tokio::test]
     #[crate::test]

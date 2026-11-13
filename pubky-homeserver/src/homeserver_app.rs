@@ -149,6 +149,13 @@ impl HomeserverApp {
         self.metrics_server.as_ref()
     }
 
+    /// The pkarr client builder this homeserver uses, for tests that check
+    /// which network it joins.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pkarr_builder(&self) -> &pkarr::ClientBuilder {
+        &self.context.pkarr_builder
+    }
+
     /// Returns the public_key of this server.
     pub fn public_key(&self) -> PublicKey {
         self.context.keypair.public_key()
