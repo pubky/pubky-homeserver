@@ -42,7 +42,8 @@ globalThis.fetch = async (input, init) => {
     ? await realFetch(`${location.origin}/testnet/${url.port}${url.pathname}${url.search}`, {
       method: request.method,
       headers: request.headers,
-      body: request.body ? await request.arrayBuffer() : undefined,
+      // Firefox reads request bytes but doesn't expose Request.body.
+      body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer(),
       credentials: request.credentials,
       signal: request.signal,
     })
