@@ -41,6 +41,10 @@ const DEFAULT_TEST_SERVER: &str = "postgres://localhost:5432/postgres";
 
 #[cfg(any(test, feature = "testing"))]
 impl DatabaseMode {
+    /// Environment variable naming the Postgres connection string for tests
+    /// and testnets.
+    pub const TEST_CONNECTION_STRING_ENV: &str = "TEST_PUBKY_CONNECTION_STRING";
+
     /// Resolve a `database_url` from config into a `DatabaseMode`.
     ///
     /// Priority:
@@ -51,7 +55,7 @@ impl DatabaseMode {
     /// Tests always get ephemeral databases — the decision is encoded here,
     /// not in a URL query parameter.
     pub fn resolve_test(explicit: Option<ConnectionString>) -> anyhow::Result<Self> {
-        let env_val = std::env::var("TEST_PUBKY_CONNECTION_STRING").ok();
+        let env_val = std::env::var(Self::TEST_CONNECTION_STRING_ENV).ok();
         Self::resolve_test_inner(explicit, env_val)
     }
 
@@ -63,7 +67,10 @@ impl DatabaseMode {
         let url = match (explicit, env_val) {
             (Some(url), _) => url,
             (None, Some(raw)) => ConnectionString::new(&raw).map_err(|e| {
-                anyhow::anyhow!("Invalid TEST_PUBKY_CONNECTION_STRING: {raw}. Error: {e}")
+                anyhow::anyhow!(
+                    "Invalid {}: {raw}. Error: {e}",
+                    Self::TEST_CONNECTION_STRING_ENV
+                )
             })?,
             (None, None) => ConnectionString::new(DEFAULT_TEST_SERVER)
                 .expect("Default test connection string is valid"),

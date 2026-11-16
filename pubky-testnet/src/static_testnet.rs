@@ -12,8 +12,8 @@ use crate::Testnet;
 use http_relay::HttpRelay;
 use pubky_common::constants::testnet_ports;
 use pubky_homeserver::{
-    AppContext, ConfigToml, ConnectionString, DataDir, DomainPort, HomeserverApp, MockDataDir,
-    PersistentDataDir,
+    AppContext, ConfigToml, ConnectionString, DataDir, DatabaseMode, DomainPort, HomeserverApp,
+    MockDataDir, PersistentDataDir,
 };
 
 /// The bind address used for all static testnet listeners.
@@ -23,7 +23,10 @@ const BIND_ALL: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
 ///
 /// Unlike the ephemeral modes, which treat it as a server to create throwaway
 /// databases on, persistent mode connects to the database it names.
-const DATABASE_URL_ENV: &str = "TEST_PUBKY_CONNECTION_STRING";
+const DATABASE_URL_ENV: &str = DatabaseMode::TEST_CONNECTION_STRING_ENV;
+
+/// The Postgres maintenance database, which should not hold testnet tables.
+const MAINTENANCE_DATABASE: &str = "postgres";
 
 /// Apply the fixed static-testnet port and DHT overrides to a config.
 fn apply_static_testnet_overrides(config: &mut ConfigToml, bootstrap_nodes: Vec<DomainPort>) {
@@ -465,14 +468,24 @@ impl DataDir for TestnetDataDir {
     fn read_or_create_config_file(&self) -> anyhow::Result<ConfigToml> {
         let mut config = self.inner.read_or_create_config_file()?;
         apply_static_testnet_overrides(&mut config, self.dht_bootstrap_nodes.clone());
-        config.general.database_url = self
-            .postgres_connection_string
-            .clone()
-            .or(config.general.database_url);
-        if config.general.database_url.is_none() {
+        let source = match &self.postgres_connection_string {
+            Some(url) => {
+                config.general.database_url = Some(url.clone());
+                DATABASE_URL_ENV
+            }
+            None => "database_url in config.toml",
+        };
+        let Some(url) = &config.general.database_url else {
             anyhow::bail!(
                 "Persistent testnet requires an explicit database URL. \
                  Set `database_url` in config.toml under [general]."
+            );
+        };
+        tracing::info!("Using database `{}` from {source}", url.database_name());
+        if url.database_name() == MAINTENANCE_DATABASE {
+            tracing::warn!(
+                "Persistent testnet tables are going into the `{MAINTENANCE_DATABASE}` \
+                 maintenance database; point {source} at a dedicated database instead"
             );
         }
         Ok(config)
