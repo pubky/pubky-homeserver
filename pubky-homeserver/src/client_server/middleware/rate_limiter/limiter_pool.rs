@@ -4,6 +4,7 @@
 //! instance, keyed by their public key. This avoids creating one governor
 //! per user while still allowing per-user tracking.
 
+use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,14 +13,18 @@ use dashmap::DashMap;
 use governor::clock::QuantaClock;
 use governor::state::keyed::DashMapStateStore;
 use governor::{Quota, RateLimiter};
+use percent_encoding::percent_decode_str;
 
 use crate::shared::quota::{BandwidthQuota, LimitKey, LimitKeyType, PathLimit};
+use crate::shared::webdav::StoragePath;
 
 use super::extract_ip::{extract_ip, MissingClientAddress};
 use super::CLEANUP_INTERVAL_SECS;
 use crate::client_server::middleware::request_tenant::RequestTenant;
+use crate::client_server::routes::tenants::LEGACY_STORAGE_ROUTE;
 use axum::body::Body;
-use axum::http::Request;
+use axum::extract::MatchedPath;
+use axum::http::{Method, Request};
 
 pub(super) type KeyedRateLimiter = RateLimiter<LimitKey, DashMapStateStore<LimitKey>, QuantaClock>;
 
@@ -136,16 +141,41 @@ impl LimitTuple {
         }
     }
 
-    /// Check if the request matches the limit.
-    pub fn is_match(&self, req: &Request<Body>) -> bool {
-        let path = req
-            .extensions()
-            .get::<RequestTenant>()
-            .and_then(RequestTenant::storage_path)
-            .map_or(req.uri().path(), |path| path.as_str());
-        let glob_match = self.limit.path.is_match(path);
-        let method_match = self.limit.method.0 == req.method();
-        glob_match && method_match
+    /// Check if a request with `method` and the [`limit_match_path`] `path`
+    /// matches the limit.
+    pub fn is_match(&self, method: &Method, path: &str) -> bool {
+        self.limit.method.0 == method && self.limit.path.is_match(path)
+    }
+}
+
+/// The path that rate limits match a request against.
+///
+/// Storage requests match the storage path their handler accesses, so encoded
+/// spellings such as `/%70ub/file` share the limits of `/pub/file`:
+///
+/// - A resolved storage path (`/storage/...` and website requests) is used as is.
+/// - The legacy storage route is decoded once and normalized, like its
+///   `Path<WebDavPathAxum>` extractor. If that fails, the raw path is kept and
+///   the extractor rejects the request.
+/// - Other routes use the raw URI path.
+pub(super) fn limit_match_path(req: &Request<Body>) -> Cow<'_, str> {
+    let extensions = req.extensions();
+    if let Some(path) = extensions
+        .get::<RequestTenant>()
+        .and_then(RequestTenant::storage_path)
+    {
+        return Cow::Borrowed(path.as_str());
+    }
+
+    let raw_path = req.uri().path();
+    // Use the matched route, not a `/pub/` prefix, which encoding can disguise.
+    if extensions.get::<MatchedPath>().map(MatchedPath::as_str) != Some(LEGACY_STORAGE_ROUTE) {
+        return Cow::Borrowed(raw_path);
+    }
+    match percent_decode_str(raw_path).decode_utf8() {
+        Ok(decoded) => StoragePath::normalize(&decoded)
+            .map_or(Cow::Borrowed(raw_path), |path| Cow::Owned(path.to_string())),
+        Err(_) => Cow::Borrowed(raw_path),
     }
 }
 

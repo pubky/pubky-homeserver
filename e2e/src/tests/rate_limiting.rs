@@ -342,3 +342,89 @@ async fn test_limit_signup_tokens() {
     let res = client.request(Method::GET, &url).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// Percent-encoded legacy paths share the rate limits of the file they read,
+/// and still need authorization for private files.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn encoded_legacy_paths_share_rate_limits() {
+    let mut config = ConfigToml::default_test_config();
+    config.drive.rate_limits = vec![PathLimit {
+        path: GlobPattern::new("/pub/*"),
+        method: HttpMethod(Method::GET),
+        quota: "1r/m".parse().unwrap(),
+        key: LimitKeyType::User,
+        burst: None,
+        whitelist: Vec::new(),
+    }];
+
+    let testnet = EphemeralTestnet::builder()
+        .config(config)
+        .build()
+        .await
+        .unwrap();
+
+    let server = testnet.homeserver_app();
+    let pubky = testnet.sdk().unwrap();
+    let client = pubky.client();
+    let base_url = server.icann_http_url();
+
+    for (first, second) in [
+        ("pub/file.txt", "%70ub/file.txt"),
+        ("%70ub/file.txt", "pub/file.txt"),
+    ] {
+        // A new owner starts with a full user quota.
+        let session = pubky
+            .signer(Keypair::random())
+            .signup_cookie(&server.public_key(), None)
+            .await
+            .unwrap();
+        session
+            .storage()
+            .put("/pub/file.txt", "public file")
+            .await
+            .unwrap();
+        let owner = session.public_key().z32();
+
+        let response = client
+            .request(Method::GET, &format!("{base_url}{first}"))
+            .header("pubky-host", &owner)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{first}");
+        assert_eq!(response.text().await.unwrap(), "public file", "{first}");
+
+        let response = client
+            .request(Method::GET, &format!("{base_url}{second}"))
+            .header("pubky-host", &owner)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "{second} after {first}"
+        );
+        assert!(response.headers().contains_key("retry-after"));
+    }
+
+    // An encoded private path is still a private path.
+    let session = pubky
+        .signer(Keypair::random())
+        .signup_cookie(&server.public_key(), None)
+        .await
+        .unwrap();
+    session
+        .storage()
+        .put("/priv/secret.txt", "private file")
+        .await
+        .unwrap();
+    let response = client
+        .request(Method::GET, &format!("{base_url}%70riv/secret.txt"))
+        .header("pubky-host", session.public_key().z32())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

@@ -16,7 +16,7 @@ use tower::{Layer, Service};
 use crate::shared::quota::PathLimit;
 use crate::shared::HttpError;
 
-use super::limiter_pool::{LimitKeyExtractionError, LimitTuple};
+use super::limiter_pool::{limit_match_path, LimitKeyExtractionError, LimitTuple};
 
 /// A Tower Layer for request-count rate limiting.
 ///
@@ -83,15 +83,11 @@ where
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let mut inner = self.inner.clone();
-
-        if !self.limits.iter().any(|l| l.is_match(&req)) {
-            return Box::pin(async move { inner.call(req).await });
-        }
-
-        let limits = self.limits.clone();
+        // The checks are synchronous, so run them before moving the request.
+        let checked = check_request_count_limits(&self.limits, &req);
 
         Box::pin(async move {
-            if let Err(resp) = check_request_count_limits(&limits, &req) {
+            if let Err(resp) = checked {
                 return Ok(resp);
             }
             inner.call(req).await
@@ -102,8 +98,9 @@ where
 /// Check request-count path limits. Returns an error response if any limit is exceeded.
 #[allow(clippy::result_large_err)]
 fn check_request_count_limits(limits: &[LimitTuple], req: &Request<Body>) -> Result<(), Response> {
+    let path = limit_match_path(req);
     for limit in limits {
-        if !limit.is_match(req) {
+        if !limit.is_match(req.method(), &path) {
             continue;
         }
         let key = match limit.extract_key(req) {
@@ -161,7 +158,7 @@ mod tests {
         time::Duration,
     };
 
-    use axum::extract::ConnectInfo;
+    use axum::extract::{ConnectInfo, Path};
     use axum::http::{header::RETRY_AFTER, Method};
     use axum::response::IntoResponse;
     use axum::{
@@ -180,7 +177,9 @@ mod tests {
         with_http_header_identity, ClientIdentityAcceptor,
     };
     use crate::client_server::middleware::request_tenant::RequestTenant;
+    use crate::client_server::routes::tenants::LEGACY_STORAGE_ROUTE;
     use crate::shared::quota::{GlobPattern, HttpMethod, LimitKey, LimitKeyType};
+    use crate::shared::webdav::WebDavPathAxum;
     use crate::shared::HttpResult;
     use crate::ClientIdentityToml;
 
@@ -192,6 +191,11 @@ mod tests {
 
     async fn download_handler() -> HttpResult<impl IntoResponse> {
         Ok((StatusCode::OK, ()))
+    }
+
+    /// Returns the storage path a legacy storage handler would access.
+    async fn legacy_storage_handler(Path(path): Path<WebDavPathAxum>) -> String {
+        path.to_string()
     }
 
     async fn start_server(config: Vec<PathLimit>) -> SocketAddr {
@@ -206,6 +210,7 @@ mod tests {
             .route("/upload", post(upload_handler))
             .route("/download", get(download_handler))
             .route("/storage/{user_z32}/{*path}", get(download_handler))
+            .route(LEGACY_STORAGE_ROUTE, get(legacy_storage_handler))
             .layer(
                 RequestRateLimitLayer::from_path_limits(config)
                     .expect("valid test request-count rate limit"),
@@ -564,6 +569,143 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Sends `raw_path` unchanged, so no client can clean up the URL first.
+    /// Returns the status code and body.
+    async fn raw_request(
+        socket: SocketAddr,
+        method: &str,
+        raw_path: &str,
+        owner: &PublicKey,
+    ) -> (u16, String) {
+        let mut stream = tokio::net::TcpStream::connect(socket).await.unwrap();
+        let request = format!(
+            "{method} {raw_path} HTTP/1.1\r\nHost: localhost\r\npubky-host: {}\r\nConnection: close\r\n\r\n",
+            owner.z32()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+        (status, body.to_string())
+    }
+
+    async fn raw_get(socket: SocketAddr, raw_path: &str, owner: &PublicKey) -> (u16, String) {
+        raw_request(socket, "GET", raw_path, owner).await
+    }
+
+    fn storage_get_limit(path: &str, key: LimitKeyType) -> PathLimit {
+        PathLimit {
+            path: GlobPattern::new(path),
+            method: HttpMethod(Method::GET),
+            quota: "1r/m".parse().unwrap(),
+            key,
+            burst: None,
+            whitelist: Vec::new(),
+        }
+    }
+
+    /// Encoded separators, repeated slashes, and dot segments share the quota
+    /// of the storage path they access, in either order.
+    #[tokio::test]
+    async fn encoded_legacy_paths_share_storage_path_quota() {
+        let socket = start_server(vec![storage_get_limit("/pub/*", LimitKeyType::User)]).await;
+        for alias in [
+            "/%70ub/file",
+            "/pub%2Ffile",
+            "/pub//file",
+            "//pub/file",
+            "/pub/./file",
+            "/pub/dir/../file",
+            "/dir/%2E%2E/pub/file",
+        ] {
+            for (first, second) in [("/pub/file", alias), (alias, "/pub/file")] {
+                // A new owner starts with a full user quota.
+                let owner = Keypair::random().public_key();
+                let response = raw_get(socket, first, &owner).await;
+                assert_eq!(response, (200, "/pub/file".into()), "{first}");
+                let status = raw_get(socket, second, &owner).await.0;
+                assert_eq!(status, 429, "{second} after {first}");
+            }
+        }
+    }
+
+    /// Paths are decoded once: a literal `%70` names a different file than `p`.
+    #[tokio::test]
+    async fn double_encoded_legacy_paths_decode_once() {
+        let socket = start_server(vec![storage_get_limit("/pub/p.txt", LimitKeyType::User)]).await;
+        let owner = Keypair::random().public_key();
+
+        let response = raw_get(socket, "/pub/%70.txt", &owner).await;
+        assert_eq!(response, (200, "/pub/p.txt".into()));
+        // `%2570` names the literal file `%70.txt`, which the rule does not cover.
+        let response = raw_get(socket, "/pub/%2570.txt", &owner).await;
+        assert_eq!(response, (200, "/pub/%70.txt".into()));
+        assert_eq!(raw_get(socket, "/pub/p.txt", &owner).await.0, 429);
+    }
+
+    /// Paths that fail to decode or normalize keep raw-path limiting, and the
+    /// handler's extractor rejects them before any storage access.
+    #[tokio::test]
+    async fn invalid_legacy_paths_keep_raw_limits_and_are_rejected() {
+        let socket = start_server(vec![storage_get_limit("/pub/*", LimitKeyType::User)]).await;
+        for invalid in [
+            "/pub/%FF",                 // Invalid UTF-8.
+            "/pub/%2E%2E%2F%2E%2E%2Fx", // Traversal above the root.
+            "/pub/a%5Cb",               // Backslash.
+            "/pub/a%0Ab",               // Control character.
+            "/pub/a%20",                // Trailing whitespace.
+        ] {
+            let owner = Keypair::random().public_key();
+            assert_eq!(raw_get(socket, invalid, &owner).await.0, 400, "{invalid}");
+            // The raw path matches `/pub/*`, so the rejected request used the quota.
+            assert_eq!(raw_get(socket, invalid, &owner).await.0, 429, "{invalid}");
+        }
+    }
+
+    /// Legacy and `/storage/{owner}/...` requests for one file share a quota.
+    #[tokio::test]
+    async fn legacy_and_storage_routes_share_limits() {
+        let socket = start_server(vec![storage_get_limit("/pub/*", LimitKeyType::User)]).await;
+        for storage_first in [false, true] {
+            let owner = Keypair::random().public_key();
+            let mut paths = [
+                "/%70ub/file".to_string(),
+                format!("/storage/{}/pub/file", owner.z32()),
+            ];
+            if storage_first {
+                paths.reverse();
+            }
+            let [first, second] = &paths;
+            assert_eq!(raw_get(socket, first, &owner).await.0, 200, "{first}");
+            let status = raw_get(socket, second, &owner).await.0;
+            assert_eq!(status, 429, "{second} after {first}");
+        }
+    }
+
+    /// Storage path matching keeps per-user keys, method filters, and whitelists.
+    #[tokio::test]
+    async fn encoded_legacy_paths_keep_key_method_and_whitelist_rules() {
+        let whitelisted = Keypair::random().public_key();
+        let mut limit = storage_get_limit("/pub/*", LimitKeyType::User);
+        limit.whitelist = vec![LimitKey::User(whitelisted.clone())];
+        let socket = start_server(vec![limit]).await;
+        let owner = Keypair::random().public_key();
+        let other = Keypair::random().public_key();
+
+        assert_eq!(raw_get(socket, "/%70ub/file", &owner).await.0, 200);
+        assert_eq!(raw_get(socket, "/%70ub/file", &owner).await.0, 429);
+        // A GET rule does not limit HEAD.
+        let status = raw_request(socket, "HEAD", "/%70ub/file", &owner).await.0;
+        assert_eq!(status, 200);
+        // Each user has a separate quota.
+        assert_eq!(raw_get(socket, "/%70ub/file", &other).await.0, 200);
+        // Whitelisted users are never limited.
+        for _ in 0..3 {
+            assert_eq!(raw_get(socket, "/%70ub/file", &whitelisted).await.0, 200);
+        }
     }
 
     /// A `429 Too Many Requests` response must carry a `Retry-After: <seconds>` header whose value

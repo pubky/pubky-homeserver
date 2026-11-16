@@ -96,6 +96,15 @@ info:
     returns `409`, and the client reads the file again and retries. A `DELETE`
     is done once the entry is removed; a blob the backend refuses to remove
     stays until the next write or delete on the path.
+
+    ## Rate Limits
+
+    Operators can limit request counts per path and method, keyed by client IP
+    or user. A limited request returns `429` with `Retry-After` in seconds.
+    Storage requests match limits by their decoded, normalized storage path, so
+    `/%70ub/file`, `/pub//file`, `/pub/./file` and
+    `/storage/{user_z32}/pub/file` share the limits of `/pub/file`. Other
+    requests match their path as sent.
   version: 0.9.0
   license:
     name: MIT
