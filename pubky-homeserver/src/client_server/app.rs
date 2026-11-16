@@ -46,8 +46,8 @@ pub enum ClientServerBuildError {
     /// Failed to run the Pubky TLS web server.
     #[error("Pubky TLS web server error: {0}")]
     PubkyTlsServer(anyhow::Error),
-    /// Failed to convert the data directory to an AppContext.
-    #[error("AppContext conversion error: {0}")]
+    /// Failed to build the AppContext.
+    #[error("Failed to build AppContext: {0}")]
     AppContext(#[from] AppContextBuildError),
     /// Failed to build request-count rate limit layer.
     #[error("Request-count rate limit configuration error: {0}")]

@@ -24,8 +24,8 @@ pub enum MetricsServerBuildError {
     #[error("Failed to create metrics server: {0}")]
     Server(anyhow::Error),
 
-    /// Failed to bootstrap from the data directory.
-    #[error("Failed to bootstrap from the data directory: {0}")]
+    /// Failed to build the AppContext.
+    #[error("Failed to build AppContext: {0}")]
     DataDir(AppContextBuildError),
 }
 

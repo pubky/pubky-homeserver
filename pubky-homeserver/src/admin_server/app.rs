@@ -75,8 +75,8 @@ pub enum AdminServerBuildError {
     #[error("Failed to create admin server: {0}")]
     Server(anyhow::Error),
 
-    /// Failed to boostrap from the data directory.
-    #[error("Failed to boostrap from the data directory: {0}")]
+    /// Failed to build the AppContext.
+    #[error("Failed to build AppContext: {0}")]
     DataDir(AppContextBuildError),
 }
 

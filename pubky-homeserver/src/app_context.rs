@@ -366,12 +366,10 @@ mod tests {
         );
     }
 
-    /// The default test config must keep the pkarr client off the public network,
-    /// whatever database it points at.
+    /// The default test config must keep the pkarr client off the public network.
     #[test]
     fn default_test_config_does_not_use_default_network() {
-        let mut config = ConfigToml::default_test_config();
-        config.general.database_url = ConfigToml::default().general.database_url;
+        let config = ConfigToml::default_test_config();
         let builder = AppContext::build_pkarr_builder_from_config(&config)
             .expect("pkarr builder should build from a valid config");
         let builder_debug = format!("{builder:?}");

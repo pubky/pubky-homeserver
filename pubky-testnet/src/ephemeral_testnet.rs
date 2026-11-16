@@ -53,7 +53,7 @@ pub struct EphemeralTestnet {
 /// # Defaults
 /// - **Config**: [`ConfigToml::minimal_test_config()`] (admin/metrics disabled)
 /// - **Keypair**: Deterministic keypair from `[0; 32]` secret key
-/// - **Postgres**: Uses `TEST_PUBKY_CONNECTION_STRING` env var if set, otherwise in-memory
+/// - **Postgres**: A throwaway database on the server in `TEST_PUBKY_CONNECTION_STRING` if set, otherwise on `localhost:5432`
 /// - **HTTP Relay**: Disabled by default (use `.with_http_relay()` to enable)
 ///
 /// # Example
