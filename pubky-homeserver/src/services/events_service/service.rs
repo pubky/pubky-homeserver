@@ -156,8 +156,9 @@ impl EventsService {
         Ok(events)
     }
 
-    /// All events (public and private) by a single global cursor.
-    /// Admin-only, exposes private paths.
+    /// All events (public and private) by a single global cursor. Exposes
+    /// private paths unless `path_filters` excludes them: the admin route
+    /// passes any, the client route only ones it has authorized.
     pub(super) async fn get_all_events(
         &self,
         cursor: Option<EventCursor>,

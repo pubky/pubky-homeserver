@@ -225,18 +225,21 @@ test("allUsers: homeserver-wide subscription", async (t) => {
   const session = await signer.signin("events.test");
   const userPk = session.info.publicKey;
 
-  await session.storage.putText("/pub/all/first.txt" as Path, "1");
-  await session.storage.putText("/priv/all/secret.txt" as Path, "2");
-  await session.storage.putText("/pub/all/second.txt" as Path, "3");
+  // A directory only this run writes to. The stream covers every user on a
+  // testnet other tests share, so each subscription below filters by it.
+  const dir = `/pub/all-${userPk.z32()}/`;
+  await session.storage.putText(`${dir}first.txt` as Path, "1");
+  await session.storage.putText(`${dir}second.txt` as Path, "2");
 
   await sleep(500);
 
-  // === Test 1: newest events across the homeserver are this user's public writes ===
+  // === Test 1: newest events under the directory, across every user ===
   t.comment("allUsers: reverse batch over every user");
 
   const stream1 = await sdk
     .eventStreamFor(HOMESERVER_PUBLICKEY)
     .allUsers(null)
+    .path(dir)
     .reverse()
     .limit(2)
     .subscribe();
@@ -255,8 +258,8 @@ test("allUsers: homeserver-wide subscription", async (t) => {
 
   t.deepEqual(
     events1.map((event) => event.resource.path),
-    ["/pub/all/second.txt", "/pub/all/first.txt"],
-    "should receive the two newest public events, never the private one",
+    [`${dir}second.txt`, `${dir}first.txt`],
+    "should receive the two newest events under the directory",
   );
   for (const event of events1) {
     t.equal(event.resource.owner.z32(), userPk.z32(), "owner should match user");
@@ -268,6 +271,7 @@ test("allUsers: homeserver-wide subscription", async (t) => {
   const stream2 = await sdk
     .eventStreamFor(HOMESERVER_PUBLICKEY)
     .allUsers(events1[1].cursor)
+    .path(dir)
     .subscribe();
 
   const events2 = [];
@@ -284,7 +288,7 @@ test("allUsers: homeserver-wide subscription", async (t) => {
 
   t.deepEqual(
     events2.map((event) => event.resource.path),
-    ["/pub/all/second.txt"],
+    [`${dir}second.txt`],
     "should receive only the event after the cursor",
   );
 
