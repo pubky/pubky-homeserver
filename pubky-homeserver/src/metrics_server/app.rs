@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use crate::observability::Metrics;
 use crate::AppContext;
-use crate::AppContextBuildError;
 use axum::routing::get;
 use axum::Router;
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
@@ -23,10 +22,6 @@ pub enum MetricsServerBuildError {
     /// Failed to create metrics server.
     #[error("Failed to create metrics server: {0}")]
     Server(anyhow::Error),
-
-    /// Failed to build the AppContext.
-    #[error("Failed to build AppContext: {0}")]
-    DataDir(AppContextBuildError),
 }
 
 /// Metrics server
