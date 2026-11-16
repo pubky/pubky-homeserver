@@ -11,7 +11,7 @@ use super::routes::{
 use super::trace::with_trace_layer;
 use super::{app_state::AppState, auth_middleware::AdminAuthLayer};
 use crate::AppContext;
-use crate::{shared::reject_allow, AppContextBuildError, PersistentDataDir};
+use crate::{shared::reject_allow, AppContextBuildError};
 use axum::routing::{any, delete, post};
 use axum::{http::Method, routing::get, Router};
 use axum_server::Handle;
@@ -93,18 +93,12 @@ pub struct AdminServer {
 }
 
 impl AdminServer {
-    /// Create a new admin server from a data directory.
-    pub async fn from_data_dir(data_dir: PersistentDataDir) -> Result<Self, AdminServerBuildError> {
-        let context = AppContext::from_persistent_dir(data_dir.path().to_path_buf())
+    /// Create a new admin server from a data directory path.
+    pub async fn from_data_dir_path(data_dir_path: PathBuf) -> Result<Self, AdminServerBuildError> {
+        let context = AppContext::from_persistent_dir(data_dir_path)
             .await
             .map_err(AdminServerBuildError::DataDir)?;
         Self::start(Arc::new(context)).await
-    }
-
-    /// Create a new admin server from a data directory path.
-    pub async fn from_data_dir_path(data_dir_path: PathBuf) -> Result<Self, AdminServerBuildError> {
-        let data_dir = PersistentDataDir::new(data_dir_path);
-        Self::from_data_dir(data_dir).await
     }
 
     /// Run the admin server.

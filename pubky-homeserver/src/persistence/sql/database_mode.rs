@@ -141,9 +141,9 @@ impl DatabaseMode {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
 /// Parse a connection string from an environment variable. The error names the
 /// variable but not its value, which may contain a password.
+#[cfg(any(test, feature = "testing"))]
 fn parse_env_value(name: &str, raw: &str) -> anyhow::Result<ConnectionString> {
     ConnectionString::new(raw).map_err(|e| anyhow::anyhow!("Invalid {name}: {e}"))
 }

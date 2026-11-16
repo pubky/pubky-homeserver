@@ -3,7 +3,7 @@ use super::AppState;
 use crate::{
     app_context::{AppContext, AppContextBuildError},
     shared::reject_allow,
-    ClientIdentityToml, PersistentDataDir,
+    ClientIdentityToml,
 };
 use anyhow::Result;
 use futures_util::TryFutureExt;
@@ -89,14 +89,6 @@ impl ClientServer {
         dir_path: PathBuf,
     ) -> Result<Self, ClientServerBuildError> {
         let context = AppContext::from_persistent_dir(dir_path).await?;
-        Self::start(Arc::new(context)).await
-    }
-
-    /// Run the homeserver with configurations from a data directory.
-    pub async fn start_with_persistent_data_dir(
-        dir: PersistentDataDir,
-    ) -> Result<Self, ClientServerBuildError> {
-        let context = AppContext::from_persistent_dir(dir.path().to_path_buf()).await?;
         Self::start(Arc::new(context)).await
     }
 
@@ -615,11 +607,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn storage_metrics_only_count_resolved_requests_with_low_cardinality_labels() {
-        let context =
+        let context = Arc::new(
             AppContext::new_ephemeral(ConfigToml::minimal_test_config(), Keypair::random(), None)
                 .await
-                .unwrap();
-        let context = Arc::new(context);
+                .unwrap(),
+        );
         let metrics = context.metrics.clone();
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router);

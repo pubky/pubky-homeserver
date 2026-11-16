@@ -7,6 +7,7 @@
 //! migration) and graceful shutdown.
 
 use crate::admin_server::{AdminServer, AdminServerBuildError};
+use crate::app_context::AppContext;
 use crate::client_server::{ClientServer, ClientServerBuildError};
 use crate::metrics_server::{MetricsServer, MetricsServerBuildError};
 use crate::persistence::files::StorageRepair;
@@ -14,7 +15,6 @@ use crate::republishers::{
     HomeserverKeyRepublisher, KeyRepublisherBuildError, UserKeysRepublisherJob,
 };
 use crate::tracing::init_tracing_logs_with_config_if_set;
-use crate::{app_context::AppContext, data_directory::PersistentDataDir};
 use anyhow::Result;
 use pubky_common::crypto::PublicKey;
 use std::path::PathBuf;
@@ -65,12 +65,6 @@ impl HomeserverApp {
     /// Run the homeserver with configurations from a data directory.
     pub async fn start_with_persistent_data_dir_path(dir_path: PathBuf) -> Result<Self> {
         let context = AppContext::from_persistent_dir(dir_path).await?;
-        Self::start(context).await
-    }
-
-    /// Run the homeserver with configurations from a data directory.
-    pub async fn start_with_persistent_data_dir(dir: PersistentDataDir) -> Result<Self> {
-        let context = AppContext::from_persistent_dir(dir.path().to_path_buf()).await?;
         Self::start(context).await
     }
 

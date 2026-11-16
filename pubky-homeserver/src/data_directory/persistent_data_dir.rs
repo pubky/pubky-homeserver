@@ -86,15 +86,7 @@ impl PersistentDataDir {
         self.read_or_create_keypair()?;
         Ok(())
     }
-}
 
-impl Default for PersistentDataDir {
-    fn default() -> Self {
-        Self::new(PathBuf::from("~/.pubky"))
-    }
-}
-
-impl PersistentDataDir {
     /// Returns the full path to the data directory.
     pub fn path(&self) -> &Path {
         &self.expanded_path
@@ -138,6 +130,12 @@ impl PersistentDataDir {
         // Read the secret file
         let keypair = pubky_common::crypto::Keypair::from_secret_key_file(&secret_file_path)?;
         Ok(keypair)
+    }
+}
+
+impl Default for PersistentDataDir {
+    fn default() -> Self {
+        Self::new(PathBuf::from("~/.pubky"))
     }
 }
 
