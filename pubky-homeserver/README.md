@@ -70,6 +70,7 @@ For testing, use `AppContext::new_ephemeral` to run on a temporary data director
 ```toml
 [dev-dependencies]
 pubky-homeserver = { version = "0.x", features = ["testing"] }
+pubky-common = "0.x"
 ```
 
 ```rust,ignore

@@ -142,8 +142,10 @@ impl DatabaseMode {
 }
 
 #[cfg(any(test, feature = "testing"))]
+/// Parse a connection string from an environment variable. The error names the
+/// variable but not its value, which may contain a password.
 fn parse_env_value(name: &str, raw: &str) -> anyhow::Result<ConnectionString> {
-    ConnectionString::new(raw).map_err(|e| anyhow::anyhow!("Invalid {name}: {raw}. Error: {e}"))
+    ConnectionString::new(raw).map_err(|e| anyhow::anyhow!("Invalid {name}: {e}"))
 }
 
 #[cfg(test)]
@@ -242,5 +244,15 @@ mod tests {
         let config = config_with_database_url(Some("postgres://localhost:5432/configdb"));
         let env_val = Some("not-a-valid-url".to_string());
         assert!(DatabaseMode::persistent_testnet_with_env(&config, env_val).is_err());
+    }
+
+    #[test]
+    fn invalid_env_var_error_does_not_contain_the_password() {
+        let env_val = Some("mysql://user:hunter2@localhost:3306/db".to_string());
+        let err = DatabaseMode::ephemeral_with_env(None, env_val)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(DatabaseMode::EPHEMERAL_SERVER_ENV), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
     }
 }

@@ -392,4 +392,26 @@ mod tests {
         }
         builder.build().expect("isolated pkarr client should build");
     }
+
+    /// An ephemeral context's data directory must outlive `new_ephemeral` and
+    /// every clone of the context, and be removed once the last one is dropped.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn ephemeral_data_dir_lives_as_long_as_the_context() {
+        let context =
+            AppContext::new_ephemeral(ConfigToml::minimal_test_config(), Keypair::random(), None)
+                .await
+                .expect("ephemeral context should build");
+        let data_path = context.data_path.clone();
+        let clone = context.clone();
+
+        drop(context);
+        assert!(data_path.exists(), "a live clone should keep the data dir");
+
+        drop(clone);
+        assert!(
+            !data_path.exists(),
+            "the data dir should be removed with the last clone"
+        );
+    }
 }
