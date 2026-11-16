@@ -51,19 +51,20 @@ mod tests {
     };
 
     /// The plan for a path-prefix query over every user. Sequential scans are
-    /// disabled because the planner prefers one on a table this small.
+    /// disabled because the planner prefers one on a table this small, and the
+    /// query has no `ORDER BY id`, which would let the primary key compete on a
+    /// near-equal cost.
     async fn prefix_query_plan(db: &SqlDb) -> String {
         let mut tx = db.pool().begin().await.unwrap();
         sqlx::query("SET LOCAL enable_seqscan = off")
             .execute(&mut *tx)
             .await
             .unwrap();
-        let plan: Vec<String> = sqlx::query_scalar(
-            "EXPLAIN SELECT id FROM events WHERE path LIKE '/pub/app/%' ORDER BY id LIMIT 100",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
+        let plan: Vec<String> =
+            sqlx::query_scalar("EXPLAIN SELECT id FROM events WHERE path LIKE '/pub/app/%'")
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
         plan.join("\n")
     }
 
