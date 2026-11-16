@@ -685,12 +685,15 @@ fn validate_approval_key(
 mod tests {
     use super::*;
     use crate::actors::auth::deep_links::{
-        DeepLinkScheme, GrantApprovalFormat, SigninDeepLink, SigninGrantDeepLink,
-        SigninGrantParams, SigninParams, XCallbackParams,
+        DeepLinkScheme, GrantApprovalFormat, ParentGrantDeepLink, ParentGrantParams,
+        SigninDeepLink, SigninGrantDeepLink, SigninGrantParams, SigninParams, XCallbackParams,
     };
     use crate::actors::auth::grant::approval_encryption;
 
-    use super::super::{approval_envelope::GrantApprovalEnvelope, credential::now_unix};
+    use super::super::{
+        approval_envelope::{GrantApprovalEnvelope, ParentApprovalEnvelope},
+        credential::now_unix,
+    };
     use pubky_common::{
         auth::{grant::GrantClaims, jws::GrantId},
         capabilities::Capability,
@@ -763,6 +766,131 @@ mod tests {
 
     fn decode_signed_approval(message: &AuthRelayMessage) -> Result<GrantApproval> {
         decode_request(message, &request(GrantApprovalFormat::SignedApprovalV1))
+    }
+
+    fn parent_request() -> ParentGrantParams {
+        ParentGrantParams {
+            client_id: ClientId::new("https://accounts.example/auth/callback").unwrap(),
+            client_pk: Keypair::from_secret(&[8; 32]).public_key(),
+            capabilities: "/pub/app/:rwe".parse().unwrap(),
+            relay: Url::parse("http://localhost/inbox").unwrap(),
+            ephemeral_public_key: ApprovalRecipientSecret::from_bytes([9; 32]).public_key(),
+        }
+    }
+
+    fn decode_parent_approval(
+        user: &Keypair,
+        claims: &GrantClaims,
+        request: &ParentGrantParams,
+        recipient: &[u8; 32],
+    ) -> Result<ParentGrantCredential> {
+        let signed = ParentApprovalEnvelope::sign(user, claims, recipient);
+        let secret = ApprovalRecipientSecret::from_bytes([9; 32]);
+        // Even a mismatched recipient claim arrives encrypted to the pending
+        // request's key, so HPKE authentication cannot mask the binding check.
+        let encrypted = approval_encryption::seal(&secret.public_key(), signed.as_bytes())?;
+        let auth_url = ParentGrantDeepLink::new(DeepLinkScheme::PubkyAuth, request.clone()).into();
+        decode_parent_credential(
+            &AuthRelayMessage::new(encrypted),
+            &auth_url,
+            Some(&secret),
+            GrantPopSigner::local(Keypair::from_secret(&[8; 32])),
+        )
+    }
+
+    #[test]
+    fn parent_approvals_reject_recipient_and_client_mismatches() {
+        let user = Keypair::random();
+        let request = parent_request();
+        let original = GrantClaims {
+            client_id: request.client_id.clone(),
+            ..claims(&user)
+        };
+        for (label, changed, recipient) in [
+            (
+                "recipient",
+                original.clone(),
+                ApprovalRecipientSecret::from_bytes([10; 32]).public_key(),
+            ),
+            (
+                "client key",
+                GrantClaims {
+                    cnf: Keypair::random().public_key(),
+                    ..original.clone()
+                },
+                request.ephemeral_public_key,
+            ),
+            (
+                "client id",
+                GrantClaims {
+                    client_id: ClientId::new("https://other.example/auth/callback").unwrap(),
+                    ..original
+                },
+                request.ephemeral_public_key,
+            ),
+        ] {
+            let error = decode_parent_approval(&user, &changed, &request, &recipient).unwrap_err();
+            assert!(
+                matches!(&error, crate::Error::Authentication(AuthError::Validation(message))
+                    if message == "approved parent grant does not match the pending request"),
+                "{label}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_approvals_cannot_expand_requested_capabilities() {
+        let user = Keypair::random();
+        // All approvals fit the parent ceiling and carry matching key scopes.
+        // Only their binding to the narrower pending request should fail.
+        for (requested, approved) in [
+            ("/pub/app/:rwe", "/pub/:rwe"),
+            ("/pub/app/:rwe", "/pub/app-evil/:rwe"),
+            ("/pub/app/:r", "/pub/app/:rw"),
+            ("/pub/app/:rw", "/pub/app/:rwe"),
+        ] {
+            let request = ParentGrantParams {
+                capabilities: requested.parse().unwrap(),
+                ..parent_request()
+            };
+            let claims = GrantClaims {
+                client_id: request.client_id.clone(),
+                caps: approved.parse::<Capabilities>().unwrap().to_vec(),
+                ..claims(&user)
+            };
+            let error =
+                decode_parent_approval(&user, &claims, &request, &request.ephemeral_public_key)
+                    .unwrap_err();
+            assert!(
+                matches!(&error, crate::Error::Authentication(AuthError::Validation(message))
+                    if message == "approved capabilities exceed the pending request"),
+                "{requested} -> {approved}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_approvals_accept_matching_narrowed_and_empty_capabilities() {
+        let user = Keypair::random();
+        let request = parent_request();
+        for approved in ["/pub/app/:rwe", "/pub/app/file:re", "/pub/app/:rw", ""] {
+            let claims = GrantClaims {
+                client_id: request.client_id.clone(),
+                caps: approved.parse::<Capabilities>().unwrap().to_vec(),
+                ..claims(&user)
+            };
+            let parent =
+                decode_parent_approval(&user, &claims, &request, &request.ephemeral_public_key)
+                    .unwrap();
+            assert_eq!(parent.claims(), &claims);
+            assert!(
+                parent.encryption_keys().scopes().eq(claims
+                    .caps
+                    .iter()
+                    .filter(|cap| cap.grants_encryption_keys())
+                    .map(Capability::scope))
+            );
+        }
     }
 
     #[test]
