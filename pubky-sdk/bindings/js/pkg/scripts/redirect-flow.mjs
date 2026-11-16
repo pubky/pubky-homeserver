@@ -156,15 +156,23 @@ async function scenario(browserType, origins) {
     await user.approve(await call(accounts, "accounts.startParent"), "/pub/:rw,/priv/:rwe");
     await call(accounts, "accounts.finishParent");
 
-    // The request is saved before navigation, holds no private key, and blocks
-    // a second request for the same callback.
+    // Starting again replaces an unanswered request, even from another tab.
     let chat = await open(context, `${CHAT}/`);
-    const started = await call(chat, "app.start", CHAT_CAPS);
+    let started = await call(chat, "app.start", CHAT_CAPS);
     const pending = await call(chat, "app.rawFlow");
     assert.equal(pending.status, "awaitingCallback");
     assert.ok(!started.authorizationUrl.includes(pending.approvalKeySecret));
-    await assert.rejects(call(chat, "app.start", CHAT_CAPS), error =>
-      error.pubky.data?.reason === "RedirectAuthFlowPending");
+    const [superseded] = await call(accounts, "accounts.issueTwice", started.authorizationUrl);
+    const restarting = await open(context, `${CHAT}/`);
+    started = await call(restarting, "app.start", CHAT_CAPS);
+    await restarting.close();
+    const replacement = await call(chat, "app.rawFlow");
+    assert.notEqual(replacement.state, pending.state);
+    assert.notEqual(replacement.keyId, pending.keyId);
+    assert.ok(!(await call(chat, "app.rawKeyIds")).includes(pending.keyId));
+    const stale = await context.newPage();
+    assert.equal((await complete(stale, superseded)).ok, false);
+    await stale.close();
     assert.equal((await call(chat, "app.pending")).authorizationUrl, started.authorizationUrl);
     await assert.rejects(call(chat, "app.start", CHAT_CAPS, { callbackUrl: SHOP_CALLBACK }), /this page's origin/);
 
@@ -275,6 +283,8 @@ async function scenario(browserType, origins) {
     const again = await call(chat, "app.start", CHAT_CAPS);
     assert.equal((await complete(chat, again.authorizationUrl)).ok, false);
     assert.equal((await call(chat, "app.pending")).status, "exchangePending");
+    await assert.rejects(call(chat, "app.start", CHAT_CAPS), error =>
+      error.pubky.data?.reason === "RedirectAuthFlowPending");
     await chat.close();
     chat = await open(context, `${CHAT}/auth/callback`);
     const resumed = await call(chat, "app.result");
@@ -309,7 +319,27 @@ async function scenario(browserType, origins) {
     await call(shop, "app.arm", "loseExchange");
     const interrupted = await call(shop, "app.start", "/pub/shop/:rw");
     assert.equal((await complete(shop, interrupted.authorizationUrl)).ok, false);
-    await call(shop, "app.cancel");
+    await call(shop, "app.arm", "failLogout");
+    await assert.rejects(call(shop, "app.cancel"), error => error.pubky.name === "RequestError");
+    const cancelledChild = await call(shop, "app.rawFlow");
+    assert.equal(cancelledChild.status, "cancelled");
+    assert.ok((await call(shop, "app.list")).includes(cancelledChild.sessionId));
+
+    // Old revocation failures don't block a new login; cleanup remains retryable.
+    await call(shop, "app.arm", "failLogout");
+    const afterCancellation = await call(shop, "app.start", "/pub/shop/:rw");
+    const newSession = await complete(shop, afterCancellation.authorizationUrl);
+    assert.equal(newSession.ok, true, JSON.stringify(newSession.error));
+    assert.notEqual(newSession.id, cancelledChild.sessionId);
+    const pendingLogout = await call(shop, "app.rawSession", cancelledChild.sessionId);
+    assert.ok(pendingLogout.logoutPending && !pendingLogout.signedApproval);
+    await assert.rejects(call(shop, "app.restore", cancelledChild.sessionId), error =>
+      error.pubky.name === "RequestError");
+    await assert.rejects(call(shop, "app.restore", cancelledChild.sessionId), /signed out/);
+    assert.equal(await call(shop, "app.rawSession", cancelledChild.sessionId), undefined);
+    await call(shop, "app.write", "/pub/shop/after-cleanup");
+    assert.equal(await user.children(SHOP_CALLBACK), 1);
+    await call(shop, "app.signOut");
     assert.equal(await user.children(SHOP_CALLBACK), 0);
     assert.deepEqual((await call(shop, "app.list")).filter(id => id !== winners[0].id), []);
 

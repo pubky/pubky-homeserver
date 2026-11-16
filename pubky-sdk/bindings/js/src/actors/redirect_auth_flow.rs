@@ -469,16 +469,18 @@ pub(crate) async fn start(
 
     let lease = RedirectLease::acquire(callback.as_str()).await?;
     let existing = lease.load().await?;
-    if let Some(record) = &existing {
-        finish_cancelled(pubky.client(), record).await?;
-    }
-    if let Some(record) = existing.as_ref().filter(|record| record.status.is_active()) {
+    if let Some(record) = existing
+        .as_ref()
+        .filter(|record| record.status == FlowStatus::ExchangePending)
+    {
         return Err(flow_error(
-            "A redirect sign-in for this callback is already pending. Resume or cancel it.",
+            "This redirect sign-in already accepted its callback. Resume or cancel it.",
             "RedirectAuthFlowPending",
             Some(record.status),
         ));
     }
+    // Cancelled children keep their logout-only session for separate revocation retries.
+    let previous_key = existing.as_ref().and_then(|record| record.key_id.clone());
 
     let mut builder = PubkyRedirectAuthFlow::builder(&caps, callback, accounts_url)
         .client(pubky.client().clone());
@@ -503,7 +505,10 @@ pub(crate) async fn start(
             return Err(error);
         }
     };
-    if let Err(error) = lease.replace(existing.as_ref(), Some(&record), None).await {
+    if let Err(error) = lease
+        .replace(existing.as_ref(), Some(&record), previous_key)
+        .await
+    {
         let _ = BrowserGrantKeyStore::delete_key(key_id).await;
         return Err(error);
     }

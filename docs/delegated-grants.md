@@ -142,10 +142,14 @@ the session before returning it. Invalid callbacks leave the request open.
 
 - Requests expire after 10 minutes by default; `lifetimeSeconds` allows up to an hour.
 - Each callback has one pending request. Read it with `redirectAuthFlow(callbackUrl)`.
+- Starting again replaces an unanswered request, including one started in another tab.
+  Its old callback is rejected. An accepted exchange must be resumed or cancelled.
 - Retry an interrupted exchange with `resumeRedirectAuthFlow(callbackUrl)`.
   It uses the accepted child again, without another Accounts approval.
 - `cancelRedirectAuthFlow(callbackUrl)` deletes the request's secrets and revokes
   the child if an exchange may have reached the homeserver.
+  Failed revocation keeps a logout-only session without blocking new sign-ins.
+  Find its ID with `browserSessionStore.list()` and retry with `restore(id)`.
 - After completion, restore with `browserSessionStore.restore(storedSession.id)`.
 - Denials use `data.denial`: `access_denied`, `cancelled`, or
   `insufficient_permissions`. Show the error; don't start another Ring approval automatically.
