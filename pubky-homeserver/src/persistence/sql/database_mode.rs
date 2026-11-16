@@ -98,19 +98,13 @@ impl DatabaseMode {
 
     /// Connect to the database a persistent testnet keeps its tables in.
     ///
-    /// The [`Self::PERSISTENT_TESTNET_DATABASE_ENV`] environment variable
-    /// overrides the `database_url` in `config.toml`. Logs which one was used,
-    /// and warns when it is the `postgres` maintenance database.
-    pub fn persistent_testnet(config: &ConfigToml) -> anyhow::Result<Self> {
-        let env_val = std::env::var(Self::PERSISTENT_TESTNET_DATABASE_ENV).ok();
-        Self::persistent_testnet_with_env(config, env_val)
-    }
-
-    /// [`Self::persistent_testnet`] with the environment variable's value
-    /// passed in. For tests only: it lets them supply the value without
-    /// changing the process environment, which is not thread-safe.
-    #[doc(hidden)]
-    pub fn persistent_testnet_with_env(
+    /// `env_val` is the value of the [`Self::PERSISTENT_TESTNET_DATABASE_ENV`]
+    /// environment variable, if set; it overrides the `database_url` in
+    /// `config.toml`. The caller reads the variable, so tests can supply it
+    /// without changing the process environment, which is not thread-safe.
+    /// Logs which one was used, and warns when it is the `postgres`
+    /// maintenance database.
+    pub fn persistent_testnet(
         config: &ConfigToml,
         env_val: Option<String>,
     ) -> anyhow::Result<Self> {
@@ -217,7 +211,7 @@ mod tests {
     fn persistent_testnet_env_var_wins_over_config() {
         let config = config_with_database_url(Some("postgres://localhost:5432/configdb"));
         let env_val = Some("postgres://envhost:5432/pubky_testnet".to_string());
-        let mode = DatabaseMode::persistent_testnet_with_env(&config, env_val).unwrap();
+        let mode = DatabaseMode::persistent_testnet(&config, env_val).unwrap();
         assert!(matches!(mode, DatabaseMode::Direct(_)));
         assert_eq!(
             mode.connection_string().as_str(),
@@ -228,7 +222,7 @@ mod tests {
     #[test]
     fn persistent_testnet_uses_config_without_env_var() {
         let config = config_with_database_url(Some("postgres://localhost:5432/configdb"));
-        let mode = DatabaseMode::persistent_testnet_with_env(&config, None).unwrap();
+        let mode = DatabaseMode::persistent_testnet(&config, None).unwrap();
         assert!(matches!(mode, DatabaseMode::Direct(_)));
         assert_eq!(mode.connection_string().database_name(), "configdb");
     }
@@ -236,14 +230,14 @@ mod tests {
     #[test]
     fn persistent_testnet_errors_without_any_database() {
         let config = config_with_database_url(None);
-        assert!(DatabaseMode::persistent_testnet_with_env(&config, None).is_err());
+        assert!(DatabaseMode::persistent_testnet(&config, None).is_err());
     }
 
     #[test]
     fn persistent_testnet_invalid_env_var_errors() {
         let config = config_with_database_url(Some("postgres://localhost:5432/configdb"));
         let env_val = Some("not-a-valid-url".to_string());
-        assert!(DatabaseMode::persistent_testnet_with_env(&config, env_val).is_err());
+        assert!(DatabaseMode::persistent_testnet(&config, env_val).is_err());
     }
 
     #[test]

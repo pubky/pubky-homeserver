@@ -366,16 +366,11 @@ impl StaticTestnet {
         // keypair before read_or_seed_testnet_keypair() seeds the deterministic one.
         persistent_dir.ensure_data_dir_exists_and_is_writable()?;
 
-        let config =
-            read_persistent_testnet_config(&persistent_dir, self.parse_bootstrap_nodes()?)?;
-        let keypair = read_or_seed_testnet_keypair(&persistent_dir)?;
-        let db_mode = DatabaseMode::persistent_testnet(&config)?;
-
-        let context = AppContext::new(
-            persistent_dir.path().to_path_buf(),
-            config,
-            keypair,
-            db_mode,
+        let database_url_env = std::env::var(DatabaseMode::PERSISTENT_TESTNET_DATABASE_ENV).ok();
+        let context = persistent_homeserver_context(
+            &persistent_dir,
+            self.parse_bootstrap_nodes()?,
+            database_url_env,
         )
         .await?;
         let homeserver = HomeserverApp::start(context).await?;
@@ -396,6 +391,21 @@ impl StaticTestnet {
         self.testnet.homeservers.push(homeserver);
         Ok(())
     }
+}
+
+/// Build the persistent testnet homeserver's context from its data directory.
+///
+/// `database_url_env` is the value of
+/// [`DatabaseMode::PERSISTENT_TESTNET_DATABASE_ENV`], if set.
+async fn persistent_homeserver_context(
+    dir: &PersistentDataDir,
+    bootstrap_nodes: Vec<DomainPort>,
+    database_url_env: Option<String>,
+) -> anyhow::Result<AppContext> {
+    let config = read_persistent_testnet_config(dir, bootstrap_nodes)?;
+    let keypair = read_or_seed_testnet_keypair(dir)?;
+    let db_mode = DatabaseMode::persistent_testnet(&config, database_url_env)?;
+    Ok(AppContext::new(dir.path().to_path_buf(), config, keypair, db_mode).await?)
 }
 
 /// Read the persistent testnet's `config.toml` with the fixed testnet ports
@@ -501,18 +511,11 @@ mod tests {
         .unwrap();
         let persistent = PersistentDataDir::new(temp.path().join("testnet"));
         persistent.seed_config(&seed).unwrap();
-        let config = read_persistent_testnet_config(&persistent, vec![]).unwrap();
 
         let env_val = pg.connection_string().unwrap().to_string();
-        let db_mode = DatabaseMode::persistent_testnet_with_env(&config, Some(env_val)).unwrap();
-        AppContext::new(
-            persistent.path().to_path_buf(),
-            config,
-            testnet_keypair(),
-            db_mode,
-        )
-        .await
-        .expect("Should connect to the env var's database, not the config's database_url");
+        persistent_homeserver_context(&persistent, vec![], Some(env_val))
+            .await
+            .expect("Should connect to the env var's database, not the config's database_url");
     }
 
     #[test]

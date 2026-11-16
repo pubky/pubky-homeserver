@@ -77,7 +77,7 @@ pub enum AdminServerBuildError {
 
     /// Failed to build the AppContext.
     #[error("Failed to build AppContext: {0}")]
-    DataDir(AppContextBuildError),
+    AppContext(AppContextBuildError),
 }
 
 /// Admin server
@@ -97,7 +97,7 @@ impl AdminServer {
     pub async fn from_data_dir_path(data_dir_path: PathBuf) -> Result<Self, AdminServerBuildError> {
         let context = AppContext::from_persistent_dir(data_dir_path)
             .await
-            .map_err(AdminServerBuildError::DataDir)?;
+            .map_err(AdminServerBuildError::AppContext)?;
         Self::start(Arc::new(context)).await
     }
 
