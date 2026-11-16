@@ -37,11 +37,16 @@ bearer per grant, with requests and refreshes coordinated by Web Locks. See the
 [browser session lifecycle](../../../docs/grant-session-lifecycle.md) for logout,
 storage requirements and upgrades from older stored records.
 
-To run the multi-window regression, start a fresh testnet with
-`cargo run -p pubky-testnet -- --homeserver-config pubky-sdk/bindings/js/pkg/scripts/session-tabs.toml`
-from the repository root. Then run `npm run build && npm run test-browser:tabs`
-from `pubky-sdk/bindings/js/pkg`. The testnet uses the existing single-session protocol and
-Postgres on port 5432 with the repository's `test_user` / `test_pass` credentials.
+To run the multi-window regression, start a fresh testnet from the repository root
+against Postgres on port 5432 with the repository's `test_user` / `test_pass` credentials:
+
+```bash
+TEST_PUBKY_CONNECTION_STRING='postgres://test_user:test_pass@localhost:5432/postgres' \
+  cargo run -p pubky-testnet
+```
+
+Then run `npm run build && npm run test-browser:tabs` from `pubky-sdk/bindings/js/pkg`.
+The testnet uses the existing single-session protocol.
 
 ## Encryption key derivation tests
 
