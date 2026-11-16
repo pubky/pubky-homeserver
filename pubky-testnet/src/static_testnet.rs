@@ -19,6 +19,12 @@ use pubky_homeserver::{
 /// The bind address used for all static testnet listeners.
 const BIND_ALL: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
 
+/// Environment variable that overrides the persistent testnet's `database_url`.
+///
+/// Unlike the ephemeral modes, which treat it as a server to create throwaway
+/// databases on, persistent mode connects to the database it names.
+const DATABASE_URL_ENV: &str = "TEST_PUBKY_CONNECTION_STRING";
+
 /// Apply the fixed static-testnet port and DHT overrides to a config.
 fn apply_static_testnet_overrides(config: &mut ConfigToml, bootstrap_nodes: Vec<DomainPort>) {
     config.pkdns.dht_bootstrap_nodes = Some(bootstrap_nodes);
@@ -381,11 +387,11 @@ impl StaticTestnet {
 
         // Wrap the persistent dir so the homeserver joins the testnet's local DHT
         // instead of the mainnet bootstrap nodes from the on-disk config.
-        let testnet_dir = TestnetDataDir {
-            inner: persistent_dir,
-            dht_bootstrap_nodes: self.parse_bootstrap_nodes()?,
-            postgres_connection_string: self.testnet.postgres_connection_string.clone(),
-        };
+        let testnet_dir = TestnetDataDir::new(
+            persistent_dir,
+            self.parse_bootstrap_nodes()?,
+            std::env::var(DATABASE_URL_ENV).ok(),
+        )?;
 
         let context = AppContext::read_from(testnet_dir).await?;
         let homeserver = HomeserverApp::start(context).await?;
@@ -417,6 +423,27 @@ struct TestnetDataDir {
     inner: PersistentDataDir,
     dht_bootstrap_nodes: Vec<DomainPort>,
     postgres_connection_string: Option<ConnectionString>,
+}
+
+impl TestnetDataDir {
+    /// `database_url_env` is the raw value of [`DATABASE_URL_ENV`], if set.
+    fn new(
+        inner: PersistentDataDir,
+        dht_bootstrap_nodes: Vec<DomainPort>,
+        database_url_env: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let postgres_connection_string = database_url_env
+            .map(|raw| {
+                ConnectionString::new(&raw)
+                    .with_context(|| format!("Invalid {DATABASE_URL_ENV}: {raw}"))
+            })
+            .transpose()?;
+        Ok(Self {
+            inner,
+            dht_bootstrap_nodes,
+            postgres_connection_string,
+        })
+    }
 }
 
 impl DataDir for TestnetDataDir {
@@ -489,6 +516,75 @@ mod tests {
         let config = testnet_dir.read_or_create_config_file().unwrap();
         assert_eq!(config.pkdns.dht_bootstrap_nodes, Some(bootstrap));
         assert_eq!(config.pkdns.dht_relay_nodes, None);
+    }
+
+    #[test]
+    fn testnet_data_dir_database_url_env_wins_over_config() {
+        let temp = TempDir::new().unwrap();
+        let persistent = PersistentDataDir::new(temp.path().to_path_buf());
+        persistent.init().unwrap();
+
+        let url = "postgres://host:5432/pubky_testnet";
+        let testnet_dir = TestnetDataDir::new(persistent, vec![], Some(url.into())).unwrap();
+
+        let config = testnet_dir.read_or_create_config_file().unwrap();
+        assert_eq!(
+            config.general.database_url.map(|u| u.to_string()),
+            Some(url.into())
+        );
+    }
+
+    #[test]
+    fn testnet_data_dir_without_database_url_env_keeps_config() {
+        let temp = TempDir::new().unwrap();
+        let persistent = PersistentDataDir::new(temp.path().to_path_buf());
+        persistent.init().unwrap();
+        let expected = persistent
+            .read_or_create_config_file()
+            .unwrap()
+            .general
+            .database_url;
+
+        let testnet_dir = TestnetDataDir::new(persistent, vec![], None).unwrap();
+
+        let config = testnet_dir.read_or_create_config_file().unwrap();
+        assert_eq!(config.general.database_url, expected);
+    }
+
+    #[test]
+    fn testnet_data_dir_rejects_invalid_database_url_env() {
+        let temp = TempDir::new().unwrap();
+        let persistent = PersistentDataDir::new(temp.path().to_path_buf());
+
+        let result = TestnetDataDir::new(persistent, vec![], Some("not-a-url".into()));
+        assert!(result.is_err());
+    }
+
+    /// The override is the database the persistent homeserver connects to,
+    /// even when `config.toml` names an unreachable one.
+    #[cfg(feature = "docker-postgres")]
+    #[tokio::test]
+    async fn docker_postgres_database_url_override_is_connected_to() {
+        let pg = crate::docker_postgres::DockerPostgres::start()
+            .await
+            .expect("Failed to start docker postgres");
+
+        let temp = TempDir::new().unwrap();
+        let seed = temp.path().join("seed.toml");
+        std::fs::write(
+            &seed,
+            "[general]\ndatabase_url = \"postgres://postgres:postgres@127.0.0.1:1/unreachable\"\n",
+        )
+        .unwrap();
+        let persistent = PersistentDataDir::new(temp.path().join("testnet"));
+        persistent.seed_config(&seed).unwrap();
+
+        let database_url_env = Some(pg.connection_string().unwrap().to_string());
+        let testnet_dir = TestnetDataDir::new(persistent, vec![], database_url_env).unwrap();
+
+        AppContext::read_from(testnet_dir)
+            .await
+            .expect("Should connect to the override, not the config's database_url");
     }
 
     #[test]

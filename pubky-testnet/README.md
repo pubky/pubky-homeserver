@@ -18,10 +18,11 @@ docker run --name pubky-postgres \
 
 > For more Postgres setup options see the [Install Guide — Set Up PostgreSQL](../docs/INSTALL.md#set-up-postgresql).
 
-Run a local testnet with persistent state:
+Run a local testnet with persistent state, in a database created for it:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
+docker exec pubky-postgres createdb -U postgres pubky_testnet  # first run only
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/pubky_testnet' \
   cargo run -p pubky-testnet -- persist ./my-testnet-data
 ```
 
@@ -29,10 +30,14 @@ The data directory is auto-initialized on first run with a `config.toml` and ser
 
 The `TEST_PUBKY_CONNECTION_STRING` environment variable is read on every startup and overrides the `database_url` in the on-disk config.
 
+> In persistent mode the variable names the database the homeserver stores its tables in, unlike the ephemeral modes below, where it names a server to create throwaway databases on. Point it at a dedicated database, not the `postgres` maintenance database.
+
+Database rows are not stored in the data directory, so deleting the directory does not reset them.
+
 To seed a custom homeserver config on first run (errors if `config.toml` already exists):
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
+TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/pubky_testnet' \
   cargo run -p pubky-testnet -- --homeserver-config my-config.toml persist ./my-testnet-data
 ```
 
