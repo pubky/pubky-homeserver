@@ -106,8 +106,8 @@ test("BrowserSessionStore: browser store can be opened and cleared", async (t) =
   const objectStores = await pubkyAuthObjectStores();
   t.deepEqual(
     objectStores,
-    ["delegatedGrantKeys", "storedSessions"],
-    "pubky-auth separates session records from delegated signing keys",
+    ["delegatedGrantKeys", "redirectFlows", "storedSessions"],
+    "pubky-auth separates session records, delegated signing keys and pending redirect sign-ins",
   );
 
   const flow = await sdk.startGrantAuthFlow(
@@ -757,7 +757,7 @@ function tamperClientPublicKey(savedState: string): string {
  */
 function pubkyAuthObjectStores(): Promise<string[]> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("pubky-auth", 1);
+    const request = indexedDB.open("pubky-auth", 2);
     request.onsuccess = () => {
       const db = request.result;
       const names = Array.from(db.objectStoreNames).sort();
@@ -770,7 +770,7 @@ function pubkyAuthObjectStores(): Promise<string[]> {
 
 function removeSharedSession(id: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("pubky-auth", 1);
+    const request = indexedDB.open("pubky-auth", 2);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
@@ -789,7 +789,7 @@ function removeSharedSession(id: string): Promise<void> {
 
 function expireSharedBearer(id: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("pubky-auth", 1);
+    const request = indexedDB.open("pubky-auth", 2);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
@@ -809,7 +809,7 @@ function expireSharedBearer(id: string): Promise<void> {
 /** Remove the delegated signing key while retaining the confidential approval. */
 function removeDelegatedKey(id: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("pubky-auth", 1);
+    const request = indexedDB.open("pubky-auth", 2);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;

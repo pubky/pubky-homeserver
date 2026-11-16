@@ -14,6 +14,10 @@ pub use auth::deep_links;
 #[doc(hidden)]
 pub use auth::grant::pop_signer::{DelegatedSignFn, GrantSigningError, delegated_sign_callback};
 pub use auth::grant::{
+    ChildGrantApproval, DEFAULT_REDIRECT_FLOW_LIFETIME, DelegatedRedirectAuthFlowState,
+    PubkyRedirectAuthFlow, RedirectAuthFlowBuilder, RedirectAuthFlowState, RedirectCallback,
+};
+pub use auth::grant::{
     CustomPopError, DelegatedGrantCredentialState, GrantCredential, GrantManager, GrantSessionView,
     ParentGrantCredential,
 };

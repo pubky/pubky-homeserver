@@ -29,9 +29,12 @@ use zeroize::Zeroizing;
 #[cfg(target_arch = "wasm32")]
 use super::shared_session::GrantSessionLease;
 use super::{
-    approval::{GrantApproval, SignedApproval, VerifiedApproval},
+    approval::{
+        ChildApproval, GrantApproval, SignedApproval, VerifiedApproval, require_direct_grant,
+    },
     grant_exchange::{
-        MAX_GRANT_SESSION_BYTES, credential_from_grant_exchange, refresh_grant_session,
+        MAX_GRANT_SESSION_BYTES, check_session_matches_grant, credential_from_grant_exchange,
+        grant_proof_body, refresh_grant_session,
     },
     pop_signer::{DelegatedSignFn, GrantPopSigner},
     shared_session::GrantSessionCoordinator,
@@ -52,6 +55,8 @@ pub(crate) const REFRESH_SLACK_SECS: u64 = 300;
 pub(crate) const GRANT_SESSION_PATH: &str = "/auth/grant/session";
 const STORED_GRANT_CREDENTIAL_PREFIX: &str = "pubky-grant-credential-v1";
 const STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX: &str = "pubky-grant-credential-v2";
+/// A child grant with its signed child approval, which holds the public parent.
+const STORED_GRANT_CREDENTIAL_CHILD_PREFIX: &str = "pubky-grant-credential-v3";
 const STORED_GRANT_CREDENTIAL_PREFIX_FAMILY: &str = "pubky-grant-credential-";
 
 /// Current Unix timestamp in seconds, cross-target.
@@ -60,6 +65,30 @@ pub(crate) fn now_unix() -> u64 {
         .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .expect("System time duration_since should always valid")
+}
+
+/// Whether a credential presents a user-signed grant or a child and its parent.
+///
+/// The homeserver needs a child's public parent for every exchange and proof-based
+/// sign-out. Only the public grants are sent, never an approval or its keys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GrantChain {
+    /// A `pubky-grant` signed by the user.
+    Direct,
+    /// A `pubky-child-grant` signed by the parent's `cnf` key.
+    Child {
+        /// The public `pubky-parent-grant` JWS.
+        parent_jws: String,
+    },
+}
+
+impl GrantChain {
+    pub(crate) fn parent_jws(&self) -> Option<&str> {
+        match self {
+            Self::Direct => None,
+            Self::Child { parent_jws } => Some(parent_jws),
+        }
+    }
 }
 
 /// Mutable grant credential state. Always wrapped in `Arc<Mutex<...>>`.
@@ -100,8 +129,11 @@ impl GrantCredentialState {
 pub struct GrantCredential {
     pub(crate) state: Arc<Mutex<GrantCredentialState>>,
     pub(crate) info: SessionInfo,
+    /// The grant and, for a child, its parent. Never changes.
+    pub(crate) chain: GrantChain,
     /// None for bare grants; Some for signed approvals, even with no `e` scopes.
     /// Retaining an empty bundle preserves the approval format during export.
+    /// A child's approval is its signed child approval.
     verified_approval: Option<Arc<VerifiedApproval>>,
 }
 
@@ -112,6 +144,7 @@ struct GrantRestoreMaterial {
     grant_claims: GrantClaims,
     client_signer: GrantPopSigner,
     homeserver_pk: PublicKey,
+    chain: GrantChain,
     verified_approval: Option<VerifiedApproval>,
 }
 
@@ -126,13 +159,34 @@ struct GrantRestoreMaterial {
 /// keys remain confidential after the underlying grant expires or is revoked.
 #[derive(Clone)]
 struct StoredGrantCredential {
-    /// User-signed grant JWS.
+    /// User-signed grant JWS, or a child grant JWS for V3 tokens.
     grant_jws: String,
     /// Secret bytes for the `PoP` client keypair bound by the grant `cnf`.
     client_key_secret: [u8; 32],
     /// Homeserver public key used as the `PoP` audience.
     homeserver_pk: PublicKey,
-    signed_approval: Option<SignedApproval>,
+    signed_approval: StoredApproval,
+}
+
+/// The confidential approval kept with a stored credential. Each kind has its own
+/// token prefix, so one is never read as another.
+#[derive(Clone, Debug)]
+enum StoredApproval {
+    /// V1: a bare grant.
+    None,
+    /// V2: a signed direct approval.
+    Direct(SignedApproval),
+    /// V3: a signed child approval.
+    Child(SignedApproval),
+}
+
+impl StoredApproval {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::Direct(approval) | Self::Child(approval) => Some(approval.as_str()),
+        }
+    }
 }
 
 /// Non-secret durable metadata for browser delegated grant restore.
@@ -174,15 +228,19 @@ impl StoredGrantCredential {
     /// Encode this credential as a compact token suitable for secure storage.
     fn encode(&self) -> String {
         let secret = Zeroizing::new(URL_SAFE_NO_PAD.encode(self.client_key_secret));
-        match &self.signed_approval {
-            Some(approval) => format!(
-                "{STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX}:{}:{}:{}:{}",
+        let prefix = match &self.signed_approval {
+            StoredApproval::None => None,
+            StoredApproval::Direct(_) => Some(STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX),
+            StoredApproval::Child(_) => Some(STORED_GRANT_CREDENTIAL_CHILD_PREFIX),
+        };
+        match (prefix, self.signed_approval.as_str()) {
+            (Some(prefix), Some(approval)) => format!(
+                "{prefix}:{}:{}:{}:{approval}",
                 self.homeserver_pk.z32(),
                 secret.as_str(),
                 self.grant_jws,
-                approval.as_str(),
             ),
-            None => format!(
+            _ => format!(
                 "{STORED_GRANT_CREDENTIAL_PREFIX}:{}:{}:{}",
                 self.homeserver_pk.z32(),
                 secret.as_str(),
@@ -198,27 +256,31 @@ impl StoredGrantCredential {
     /// unsupported version, invalid homeserver key, or invalid client secret.
     fn decode(token: &str) -> Result<Self> {
         // V1 remains authentication-only. V2 appends the confidential signed
-        // approval; compact JWS values contain no colon separators.
+        // approval, and V3 a signed child approval; compact JWS values contain
+        // no colon separators.
         let (prefix, rest) = token.split_once(':').ok_or_else(invalid_stored_grant)?;
-        if prefix != STORED_GRANT_CREDENTIAL_PREFIX
-            && prefix != STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX
-        {
-            return Err(RequestError::Validation {
-                message: "unsupported grant credential token version".into(),
+        let approval_kind: Option<fn(SignedApproval) -> StoredApproval> = match prefix {
+            STORED_GRANT_CREDENTIAL_PREFIX => None,
+            STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX => Some(StoredApproval::Direct),
+            STORED_GRANT_CREDENTIAL_CHILD_PREFIX => Some(StoredApproval::Child),
+            _ => {
+                return Err(RequestError::Validation {
+                    message: "unsupported grant credential token version".into(),
+                }
+                .into());
             }
-            .into());
-        }
+        };
 
         let (homeserver, rest) = rest.split_once(':').ok_or_else(invalid_stored_grant)?;
         let (secret, grant_jws) = rest.split_once(':').ok_or_else(invalid_stored_grant)?;
-        let (grant_jws, signed_approval) = if prefix == STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX {
+        let (grant_jws, signed_approval) = if let Some(kind) = approval_kind {
             let (grant, approval) = grant_jws.split_once(':').ok_or_else(invalid_stored_grant)?;
             if approval.is_empty() {
                 return Err(invalid_stored_grant().into());
             }
-            (grant, Some(SignedApproval::new(approval)))
+            (grant, kind(SignedApproval::new(approval)))
         } else {
-            (grant_jws, None)
+            (grant_jws, StoredApproval::None)
         };
         if grant_jws.is_empty() {
             return Err(invalid_stored_grant().into());
@@ -256,6 +318,7 @@ impl GrantCredential {
         grant_claims: GrantClaims,
         client_signer: GrantPopSigner,
         homeserver_pk: PublicKey,
+        chain: GrantChain,
     ) -> Self {
         let info = to_session_info(&response.session);
         let state = GrantCredentialState {
@@ -270,6 +333,7 @@ impl GrantCredential {
         Self {
             state: Arc::new(Mutex::new(state)),
             info,
+            chain,
             verified_approval: None,
         }
     }
@@ -299,12 +363,69 @@ impl GrantCredential {
         )?))
     }
 
+    /// Read browser-held restore material for a child grant and verify its
+    /// signed child approval, without issuing a bearer.
+    ///
+    /// `state.grant_jws` is the child grant. Expired grants remain usable for logout.
+    #[doc(hidden)]
+    pub fn from_shared_delegated_child(
+        state: DelegatedGrantCredentialState,
+        sign: DelegatedSignFn,
+        signed_approval: &str,
+    ) -> Result<Self> {
+        let approval = ChildApproval::decode(signed_approval)?;
+        if approval.child_jws != state.grant_jws {
+            return Err(AuthError::Validation(
+                "stored approval does not match the stored grant".into(),
+            )
+            .into());
+        }
+        let material = delegated_material(
+            state,
+            sign,
+            true,
+            approval.child_claims.grant.clone(),
+            GrantChain::Child {
+                parent_jws: approval.parent_jws.clone(),
+            },
+            Some(VerifiedApproval {
+                encryption_keys: approval.encryption_keys,
+                signed_approval: approval.signed_approval,
+            }),
+        )?;
+        Ok(Self::from_shared_material(material))
+    }
+
+    /// Read a child grant whose approval and keys were deleted at sign-out, so the
+    /// browser can finish revoking it. The credential has no keys.
+    #[doc(hidden)]
+    pub fn from_shared_delegated_child_logout(
+        state: DelegatedGrantCredentialState,
+        parent_jws: &str,
+        sign: DelegatedSignFn,
+    ) -> Result<Self> {
+        let claims = decode_child_grant(&state.grant_jws)?;
+        let chain = GrantChain::Child {
+            parent_jws: parent_jws.to_owned(),
+        };
+        let material = delegated_material(state, sign, true, claims, chain, None)?;
+        Ok(Self::from_shared_material(material))
+    }
+
+    /// The public parent grant JWS of a child grant, or `None` for a direct grant.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn parent_grant(&self) -> Option<&str> {
+        self.chain.parent_jws()
+    }
+
     fn from_shared_material(material: GrantRestoreMaterial) -> Self {
         let GrantRestoreMaterial {
             grant_jws,
             grant_claims: claims,
             client_signer: signer,
             homeserver_pk: homeserver,
+            chain,
             verified_approval,
         } = material;
         let response = GrantSessionResponse {
@@ -320,7 +441,8 @@ impl GrantCredential {
                 created_at: 0,
             },
         };
-        let mut credential = Self::from_response(response, grant_jws, claims, signer, homeserver);
+        let mut credential =
+            Self::from_response(response, grant_jws, claims, signer, homeserver, chain);
         credential.retain_verified_approval(verified_approval);
         credential
     }
@@ -335,6 +457,7 @@ impl GrantCredential {
             material.grant_claims,
             material.client_signer,
             material.homeserver_pk,
+            material.chain,
         )
         .await?;
         credential.retain_verified_approval(material.verified_approval);
@@ -373,15 +496,23 @@ impl GrantCredential {
     pub async fn export_local_secret(&self) -> Option<String> {
         let state = self.state.lock().await;
         let client_key_secret = state.client_signer.local_secret()?;
+        let approval = self
+            .verified_approval
+            .as_ref()
+            .map(|approval| approval.signed_approval.clone());
+        let signed_approval = match (&self.chain, approval) {
+            (GrantChain::Direct, None) => StoredApproval::None,
+            (GrantChain::Direct, Some(approval)) => StoredApproval::Direct(approval),
+            (GrantChain::Child { .. }, Some(approval)) => StoredApproval::Child(approval),
+            // A child without its approval can only finish signing out.
+            (GrantChain::Child { .. }, None) => return None,
+        };
         Some(
             StoredGrantCredential {
                 grant_jws: state.grant_jws.clone(),
                 client_key_secret,
                 homeserver_pk: state.homeserver_pk.clone(),
-                signed_approval: self
-                    .verified_approval
-                    .as_ref()
-                    .map(|approval| approval.signed_approval.clone()),
+                signed_approval,
             }
             .encode(),
         )
@@ -452,10 +583,39 @@ impl GrantCredential {
         token: &str,
     ) -> Result<Option<(GrantClaims, ScopedEncryptionKeyBundle)>> {
         let saved = StoredGrantCredential::decode(token)?;
-        Self::restore_encryption_keys_from_approval(
-            &saved.grant_jws,
-            saved.signed_approval.as_ref().map(SignedApproval::as_str),
-        )
+        match &saved.signed_approval {
+            StoredApproval::Child(approval) => {
+                Self::restore_child_encryption_keys(&saved.grant_jws, approval.as_str()).map(Some)
+            }
+            approval => {
+                require_direct_grant(&saved.grant_jws)?;
+                Self::restore_encryption_keys_from_approval(&saved.grant_jws, approval.as_str())
+            }
+        }
+    }
+
+    /// Recover a child grant's keys and authenticated claims from its signed child
+    /// approval, offline.
+    ///
+    /// Verifies the whole chain and that the approval holds exactly `child_grant`.
+    /// Check `claims.iss` and `claims.jti` against the expected record before using
+    /// the returned `(claims, keys)`. Direct approvals are rejected; use
+    /// [`Self::restore_encryption_keys_from_approval`] for those.
+    ///
+    /// # Errors
+    /// Rejects invalid approvals, inconsistent scopes, and mismatched grants.
+    pub fn restore_child_encryption_keys(
+        child_grant: &str,
+        signed_approval: &str,
+    ) -> Result<(GrantClaims, ScopedEncryptionKeyBundle)> {
+        let approval = ChildApproval::decode(signed_approval)?;
+        if approval.child_jws != child_grant {
+            return Err(AuthError::Validation(
+                "stored approval does not match the stored grant".into(),
+            )
+            .into());
+        }
+        Ok((approval.child_claims.grant, approval.encryption_keys))
     }
 
     /// Recover keys and authenticated claims from an approval bound to `grant_jws`.
@@ -540,11 +700,15 @@ impl GrantCredential {
         let parsed = refresh_grant_session(
             client,
             &state.grant_jws,
+            self.chain.parent_jws(),
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,
         )
         .await?;
+        if matches!(self.chain, GrantChain::Child { .. }) {
+            check_session_matches_grant(&parsed, &state.grant_claims, &state.homeserver_pk)?;
+        }
 
         state.bearer = parsed.token;
         state.session = parsed.session;
@@ -621,7 +785,12 @@ impl SessionCredential for GrantCredential {
                     &state.grant_claims.jti,
                 )
                 .await?;
-                Some(serde_json::json!({ "grant": state.grant_jws, "pop": pop }))
+                // A child's proof names its parent, which revokes only the child.
+                Some(grant_proof_body(
+                    &state.grant_jws,
+                    self.chain.parent_jws(),
+                    &pop,
+                ))
             } else {
                 None
             }
@@ -775,14 +944,36 @@ fn restore_material(
     saved: StoredGrantCredential,
     allow_expired: bool,
 ) -> Result<GrantRestoreMaterial> {
-    let verified_approval = restore_verified_approval(
-        saved.signed_approval.as_ref().map(SignedApproval::as_str),
-        &saved.grant_jws,
-    )?
-    .map(|(_, approval)| approval);
-    let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
-        AuthError::Validation(format!("invalid stored grant credential grant JWS: {err}"))
-    })?;
+    let (grant_claims, chain, verified_approval) = match &saved.signed_approval {
+        StoredApproval::Child(signed) => {
+            let approval = ChildApproval::decode(signed.as_str())?;
+            if approval.child_jws != saved.grant_jws {
+                return Err(AuthError::Validation(
+                    "stored approval does not match the stored grant".into(),
+                )
+                .into());
+            }
+            (
+                approval.child_claims.grant,
+                GrantChain::Child {
+                    parent_jws: approval.parent_jws,
+                },
+                Some(VerifiedApproval {
+                    encryption_keys: approval.encryption_keys,
+                    signed_approval: approval.signed_approval,
+                }),
+            )
+        }
+        approval => {
+            require_direct_grant(&saved.grant_jws)?;
+            let verified = restore_verified_approval(approval.as_str(), &saved.grant_jws)?
+                .map(|(_, approval)| approval);
+            let claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
+                AuthError::Validation(format!("invalid stored grant credential grant JWS: {err}"))
+            })?;
+            (claims, GrantChain::Direct, verified)
+        }
+    };
     if !allow_expired && grant_claims.exp <= now_unix() {
         return Err(AuthError::Validation("stored grant credential has expired".into()).into());
     }
@@ -800,6 +991,7 @@ fn restore_material(
         grant_claims,
         client_signer: GrantPopSigner::local(client_keypair),
         homeserver_pk: saved.homeserver_pk,
+        chain,
         verified_approval,
     })
 }
@@ -832,6 +1024,7 @@ fn restore_delegated_material(
     allow_expired: bool,
     signed_approval: Option<&str>,
 ) -> Result<GrantRestoreMaterial> {
+    require_direct_grant(&saved.grant_jws)?;
     let verified_approval =
         restore_verified_approval(signed_approval, &saved.grant_jws)?.map(|(_, approval)| approval);
     let grant_claims = GrantClaims::decode(&saved.grant_jws).map_err(|err| {
@@ -839,6 +1032,32 @@ fn restore_delegated_material(
             "invalid delegated grant credential grant JWS: {err}"
         ))
     })?;
+    delegated_material(
+        saved,
+        sign,
+        allow_expired,
+        grant_claims,
+        GrantChain::Direct,
+        verified_approval,
+    )
+}
+
+/// Decode a child grant's claims without verifying them, for a sign-out that
+/// only the homeserver checks.
+fn decode_child_grant(child_jws: &str) -> Result<GrantClaims> {
+    pubky_common::auth::grant::ChildGrantClaims::decode(child_jws)
+        .map(|child| child.grant)
+        .map_err(|err| AuthError::Validation(format!("invalid stored child grant: {err}")).into())
+}
+
+fn delegated_material(
+    saved: DelegatedGrantCredentialState,
+    sign: DelegatedSignFn,
+    allow_expired: bool,
+    grant_claims: GrantClaims,
+    chain: GrantChain,
+    verified_approval: Option<VerifiedApproval>,
+) -> Result<GrantRestoreMaterial> {
     if !allow_expired && grant_claims.exp <= now_unix() {
         return Err(AuthError::Validation("delegated grant credential has expired".into()).into());
     }
@@ -855,6 +1074,7 @@ fn restore_delegated_material(
         grant_claims,
         client_signer: GrantPopSigner::delegated(saved.key_id, saved.client_pk, sign),
         homeserver_pk: saved.homeserver_pk,
+        chain,
         verified_approval,
     })
 }
@@ -947,9 +1167,16 @@ mod tests {
         };
         let jws = grant.sign(&user, GRANT_JWS_TYP);
         let signer = GrantPopSigner::local(pop_key);
-        let credential = credential_from_grant_exchange(&client, jws, grant, signer, homeserver)
-            .await
-            .unwrap();
+        let credential = credential_from_grant_exchange(
+            &client,
+            jws,
+            grant,
+            signer,
+            homeserver,
+            GrantChain::Direct,
+        )
+        .await
+        .unwrap();
         let state = credential.state.lock().await;
         let bearer = state.bearer.clone();
         assert_eq!(state.session.token_expires_at, state.grant_claims.exp);
@@ -1021,7 +1248,7 @@ mod tests {
         assert_eq!(decoded.grant_jws, stored.grant_jws);
         assert_eq!(decoded.client_key_secret, stored.client_key_secret);
         assert_eq!(decoded.homeserver_pk, stored.homeserver_pk);
-        assert!(decoded.signed_approval.is_none());
+        assert!(matches!(decoded.signed_approval, StoredApproval::None));
     }
 
     #[test]
@@ -1033,17 +1260,15 @@ mod tests {
         stored.grant_jws = claims.sign(&identity, GRANT_JWS_TYP);
         let signed =
             super::super::approval_envelope::GrantApprovalEnvelope::sign(&identity, &claims);
-        stored.signed_approval = Some(SignedApproval::new(&signed));
+        stored.signed_approval = StoredApproval::Direct(SignedApproval::new(&signed));
 
         let encoded = Zeroizing::new(stored.encode());
         assert!(encoded.starts_with(STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX));
         let decoded = StoredGrantCredential::decode(&encoded).unwrap();
-        let (_, approval) = restore_verified_approval(
-            decoded.signed_approval.as_ref().map(SignedApproval::as_str),
-            &decoded.grant_jws,
-        )
-        .unwrap()
-        .unwrap();
+        let (_, approval) =
+            restore_verified_approval(decoded.signed_approval.as_str(), &decoded.grant_jws)
+                .unwrap()
+                .unwrap();
         let keys = approval.encryption_keys;
         let path = pubky_common::StoragePath::new("/pub/chat/message").unwrap();
         let expected = ScopedEncryptionKeyBundle::from_identity_secret(&identity.secret(), [&path]);
@@ -1084,7 +1309,7 @@ mod tests {
         saved.grant_jws = claims.sign(&identity, GRANT_JWS_TYP);
         let signed =
             super::super::approval_envelope::GrantApprovalEnvelope::sign(&identity, &claims);
-        saved.signed_approval = Some(SignedApproval::new(&signed));
+        saved.signed_approval = StoredApproval::Direct(SignedApproval::new(&signed));
         let delegated = DelegatedGrantCredentialState {
             grant_jws: saved.grant_jws.clone(),
             homeserver_pk: saved.homeserver_pk.clone(),
@@ -1104,7 +1329,7 @@ mod tests {
         let (delegated_claims, delegated_keys) =
             GrantCredential::restore_encryption_keys_from_approval(
                 &delegated.grant_jws,
-                saved.signed_approval.as_ref().map(SignedApproval::as_str),
+                saved.signed_approval.as_str(),
             )
             .unwrap()
             .unwrap();
@@ -1117,7 +1342,7 @@ mod tests {
         let shared_delegated = GrantCredential::from_shared_delegated_state(
             delegated.clone(),
             test_delegated_signer(),
-            saved.signed_approval.as_ref().map(SignedApproval::as_str),
+            saved.signed_approval.as_str(),
         )
         .unwrap();
         assert!(shared_local.signed_approval().is_some());
@@ -1154,7 +1379,9 @@ mod tests {
     #[test]
     fn offline_key_recovery_rejects_tampering_and_mismatched_grants() {
         let (mut saved, mut delegated, _) = expired_key_credential();
-        let signed = saved.signed_approval.clone().unwrap();
+        let StoredApproval::Direct(signed) = saved.signed_approval.clone() else {
+            panic!("expected a direct approval");
+        };
         let (other, _) = stored_credential(now_unix() + 3600);
         delegated.grant_jws = other.grant_jws.clone();
         GrantCredential::restore_encryption_keys_from_approval(
@@ -1175,7 +1402,7 @@ mod tests {
             b'A'
         };
         let tampered = Zeroizing::new(String::from_utf8(tampered).unwrap());
-        saved.signed_approval = Some(SignedApproval::new(&tampered));
+        saved.signed_approval = StoredApproval::Direct(SignedApproval::new(&tampered));
         GrantCredential::from_shared_secret(&saved.encode()).unwrap_err();
         GrantCredential::from_shared_delegated_state(
             delegated.clone(),
@@ -1874,6 +2101,7 @@ mod tests {
                 claims,
                 GrantPopSigner::local(client_keypair),
                 homeserver,
+                GrantChain::Direct,
             )
         }
 
@@ -2009,7 +2237,7 @@ mod tests {
             grant_jws,
             client_key_secret: client_keypair.secret(),
             homeserver_pk: homeserver_keypair.public_key(),
-            signed_approval: None,
+            signed_approval: StoredApproval::None,
         };
         (stored, claims)
     }
@@ -2038,11 +2266,308 @@ mod tests {
             claims,
             client_signer,
             stored.homeserver_pk,
+            GrantChain::Direct,
         )
     }
 
     fn test_delegated_signer() -> DelegatedSignFn {
         super::super::pop_signer::delegated_sign_callback(|_| async { Ok(vec![0; 64]) })
+    }
+
+    /// A child grant, its signed child approval and the app key its `cnf` binds.
+    struct ChildMaterial {
+        user: Keypair,
+        app: Keypair,
+        parent_jws: String,
+        child_jws: String,
+        claims: GrantClaims,
+        approval: Zeroizing<String>,
+    }
+
+    fn child_material(exp: u64) -> ChildMaterial {
+        use pubky_common::auth::{
+            grant::ChildGrantClaims,
+            jws::{CHILD_GRANT_JWS_TYP, PARENT_GRANT_JWS_TYP, sign_jws},
+        };
+
+        use super::super::approval_envelope::{
+            CHILD_APPROVAL_JWS_TYP, ChildApprovalEnvelope, key_scopes,
+        };
+
+        let user = Keypair::random();
+        let accounts = Keypair::random();
+        let app = Keypair::random();
+        let parent = GrantClaims {
+            iss: user.public_key(),
+            client_id: ClientId::new("https://accounts.example/auth/callback").unwrap(),
+            caps: vec!["/pub/:rwe".parse().unwrap(), "/priv/:rwe".parse().unwrap()],
+            cnf: accounts.public_key(),
+            jti: GrantId::generate(),
+            iat: exp.saturating_sub(7200),
+            exp,
+        };
+        let child = ChildGrantClaims {
+            grant: GrantClaims {
+                iss: user.public_key(),
+                client_id: ClientId::new("https://chat.example/auth/callback").unwrap(),
+                caps: vec![
+                    "/pub/chat/:rw".parse().unwrap(),
+                    "/priv/chat/:rwe".parse().unwrap(),
+                ],
+                cnf: app.public_key(),
+                jti: GrantId::generate(),
+                iat: exp.saturating_sub(7200),
+                exp,
+            },
+            parent_jti: parent.jti.clone(),
+        };
+        let parent_jws = sign_jws(&user, PARENT_GRANT_JWS_TYP, &parent);
+        let child_jws = sign_jws(&accounts, CHILD_GRANT_JWS_TYP, &child);
+        let envelope = ChildApprovalEnvelope {
+            parent: parent_jws.clone(),
+            child: child_jws.clone(),
+            recipient: "recipient".into(),
+            state: "state".into(),
+            encryption_keys: ScopedEncryptionKeyBundle::from_identity_secret(
+                &user.secret(),
+                key_scopes(&child.grant.caps),
+            ),
+        };
+        let approval = Zeroizing::new(sign_jws(&accounts, CHILD_APPROVAL_JWS_TYP, &envelope));
+        ChildMaterial {
+            user,
+            app,
+            parent_jws,
+            child_jws,
+            claims: child.grant,
+            approval,
+        }
+    }
+
+    fn child_token(material: &ChildMaterial) -> StoredGrantCredential {
+        StoredGrantCredential {
+            grant_jws: material.child_jws.clone(),
+            client_key_secret: material.app.secret(),
+            homeserver_pk: Keypair::random().public_key(),
+            signed_approval: StoredApproval::Child(SignedApproval::new(&material.approval)),
+        }
+    }
+
+    fn child_state(material: &ChildMaterial) -> DelegatedGrantCredentialState {
+        DelegatedGrantCredentialState {
+            grant_jws: material.child_jws.clone(),
+            homeserver_pk: Keypair::random().public_key(),
+            key_id: "child-key".into(),
+            client_pk: material.app.public_key(),
+        }
+    }
+
+    #[tokio::test]
+    async fn child_tokens_keep_the_chain_and_round_trip() {
+        let material = child_material(now_unix() + 3600);
+        let token = Zeroizing::new(child_token(&material).encode());
+        assert!(token.starts_with("pubky-grant-credential-v3:"));
+
+        let credential = GrantCredential::from_shared_secret(&token).unwrap();
+        assert_eq!(
+            credential.parent_grant(),
+            Some(material.parent_jws.as_str())
+        );
+        assert_eq!(
+            credential.signed_approval(),
+            Some(material.approval.as_str())
+        );
+        assert_eq!(credential.export_local_secret().await.unwrap(), *token);
+
+        let (claims, keys) = GrantCredential::restore_encryption_keys(&token)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claims, material.claims);
+        let file = pubky_common::StoragePath::new("/priv/chat/message").unwrap();
+        let expected = ScopedEncryptionKeyBundle::from_identity_secret(
+            &material.user.secret(),
+            [&pubky_common::StoragePath::new("/priv/chat/").unwrap()],
+        );
+        assert_eq!(
+            *keys.derive_for_path(&file).unwrap(),
+            *expected.derive_for_path(&file).unwrap()
+        );
+        let (claims, _) =
+            GrantCredential::restore_child_encryption_keys(&material.child_jws, &material.approval)
+                .unwrap();
+        assert_eq!(claims, material.claims);
+        assert!(!format!("{credential:?}").contains(material.approval.as_str()));
+    }
+
+    #[test]
+    fn child_and_direct_formats_never_stand_in_for_each_other() {
+        let material = child_material(now_unix() + 3600);
+        let v3 = child_token(&material).encode();
+        let (direct, _) = stored_credential(now_unix() + 3600);
+        let direct_approval = {
+            let identity = Keypair::random();
+            let (mut stored, mut claims) = stored_credential(now_unix() + 3600);
+            claims.iss = identity.public_key();
+            stored.grant_jws = claims.sign(&identity, GRANT_JWS_TYP);
+            let signed =
+                super::super::approval_envelope::GrantApprovalEnvelope::sign(&identity, &claims);
+            stored.signed_approval = StoredApproval::Direct(SignedApproval::new(&signed));
+            stored
+        };
+
+        // A child approval in a V2 token, a child grant in a V1 token, and a
+        // direct approval in a V3 token.
+        let as_v2 = v3.replacen(
+            STORED_GRANT_CREDENTIAL_CHILD_PREFIX,
+            STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX,
+            1,
+        );
+        let bare_child = StoredGrantCredential {
+            signed_approval: StoredApproval::None,
+            ..child_token(&material)
+        }
+        .encode();
+        let direct_as_v3 = direct_approval.encode().replacen(
+            STORED_GRANT_CREDENTIAL_APPROVAL_PREFIX,
+            STORED_GRANT_CREDENTIAL_CHILD_PREFIX,
+            1,
+        );
+        for token in [as_v2, bare_child, direct_as_v3] {
+            GrantCredential::from_shared_secret(&token).unwrap_err();
+            GrantCredential::restore_encryption_keys(&token).unwrap_err();
+        }
+        // The approval must hold exactly the stored child.
+        let swapped = StoredGrantCredential {
+            grant_jws: child_material(now_unix() + 3600).child_jws,
+            ..child_token(&material)
+        };
+        GrantCredential::from_shared_secret(&swapped.encode()).unwrap_err();
+
+        // Delegated restore keeps the same separation.
+        let state = child_state(&material);
+        GrantCredential::from_shared_delegated_state(
+            state.clone(),
+            test_delegated_signer(),
+            Some(&material.approval),
+        )
+        .unwrap_err();
+        GrantCredential::from_shared_delegated_state(state.clone(), test_delegated_signer(), None)
+            .unwrap_err();
+        let direct_state = DelegatedGrantCredentialState {
+            grant_jws: direct_approval.grant_jws.clone(),
+            homeserver_pk: direct.homeserver_pk,
+            key_id: "direct".into(),
+            client_pk: Keypair::from_secret(&direct_approval.client_key_secret).public_key(),
+        };
+        GrantCredential::from_shared_delegated_child(
+            direct_state,
+            test_delegated_signer(),
+            direct_approval.signed_approval.as_str().unwrap(),
+        )
+        .unwrap_err();
+        GrantCredential::restore_child_encryption_keys(
+            &direct_approval.grant_jws,
+            direct_approval.signed_approval.as_str().unwrap(),
+        )
+        .unwrap_err();
+        GrantCredential::restore_encryption_keys_from_approval(
+            &material.child_jws,
+            Some(&material.approval),
+        )
+        .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn delegated_children_restore_with_their_approval_or_only_to_sign_out() {
+        let material = child_material(now_unix() + 3600);
+        let state = child_state(&material);
+        let restored = GrantCredential::from_shared_delegated_child(
+            state.clone(),
+            test_delegated_signer(),
+            &material.approval,
+        )
+        .unwrap();
+        assert_eq!(restored.parent_grant(), Some(material.parent_jws.as_str()));
+        assert!(restored.encryption_keys().is_some());
+        assert!(restored.export_local_secret().await.is_none());
+
+        let mut other_key = state.clone();
+        other_key.client_pk = Keypair::random().public_key();
+        GrantCredential::from_shared_delegated_child(
+            other_key,
+            test_delegated_signer(),
+            &material.approval,
+        )
+        .unwrap_err();
+        let other_child = child_material(now_unix() + 3600);
+        GrantCredential::from_shared_delegated_child(
+            state.clone(),
+            test_delegated_signer(),
+            &other_child.approval,
+        )
+        .unwrap_err();
+
+        // After sign-out deleted the approval, only the public chain remains.
+        let logout = GrantCredential::from_shared_delegated_child_logout(
+            state,
+            &material.parent_jws,
+            test_delegated_signer(),
+        )
+        .unwrap();
+        assert_eq!(logout.parent_grant(), Some(material.parent_jws.as_str()));
+        assert!(logout.encryption_keys().is_none());
+        assert!(logout.signed_approval().is_none());
+
+        // A local child without its approval can't be exported either.
+        let local = GrantCredential::from_response(
+            GrantSessionResponse {
+                token: String::new(),
+                session: GrantSessionInfo {
+                    homeserver: Keypair::random().public_key(),
+                    pubky: material.claims.iss.clone(),
+                    client_id: material.claims.client_id.clone(),
+                    capabilities: material.claims.caps.clone(),
+                    grant_id: material.claims.jti.clone(),
+                    token_expires_at: 0,
+                    grant_expires_at: material.claims.exp,
+                    created_at: 0,
+                },
+            },
+            material.child_jws.clone(),
+            material.claims.clone(),
+            GrantPopSigner::local(material.app),
+            Keypair::random().public_key(),
+            GrantChain::Child {
+                parent_jws: material.parent_jws.clone(),
+            },
+        );
+        assert!(local.export_local_secret().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn custom_proofs_refuse_child_grants() {
+        let material = child_material(now_unix() + 3600);
+        let credential =
+            GrantCredential::from_shared_secret(&child_token(&material).encode()).unwrap();
+        let error = credential
+            .create_custom_pop(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("child grants"), "{error}");
+    }
+
+    #[test]
+    fn exchange_and_logout_bodies_carry_the_parent_only_for_children() {
+        let direct = super::super::grant_exchange::grant_proof_body("grant", None, "pop");
+        assert_eq!(
+            direct,
+            serde_json::json!({ "grant": "grant", "pop": "pop" })
+        );
+        let child = super::super::grant_exchange::grant_proof_body("grant", Some("parent"), "pop");
+        assert_eq!(
+            child,
+            serde_json::json!({ "parent": "parent", "grant": "grant", "pop": "pop" })
+        );
     }
 
     #[tokio::test]

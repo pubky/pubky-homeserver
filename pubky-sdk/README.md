@@ -492,6 +492,13 @@ store that key and `parent.signed_approval()` securely, and restore with
   keys stay usable. To retry after a restart, keep `parent.parent_grant()` and
   the key, and call `ParentGrantCredential::revoke_with_keypair`.
 
+#### Sign in through a parent grant holder
+
+Use `PubkyRedirectAuthFlow` with your Accounts URL and registered HTTPS callback.
+Save the flow before navigating, then accept and exchange the callback.
+See [redirect sign-in](../docs/delegated-grants.md#sign-in-an-app) for persistence,
+retries, and sign-out.
+
 ## Features
 
 - `json`: enable `Storage` helpers (`.get_json()` / `.put_json()`) and serde on certain types.

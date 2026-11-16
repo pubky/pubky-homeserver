@@ -4,9 +4,11 @@ use pubky::{GrantSessionCoordinator, GrantSessionLease, SharedGrantSession};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 
-use super::session_store::{js_session_acquire, js_session_release, js_session_wait, store_error};
+use super::session_store::browser::{
+    js_session_acquire, js_session_release, js_session_wait, store_error,
+};
 #[cfg(target_arch = "wasm32")]
-use super::session_store::{js_shared_load, js_shared_remove, js_shared_store};
+use super::session_store::browser::{js_shared_load, js_shared_remove, js_shared_store};
 
 #[derive(Debug)]
 pub(crate) struct BrowserSessionCoordinator {

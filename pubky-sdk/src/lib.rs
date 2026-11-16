@@ -48,6 +48,11 @@ pub use actors::SessionInfo;
 #[doc(inline)]
 pub use actors::deep_links;
 #[doc(inline)]
+pub use actors::{
+    ChildGrantApproval, DEFAULT_REDIRECT_FLOW_LIFETIME, DelegatedRedirectAuthFlowState,
+    PubkyRedirectAuthFlow, RedirectAuthFlowBuilder, RedirectAuthFlowState, RedirectCallback,
+};
+#[doc(inline)]
 #[allow(deprecated, reason = "Re-exporting deprecated public API")]
 pub use actors::{
     CookieCredential, CookieSessionView, DelegatedGrantCredentialState, GrantCredential,

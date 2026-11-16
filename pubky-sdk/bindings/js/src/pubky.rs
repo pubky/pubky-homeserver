@@ -13,8 +13,12 @@ use crate::actors::{
     event_stream::EventStreamBuilder,
     grant_auth_flow::{GrantAuthFlow, GrantAuthFlowOptions},
     parent_grant::ParentGrantStore,
+    redirect_auth_flow::{self, RedirectAuthFlowOptions, RedirectAuthRequest, RedirectAuthResult},
     session::Session,
-    session_store::BrowserSessionStore,
+    session_store::{
+        BrowserSessionStore,
+        browser::{js_redirect_capture_location, js_redirect_origin, store_error},
+    },
     signer::Signer,
     storage::PublicStorage,
 };
@@ -257,6 +261,57 @@ impl Pubky {
     ) -> JsResult<GrantAuthFlow> {
         GrantAuthFlow::resume_delegated_with_client(saved_state, Some(self.0.client().clone()))
             .await
+    }
+
+    /// Start and save a redirect request using the supplied Accounts and callback URLs.
+    #[wasm_bindgen(js_name = "startRedirectAuthFlow")]
+    pub async fn start_redirect_auth_flow(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
+        options: Ts<RedirectAuthFlowOptions>,
+    ) -> JsResult<RedirectAuthRequest> {
+        let options = deserialize_ts(&options)?;
+        redirect_auth_flow::start(&self.0, &capabilities, options, js_redirect_origin()).await
+    }
+
+    /// Remove the callback fragment immediately, then verify and save the session.
+    /// Call before routing or analytics. A reload resumes an interrupted exchange.
+    #[wasm_bindgen(
+        js_name = "completeRedirectAuthFlow",
+        unchecked_return_type = "Promise<RedirectAuthResult>"
+    )]
+    pub fn complete_redirect_auth_flow(&self) -> js_sys::Promise {
+        // Before the first await, so code that runs next never sees the fragment.
+        let captured = js_redirect_capture_location();
+        let pubky = self.0.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let href = captured.map_err(store_error)?;
+            Ok(redirect_auth_flow::complete(&pubky, &href).await?.into())
+        })
+    }
+
+    /// Read the pending request for this callback, if any.
+    #[wasm_bindgen(js_name = "redirectAuthFlow")]
+    pub async fn redirect_auth_flow(
+        &self,
+        callback_url: String,
+    ) -> JsResult<Option<RedirectAuthRequest>> {
+        redirect_auth_flow::pending(&callback_url).await
+    }
+
+    /// Retry an accepted callback whose exchange or session save failed.
+    #[wasm_bindgen(js_name = "resumeRedirectAuthFlow")]
+    pub async fn resume_redirect_auth_flow(
+        &self,
+        callback_url: String,
+    ) -> JsResult<RedirectAuthResult> {
+        redirect_auth_flow::resume(&self.0, &callback_url).await
+    }
+
+    /// Delete a pending request; revoke its child if an exchange may have happened.
+    #[wasm_bindgen(js_name = "cancelRedirectAuthFlow")]
+    pub async fn cancel_redirect_auth_flow(&self, callback_url: String) -> JsResult<()> {
+        redirect_auth_flow::cancel(&self.0, &callback_url).await
     }
 
     /// Browser-backed store for parent grants, used by holders such as Pubky Accounts.

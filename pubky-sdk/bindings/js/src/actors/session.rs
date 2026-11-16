@@ -62,10 +62,28 @@ impl Session {
     /// @returns {Promise<void>}
     #[wasm_bindgen]
     pub async fn signout(&self) -> JsResult<()> {
-        match self.0.clone().signout().await {
-            Ok(()) => Ok(()),
-            Err((e, _s)) => Err(PubkyError::from(e)),
-        }
+        let callback = match self.0.as_grant() {
+            Some(grant)
+                if grant.parent_grant().is_some()
+                    && grant.export_delegated_restore_state().await.is_some() =>
+            {
+                Some(grant.session_info().await.client_id)
+            }
+            _ => None,
+        };
+        let result = self
+            .0
+            .clone()
+            .signout()
+            .await
+            .map_err(|(error, _)| PubkyError::from(error));
+        let cleanup = match callback {
+            Some(callback) => {
+                super::redirect_auth_flow::finish_signout(self.0.client(), callback.as_str()).await
+            }
+            None => Ok(()),
+        };
+        result.and(cleanup)
     }
 
     /// Export the session metadata so it can be restored after a tab refresh.

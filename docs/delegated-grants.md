@@ -120,6 +120,52 @@ A request that exceeds the parent, such as keys the user declined to share, gets
 `insufficient_permissions`. Tell the user what's missing rather than starting
 another Ring approval automatically.
 
+### Sign in an app
+
+Pass your Accounts authorization URL and registered HTTPS callback. The callback
+must be on the app's origin. Accounts checks the callback against its catalog.
+
+```js
+const request = await pubky.startRedirectAuthFlow(capabilities, { accountsUrl, callbackUrl });
+location.assign(request.authorizationUrl);
+```
+
+On the callback page, before routing or analytics:
+
+```js
+const { session, storedSession } = await pubky.completeRedirectAuthFlow();
+```
+
+The SDK saves the request before navigation and removes the callback fragment
+synchronously. It verifies the approval, exchanges the child grant, and saves
+the session before returning it. Invalid callbacks leave the request open.
+
+- Requests expire after 10 minutes by default; `lifetimeSeconds` allows up to an hour.
+- Each callback has one pending request. Read it with `redirectAuthFlow(callbackUrl)`.
+- Retry an interrupted exchange with `resumeRedirectAuthFlow(callbackUrl)`.
+  It uses the accepted child again, without another Accounts approval.
+- `cancelRedirectAuthFlow(callbackUrl)` deletes the request's secrets and revokes
+  the child if an exchange may have reached the homeserver.
+- After completion, restore with `browserSessionStore.restore(storedSession.id)`.
+- Denials use `data.denial`: `access_denied`, `cancelled`, or
+  `insufficient_permissions`. Show the error; don't start another Ring approval automatically.
+
+Rust apps use `PubkyRedirectAuthFlow`: save the flow before navigation, then
+`accept()` the callback, save `signed_approval()`, and `exchange()` it. Resume a
+saved approval with `accept_signed_approval()`. Treat saved state as secret.
+
+Child exchanges, refreshes, and proof-based sign-out include the public parent.
+`createCustomPop()` supports direct grants only.
+
+### Sign out of an app
+
+`session.signout()` deletes the stored child approval and encryption keys before
+revoking the child. Other apps and the parent keep working. If revocation fails,
+retry with `signout()` or `browserSessionStore.restore(id)`; neither reopens the
+session. Signing in again returns the same keys for the same scopes.
+
+The SDK cannot delete keys the app copied elsewhere.
+
 ### Reconnect an app
 
 When the user removes an app, for example in Ring, the homeserver blocks new
@@ -175,11 +221,16 @@ The error code is `access_denied`, `cancelled` or `insufficient_permissions`.
 The receiver rejects an approval unless all of these are true:
 
 - Every signature and JWS type is correct, and the chain meets the
-  [homeserver's rules](#tokens).
+  [homeserver's rules](#tokens), except expiry, which the homeserver checks.
 - The recipient, client key and client ID match the pending request. For a child,
   so does the signed `state`.
 - The approved capabilities stay within the request.
 - The bundle has keys for exactly the grant's `e` scopes, with none missing or extra.
+
+An app also rejects a callback whose fragment repeats a parameter, holds both
+`approval` and `error`, has any other parameter, an unknown error code or more
+than 16 KiB, or arrives at another URL than the request's exact callback. Errors
+never include the fragment.
 
 ## Tokens
 
