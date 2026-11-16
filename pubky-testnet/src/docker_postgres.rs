@@ -340,7 +340,7 @@ mod tests {
     /// on testnet B (proving it has a separate, empty database).
     ///
     /// This also validates that the configured connection string (random Docker
-    /// port) flows through `DatabaseMode::resolve_test` → `EphemeralTest` →
+    /// port) flows through `DatabaseMode::ephemeral` → `EphemeralTest` →
     /// `create_ephemeral_test_db()`. Without that, it would fall back to
     /// `localhost:5432` and fail to connect.
     #[tokio::test]

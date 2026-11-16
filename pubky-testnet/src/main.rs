@@ -76,14 +76,11 @@ async fn main() -> Result<()> {
     }
 
     tokio::signal::ctrl_c().await?;
-    let persistent = testnet.is_persistent();
     drop(testnet);
 
-    if !persistent {
-        // Cleanup all ephemeral test databases. Test databases are only registered
-        // for the drop after the testnet is dropped.
-        pubky_testnet::drop_test_databases().await;
-    }
+    // Cleanup ephemeral test databases. They are only registered for the drop
+    // after the testnet is dropped, and a persistent testnet registers none.
+    pubky_testnet::drop_test_databases().await;
 
     Ok(())
 }

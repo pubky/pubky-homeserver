@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-For testing, use `MockDataDir` to create a temporary directory that is cleaned up on drop. Enable the `testing` feature:
+For testing, use `AppContext::new_ephemeral` to run on a temporary data directory and a throwaway database, both cleaned up after use. The database is created on the Postgres server given as the third argument, else the one in `TEST_PUBKY_CONNECTION_STRING`, else `localhost:5432`. Enable the `testing` feature:
 
 ```toml
 [dev-dependencies]
@@ -73,11 +73,12 @@ pubky-homeserver = { version = "0.x", features = ["testing"] }
 ```
 
 ```rust,ignore
-use pubky_homeserver::{HomeserverApp, MockDataDir, ConfigToml};
+use pubky_homeserver::{AppContext, ConfigToml, HomeserverApp};
+use pubky_common::crypto::Keypair;
 
 let config = ConfigToml::default_test_config();
-let mock_dir = MockDataDir::new(config, None).unwrap();
-let app = HomeserverApp::start_with_mock_data_dir(mock_dir).await.unwrap();
+let context = AppContext::new_ephemeral(config, Keypair::random(), None).await.unwrap();
+let app = HomeserverApp::start(context).await.unwrap();
 ```
 
 ### Binary

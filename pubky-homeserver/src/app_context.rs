@@ -2,31 +2,33 @@
 //! The application context shared between all components.
 //! Think of it as a simple Dependency Injection container.
 //!
-//! Create with a `DataDir` instance: `AppContext::try_from(data_dir)`
+//! Build it with [`AppContext::from_persistent_dir`] or [`AppContext::new`],
+//! or in tests with `AppContext::new_ephemeral`.
 //!
 
 use crate::services::lock_service::LockService;
 use crate::services::signup_service::SignupService;
 use crate::services::user_service::UserService;
 #[cfg(any(test, feature = "testing"))]
-use crate::MockDataDir;
+use crate::ConnectionString;
 use crate::{
     client_server::auth::RevocationListener,
     observability::{Metrics, MetricsInitError},
     persistence::{
         files::{FileIoError, FileService},
-        sql::{Migrator, PgEventListener, SqlDb},
+        sql::{DatabaseMode, Migrator, PgEventListener, SqlDb},
     },
     services::events_service::EventsService,
-    ConfigToml, DataDir,
+    ConfigToml, PersistentDataDir,
 };
 use pubky_common::crypto::Keypair;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Errors that can occur when converting a `DataDir` to an `AppContext`.
+/// Errors that can occur when building an `AppContext`.
 #[derive(Debug, thiserror::Error)]
-pub enum AppContextConversionError {
+pub enum AppContextBuildError {
     /// Failed to ensure data directory exists and is writable.
     #[error("Failed to ensure data directory exists and is writable: {0}")]
     DataDir(anyhow::Error),
@@ -39,7 +41,7 @@ pub enum AppContextConversionError {
     /// Failed to open SQL DB.
     #[error("Failed to open SQL DB: {0}")]
     SqlDb(sqlx::Error),
-    /// Failed to resolve the database mode (e.g. missing URL or invalid TEST_PUBKY_CONNECTION_STRING).
+    /// Failed to resolve the database mode (e.g. missing URL or an invalid environment variable).
     #[error("Failed to resolve database mode: {0}")]
     DatabaseResolution(anyhow::Error),
     /// Failed to run migrations.
@@ -68,7 +70,7 @@ pub enum AppContextConversionError {
 /// The application context shared between all components.
 /// Think of it as a simple Dependency Injection container.
 ///
-/// Create with a `DataDir` instance: `AppContext::read_from(data_dir)`
+/// Build with [`AppContext::from_persistent_dir`] or [`AppContext::new`].
 ///
 /// Implements `Clone` but prefer wrapping in `Arc<AppContext>` for
 /// hot paths like axum state (avoids deep-copying config strings).
@@ -79,8 +81,12 @@ pub struct AppContext {
     /// The storage operator to store files.
     pub(crate) file_service: FileService,
     pub(crate) config_toml: ConfigToml,
-    /// Keep data_dir alive. The mock dir will cleanup on drop.
-    pub(crate) data_dir: Arc<dyn DataDir>,
+    /// The directory on-disk state such as file storage lives in.
+    pub(crate) data_path: PathBuf,
+    /// Keeps an ephemeral context's temporary data directory alive.
+    /// The directory is removed when the last clone is dropped.
+    #[cfg(any(test, feature = "testing"))]
+    _temp_dir: Option<Arc<tempfile::TempDir>>,
     pub(crate) keypair: Keypair,
     /// Main pkarr instance. This will automatically turn into a DHT server after 15 minutes after startup.
     /// We need to keep this alive.
@@ -128,13 +134,15 @@ impl AppContext {
     }
 
     /// Create a new AppContext for testing, wrapped in Arc for use in AppState.
+    ///
+    /// Uses [`ConfigToml::default_test_config()`] and a fixed keypair.
     #[cfg(any(test, feature = "testing"))]
     pub async fn test() -> Arc<Self> {
-        let data_dir = MockDataDir::test();
+        let keypair = Keypair::from_secret(&[0; 32]);
         Arc::new(
-            Self::read_from(data_dir)
+            Self::new_ephemeral(ConfigToml::default_test_config(), keypair, None)
                 .await
-                .expect("failed to build AppContext from DataDirMock"),
+                .expect("failed to build ephemeral AppContext"),
         )
     }
 
@@ -143,78 +151,114 @@ impl AppContext {
     pub async fn test_with_config(f: impl FnOnce(&mut ConfigToml)) -> Arc<Self> {
         let mut config = ConfigToml::default_test_config();
         f(&mut config);
-        let data_dir = MockDataDir::new(config, None).expect("failed to create MockDataDir");
         Arc::new(
-            Self::read_from(data_dir)
+            Self::new_ephemeral(config, Keypair::random(), None)
                 .await
-                .expect("failed to build AppContext from DataDirMock"),
+                .expect("failed to build ephemeral AppContext"),
         )
     }
 
-    /// Create a new AppContext from a data directory.
-    pub async fn read_from<D: DataDir + 'static>(
-        dir: D,
-    ) -> Result<Self, AppContextConversionError> {
+    /// Build an AppContext from a data directory on disk, as the homeserver binary does.
+    ///
+    /// Creates the directory, a sample `config.toml` and a keypair if they are
+    /// missing, and connects to the configured `database_url`.
+    pub async fn from_persistent_dir(path: PathBuf) -> Result<Self, AppContextBuildError> {
+        let dir = PersistentDataDir::new(path);
         dir.ensure_data_dir_exists_and_is_writable()
-            .map_err(AppContextConversionError::DataDir)?;
-        let conf = dir
+            .map_err(AppContextBuildError::DataDir)?;
+        let config = dir
             .read_or_create_config_file()
-            .map_err(AppContextConversionError::Config)?;
+            .map_err(AppContextBuildError::Config)?;
         let keypair = dir
             .read_or_create_keypair()
-            .map_err(AppContextConversionError::Keypair)?;
+            .map_err(AppContextBuildError::Keypair)?;
+        let db_mode =
+            DatabaseMode::from_config(&config).map_err(AppContextBuildError::DatabaseResolution)?;
+        Self::new(dir.path().to_path_buf(), config, keypair, db_mode).await
+    }
 
-        let db_mode = dir
-            .resolve_database_mode(&conf)
-            .map_err(AppContextConversionError::DatabaseResolution)?;
+    /// Build an AppContext with a temporary data directory and a throwaway
+    /// database, both removed after use.
+    ///
+    /// `db_server` is the Postgres server to create the database on; see
+    /// [`DatabaseMode::ephemeral`] for the fallbacks. `config.general.database_url`
+    /// is not read.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn new_ephemeral(
+        config: ConfigToml,
+        keypair: Keypair,
+        db_server: Option<ConnectionString>,
+    ) -> Result<Self, AppContextBuildError> {
+        let temp_dir =
+            tempfile::TempDir::new().map_err(|e| AppContextBuildError::DataDir(e.into()))?;
+        let db_mode =
+            DatabaseMode::ephemeral(db_server).map_err(AppContextBuildError::DatabaseResolution)?;
+        let mut context =
+            Self::new(temp_dir.path().to_path_buf(), config, keypair, db_mode).await?;
+        context._temp_dir = Some(Arc::new(temp_dir));
+        Ok(context)
+    }
+
+    /// Build an AppContext from explicit parts.
+    ///
+    /// `data_path` holds on-disk state such as file storage. The pkarr network
+    /// is decided by `[pkdns]` in `config`.
+    pub async fn new(
+        data_path: PathBuf,
+        config: ConfigToml,
+        keypair: Keypair,
+        db_mode: DatabaseMode,
+    ) -> Result<Self, AppContextBuildError> {
         let sql_db = SqlDb::connect(db_mode)
             .await
-            .map_err(AppContextConversionError::SqlDb)?;
+            .map_err(AppContextBuildError::SqlDb)?;
         Migrator::new(&sql_db)
             .run()
             .await
-            .map_err(AppContextConversionError::Migrations)?;
+            .map_err(AppContextBuildError::Migrations)?;
 
-        let metrics = Metrics::new().map_err(AppContextConversionError::Metrics)?;
+        let metrics = Metrics::new().map_err(AppContextBuildError::Metrics)?;
         let events_service = EventsService::new(sql_db.clone(), metrics.clone(), 1000);
 
         let pg_event_listener = PgEventListener::start(sql_db.pool(), events_service.clone())
             .await
-            .map_err(AppContextConversionError::PgEventListener)?;
+            .map_err(AppContextBuildError::PgEventListener)?;
         let revocation_listener = RevocationListener::start(sql_db.pool())
             .await
-            .map_err(AppContextConversionError::RevocationListener)?;
+            .map_err(AppContextBuildError::RevocationListener)?;
 
         let user_service = UserService::new(sql_db.clone());
         let lock_service = LockService::new(sql_db.clone());
         let signup_service = SignupService::new(
             sql_db.clone(),
-            conf.general.signup_mode.clone(),
+            config.general.signup_mode.clone(),
             user_service.clone(),
             metrics.clone(),
         );
 
         let file_service = FileService::new_from_config(
-            &conf,
-            dir.path(),
+            &config,
+            &data_path,
             sql_db.clone(),
             events_service.clone(),
             user_service.clone(),
         )
-        .map_err(AppContextConversionError::Storage)?;
-        let pkarr_builder = Self::build_pkarr_builder_from_config(&conf)?;
+        .map_err(AppContextBuildError::Storage)?;
+        let pkarr_builder = Self::build_pkarr_builder_from_config(&config)?;
 
         Ok(Self {
             sql_db,
             pkarr_client: pkarr_builder
                 .clone()
                 .build()
-                .map_err(AppContextConversionError::Pkarr)?,
+                .map_err(AppContextBuildError::Pkarr)?,
             file_service,
             pkarr_builder,
-            config_toml: conf,
+            config_toml: config,
+            data_path,
+            #[cfg(any(test, feature = "testing"))]
+            _temp_dir: None,
             keypair,
-            data_dir: Arc::new(dir),
             events_service,
             metrics,
             _pg_event_listener: Arc::new(pg_event_listener),
@@ -230,7 +274,7 @@ impl AppContext {
     /// Build the pkarr client builder based on the config.
     fn build_pkarr_builder_from_config(
         config_toml: &ConfigToml,
-    ) -> Result<pkarr::ClientBuilder, AppContextConversionError> {
+    ) -> Result<pkarr::ClientBuilder, AppContextBuildError> {
         let mut builder = pkarr::ClientBuilder::default();
         if let Some(bootstrap_nodes) = &config_toml.pkdns.dht_bootstrap_nodes {
             let nodes = bootstrap_nodes
@@ -248,7 +292,7 @@ impl AppContext {
         if let Some(relays) = &config_toml.pkdns.dht_relay_nodes {
             builder
                 .relays(relays)
-                .map_err(AppContextConversionError::RelayNodes)?;
+                .map_err(AppContextBuildError::RelayNodes)?;
         }
         if let Some(timeout_ms) = config_toml.pkdns.dht_request_timeout_ms {
             builder.dht_request_timeout(Duration::from_millis(timeout_ms.get()));
@@ -317,7 +361,7 @@ mod tests {
         let result = AppContext::build_pkarr_builder_from_config(&config);
 
         assert!(
-            matches!(result, Err(AppContextConversionError::RelayNodes(_))),
+            matches!(result, Err(AppContextBuildError::RelayNodes(_))),
             "expected RelayNodes error, got {result:?}"
         );
     }

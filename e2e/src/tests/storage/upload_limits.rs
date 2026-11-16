@@ -2,7 +2,8 @@ use std::{convert::Infallible, time::Duration};
 
 use futures::{stream, StreamExt};
 use pubky_testnet::pubky_homeserver::{
-    storage_config::StorageConfigToml, DataDir, HomeserverApp, MAX_UPLOAD_BYTES,
+    storage_config::StorageConfigToml, AppContext, ConfigToml, DatabaseMode, HomeserverApp,
+    MAX_UPLOAD_BYTES,
 };
 
 use super::*;
@@ -35,17 +36,24 @@ async fn upload_limit_applies_to_both_routes_and_cleans_up_rejected_overwrites()
     let mut testnet = Testnet::new().await.unwrap();
     testnet.create_pkarr_relay().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mut data_dir = MockDataDir::test();
-    data_dir.config_toml.storage.backend = StorageConfigToml::FileSystem;
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut config = ConfigToml::default_test_config();
+    config.storage.backend = StorageConfigToml::FileSystem;
     // Exercise the body wrapper that loses the original size hint too.
-    data_dir.config_toml.default_quotas.rate_write = Some("1gb/s".parse().unwrap());
-    data_dir.config_toml.pkdns.dht_bootstrap_nodes = Some(testnet.dht_bootstrap_nodes());
-    data_dir.config_toml.pkdns.dht_relay_nodes = Some(testnet.dht_relay_urls());
+    config.default_quotas.rate_write = Some("1gb/s".parse().unwrap());
+    config.pkdns.dht_bootstrap_nodes = Some(testnet.dht_bootstrap_nodes());
+    config.pkdns.dht_relay_nodes = Some(testnet.dht_relay_urls());
     let staging_dir = data_dir.path().join("data/files-tmp");
-    // Testnet's create_homeserver_app_with_mock forces in-memory storage.
-    let server = HomeserverApp::start_with_mock_data_dir(data_dir)
-        .await
-        .unwrap();
+    // Testnet's create_homeserver_with forces in-memory storage.
+    let context = AppContext::new(
+        data_dir.path().to_path_buf(),
+        config,
+        Keypair::from_secret(&[0; 32]),
+        DatabaseMode::ephemeral(None).unwrap(),
+    )
+    .await
+    .unwrap();
+    let server = HomeserverApp::start(context).await.unwrap();
     let session = pubky
         .signer(Keypair::random())
         .signup_cookie(&server.public_key(), None)
