@@ -498,7 +498,9 @@ impl EventStreamBuilder {
 
         if self.all_users && !self.users.is_empty() {
             return Err(Error::from(RequestError::Validation {
-                message: "Cannot combine all_users with specific users".into(),
+                message: "Cannot combine all_users with specific users: use a builder \
+                          from event_stream_for(homeserver) and add no users"
+                    .into(),
             }));
         }
         if !self.all_users && self.users.is_empty() {

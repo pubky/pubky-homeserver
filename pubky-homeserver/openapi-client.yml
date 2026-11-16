@@ -1260,8 +1260,8 @@ paths:
         description: >-
           Resume the combined feed after this numeric event ID; applies to every
           listed user, or to every user when `user` is omitted. Omit the cursor
-          or use `0` to start from the beginning. Non-numeric cursors return HTTP 400,
-          as does combining it with a per-user cursor.
+          to start from the beginning. Non-numeric cursors return HTTP 400, as
+          does combining it with a per-user cursor.
         schema:
           type: string
       - name: limit
