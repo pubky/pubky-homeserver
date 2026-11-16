@@ -1,4 +1,4 @@
-use super::{ResponseBodyError, read_json_body, read_response_body};
+use super::{read_json_body, read_response_body};
 use crate::{
     Error, PubkyHttpClient,
     errors::{RequestError, RequestErrorKind},
@@ -372,10 +372,10 @@ async fn json_bodies_are_bounded_then_decoded() {
     let error = read_json_body::<Vec<u32>>(response, 16, "numbers")
         .await
         .unwrap_err();
-    let Error::Request(RequestError::DecodeJson { message }) = error else {
+    let Error::Request(RequestError::Oversized { limit, label }) = error else {
         panic!("unexpected error: {error:?}");
     };
-    assert_eq!(message, "numbers exceeds the 16-byte limit");
+    assert_eq!((limit, label.as_str()), (16, "numbers"));
 
     let body = b"nope";
     let (response, _connection) =
@@ -409,12 +409,15 @@ async fn body_limit_is_inclusive_under_both_framings() {
             ),
         ] {
             let (response, _connection) = serve_response(200, &framing, wire).await;
-            let result = read_response_body(response, LIMIT).await;
+            let result = read_response_body(response, LIMIT, "body").await;
             if size <= LIMIT {
                 assert_eq!(result.unwrap(), body, "{framing} size {size}");
             } else {
                 assert!(
-                    matches!(result, Err(ResponseBodyError::TooLarge)),
+                    matches!(
+                        result,
+                        Err(Error::Request(RequestError::Oversized { limit: LIMIT, .. }))
+                    ),
                     "{framing} size {size}"
                 );
             }

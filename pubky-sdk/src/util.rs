@@ -9,67 +9,48 @@ use crate::{
     errors::{Error, RequestError, Result},
 };
 
-/// Failure to receive a complete response within the caller's byte limit.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ResponseBodyError {
-    #[error("Response body exceeds the byte limit")]
-    TooLarge,
-    #[error(transparent)]
-    Transport(#[from] reqwest::Error),
-}
-
-impl ResponseBodyError {
-    /// Convert into the crate error: `too_large` for the limit case, the
-    /// transport error's usual conversion otherwise.
-    pub(crate) fn into_error<E: Into<Error>>(self, too_large: impl FnOnce() -> E) -> Error {
-        match self {
-            Self::TooLarge => too_large().into(),
-            Self::Transport(error) => error.into(),
-        }
-    }
-}
-
 /// Read a complete response of at most `max_bytes` (inclusive), rejecting
-/// oversized declarations and enforcing the limit incrementally. Dropping the
-/// stream on failure cancels the unread browser `ReadableStream` as well as
-/// native response consumption.
+/// oversized declarations and enforcing the limit incrementally. An overflow
+/// reports [`RequestError::Oversized`], naming `label`. Dropping the stream on
+/// failure cancels the unread browser `ReadableStream` as well as native
+/// response consumption.
 pub(crate) async fn read_response_body(
     response: Response,
     max_bytes: usize,
-) -> std::result::Result<Vec<u8>, ResponseBodyError> {
+    label: &str,
+) -> Result<Vec<u8>> {
+    let oversized = || RequestError::Oversized {
+        limit: max_bytes,
+        label: label.to_owned(),
+    };
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
         drop(response.bytes_stream());
-        return Err(ResponseBodyError::TooLarge);
+        return Err(oversized().into());
     }
 
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.try_next().await? {
         if chunk.len() > max_bytes - body.len() {
-            return Err(ResponseBodyError::TooLarge);
+            return Err(oversized().into());
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
 }
 
-/// Read a JSON response within `max_bytes` and decode it. Oversized and
-/// undecodable bodies both report [`RequestError::DecodeJson`], naming `label`.
+/// Read a JSON response within `max_bytes` and decode it. An oversized body
+/// reports [`RequestError::Oversized`] and an undecodable one
+/// [`RequestError::DecodeJson`], both naming `label`.
 pub(crate) async fn read_json_body<T: serde::de::DeserializeOwned>(
     response: Response,
     max_bytes: usize,
     label: &str,
 ) -> Result<T> {
-    let body = read_response_body(response, max_bytes)
-        .await
-        .map_err(|error| {
-            error.into_error(|| RequestError::DecodeJson {
-                message: format!("{label} exceeds the {max_bytes}-byte limit"),
-            })
-        })?;
+    let body = read_response_body(response, max_bytes, label).await?;
     serde_json::from_slice(&body).map_err(|e| {
         RequestError::DecodeJson {
             message: format!("decoding {label}: {e}"),

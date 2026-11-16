@@ -113,7 +113,8 @@ test("event stream validation setters update the receiver and support chaining",
             t.fail("configured byte limit must reject the oversized event");
           } catch (error) {
             assertPubkyError(t, error);
-            t.ok(error.message.includes("limit of 256 bytes"), `enforces byte limit with chain=${chain}`);
+            t.ok(error.message.includes("SSE event exceeds the 256-byte limit"), `enforces byte limit with chain=${chain}`);
+            t.deepEqual(error.data, { reason: "Oversized" }, "overflow reason reaches JS");
           }
         } finally {
           reader.releaseLock();
@@ -155,7 +156,8 @@ test("oversized SSE cancels the response", async (t) => {
           t.fail("overflow must reject the read");
         } catch (error) {
           assertPubkyError(t, error);
-          t.ok(error.message.includes(`SSE event exceeds the configured limit of ${limit} bytes`));
+          t.ok(error.message.includes(`SSE event exceeds the ${limit}-byte limit`));
+          t.deepEqual(error.data, { reason: "Oversized" }, "overflow reason reaches JS");
         }
         await new Promise((resolve) => setTimeout(resolve, 0));
         t.ok(response.cancelled, "underlying response cancelled while reader is retained");

@@ -128,6 +128,7 @@ impl PubkyError {
             RequestErrorKind::Body => ("Body", None),
             RequestErrorKind::Decode => ("Decode", None),
             RequestErrorKind::InvalidRequest => ("InvalidRequest", None),
+            RequestErrorKind::Oversized => ("Oversized", None),
             _ => ("Other", None),
         };
         let error =
@@ -215,6 +216,7 @@ export type RequestErrorReason =
   | "Body"
   | "Decode"
   | "InvalidRequest"
+  | "Oversized"
   | "Other";
 
 /**
@@ -242,22 +244,21 @@ impl From<pubky::Error> for PubkyError {
             pubky::Error::Build(_) => PubkyErrorName::InternalError,
         };
 
-        // A declined redirect carries its denial code, so callers needn't read the message.
-        if let pubky::Error::Authentication(pubky::errors::AuthError::RedirectDeclined(denial)) =
-            &err
-        {
-            let data = json!({ "reason": "RedirectDeclined", "denial": denial.as_str() });
-            return Self::new(name, &err).with_data(data);
+        match &err {
+            // A declined redirect carries its denial code, so callers needn't read the message.
+            pubky::Error::Authentication(pubky::errors::AuthError::RedirectDeclined(denial)) => {
+                let data = json!({ "reason": "RedirectDeclined", "denial": denial.as_str() });
+                Self::new(name, &err).with_data(data)
+            }
+            // Only errors that carry an HTTP status populate `data.statusCode`.
+            pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
+                status: Some(status),
+            }) => Self::new_with_status(name, &err, status.as_u16()),
+            pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Oversized {
+                ..
+            }) => Self::new(name, &err).with_data(json!({ "reason": "Oversized" })),
+            _ => Self::new(name, err),
         }
-
-        // Only errors that carry an HTTP status populate `data.statusCode`.
-        if let pubky::Error::CredentialRefresh(pubky::CredentialRefreshError::Request {
-            status: Some(status),
-        }) = &err
-        {
-            return Self::new_with_status(name, &err, status.as_u16());
-        }
-        Self::new(name, err)
     }
 }
 
@@ -414,6 +415,8 @@ impl WasmDescribe for PubkyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_arch = "wasm32")]
+    use futures_util::StreamExt;
     use pubky::custom_pop::CustomPopError;
     use pubky::errors::{AuthError, RedirectDenial, RequestError};
 
@@ -427,6 +430,7 @@ mod tests {
             (RequestErrorKind::Body, "Body"),
             (RequestErrorKind::Decode, "Decode"),
             (RequestErrorKind::InvalidRequest, "InvalidRequest"),
+            (RequestErrorKind::Oversized, "Oversized"),
             (RequestErrorKind::Other, "Other"),
         ] {
             let error = PubkyError::request("request failed", kind);
@@ -464,6 +468,13 @@ mod tests {
                     message: "invalid response".into(),
                 },
                 json!({ "reason": "Decode" }),
+            ),
+            (
+                RequestError::Oversized {
+                    limit: 16,
+                    label: "Session response".into(),
+                },
+                json!({ "reason": "Oversized" }),
             ),
             (
                 RequestError::Transport(
@@ -551,6 +562,61 @@ mod tests {
         ));
         assert_eq!(transport.name.as_str(), "CredentialRefreshError");
         assert_eq!(transport.data, None);
+
+        let oversized = PubkyError::from(pubky::Error::CredentialRefresh(
+            pubky::CredentialRefreshError::Oversized { limit: 65536 },
+        ));
+        assert_eq!(oversized.name.as_str(), "CredentialRefreshError");
+        assert_eq!(oversized.data, Some(json!({ "reason": "Oversized" })));
+    }
+
+    /// Replaces `fetch` with one whose response body never yields and fails
+    /// with the request's abort reason, as a browser body does once the fetch
+    /// is aborted. Returns the original `fetch`.
+    #[cfg(target_arch = "wasm32")]
+    fn stall_fetch_bodies() -> JsValue {
+        let global = js_sys::global();
+        let original = Reflect::get(&global, &"fetch".into()).unwrap();
+        let stalled = js_sys::Function::new_with_args(
+            "request",
+            "const body = new ReadableStream({ start(controller) {
+               request.signal.addEventListener('abort',
+                 () => controller.error(request.signal.reason));
+             } });
+             const response = new Response(body);
+             Object.defineProperty(response, 'url', { value: request.url });
+             return Promise.resolve(response);",
+        );
+        Reflect::set(&global, &"fetch".into(), &stalled).unwrap();
+        original
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test(async)]
+    async fn body_read_past_the_deadline_is_a_timeout() {
+        let original = stall_fetch_bodies();
+        let response = reqwest::Client::new()
+            .get("https://example.com/")
+            .timeout(std::time::Duration::from_millis(50))
+            .send()
+            .await;
+        Reflect::set(&js_sys::global(), &"fetch".into(), &original).unwrap();
+
+        // The deadline must expire during the body read, not while awaiting
+        // the headers, which reqwest already reports as a typed timeout.
+        let response = response.expect("headers must arrive before the deadline");
+        let error = response
+            .bytes_stream()
+            .next()
+            .await
+            .expect("the stalled body must fail")
+            .expect_err("the stalled body must not yield");
+        assert_eq!(
+            RequestErrorKind::from_transport(&error),
+            RequestErrorKind::Timeout
+        );
+        let error = PubkyError::from(error);
+        assert_eq!(error.data, Some(json!({ "reason": "Timeout" })));
     }
 
     #[test]

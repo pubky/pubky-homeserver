@@ -59,7 +59,10 @@ async fn events_stream_sdk_accepts_maximum_storage_path() {
             .unwrap()
             .unwrap()
             .unwrap_err();
-        assert!(error.to_string().contains("limit of 128 bytes"));
+        assert!(matches!(
+            error,
+            Error::Request(RequestError::Oversized { limit: 128, .. })
+        ));
         assert!(small.next().await.is_none());
     }
 }

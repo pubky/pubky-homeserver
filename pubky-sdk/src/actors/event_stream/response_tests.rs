@@ -1,11 +1,13 @@
 use super::*;
 use crate::{
     Keypair, ResourcePath,
+    errors::RequestErrorKind,
     util::tests::{ServedConnection, serve_response},
 };
 use pubky_common::storage_path::MAX_STORAGE_PATH_TOTAL_LENGTH;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 async fn response(body: &str) -> (reqwest::Response, ServedConnection) {
     serve_response(
@@ -43,11 +45,10 @@ async fn response_overflow_releases_connection_and_preserves_prior_event() {
         .unwrap()
         .unwrap()
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&format!("limit of {setting} bytes"))
-    );
+    assert!(matches!(
+        error,
+        Error::Request(RequestError::Oversized { limit, .. }) if limit == setting
+    ));
     // Retain `events`: the decoder itself must close the response on error.
     let mut socket = connection.into_socket().await;
     let closed = tokio::time::timeout(Duration::from_secs(2), socket.read_u8())
@@ -55,6 +56,70 @@ async fn response_overflow_releases_connection_and_preserves_prior_event() {
         .unwrap();
     assert!(closed.is_err(), "response socket must close");
     assert!(events.next().await.is_none());
+}
+
+#[tokio::test]
+async fn dropped_connection_reports_a_transport_error() {
+    // Declare a longer chunk than is sent, then close the connection mid-body.
+    let (response, connection) = serve_response(
+        200,
+        "Content-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n",
+        b"100\r\ndata: partial",
+    )
+    .await;
+    drop(connection);
+    let mut events = Box::pin(EventStreamBuilder::response_event_stream(response, 8192));
+    let error = tokio::time::timeout(Duration::from_secs(2), events.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    let Error::Request(error @ RequestError::Transport(_)) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    // reqwest files a truncated chunked body under decoding, not `Body`.
+    assert_eq!(error.kind(), RequestErrorKind::Decode);
+    assert!(events.next().await.is_none());
+}
+
+#[tokio::test]
+async fn stalled_stream_reports_a_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .unwrap();
+    // Answer with headers only and keep the socket open past the deadline.
+    let serve = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(socket.read_u8().await.unwrap());
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                  Transfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        socket
+    };
+    let (response, _socket) = tokio::join!(client.get(url).send(), serve);
+    let mut events = Box::pin(EventStreamBuilder::response_event_stream(
+        response.unwrap(),
+        8192,
+    ));
+    let error = tokio::time::timeout(Duration::from_secs(5), events.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    let Error::Request(error @ RequestError::Transport(_)) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(error.kind(), RequestErrorKind::Timeout);
 }
 
 #[tokio::test]

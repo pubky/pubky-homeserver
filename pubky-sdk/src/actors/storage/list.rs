@@ -5,7 +5,6 @@ use super::core::{PublicStorage, SessionStorage, dir_trailing_slash_error};
 use crate::actors::storage::resource::{
     IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath,
 };
-use crate::errors::RequestError;
 use crate::util::read_response_body;
 use crate::{Result, cross_log};
 
@@ -16,13 +15,7 @@ const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
 
 /// Read a listing response within [`MAX_LIST_BYTES`].
 async fn read_list_body(response: reqwest::Response) -> Result<Vec<u8>> {
-    read_response_body(response, MAX_LIST_BYTES)
-        .await
-        .map_err(|error| {
-            error.into_error(|| RequestError::Validation {
-                message: format!("List response exceeds the {MAX_LIST_BYTES}-byte limit"),
-            })
-        })
+    read_response_body(response, MAX_LIST_BYTES, "List response").await
 }
 
 impl SessionStorage {
@@ -168,8 +161,8 @@ impl<'a> ListBuilder<'a> {
     ///
     /// # Errors
     /// - Propagates transport failures while issuing the HTTP request.
-    /// - Returns [`crate::errors::RequestError::Validation`] if any resource line returned by the server is invalid
-    ///   or the listing exceeds the 4 MiB response limit.
+    /// - Returns [`crate::errors::RequestError::Validation`] if any resource line returned by the server is invalid.
+    /// - Returns [`crate::errors::RequestError::Oversized`] if the listing exceeds the 4 MiB response limit.
     pub async fn send(self) -> Result<Vec<PubkyResource>> {
         // 1) Build query params
         let mut url = self.url;
@@ -246,6 +239,7 @@ impl<'a> ListBuilder<'a> {
 mod tests {
     use super::*;
     use crate::Error;
+    use crate::errors::RequestError;
     use crate::util::tests::serve_response;
 
     #[tokio::test]
@@ -259,12 +253,9 @@ mod tests {
         let (response, _connection) =
             serve_response(200, &format!("Content-Length: {declared}\r\n"), b"").await;
         let error = read_list_body(response).await.unwrap_err();
-        let Error::Request(RequestError::Validation { message }) = error else {
+        let Error::Request(RequestError::Oversized { limit, label }) = error else {
             panic!("unexpected error: {error:?}");
         };
-        assert_eq!(
-            message,
-            format!("List response exceeds the {MAX_LIST_BYTES}-byte limit")
-        );
+        assert_eq!((limit, label.as_str()), (MAX_LIST_BYTES, "List response"));
     }
 }

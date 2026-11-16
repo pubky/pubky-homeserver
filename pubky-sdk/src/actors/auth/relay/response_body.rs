@@ -1,4 +1,4 @@
-use crate::errors::{AuthError, Result};
+use crate::errors::Result;
 use crate::util::read_response_body;
 
 /// Maximum wire size, inclusive, for a received auth relay message, including
@@ -8,15 +8,7 @@ pub(super) const MAX_RELAY_BODY_BYTES: usize = 1024 * 1024;
 
 /// Apply the auth relay limit before decryption or parsing.
 pub(super) async fn read_relay_body(response: reqwest::Response) -> Result<Vec<u8>> {
-    read_response_body(response, MAX_RELAY_BODY_BYTES)
-        .await
-        .map_err(|error| {
-            error.into_error(|| {
-                AuthError::Validation(format!(
-                    "Auth relay response exceeds the {MAX_RELAY_BODY_BYTES}-byte limit"
-                ))
-            })
-        })
+    read_response_body(response, MAX_RELAY_BODY_BYTES, "Auth relay response").await
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -39,6 +31,7 @@ mod tests {
             http_relay_inbox_channel::HttpRelayInboxChannel,
             http_relay_link_channel::HttpRelayLinkChannel,
         },
+        errors::RequestError,
     };
 
     #[tokio::test]
@@ -97,17 +90,17 @@ mod tests {
         drop(connection);
         assert!(matches!(
             read_relay_body(response).await,
-            Err(Error::Request(_))
+            Err(Error::Request(RequestError::Transport(_)))
         ));
     }
 
     fn assert_too_large(error: Error) {
-        let Error::Authentication(AuthError::Validation(message)) = error else {
+        let Error::Request(RequestError::Oversized { limit, label }) = error else {
             panic!("unexpected error: {error:?}");
         };
         assert_eq!(
-            message,
-            format!("Auth relay response exceeds the {MAX_RELAY_BODY_BYTES}-byte limit")
+            (limit, label.as_str()),
+            (MAX_RELAY_BODY_BYTES, "Auth relay response")
         );
     }
 

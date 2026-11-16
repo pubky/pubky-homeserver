@@ -445,7 +445,6 @@ mod tests {
 
     use super::super::response_body::MAX_RELAY_BODY_BYTES;
     use super::*;
-    use crate::errors::AuthError;
 
     #[test]
     fn test_new() {
@@ -614,7 +613,10 @@ mod tests {
         let error = channel.check_ack(&client).await.unwrap_err();
         assert!(matches!(
             error,
-            Error::Authentication(AuthError::Validation(_))
+            Error::Request(RequestError::Oversized {
+                limit: MAX_RELAY_BODY_BYTES,
+                ..
+            })
         ));
     }
 
