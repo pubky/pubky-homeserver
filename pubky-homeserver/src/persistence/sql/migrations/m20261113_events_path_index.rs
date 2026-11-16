@@ -53,18 +53,23 @@ mod tests {
     /// The plan for a path-prefix query over every user. Sequential scans are
     /// disabled because the planner prefers one on a table this small, and the
     /// query has no `ORDER BY id`, which would let the primary key compete on a
-    /// near-equal cost.
+    /// near-equal cost. So this shows only that a prefix can use the index as a
+    /// range. Which index the stream's `ORDER BY id LIMIT n` query picks depends
+    /// on the data; that was checked by hand on a 3M-event table.
     async fn prefix_query_plan(db: &SqlDb) -> String {
         let mut tx = db.pool().begin().await.unwrap();
         sqlx::query("SET LOCAL enable_seqscan = off")
             .execute(&mut *tx)
             .await
             .unwrap();
-        let plan: Vec<String> =
-            sqlx::query_scalar("EXPLAIN SELECT id FROM events WHERE path LIKE '/pub/app/%'")
-                .fetch_all(&mut *tx)
-                .await
-                .unwrap();
+        // The stream's own predicate (`like_pattern::starts_with`), with the
+        // pattern inlined because `EXPLAIN` takes no bind parameters.
+        let plan: Vec<String> = sqlx::query_scalar(
+            r"EXPLAIN SELECT id FROM events WHERE path LIKE '/pub/app/%' ESCAPE '\'",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
         plan.join("\n")
     }
 

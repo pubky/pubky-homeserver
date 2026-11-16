@@ -57,8 +57,10 @@ impl From<sqlx::Error> for EventStreamError {
 /// Where a stream resumes from: one of the two forms a request may use.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Resume {
-    /// One cursor over the combined feed (`None` = from the beginning),
-    /// optionally restricted to `users` (empty = every user).
+    /// One cursor over the combined feed, optionally restricted to `users`
+    /// (empty = every user). `cursor` is `None` only when streaming every user
+    /// from the beginning; the parser gives named users with no cursor the
+    /// [`Self::PerUser`] form.
     Global {
         cursor: Option<EventCursor>,
         users: Vec<PublicKey>,
@@ -142,7 +144,8 @@ impl EventStreamQuery {
                     let suffix = suffix.map(parse_cursor).transpose()?;
                     match user_cursors.iter_mut().find(|(known, _)| *known == pubkey) {
                         // A bare repeat must not drop a suffix given earlier, or
-                        // `user=<pk>:10&user=<pk>` would silently become the global form.
+                        // `user=<pk>:10&user=<pk>` would silently restart that user
+                        // from the beginning.
                         Some(known) => known.1 = suffix.or(known.1),
                         None => user_cursors.push((pubkey, suffix)),
                     }
@@ -158,10 +161,16 @@ impl EventStreamQuery {
         }
 
         let has_suffix = user_cursors.iter().any(|(_, suffix)| suffix.is_some());
-        let resume = match (cursor, has_suffix) {
-            (Some(_), true) => return Err(EventStreamError::MixedCursors),
-            (None, true) => Resume::PerUser(user_cursors),
-            (cursor, false) => Resume::Global {
+        let resume = match cursor {
+            Some(_) if has_suffix => return Err(EventStreamError::MixedCursors),
+            // Users with no cursor anywhere resume per user, each from the
+            // beginning. The events are the same as a global cursor of `None`
+            // would give, but the per-user query reads each user through
+            // `idx_events_user_path_id`, where the global query's
+            // `user IN (..) ORDER BY id LIMIT n` can walk the primary key past
+            // every other user's events.
+            None if !user_cursors.is_empty() => Resume::PerUser(user_cursors),
+            cursor => Resume::Global {
                 cursor,
                 users: user_cursors.into_iter().map(|(pk, _)| pk).collect(),
             },
@@ -299,13 +308,22 @@ mod tests {
                 users: vec![u.clone()],
             }
         );
-        // No cursor anywhere is the global form from the beginning.
         assert_eq!(
-            parse(&format!("user={}", u.z32())).resume,
+            parse("").resume,
             Resume::Global {
                 cursor: None,
-                users: vec![u],
+                users: vec![],
             }
+        );
+    }
+
+    #[test]
+    fn users_without_any_cursor_resume_per_user() {
+        // Not the global form: see the comment in `parse` on the query each runs.
+        let (a, b) = (pk(), pk());
+        assert_eq!(
+            parse(&format!("user={}&user={}", a.z32(), b.z32())).resume,
+            Resume::PerUser(vec![(a, None), (b, None)])
         );
     }
 
@@ -337,10 +355,7 @@ mod tests {
         let u = pk();
         assert_eq!(
             parse(&format!("user={}:&cursor=", u.z32())).resume,
-            Resume::Global {
-                cursor: None,
-                users: vec![u],
-            }
+            Resume::PerUser(vec![(u, None)])
         );
     }
 
@@ -368,10 +383,7 @@ mod tests {
         );
         assert_eq!(
             parse(&format!("user={}&user={}", a.z32(), a.z32())).resume,
-            Resume::Global {
-                cursor: None,
-                users: vec![a],
-            }
+            Resume::PerUser(vec![(a, None)])
         );
     }
 

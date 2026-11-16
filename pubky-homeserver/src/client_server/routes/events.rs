@@ -292,10 +292,7 @@ mod tests {
     }
 
     fn users(keys: &[&PublicKey]) -> Resume {
-        Resume::Global {
-            cursor: None,
-            users: keys.iter().map(|k| (*k).clone()).collect(),
-        }
+        Resume::PerUser(keys.iter().map(|k| ((*k).clone(), None)).collect())
     }
 
     fn reject_status(result: Result<Vec<PathFilter>, HttpError>) -> StatusCode {
