@@ -1501,7 +1501,16 @@ mod tests {
             .await
             .unwrap();
 
-        for folder in ["/pub/a+b/", "/pub/a(b/", "/pub/a.b/", "/pub/a[b/"] {
+        // A wildcard match for the dot in "a.b" would include this sibling.
+        create_entry_for_path(&db, user.id, "/pub/aXb/only-in-sibling.txt").await;
+
+        for folder in [
+            "/pub/a+b/",
+            "/pub/a(b/",
+            "/pub/a.b/",
+            "/pub/a[b/",
+            "/pub/café+b/",
+        ] {
             // Two files in the same sub-folder, so a broken collapse would
             // return both full paths instead of one de-duplicated folder,
             // plus a direct file to cover a segment with no trailing slash.
