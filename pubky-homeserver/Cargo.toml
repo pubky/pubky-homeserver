@@ -69,7 +69,7 @@ opendal = { version = "=0.59.5", features = ["services-fs"] }
 opendal-http-transport-reqwest = "=0.59.5"
 dav-server-opendalfs = "=0.7.11"
 
-dav-server = "0.11"
+dav-server = "0.12"
 sea-query = { version = "1", features = ["with-chrono", "postgres-array"] }
 sea-query-sqlx = { version = "0.8", features = [
     "with-chrono",
