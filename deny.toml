@@ -17,6 +17,7 @@ all-features = true
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "GCS uses blinded signing; no RSA decryption endpoint. No patched release available." },
     { id = "RUSTSEC-2026-0440", reason = "Used only for testing and local examples via pubky-testnet's optional Docker PostgreSQL support. Remove when testcontainers replaces astral-tokio-tar." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained but has no known vulnerability. It is a hard dependency of dav-server and axum-test (expect-json), so it cannot leave the tree. Revisit when they move to jiff or time." },
 ]
 
 [bans]
