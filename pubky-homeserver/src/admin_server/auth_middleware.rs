@@ -41,7 +41,7 @@ pub struct AdminAuthMiddleware<S> {
 
 impl<S, ReqBody> Service<Request<ReqBody>> for AdminAuthMiddleware<S>
 where
-    S: Service<Request<ReqBody>, Response = Response, Error = Infallible> + Clone + Send + 'static,
+    S: Service<Request<ReqBody>, Response = Response, Error = Infallible> + Send + 'static,
     S::Future: Send + 'static,
     ReqBody: Send + 'static,
 {
@@ -54,34 +54,61 @@ where
     }
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
-        let password = self.password.clone();
-        let mut inner = self.inner.clone();
-
-        Box::pin(async move {
-            match req.headers().get("X-Admin-Password") {
-                Some(header_value) if header_value.to_str().unwrap_or("") == password => {
-                    // If the header is valid, proceed.
-                    inner.call(req).await
-                }
-                Some(_) => {
-                    // If header exists but password is incorrect,
-                    let msg = "Invalid admin password";
-                    let response = Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::from(msg))
-                        .unwrap_or_else(|_| Response::new(Body::from(msg)));
-                    Ok(response)
-                }
-                None => {
-                    // If header is missing, do the same.
-                    let msg = "Missing admin password";
-                    let response = Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::from(msg))
-                        .unwrap_or_else(|_| Response::new(Body::from(msg)));
-                    Ok(response)
-                }
+        let message = match req.headers().get("X-Admin-Password") {
+            Some(header_value) if header_value.to_str().unwrap_or_default() == self.password => {
+                // Call the same service instance that poll_ready checked.
+                return Box::pin(self.inner.call(req));
             }
-        })
+            Some(_) => "Invalid admin password",
+            None => "Missing admin password",
+        };
+        let mut response = Response::new(Body::from(message));
+        *response.status_mut() = StatusCode::UNAUTHORIZED;
+        Box::pin(async move { Ok(response) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::test_service::ReadinessRequiredService;
+    use axum::body::to_bytes;
+    use std::future::Ready;
+    use tower::{service_fn, ServiceExt};
+
+    #[tokio::test]
+    async fn calls_the_service_instance_that_was_polled_ready() {
+        let mut service =
+            AdminAuthLayer::new("secret".into()).layer(ReadinessRequiredService::default());
+        for _ in 0..2 {
+            let request = Request::builder()
+                .header("X-Admin-Password", "secret")
+                .body(Body::empty())
+                .unwrap();
+            let response = service.ready().await.unwrap().call(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_or_incorrect_password_before_calling_inner() {
+        let inner = service_fn(|_: Request<Body>| -> Ready<Result<Response, Infallible>> {
+            panic!("rejected requests must not reach the inner service");
+        });
+        let mut service = AdminAuthLayer::new("secret".into()).layer(inner);
+        for (password, expected_message) in [
+            (None, "Missing admin password"),
+            (Some("incorrect"), "Invalid admin password"),
+        ] {
+            let mut request = Request::builder();
+            if let Some(password) = password {
+                request = request.header("X-Admin-Password", password);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let response = service.ready().await.unwrap().call(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            assert_eq!(body.as_ref(), expected_message.as_bytes());
+        }
     }
 }
