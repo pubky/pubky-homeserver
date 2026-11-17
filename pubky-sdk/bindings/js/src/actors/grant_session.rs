@@ -10,6 +10,20 @@ use serde::{Deserialize, Serialize};
 use tsify::Ts;
 
 const DELEGATED_GRANT_CREDENTIAL_VERSION: &str = "pubky-delegated-grant-credential-v1";
+/// A child grant and its public parent. Its own version keeps it out of direct
+/// restore paths.
+const DELEGATED_CHILD_GRANT_CREDENTIAL_VERSION: &str = "pubky-delegated-child-grant-credential-v1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DelegatedChildGrantCredentialJson {
+    version: String,
+    parent_jws: String,
+    grant_jws: String,
+    homeserver_public_key: String,
+    client_public_key: String,
+    key_id: String,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +175,54 @@ pub(crate) fn decode_delegated_grant_state(
             .map_err(|e| PubkyError::new(PubkyErrorName::InvalidInput, e))?,
         key_id: json.key_id,
     })
+}
+
+/// Encode a child grant's restore metadata. It holds only public grants and the
+/// key's id: the signed approval is stored separately.
+pub(crate) fn encode_delegated_child_state(
+    state: pubky::DelegatedGrantCredentialState,
+    parent_jws: &str,
+) -> JsResult<String> {
+    let json = DelegatedChildGrantCredentialJson {
+        version: DELEGATED_CHILD_GRANT_CREDENTIAL_VERSION.to_string(),
+        parent_jws: parent_jws.to_owned(),
+        grant_jws: state.grant_jws,
+        homeserver_public_key: state.homeserver_pk.z32(),
+        client_public_key: state.client_pk.z32(),
+        key_id: state.key_id,
+    };
+    serde_json::to_string(&json).map_err(|e| {
+        PubkyError::new(
+            PubkyErrorName::InternalError,
+            format!("Failed to serialize delegated child grant state: {e}"),
+        )
+    })
+}
+
+/// Decode child restore metadata into the child's state and its parent JWS.
+pub(crate) fn decode_delegated_child_state(
+    saved_state: &str,
+) -> JsResult<(pubky::DelegatedGrantCredentialState, String)> {
+    let invalid = || {
+        PubkyError::new(
+            PubkyErrorName::InvalidInput,
+            "Invalid delegated child grant state.",
+        )
+    };
+    let json: DelegatedChildGrantCredentialJson =
+        serde_json::from_str(saved_state).map_err(|_| invalid())?;
+    if json.version != DELEGATED_CHILD_GRANT_CREDENTIAL_VERSION {
+        return Err(invalid());
+    }
+    let state = pubky::DelegatedGrantCredentialState {
+        grant_jws: json.grant_jws,
+        homeserver_pk: pubky::PublicKey::try_from_z32(&json.homeserver_public_key)
+            .map_err(|_| invalid())?,
+        client_pk: pubky::PublicKey::try_from_z32(&json.client_public_key)
+            .map_err(|_| invalid())?,
+        key_id: json.key_id,
+    };
+    Ok((state, json.parent_jws))
 }
 
 /// Summary of an active grant returned by `GrantManager.list()`.

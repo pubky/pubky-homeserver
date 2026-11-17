@@ -16,6 +16,7 @@ pub(crate) mod grant_exchange;
 pub mod manager;
 pub(crate) mod parent_credential;
 pub(crate) mod pop_signer;
+pub(crate) mod redirect;
 #[doc(hidden)]
 pub mod shared_session;
 pub mod view;
@@ -25,4 +26,8 @@ pub use custom_pop::CustomPopError;
 pub use flow::{DelegatedGrantAuthFlowState, GrantAuthFlowState, PubkyGrantAuthFlow};
 pub use manager::GrantManager;
 pub use parent_credential::ParentGrantCredential;
+pub use redirect::{
+    ChildGrantApproval, DEFAULT_REDIRECT_FLOW_LIFETIME, DelegatedRedirectAuthFlowState,
+    PubkyRedirectAuthFlow, RedirectAuthFlowBuilder, RedirectAuthFlowState, RedirectCallback,
+};
 pub use view::GrantSessionView;

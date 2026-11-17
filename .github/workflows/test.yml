@@ -145,6 +145,9 @@ jobs:
           - suite: session-tabs
             command: xvfb-run -a npm run test-browser:tabs -- --no-sandbox
             electron: true
+          - suite: redirect
+            command: npm run test-browser:redirect
+            electron: false
     services:
       postgres:
         image: postgres:18-alpine          # official image
@@ -187,6 +190,11 @@ jobs:
       - name: Install JS dependencies
         working-directory: pubky-sdk/bindings/js/pkg
         run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Install redirect test browsers
+        if: matrix.suite == 'redirect'
+        working-directory: pubky-sdk/bindings/js/pkg
+        run: npx --no-install playwright-core install --with-deps chromium firefox webkit
 
       # The testnet builds while the WASM bindings build. Its own target
       # directory keeps the two builds from waiting for each other's lock.

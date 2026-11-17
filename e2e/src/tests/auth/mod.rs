@@ -4,6 +4,7 @@ mod cookie;
 mod grant;
 mod parent_grant;
 mod pkdns;
+mod redirect;
 mod signup_tokens;
 
 use super::{build_full_testnet, grant_session};

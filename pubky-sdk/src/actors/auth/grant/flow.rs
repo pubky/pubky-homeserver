@@ -62,7 +62,7 @@ use crate::actors::auth::deep_links::{DeepLink, GrantRelayChannel};
 use crate::actors::auth::grant::approval::{GrantApproval, ParentApproval};
 use crate::actors::auth::grant::approval_encryption::ApprovalRecipientSecret;
 use crate::actors::auth::grant::builder::GrantAuthFlowBuilder;
-use crate::actors::auth::grant::credential::GrantCredential;
+use crate::actors::auth::grant::credential::{GrantChain, GrantCredential};
 use crate::actors::auth::grant::grant_exchange::credential_from_grant_exchange;
 use crate::actors::auth::grant::parent_credential::ParentGrantCredential;
 use crate::actors::auth::grant::pop_signer::{DelegatedSignFn, GrantPopSigner};
@@ -459,8 +459,15 @@ impl PubkyGrantAuthFlow {
 
         let pkdns = Pkdns::with_client(client.clone());
         let hs_pk = pkdns.require_homeserver_of(&claims.iss).await?;
-        let mut credential =
-            credential_from_grant_exchange(client, grant_jws, claims, client_signer, hs_pk).await?;
+        let mut credential = credential_from_grant_exchange(
+            client,
+            grant_jws,
+            claims,
+            client_signer,
+            hs_pk,
+            GrantChain::Direct,
+        )
+        .await?;
         credential.retain_verified_approval(verified_approval);
         Ok(credential)
     }

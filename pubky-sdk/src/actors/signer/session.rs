@@ -20,6 +20,7 @@ use crate::{
     actors::auth::{
         cookie::CookieCredential,
         grant::constants::DEFAULT_GRANT_LIFETIME_SECS,
+        grant::credential::GrantChain,
         grant::grant_exchange::{credential_from_grant_exchange, signup_account_from_grant},
         grant::pop_signer::GrantPopSigner,
     },
@@ -141,6 +142,7 @@ impl PubkySigner {
             grant_claims,
             client_signer,
             homeserver,
+            GrantChain::Direct,
         )
         .await?;
         let session = PubkySession::from_grant_credential(self.client.clone(), credential);

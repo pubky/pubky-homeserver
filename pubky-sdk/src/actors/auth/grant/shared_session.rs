@@ -125,6 +125,7 @@ impl GrantCredential {
         let response = refresh_grant_session(
             client,
             &state.grant_jws,
+            self.chain.parent_jws(),
             &state.grant_claims,
             &state.client_signer,
             &state.homeserver_pk,

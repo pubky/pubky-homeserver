@@ -495,6 +495,13 @@ callbacks in your catalog, and show an error for an unknown one.
   Delivered keys stay usable. `browserSessionStore.clearAll()` leaves saved
   parents in place.
 
+#### Sign in through Pubky Accounts
+
+Call `startRedirectAuthFlow(caps, { accountsUrl, callbackUrl })`, then navigate to
+its `authorizationUrl`. On the callback page, call `completeRedirectAuthFlow()`
+before routing or analytics. The SDK saves the session and deletes its stored
+keys on sign-out. See [redirect sign-in](../../../../docs/delegated-grants.md#sign-in-an-app).
+
 #### Validate and normalize capabilities
 
 If you accept capability strings from user input (forms, CLI arguments, etc.),

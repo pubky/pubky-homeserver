@@ -70,8 +70,8 @@ use crate::actors::auth::cookie::secret::session_from_secret_file;
 use crate::PubkyCookieAuthFlow;
 use crate::{
     Capabilities, ClientId, DelegatedGrantCredentialState, EventCursor, EventStreamBuilder,
-    GrantCredential, Pkdns, PubkyGrantAuthFlow, PubkyHttpClient, PubkySession, PubkySigner,
-    PublicStorage, Result,
+    GrantCredential, Pkdns, PubkyGrantAuthFlow, PubkyHttpClient, PubkyRedirectAuthFlow,
+    PubkySession, PubkySigner, PublicStorage, Result,
     actors::AuthFlowKind,
     deep_links::{DeepLink, XCallbackParams},
     errors::AuthError,
@@ -228,6 +228,26 @@ impl Pubky {
         client_id: ClientId,
     ) -> Result<PubkyGrantAuthFlow> {
         PubkyGrantAuthFlow::builder(caps, auth_kind, client_id)
+            .client(self.client.clone())
+            .start()
+    }
+
+    /// Start a redirect sign-in answered by a parent grant holder such as Pubky Accounts.
+    ///
+    /// `callback` is the app's exact registered HTTPS callback, and `accounts_url`
+    /// the holder's authorization endpoint. Save the flow's state, then send the
+    /// user to its [`authorization_url`](PubkyRedirectAuthFlow::authorization_url).
+    /// See [`PubkyRedirectAuthFlow`].
+    ///
+    /// # Errors
+    /// Fails like [`RedirectAuthFlowBuilder::start`](crate::RedirectAuthFlowBuilder::start).
+    pub fn start_redirect_auth_flow(
+        &self,
+        caps: &Capabilities,
+        callback: ClientId,
+        accounts_url: url::Url,
+    ) -> Result<PubkyRedirectAuthFlow> {
+        PubkyRedirectAuthFlow::builder(caps, callback, accounts_url)
             .client(self.client.clone())
             .start()
     }

@@ -101,10 +101,10 @@ independently.
 | Approval format | `af` link parameter; `GrantApprovalFormat` in Rust; `approvalFormat` in JS | Bare grant (default): no parameter, `BareGrant`, `bareGrant`. Signed approval: `af=v1`, `SignedApprovalV1`, `signedApprovalV1`. |
 | Approval encryption | `epk` link parameter | 32-byte X25519 public key, base64url without padding. Required for `af=v1`; `base64url(BLAKE3("pubky-grant-relay-channel-v1" || 0x00 || epk))` identifies the HTTP relay channel. |
 | Key derivation | `version` field of the key bundle | `v1` |
-| Exported secret token | Token prefix | `pubky-grant-credential-v1` for bare grants; `pubky-grant-credential-v2` for signed approvals |
-| Browser session record | `version` field in IndexedDB | `pubky-session-v1` for bare grants; `pubky-session-v2` for signed approvals |
+| Exported secret token | Token prefix | `pubky-grant-credential-v1` for bare grants; `pubky-grant-credential-v2` for signed approvals; `pubky-grant-credential-v3` for child grants |
+| Browser session record | `version` field in IndexedDB | `pubky-session-v1` for bare grants; `pubky-session-v2` for signed approvals; `pubky-session-v3` for child grants |
 
-A signed approval always uses the `v2` token and record formats, even if the
+A direct signed approval uses the `v2` token and record formats, even if the
 signer declined `e` and the key bundle is empty.
 
 [Parent and child approvals](delegated-grants.md#approval-formats) have no version
@@ -206,6 +206,9 @@ How each storage option keeps the signed approval:
 - **Parent grant store:** `parentGrantStore.save()` stores a holder's approval as
   plaintext in IndexedDB too, with the same trust boundary. That approval holds
   the keys for every scope the holder was approved for.
+- **Child sessions:** a redirect sign-in stores the app's child approval the same
+  way, with keys for only the app's scopes. Signing out deletes it before the
+  revocation request, so local recovery is no longer possible afterwards.
 
 Offline recovery returns the keys from saved restore material without network
 access. It verifies the approval signature, its binding to the grant, and the
@@ -220,6 +223,8 @@ key scopes, but it doesn't require a valid grant and creates no session:
   are. In Rust, `restore_encryption_keys()` and
   `restore_encryption_keys_from_approval()` return the authenticated grant claims;
   compare `iss` and `jti` with the user and grant you expect.
+- For a child grant, use `restore_child_encryption_keys(child_grant, approval)`
+  in Rust. `restore_encryption_keys(token)` also reads `v3` tokens.
 - In JS, `EncryptionKeys.fromLocalSecret(token)` returns
   `{ publicKey, grantId, keys }`. Check `publicKey` (z-base-32) and `grantId`
   against the expected account and grant before using `keys`. Call
