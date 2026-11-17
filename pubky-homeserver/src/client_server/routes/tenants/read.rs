@@ -17,9 +17,9 @@ use axum::{
     response::IntoResponse,
 };
 use httpdate::HttpDate;
-use sqlx::types::chrono::{DateTime, Utc};
 use std::str::FromStr;
 use std::time::SystemTime;
+use time::PrimitiveDateTime;
 
 pub async fn legacy_head(
     state: State<AppState>,
@@ -215,9 +215,9 @@ pub(crate) fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<
         .body(Body::empty())?)
 }
 
-/// Convert a `NaiveDateTime` to a `HttpDate`.
-fn to_http_date(date: &sqlx::types::chrono::NaiveDateTime) -> HttpDate {
-    let sys_datetime = SystemTime::from(DateTime::<Utc>::from_naive_utc_and_offset(*date, Utc));
+/// Convert a UTC `PrimitiveDateTime` to a `HttpDate`.
+fn to_http_date(date: &PrimitiveDateTime) -> HttpDate {
+    let sys_datetime = SystemTime::from(date.assume_utc());
     httpdate::HttpDate::from(sys_datetime)
 }
 

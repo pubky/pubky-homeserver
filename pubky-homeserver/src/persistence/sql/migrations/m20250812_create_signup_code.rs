@@ -64,14 +64,14 @@ mod tests {
     #[derive(Debug, PartialEq, Eq, Clone)]
     struct SignupCodeEntity {
         pub id: String,
-        pub created_at: sqlx::types::chrono::NaiveDateTime,
+        pub created_at: time::PrimitiveDateTime,
         pub used_by: Option<PublicKey>,
     }
 
     impl FromRow<'_, PgRow> for SignupCodeEntity {
         fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
             let token: String = row.try_get(SignupCodeIden::Id.to_string().as_str())?;
-            let created_at: sqlx::types::chrono::NaiveDateTime =
+            let created_at: time::PrimitiveDateTime =
                 row.try_get(SignupCodeIden::CreatedAt.to_string().as_str())?;
             let used_by_raw: Option<String> =
                 row.try_get(SignupCodeIden::UsedBy.to_string().as_str())?;

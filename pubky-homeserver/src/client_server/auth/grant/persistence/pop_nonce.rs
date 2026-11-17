@@ -3,11 +3,13 @@
 use pubky_common::auth::jws::PopNonce;
 use sea_query::{Expr, ExprTrait, PostgresQueryBuilder, Query, SimpleExpr};
 use sea_query_sqlx::SqlxBinder;
+use time::Duration;
 
 use crate::persistence::sql::{
     migrations::m20260325_create_grant_sessions::{PopNonceIden, POP_NONCES_TABLE},
     UnifiedExecutor,
 };
+use crate::shared::timestamp;
 
 /// Repository for PoP nonce tracking and garbage collection.
 pub struct PopNonceRepository;
@@ -61,11 +63,11 @@ impl PopNonceRepository {
         max_age_secs: u64,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<u64, sqlx::Error> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs as i64);
+        let cutoff = timestamp::now_naive_utc() - Duration::seconds(max_age_secs as i64);
 
         let statement = Query::delete()
             .from_table(POP_NONCES_TABLE)
-            .and_where(Expr::col(PopNonceIden::CreatedAt).lt(cutoff.naive_utc()))
+            .and_where(Expr::col(PopNonceIden::CreatedAt).lt(cutoff))
             .to_owned();
 
         let (query, values) = statement.build_sqlx(PostgresQueryBuilder);

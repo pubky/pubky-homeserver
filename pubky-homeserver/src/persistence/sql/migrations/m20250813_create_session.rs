@@ -103,7 +103,7 @@ mod tests {
         pub secret: String,
         pub user: i32,
         pub capabilities: Capabilities,
-        pub created_at: sqlx::types::chrono::NaiveDateTime,
+        pub created_at: time::PrimitiveDateTime,
     }
 
     impl FromRow<'_, PgRow> for SessionEntity {
@@ -118,7 +118,7 @@ mod tests {
                     sqlx::Error::Decode(e.into())
                 },
             )?;
-            let created_at: sqlx::types::chrono::NaiveDateTime =
+            let created_at: time::PrimitiveDateTime =
                 row.try_get(SessionIden::CreatedAt.to_string().as_str())?;
             Ok(SessionEntity {
                 id,

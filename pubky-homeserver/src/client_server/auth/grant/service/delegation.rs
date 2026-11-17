@@ -1,7 +1,7 @@
 //! Parent and child grant exchange, signout, and app reconnection.
 
-use chrono::Utc;
 use pubky_common::auth::grant_session_responses::GrantSessionResponse;
+use time::OffsetDateTime;
 
 use super::GrantAuthService;
 use crate::client_server::auth::grant::{
@@ -42,7 +42,7 @@ impl GrantAuthService {
         let new_parent = NewGrant::parent(parent, user.id);
         let new_child = NewGrant::child(&chain, user.id);
         let client_id = &child.grant.client_id;
-        let now = Utc::now().timestamp();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
 
         let mut tx = self.sql_db.pool().begin().await?;
         Self::store_grant(&new_parent, uexecutor!(tx))
@@ -109,7 +109,7 @@ impl GrantAuthService {
         let user = self.find_user(parent).await?;
         let new_parent = NewGrant::parent(parent, user.id);
         let mut new_child = NewGrant::child(&chain, user.id);
-        new_child.revoked_at = Some(Utc::now().timestamp());
+        new_child.revoked_at = Some(OffsetDateTime::now_utc().unix_timestamp());
 
         let mut tx = self.sql_db.pool().begin().await?;
         Self::store_grant(&new_parent, uexecutor!(tx)).await?;
@@ -143,7 +143,7 @@ impl GrantAuthService {
         let mut tx = self.sql_db.pool().begin().await?;
         Self::store_grant(&new_parent, uexecutor!(tx))
             .await?
-            .require_active(Utc::now().timestamp())?;
+            .require_active(OffsetDateTime::now_utc().unix_timestamp())?;
         GrantRepository::unblock_app(user.id, &parent.jti, &client_id, uexecutor!(tx)).await?;
         tx.commit().await?;
         Ok(())
@@ -208,7 +208,7 @@ mod tests {
 
         fn for_user(service: GrantAuthService, user: Keypair, user_id: i32) -> Self {
             let accounts = Keypair::random();
-            let now = Utc::now().timestamp() as u64;
+            let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
             let parent = GrantClaims {
                 iss: user.public_key(),
                 client_id: ClientId::new("https://accounts.example/auth/callback").unwrap(),
@@ -286,7 +286,7 @@ mod tests {
                         aud: self.service.homeserver_public_key(),
                         gid: self.parent.jti.clone(),
                         nonce: PopNonce::generate(),
-                        iat: Utc::now().timestamp() as u64,
+                        iat: OffsetDateTime::now_utc().unix_timestamp() as u64,
                     },
                     client_id: ClientId::new(callback).unwrap(),
                 },
@@ -371,7 +371,7 @@ mod tests {
     async fn child_bearer_expires_with_a_short_lived_child() {
         let d = ParentGrant::new().await;
         let mut app = d.app(CHAT);
-        app.child.grant.exp = Utc::now().timestamp() as u64 + 60;
+        app.child.grant.exp = OffsetDateTime::now_utc().unix_timestamp() as u64 + 60;
 
         let response = d.exchange(&app).await.unwrap();
 

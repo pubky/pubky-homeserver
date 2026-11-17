@@ -15,8 +15,8 @@ pub struct EntryEntity {
     pub content_hash: pubky_common::crypto::Hash,
     pub content_length: u64,
     pub content_type: String,
-    pub modified_at: sqlx::types::chrono::NaiveDateTime,
-    pub created_at: sqlx::types::chrono::NaiveDateTime,
+    pub modified_at: time::PrimitiveDateTime,
+    pub created_at: time::PrimitiveDateTime,
 }
 
 impl FromRow<'_, PgRow> for EntryEntity {
@@ -39,9 +39,9 @@ impl FromRow<'_, PgRow> for EntryEntity {
         let content_hash = pubky_common::crypto::Hash::from_bytes(content_hash);
         let content_length: i64 = row.try_get(EntryIden::ContentLength.to_string().as_str())?;
         let content_type: String = row.try_get(EntryIden::ContentType.to_string().as_str())?;
-        let modified_at: sqlx::types::chrono::NaiveDateTime =
+        let modified_at: time::PrimitiveDateTime =
             row.try_get(EntryIden::ModifiedAt.to_string().as_str())?;
-        let created_at: sqlx::types::chrono::NaiveDateTime =
+        let created_at: time::PrimitiveDateTime =
             row.try_get(EntryIden::CreatedAt.to_string().as_str())?;
         Ok(EntryEntity {
             id,

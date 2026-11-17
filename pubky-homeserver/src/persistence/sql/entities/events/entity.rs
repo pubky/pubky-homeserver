@@ -3,7 +3,8 @@ use pubky_common::crypto::Hash;
 use pubky_common::crypto::PublicKey;
 use pubky_common::events::{EventCursor, EventType};
 use sea_query::Iden;
-use sqlx::{postgres::PgRow, types::chrono::NaiveDateTime, FromRow, Row};
+use sqlx::{postgres::PgRow, FromRow, Row};
+use time::PrimitiveDateTime;
 
 use crate::{
     persistence::sql::{events::EventIden, user::UserIden},
@@ -17,7 +18,7 @@ pub struct EventEntity {
     pub user_pubkey: PublicKey,
     pub event_type: EventType,
     pub path: EntryPath,
-    pub created_at: NaiveDateTime,
+    pub created_at: PrimitiveDateTime,
 }
 
 impl EventEntity {
@@ -62,7 +63,8 @@ impl FromRow<'_, PgRow> for EventEntity {
         let event_type_str: String = row.try_get(EventIden::Type.to_string().as_str())?;
         let path: String = row.try_get(EventIden::Path.to_string().as_str())?;
         let path = StoragePath::new(&path).map_err(|e| sqlx::Error::Decode(e.into()))?;
-        let created_at: NaiveDateTime = row.try_get(EventIden::CreatedAt.to_string().as_str())?;
+        let created_at: PrimitiveDateTime =
+            row.try_get(EventIden::CreatedAt.to_string().as_str())?;
 
         let content_hash_bytes: Option<Vec<u8>> =
             row.try_get(EventIden::ContentHash.to_string().as_str())?;
@@ -125,7 +127,7 @@ mod tests {
             user_pubkey,
             event_type,
             path,
-            created_at: NaiveDateTime::default(),
+            created_at: time::macros::datetime!(1970-01-01 0:00),
         }
     }
 

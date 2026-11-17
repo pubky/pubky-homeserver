@@ -3,7 +3,7 @@
 use crate::client_server::AppState;
 use crate::persistence::sql::signup_code::SignupCode;
 use crate::services::signup_service::SignupServiceError;
-use crate::shared::{HttpError, HttpResult};
+use crate::shared::{timestamp, HttpError, HttpResult};
 use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
@@ -69,7 +69,7 @@ pub async fn get(
     };
     let response = SignupTokenResponse {
         status,
-        created_at: code.created_at.and_utc().to_rfc3339(),
+        created_at: timestamp::to_rfc3339_utc(&code.created_at),
     };
 
     Ok((

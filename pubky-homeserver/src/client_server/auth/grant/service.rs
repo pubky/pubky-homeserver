@@ -9,7 +9,6 @@ use std::collections::HashSet;
 
 use crate::persistence::sql::{signup_code::SignupCode, uexecutor, SqlDb, UnifiedExecutor};
 use crate::services::user_service::{UserEntity, UserService};
-use chrono::Utc;
 use pubky_common::{
     auth::grant::GrantClaims,
     auth::grant_session_responses::{GrantKind, GrantSessionInfo, GrantSessionResponse},
@@ -17,6 +16,7 @@ use pubky_common::{
     crypto::PublicKey,
 };
 use sqlx::{Postgres, Transaction};
+use time::OffsetDateTime;
 
 use super::crypto::{
     grant_verifier::{is_parent_grant, verify_grant, verify_grant_for_revocation},
@@ -257,7 +257,7 @@ impl GrantAuthService {
             grant_id: session.grant_id.clone(),
             token_expires_at: session.token_expires_at,
             grant_expires_at: grant.expires_at as u64,
-            created_at: grant.created_at.and_utc().timestamp() as u64,
+            created_at: grant.created_at.assume_utc().unix_timestamp() as u64,
         })
     }
 
@@ -343,7 +343,7 @@ impl GrantAuthService {
         &self,
         session: &GrantSessionEntity,
     ) -> Result<GrantEntity, AuthServiceError> {
-        let now = Utc::now().timestamp();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
         if session.expires_at <= now {
             return Err(AuthServiceError::SessionExpired);
         }
@@ -412,7 +412,7 @@ impl GrantAuthService {
     }
 
     fn require_short_signup_lifetime(grant: &GrantClaims) -> Result<(), AuthServiceError> {
-        let now = Utc::now().timestamp() as u64;
+        let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
         if grant.iat > now + POP_MAX_AGE_SECS {
             return Err(AuthServiceError::InvalidSignupGrant(
                 "signup grant iat is too far in the future".into(),
@@ -532,7 +532,7 @@ impl GrantAuthService {
     /// The bearer can't outlive `grant`. A child never outlives its parent, so
     /// this also caps a child's bearer at the parent's expiry.
     fn prepare_session(&self, grant: &GrantClaims) -> (NewGrantSession, GrantSessionResponse) {
-        let now = Utc::now().timestamp() as u64;
+        let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
         let expires_at = (now + DEFAULT_SESSION_TOKEN_LIFETIME_SECS).min(grant.exp);
         let bearer = SessionBearer::generate();
         let token_hash = bearer.hash();
@@ -650,7 +650,7 @@ mod tests {
         client_id: &str,
         lifetime_secs: u64,
     ) -> (JwsCompact, JwsCompact, GrantClaims) {
-        let now = Utc::now().timestamp() as u64;
+        let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
         let raw_grant = GrantClaims {
             iss: user_kp.public_key(),
             client_id: ClientId::new(client_id).unwrap(),
@@ -677,7 +677,7 @@ mod tests {
             aud: hs_pubkey.clone(),
             gid: raw_grant.jti.clone(),
             nonce: PopNonce::generate(),
-            iat: Utc::now().timestamp() as u64,
+            iat: OffsetDateTime::now_utc().unix_timestamp() as u64,
         };
         let pop_jws = sign_jws(client_kp, POP_JWS_TYP, &pop_claims);
 
@@ -701,7 +701,7 @@ mod tests {
                 aud: service.homeserver_public_key(),
                 gid: grant_id.clone(),
                 nonce: PopNonce::generate(),
-                iat: Utc::now().timestamp() as u64,
+                iat: OffsetDateTime::now_utc().unix_timestamp() as u64,
             },
         )
     }
@@ -751,7 +751,7 @@ mod tests {
 
         // Sign grant with wrong key
         let (_, pop_jws, _) = sign_grant(&user_kp, &client_kp, &service.homeserver_public_key());
-        let now = Utc::now().timestamp() as u64;
+        let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
         let raw_grant = GrantClaims {
             iss: user_kp.public_key(),
             client_id: ClientId::new("test.app").unwrap(),
@@ -779,7 +779,7 @@ mod tests {
         let hs_pubkey = service.homeserver_public_key();
 
         // Create a shared PoP nonce for replay
-        let now = Utc::now().timestamp() as u64;
+        let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
         let grant_id = GrantId::generate();
         let shared_nonce = PopNonce::generate();
 
@@ -922,7 +922,7 @@ mod tests {
         let hs_pubkey = service.homeserver_public_key();
 
         // Unsorted and duplicated capabilities must still match their stored form.
-        let now = Utc::now().timestamp() as u64;
+        let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
         let raw_grant = GrantClaims {
             iss: user_kp.public_key(),
             client_id: ClientId::new("test.app").unwrap(),
@@ -1239,7 +1239,7 @@ mod tests {
             .await
             .unwrap();
         let bearer = SessionBearer::parse(&response.token).unwrap();
-        let expired_at = Utc::now().timestamp().saturating_sub(1);
+        let expired_at = OffsetDateTime::now_utc().unix_timestamp().saturating_sub(1);
         sqlx::query("UPDATE grant_sessions SET expires_at = $1 WHERE token_hash = $2")
             .bind(expired_at)
             .bind(bearer.hash().as_ref().to_vec())
@@ -1446,7 +1446,7 @@ mod tests {
                     aud: service.homeserver_public_key(),
                     gid: grant.jti.clone(),
                     nonce: PopNonce::generate(),
-                    iat: Utc::now().timestamp() as u64,
+                    iat: OffsetDateTime::now_utc().unix_timestamp() as u64,
                 },
             );
             service
@@ -1491,7 +1491,7 @@ mod tests {
                     aud: service.homeserver_public_key(),
                     gid: grant.jti.clone(),
                     nonce: PopNonce::generate(),
-                    iat: Utc::now().timestamp() as u64,
+                    iat: OffsetDateTime::now_utc().unix_timestamp() as u64,
                 },
             );
             assert!(matches!(
@@ -1535,7 +1535,7 @@ mod tests {
                 aud: service.homeserver_public_key(),
                 gid: grant.jti,
                 nonce: PopNonce::generate(),
-                iat: Utc::now().timestamp() as u64,
+                iat: OffsetDateTime::now_utc().unix_timestamp() as u64,
             },
         );
         assert!(matches!(

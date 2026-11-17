@@ -5,7 +5,7 @@ use crate::{
     persistence::sql::signup_code::{
         SignupCode, SignupCodeEntity, SignupCodeListQuery, SignupCodeListState,
     },
-    shared::{quota::UserQuota, HttpResult},
+    shared::{quota::UserQuota, timestamp, HttpResult},
 };
 use axum::{
     extract::{Query, State},
@@ -13,7 +13,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::types::chrono::NaiveDateTime;
+use time::PrimitiveDateTime;
 
 #[derive(Deserialize)]
 pub(crate) struct SignupTokensQuery {
@@ -35,8 +35,10 @@ impl SignupTokensQuery {
 #[derive(Serialize)]
 pub(crate) struct SignupTokenItem {
     token: SignupCode,
-    created_at: NaiveDateTime,
-    used_at: Option<NaiveDateTime>,
+    #[serde(serialize_with = "timestamp::serialize_iso8601")]
+    created_at: PrimitiveDateTime,
+    #[serde(serialize_with = "timestamp::serialize_option_iso8601")]
+    used_at: Option<PrimitiveDateTime>,
     used_by: Option<String>,
     /// Quota overrides stored on the token, in the same shape as the
     /// `POST /generate_signup_token` body. Fields using the system default are omitted.

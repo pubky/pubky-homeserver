@@ -213,7 +213,7 @@ mod tests {
                 user_id: 1,
                 user_pubkey: Keypair::random().public_key(),
                 capabilities: Capabilities::default(),
-                created_at: chrono::Utc::now().naive_utc(),
+                created_at: crate::shared::timestamp::now_naive_utc(),
             })),
             revocation_rx,
             auth_state: Box::new(AuthState::new(context)),

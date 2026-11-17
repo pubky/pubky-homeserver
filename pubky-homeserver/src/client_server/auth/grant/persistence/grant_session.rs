@@ -40,7 +40,9 @@ impl GrantSessionRepository {
         if grant.try_get::<Option<i64>, _>("revoked_at")?.is_some() {
             return Err(SessionIssueError::Revoked);
         }
-        if grant.try_get::<i64, _>("expires_at")? <= chrono::Utc::now().timestamp() {
+        if grant.try_get::<i64, _>("expires_at")?
+            <= time::OffsetDateTime::now_utc().unix_timestamp()
+        {
             return Err(SessionIssueError::Expired);
         }
         sqlx::query("DELETE FROM grant_sessions WHERE grant_id = $1")
@@ -112,7 +114,7 @@ pub struct GrantSessionEntity {
     pub token_hash: SessionTokenHash,
     pub grant_id: GrantId,
     pub expires_at: i64,
-    pub created_at: sqlx::types::chrono::NaiveDateTime,
+    pub created_at: time::PrimitiveDateTime,
 }
 
 impl FromRow<'_, PgRow> for GrantSessionEntity {
@@ -168,7 +170,7 @@ mod tests {
     async fn setup_user_and_grant(db: &SqlDb) -> GrantId {
         let pubkey = Keypair::random().public_key();
         let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
         let grant_id = GrantId::generate();
         let new_grant = NewGrant::direct(
             &GrantClaims {
@@ -189,7 +191,7 @@ mod tests {
     }
 
     fn make_new_session(grant_id: &GrantId) -> (NewGrantSession, SessionTokenHash) {
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
         let hash = SessionBearer::generate().hash();
         (
             NewGrantSession {
@@ -269,7 +271,7 @@ mod tests {
 
         // Create a second grant for the same user
         let grant_b_id = GrantId::generate();
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
         let pubkey = Keypair::random().public_key();
         let user = UserService::new(db.clone()).create(&pubkey).await.unwrap();
         let new_grant_b = NewGrant::direct(

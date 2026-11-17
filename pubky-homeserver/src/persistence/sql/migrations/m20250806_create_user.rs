@@ -90,7 +90,7 @@ mod tests {
     struct UserEntity {
         pub id: u32,
         pub public_key: PublicKey,
-        pub created_at: sqlx::types::chrono::NaiveDateTime,
+        pub created_at: time::PrimitiveDateTime,
         pub disabled: bool,
         pub used_bytes: u64,
     }
@@ -104,7 +104,7 @@ mod tests {
             let disabled: bool = row.try_get(User::Disabled.to_string().as_str())?;
             let raw_used_bytes: i64 = row.try_get(User::UsedBytes.to_string().as_str())?;
             let used_bytes = raw_used_bytes as u64;
-            let created_at: sqlx::types::chrono::NaiveDateTime =
+            let created_at: time::PrimitiveDateTime =
                 row.try_get(User::CreatedAt.to_string().as_str())?;
             Ok(UserEntity {
                 id: id as u32,
