@@ -14,9 +14,13 @@ use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
 
 #[wasm_bindgen(inline_js = r#"
 const PUBKY_GRANT_KEYS_DB_NAME = "pubky-auth";
-const PUBKY_GRANT_KEYS_DB_VERSION = 1;
+// Keep the version and stores in sync with `openSessionStoreDb` in
+// session_store/browser.rs: both open this database.
+const PUBKY_GRANT_KEYS_DB_VERSION = 2;
 const PUBKY_GRANT_KEYS_STORE_NAME = "delegatedGrantKeys";
 const PUBKY_GRANT_KEYS_SESSION_STORE_NAME = "storedSessions";
+const PUBKY_GRANT_KEYS_REDIRECT_STORE_NAME = "redirectFlows";
+const PUBKY_GRANT_KEYS_BLOCKED_TIMEOUT_MS = 10000;
 let canUseDelegationPromise;
 const TEST_CAN_USE_DELEGATION_OVERRIDE = "__pubkyGrantCanUseDelegationOverride";
 
@@ -106,6 +110,8 @@ function openGrantKeyDb() {
   requireBrowserCrypto();
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(PUBKY_GRANT_KEYS_DB_NAME, PUBKY_GRANT_KEYS_DB_VERSION);
+    let settled = false;
+    let blocked;
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(PUBKY_GRANT_KEYS_STORE_NAME)) {
@@ -114,9 +120,37 @@ function openGrantKeyDb() {
       if (!db.objectStoreNames.contains(PUBKY_GRANT_KEYS_SESSION_STORE_NAME)) {
         db.createObjectStore(PUBKY_GRANT_KEYS_SESSION_STORE_NAME, { keyPath: "id" });
       }
+      if (!db.objectStoreNames.contains(PUBKY_GRANT_KEYS_REDIRECT_STORE_NAME)) {
+        db.createObjectStore(PUBKY_GRANT_KEYS_REDIRECT_STORE_NAME, { keyPath: "callbackUrl" });
+      }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Opening delegated grant key store failed."));
+    // A tab with the previous version open blocks the upgrade; see openSessionStoreDb.
+    request.onblocked = () => {
+      if (blocked === undefined) blocked = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(
+          "Another tab of this site is using an older Pubky SDK. Reload or close it to finish the browser storage upgrade.",
+        ));
+      }, PUBKY_GRANT_KEYS_BLOCKED_TIMEOUT_MS);
+    };
+    request.onsuccess = () => {
+      clearTimeout(blocked);
+      const db = request.result;
+      if (settled) {
+        db.close();
+        return;
+      }
+      settled = true;
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
+    request.onerror = () => {
+      clearTimeout(blocked);
+      if (settled) return;
+      settled = true;
+      reject(request.error ?? new Error("Opening delegated grant key store failed."));
+    };
   });
 }
 

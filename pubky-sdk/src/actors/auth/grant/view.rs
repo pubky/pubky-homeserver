@@ -101,6 +101,13 @@ impl<'a> GrantSessionView<'a> {
         self.credential.signed_approval()
     }
 
+    /// The public parent grant JWS when this session holds a child grant.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn parent_grant(&self) -> Option<&str> {
+        self.credential.parent_grant()
+    }
+
     /// Returns the full grant session metadata from the homeserver.
     ///
     /// This gives access to grant-specific fields like `grant_id`,

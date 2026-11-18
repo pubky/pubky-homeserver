@@ -2,10 +2,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use pubky_common::{
     auth::{
         grant::{
-            GrantClaims, MAX_PARENT_GRANT_LIFETIME_SECS, caps_within, is_exact_callback,
-            parent_grant_ceiling,
+            ChildGrantClaims, GrantClaims, MAX_PARENT_GRANT_LIFETIME_SECS, caps_within,
+            is_exact_callback, parent_grant_ceiling,
         },
-        jws::PARENT_GRANT_JWS_TYP,
+        jws::{CHILD_GRANT_JWS_TYP, GRANT_JWS_TYP, PARENT_GRANT_JWS_TYP},
     },
     crypto::{PublicKey, Signature},
     encryption_keys::ScopedEncryptionKeyBundle,
@@ -14,7 +14,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use zeroize::Zeroizing;
 
 use super::approval_envelope::{
-    APPROVAL_JWS_TYP, GrantApprovalEnvelope, PARENT_APPROVAL_JWS_TYP, ParentApprovalEnvelope,
+    APPROVAL_JWS_TYP, CHILD_APPROVAL_JWS_TYP, ChildApprovalEnvelope, GrantApprovalEnvelope,
+    PARENT_APPROVAL_JWS_TYP, ParentApprovalEnvelope,
 };
 use crate::actors::auth::{deep_links::GrantApprovalFormat, relay::AuthRelayMessage};
 use crate::errors::{AuthError, Result};
@@ -69,6 +70,91 @@ impl ParentApproval {
             signed_approval: SignedApproval::new(text),
         })
     }
+}
+
+/// Verified child approval: the public grant chain, the child's keys and the
+/// request bindings that the parent's `cnf` key signed.
+///
+/// The redirect flow still has to check the bindings against its pending request.
+#[derive(Clone, Debug)]
+pub(crate) struct ChildApproval {
+    pub(crate) parent_jws: String,
+    pub(crate) parent_claims: GrantClaims,
+    pub(crate) child_jws: String,
+    pub(crate) child_claims: ChildGrantClaims,
+    pub(crate) recipient: String,
+    pub(crate) state: String,
+    pub(crate) encryption_keys: ScopedEncryptionKeyBundle,
+    pub(crate) signed_approval: SignedApproval,
+}
+
+impl ChildApproval {
+    /// Verify every signature in the chain, the delegation rules and the key scopes.
+    ///
+    /// Leaves expiry to the homeserver, which checks it against its own clock.
+    pub(crate) fn decode(text: &str) -> Result<Self> {
+        // Skip the key bundle until its signer has authenticated it.
+        #[derive(Deserialize)]
+        struct Unverified {
+            parent: String,
+            child: String,
+        }
+
+        let unverified: Unverified = decode_payload(text)?;
+        let parent = verify_parent_grant(&unverified.parent)?;
+        verify_jws(&unverified.child, &parent.cnf, CHILD_GRANT_JWS_TYP)?;
+        let child: ChildGrantClaims = decode_payload(&unverified.child)?;
+        verify_jws(text, &parent.cnf, CHILD_APPROVAL_JWS_TYP)?;
+        let envelope: ChildApprovalEnvelope = decode_payload(text)?;
+        verify_child_chain(&parent, &child)?;
+        validate_key_scopes_match_grant(&envelope.encryption_keys, &child.grant)?;
+        Ok(Self {
+            parent_jws: envelope.parent,
+            parent_claims: parent,
+            child_jws: envelope.child,
+            child_claims: child,
+            recipient: envelope.recipient,
+            state: envelope.state,
+            encryption_keys: envelope.encryption_keys,
+            signed_approval: SignedApproval::new(text),
+        })
+    }
+}
+
+/// Apply the homeserver's delegation rules, except expiry, to a verified chain.
+fn verify_child_chain(parent: &GrantClaims, child: &ChildGrantClaims) -> Result<()> {
+    let grant = &child.grant;
+    let within_parent = parent.iat <= grant.iat && grant.iat < grant.exp && grant.exp <= parent.exp;
+    if grant.iss != parent.iss
+        || child.parent_jti != parent.jti
+        || !within_parent
+        || !is_exact_callback(&grant.client_id)
+        || !caps_within(&parent.caps.clone().into(), &grant.caps)
+    {
+        return Err(invalid_approval("invalid child grant"));
+    }
+    Ok(())
+}
+
+/// Reject a grant JWS whose header names another grant type, without verifying it.
+///
+/// Restore paths for direct grants use this so a child grant can't pass as one.
+pub(crate) fn require_direct_grant(compact: &str) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Header {
+        typ: String,
+    }
+
+    let (header, _, _) = jws_parts(compact)?;
+    let header: Header = URL_SAFE_NO_PAD
+        .decode(header)
+        .ok()
+        .and_then(|header| serde_json::from_slice(&header).ok())
+        .ok_or_else(|| invalid_approval("invalid JWS header"))?;
+    if header.typ != GRANT_JWS_TYP {
+        return Err(invalid_approval("expected a direct grant"));
+    }
+    Ok(())
 }
 
 /// Verify the user's signature on a parent grant and the limits on any parent.
@@ -248,7 +334,7 @@ pub(super) fn verify_jws(compact: &str, signer: &PublicKey, typ: &str) -> Result
 mod tests {
     use pubky_common::{
         StoragePath,
-        auth::jws::{ClientId, GRANT_JWS_TYP, GrantId, decode_jws_payload, sign_jws},
+        auth::jws::{ClientId, GrantId, decode_jws_payload, sign_jws},
         capabilities::Capability,
     };
 
@@ -596,17 +682,12 @@ mod tests {
 mod delegation_tests {
     use pubky_common::{
         StoragePath,
-        auth::{
-            grant::ChildGrantClaims,
-            jws::{CHILD_GRANT_JWS_TYP, ClientId, GRANT_JWS_TYP, GrantId, sign_jws},
-        },
+        auth::jws::{ClientId, GrantId, sign_jws},
         capabilities::Capability,
         crypto::Keypair,
     };
 
-    use super::super::approval_envelope::{
-        CHILD_APPROVAL_JWS_TYP, ChildApprovalEnvelope, key_scopes,
-    };
+    use super::super::approval_envelope::key_scopes;
     use super::*;
 
     struct Chain {
@@ -760,5 +841,161 @@ mod delegation_tests {
 
         let direct = GrantApprovalEnvelope::sign(&chain.user, &chain.child.grant);
         ParentApproval::decode(&direct).unwrap_err();
+
+        ChildApproval::decode(&child).unwrap();
+        ChildApproval::decode(&parent).unwrap_err();
+        ChildApproval::decode(&direct).unwrap_err();
+    }
+
+    #[test]
+    fn child_approval_verifies_the_chain_and_keeps_only_the_childs_keys() {
+        let chain = chain();
+        let approval = ChildApproval::decode(&chain.child_approval()).unwrap();
+        assert_eq!(approval.parent_claims, chain.parent);
+        assert_eq!(approval.child_claims, chain.child);
+        assert_eq!(approval.state, "state");
+        assert_eq!(approval.recipient, "recipient");
+        let scope = StoragePath::new("/priv/chat/").unwrap();
+        assert!(approval.encryption_keys.scopes().eq([&scope]));
+
+        // The child's key is the one the user's identity derives for that scope.
+        let file = StoragePath::new("/priv/chat/message").unwrap();
+        let direct = chain.keys(std::slice::from_ref(&scope));
+        assert_eq!(
+            *approval.encryption_keys.derive_for_path(&file).unwrap(),
+            *direct.derive_for_path(&file).unwrap()
+        );
+        assert!(!format!("{approval:?}").contains(approval.signed_approval.as_str()));
+    }
+
+    #[test]
+    fn child_approval_rejects_chains_the_homeserver_would_reject() {
+        let mutations: [fn(&mut Chain); 8] = [
+            |chain| chain.child.grant.iss = Keypair::random().public_key(),
+            |chain| chain.child.parent_jti = GrantId::generate(),
+            |chain| chain.child.grant.iat = chain.parent.iat - 1,
+            |chain| chain.child.grant.exp = chain.parent.exp + 1,
+            |chain| chain.child.grant.exp = chain.child.grant.iat,
+            |chain| chain.child.grant.caps = vec![Capability::root()],
+            |chain| chain.child.grant.caps = vec!["/pub/:rwe".parse().unwrap()],
+            |chain| {
+                chain.child.grant.client_id = ClientId::new("chat.example").unwrap();
+            },
+        ];
+        for (index, mutate) in mutations.into_iter().enumerate() {
+            let mut chain = chain();
+            chain.parent.caps = vec![
+                "/pub/chat/:rw".parse().unwrap(),
+                "/priv/:rwe".parse().unwrap(),
+            ];
+            mutate(&mut chain);
+            assert!(
+                ChildApproval::decode(&chain.child_approval()).is_err(),
+                "mutation {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_approval_rejects_wrong_signers_types_and_key_scopes() {
+        let chain = chain();
+        let scopes: Vec<_> = key_scopes(&chain.child.grant.caps).cloned().collect();
+        let mut wrong_child_signer = chain.child_envelope(&scopes);
+        wrong_child_signer.child = sign_jws(&chain.user, CHILD_GRANT_JWS_TYP, &chain.child);
+        let mut wrong_child_type = chain.child_envelope(&scopes);
+        wrong_child_type.child = sign_jws(&chain.accounts, GRANT_JWS_TYP, &chain.child);
+        let mut wrong_parent_signer = chain.child_envelope(&scopes);
+        wrong_parent_signer.parent = sign_jws(&chain.accounts, PARENT_GRANT_JWS_TYP, &chain.parent);
+        let mut direct_parent = chain.child_envelope(&scopes);
+        direct_parent.parent = sign_jws(&chain.user, GRANT_JWS_TYP, &chain.parent);
+        let wider = [
+            scopes.clone(),
+            vec![StoragePath::new("/priv/shop/").unwrap()],
+        ]
+        .concat();
+        let ancestor = vec![StoragePath::new("/priv/").unwrap()];
+
+        for approval in [
+            sign_jws(
+                &chain.user,
+                CHILD_APPROVAL_JWS_TYP,
+                &chain.child_envelope(&scopes),
+            ),
+            sign_jws(
+                &chain.accounts,
+                PARENT_APPROVAL_JWS_TYP,
+                &chain.child_envelope(&scopes),
+            ),
+            sign_jws(
+                &chain.accounts,
+                APPROVAL_JWS_TYP,
+                &chain.child_envelope(&scopes),
+            ),
+            sign_jws(&chain.accounts, CHILD_APPROVAL_JWS_TYP, &wrong_child_signer),
+            sign_jws(&chain.accounts, CHILD_APPROVAL_JWS_TYP, &wrong_child_type),
+            sign_jws(
+                &chain.accounts,
+                CHILD_APPROVAL_JWS_TYP,
+                &wrong_parent_signer,
+            ),
+            sign_jws(&chain.accounts, CHILD_APPROVAL_JWS_TYP, &direct_parent),
+            // Missing, extra and ancestor keys.
+            sign_jws(
+                &chain.accounts,
+                CHILD_APPROVAL_JWS_TYP,
+                &chain.child_envelope(&[]),
+            ),
+            sign_jws(
+                &chain.accounts,
+                CHILD_APPROVAL_JWS_TYP,
+                &chain.child_envelope(&wider),
+            ),
+            sign_jws(
+                &chain.accounts,
+                CHILD_APPROVAL_JWS_TYP,
+                &chain.child_envelope(&ancestor),
+            ),
+        ] {
+            ChildApproval::decode(&approval).unwrap_err();
+        }
+
+        // Tampering after signing breaks the outer signature.
+        let valid = chain.child_approval();
+        let parts: Vec<_> = valid.split('.').collect();
+        let mut payload: serde_json::Value =
+            pubky_common::auth::jws::decode_jws_payload(&valid).unwrap();
+        payload["state"] = serde_json::json!("other");
+        let tampered = format!(
+            "{}.{}.{}",
+            parts[0],
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap()),
+            parts[2]
+        );
+        let error = ChildApproval::decode(&tampered).unwrap_err().to_string();
+        assert!(error.contains("signature"), "{error}");
+    }
+
+    #[test]
+    fn child_approval_errors_hold_no_payload() {
+        let chain = chain();
+        let scopes: Vec<_> = key_scopes(&chain.child.grant.caps).cloned().collect();
+        let mut payload = serde_json::to_value(chain.child_envelope(&scopes)).unwrap();
+        payload["encryption_keys"]["keys"][0]["secret"] = serde_json::json!("sensitive-value");
+        let approval = sign_jws(&chain.accounts, CHILD_APPROVAL_JWS_TYP, &payload);
+        let error = ChildApproval::decode(&approval).unwrap_err().to_string();
+        assert!(!error.contains("sensitive-value"), "{error}");
+    }
+
+    #[test]
+    fn only_direct_grants_pass_the_direct_restore_check() {
+        let chain = chain();
+        require_direct_grant(&sign_jws(&chain.user, GRANT_JWS_TYP, &chain.child.grant)).unwrap();
+        for grant in [
+            sign_jws(&chain.accounts, CHILD_GRANT_JWS_TYP, &chain.child),
+            chain.parent_jws(),
+            "not-a-jws".into(),
+        ] {
+            require_direct_grant(&grant).unwrap_err();
+        }
     }
 }

@@ -90,6 +90,26 @@ keys; `clearAll` also removes unrelated signing keys.
 
 Older SDKs cannot safely share V2 session records.
 
+### Records for child grants
+
+Redirect sessions use `pubky-session-v3`. The credential stores the public chain
+and signing key ID; the separate signed approval contains the encryption keys.
+Child sessions use browser-held keys (`storageMode: delegated`). Older SDKs reject them.
+
+Sign-out deletes the approval and sets `logoutPending`. Restoring retries
+revocation and then rejects. A stale handle cannot save the approval again.
+See [app sign-out](delegated-grants.md#sign-out-of-an-app).
+
+### Database version 2
+
+`pubky-auth` version 2 adds `redirectFlows` and preserves V1/V2 sessions. Deploy
+the SDK to every page of an origin together. Older tabs need a reload; an upgrade
+blocked for 10 seconds reports an error.
+
+`clear()` deletes sessions and pending redirects. `clearAll()` also deletes
+unreferenced signing keys. Neither revokes remote grants; saved parents and their
+keys stay until `parentGrantStore.signOut()`.
+
 ### Add encryption keys to an existing session
 
 1. Request a new signed approval with `e`, even for the same `clientId`. A new

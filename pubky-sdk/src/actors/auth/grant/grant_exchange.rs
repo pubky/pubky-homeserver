@@ -16,7 +16,7 @@ use pubky_common::{
 use reqwest::{Method, Response};
 
 use super::{
-    credential::{GrantCredential, sign_pop_for_grant},
+    credential::{GrantChain, GrantCredential, sign_pop_for_grant},
     pop_signer::GrantPopSigner,
 };
 use crate::PubkyHttpClient;
@@ -51,32 +51,63 @@ async fn decode_refreshed_grant_session(response: Response) -> Result<GrantSessi
 /// Used by [`PubkyGrantAuthFlow`](crate::PubkyGrantAuthFlow) once the signer (Ring)
 /// has delivered an encrypted grant via the relay channel.
 ///
+/// A child grant also sends its parent, and its session must describe exactly
+/// that child before the credential is returned.
+///
 /// # Errors
 /// - Propagates HTTP transport / server errors from `POST /auth/grant/session`.
 /// - Returns [`crate::errors::Error::Authentication`] if the response bearer
-///   cannot be decoded.
+///   cannot be decoded, or a child's session doesn't match the child.
 pub(crate) async fn credential_from_grant_exchange(
     client: &PubkyHttpClient,
     grant_jws: String,
     grant_claims: GrantClaims,
     client_signer: GrantPopSigner,
     homeserver_pubkey: PublicKey,
+    chain: GrantChain,
 ) -> Result<GrantCredential> {
     let response = post_grant_session(
         client,
         &grant_jws,
+        chain.parent_jws(),
         &grant_claims,
         &client_signer,
         &homeserver_pubkey,
     )
     .await?;
+    if matches!(chain, GrantChain::Child { .. }) {
+        check_session_matches_grant(&response, &grant_claims, &homeserver_pubkey)?;
+    }
     Ok(GrantCredential::from_response(
         response,
         grant_jws,
         grant_claims,
         client_signer,
         homeserver_pubkey,
+        chain,
     ))
+}
+
+/// Reject a session response that doesn't describe exactly this grant.
+pub(crate) fn check_session_matches_grant(
+    response: &GrantSessionResponse,
+    claims: &GrantClaims,
+    homeserver: &PublicKey,
+) -> Result<()> {
+    let session = &response.session;
+    if &session.homeserver != homeserver
+        || session.pubky != claims.iss
+        || session.grant_id != claims.jti
+        || session.client_id != claims.client_id
+        || session.capabilities != claims.caps
+        || session.grant_expires_at != claims.exp
+    {
+        return Err(crate::errors::AuthError::Validation(
+            "session does not match its grant".into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Create a user via `POST /auth/grant/signup` without minting a session.
@@ -114,6 +145,7 @@ pub(crate) async fn signup_account_from_grant(
 async fn post_grant_session(
     client: &PubkyHttpClient,
     grant_jws: &str,
+    parent_jws: Option<&str>,
     grant_claims: &GrantClaims,
     client_signer: &GrantPopSigner,
     homeserver_pk: &PublicKey,
@@ -121,6 +153,7 @@ async fn post_grant_session(
     let resp = post_grant_session_response(
         client,
         grant_jws,
+        parent_jws,
         grant_claims,
         client_signer,
         homeserver_pk,
@@ -137,6 +170,7 @@ async fn post_grant_session(
 pub(crate) async fn refresh_grant_session(
     client: &PubkyHttpClient,
     grant_jws: &str,
+    parent_jws: Option<&str>,
     grant_claims: &GrantClaims,
     client_signer: &GrantPopSigner,
     homeserver_pk: &PublicKey,
@@ -144,6 +178,7 @@ pub(crate) async fn refresh_grant_session(
     let response = post_grant_session_response(
         client,
         grant_jws,
+        parent_jws,
         grant_claims,
         client_signer,
         homeserver_pk,
@@ -163,6 +198,18 @@ pub(crate) async fn refresh_grant_session(
     decode_refreshed_grant_session(response).await
 }
 
+/// The JSON body that proves possession of a grant. A child grant carries its parent.
+pub(crate) fn grant_proof_body(
+    grant_jws: &str,
+    parent_jws: Option<&str>,
+    pop_jws: &str,
+) -> serde_json::Value {
+    match parent_jws {
+        Some(parent) => serde_json::json!({ "parent": parent, "grant": grant_jws, "pop": pop_jws }),
+        None => serde_json::json!({ "grant": grant_jws, "pop": pop_jws }),
+    }
+}
+
 fn redact_refresh_request_error(error: Error) -> Error {
     match error {
         Error::Request(RequestError::Server { status, .. }) => CredentialRefreshError::Request {
@@ -177,12 +224,13 @@ fn redact_refresh_request_error(error: Error) -> Error {
 async fn post_grant_session_response(
     client: &PubkyHttpClient,
     grant_jws: &str,
+    parent_jws: Option<&str>,
     grant_claims: &GrantClaims,
     client_signer: &GrantPopSigner,
     homeserver_pk: &PublicKey,
 ) -> Result<Response> {
     let pop_jws = sign_pop_for_grant(client_signer, homeserver_pk, &grant_claims.jti).await?;
-    let body = serde_json::json!({ "grant": grant_jws, "pop": pop_jws });
+    let body = grant_proof_body(grant_jws, parent_jws, &pop_jws);
 
     Ok(client
         .cross_request_via_homeserver(

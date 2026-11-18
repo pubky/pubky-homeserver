@@ -80,17 +80,21 @@ where
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(|e| match e {})
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
         let state = self.state.clone();
-        let mut inner = self.inner.clone();
+        let replacement = self.inner.clone();
+        // Use the original service for this request: poll_ready checked it,
+        // but its clone may not be ready. Leave the clone in self.inner so
+        // Tower checks its readiness before the next request.
+        let mut inner = std::mem::replace(&mut self.inner, replacement);
 
         Box::pin(async move {
             if req.extensions().get::<AuthSession>().is_some() {
                 // Prior middleware already authenticated the request. No need to check cookies.
-                return inner.call(req).await.map_err(|e| match e {});
+                return inner.call(req).await;
             }
 
             let cookies = match req.extensions().get::<Cookies>().cloned() {
@@ -99,7 +103,7 @@ where
                     tracing::trace!(
                         "No cookies found in request extensions. Skip cookie authentication."
                     );
-                    return inner.call(req).await.map_err(|e| match e {});
+                    return inner.call(req).await;
                 }
             };
             let tenant = match req.extensions().get::<RequestTenant>().cloned() {
@@ -108,7 +112,7 @@ where
                     tracing::trace!(
                         "No request tenant found in request extensions. Skip cookie authentication."
                     );
-                    return inner.call(req).await.map_err(|e| match e {});
+                    return inner.call(req).await;
                 }
             };
 
@@ -118,7 +122,7 @@ where
                 req.extensions_mut().insert(session);
             }
 
-            inner.call(req).await.map_err(|e| match e {})
+            inner.call(req).await
         })
     }
 }
@@ -129,6 +133,7 @@ mod tests {
     use crate::app_context::AppContext;
     use crate::client_server::auth::AuthSession;
     use crate::client_server::auth::AuthState;
+    use crate::shared::test_service::ReadinessRequiredService;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use pubky_common::crypto::Keypair;
@@ -216,5 +221,31 @@ mod tests {
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn calls_the_service_instance_that_was_polled_ready() {
+        let state = create_auth_state().await;
+        let mut service =
+            CookieAuthenticationLayer::new(state).layer(ReadinessRequiredService::default());
+        for with_cookie in [false, true, false, true] {
+            let mut request = Request::new(Body::empty());
+            if with_cookie {
+                // Exercise the async session lookup as well as the bypass path.
+                let public_key = Keypair::random().public_key();
+                let cookies = Cookies::default();
+                cookies.add(tower_cookies::Cookie::new(
+                    public_key.z32(),
+                    "nonexistent-secret-value",
+                ));
+                request
+                    .extensions_mut()
+                    .insert(RequestTenant::legacy(public_key));
+                request.extensions_mut().insert(cookies);
+            }
+            let response = service.ready().await.unwrap().call(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 }

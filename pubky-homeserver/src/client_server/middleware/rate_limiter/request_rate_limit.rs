@@ -70,7 +70,7 @@ pub struct RequestRateLimitMiddleware<S> {
 
 impl<S> Service<Request<Body>> for RequestRateLimitMiddleware<S>
 where
-    S: Service<Request<Body>, Response = Response, Error = Infallible> + Send + 'static + Clone,
+    S: Service<Request<Body>, Response = Response, Error = Infallible> + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -82,16 +82,12 @@ where
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let mut inner = self.inner.clone();
-        // The checks are synchronous, so run them before moving the request.
-        let checked = check_request_count_limits(&self.limits, &req);
+        if let Err(response) = check_request_count_limits(&self.limits, &req) {
+            return Box::pin(async move { Ok(response) });
+        }
 
-        Box::pin(async move {
-            if let Err(resp) = checked {
-                return Ok(resp);
-            }
-            inner.call(req).await
-        })
+        // Call the same service instance that poll_ready checked.
+        Box::pin(self.inner.call(req))
     }
 }
 
@@ -171,6 +167,7 @@ mod tests {
     use reqwest::{Client, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinHandle;
+    use tower::ServiceExt;
     use tower_cookies::CookieManagerLayer;
 
     use crate::client_server::client_identity::{
@@ -183,7 +180,22 @@ mod tests {
     use crate::shared::HttpResult;
     use crate::ClientIdentityToml;
 
+    use crate::shared::test_service::ReadinessRequiredService;
+
     use super::*;
+
+    #[tokio::test]
+    async fn calls_the_service_instance_that_was_polled_ready() {
+        let mut service = RequestRateLimitLayer::from_path_limits(vec![])
+            .unwrap()
+            .layer(ReadinessRequiredService::default());
+
+        for _ in 0..2 {
+            let request = Request::new(Body::empty());
+            let response = service.ready().await.unwrap().call(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
 
     async fn upload_handler() -> HttpResult<impl IntoResponse> {
         Ok((StatusCode::CREATED, ()))

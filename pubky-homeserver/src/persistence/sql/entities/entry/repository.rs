@@ -330,13 +330,15 @@ impl EntryRepository {
             // Make sure the path is a folder
             dir_path.push('/');
         }
-        // Use this regex to get the distinct paths
-        // ^(?'fixed_directory'\/test\/)(?'path_segment'[^\/]*)(?'opt_slash_indicating_dir'\/?)(?'rest_of_path'.*)$
+        // Collapse each descendant to the folder plus its first segment and
+        // trailing slash, if any. The regex only sees the remainder after the
+        // folder prefix, so metacharacters in the folder path are never
+        // interpreted as a pattern.
         // DISTINCT ON makes sure that the same path is only returned once.
         let inner_statement = Query::select()
             .from(ENTRY_TABLE)
             .expr(Expr::cust_with_values(
-                "DISTINCT ON (regpath) regexp_replace(entries.path, '^'||$1||'([^/]*)(\\/?)(.*)?$', $1||'\\1'||'\\2') as regpath",
+                "DISTINCT ON (regpath) $1 || substring(substr(entries.path, length($1) + 1) from '^[^/]*/?') as regpath",
                 vec![sea_query::Value::from(dir_path.clone())],
             ))
             .left_join(
@@ -1486,6 +1488,51 @@ mod tests {
             .unwrap();
             let got: Vec<&str> = entries.iter().map(|e| e.path().as_str()).collect();
             assert_eq!(got, vec![file], "listing {dir}");
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn test_list_shallow_regex_metacharacters_in_folder() {
+        let db = SqlDb::test().await;
+        let user_pubkey = Keypair::random().public_key();
+        let user = UserService::new(db.clone())
+            .create(&user_pubkey)
+            .await
+            .unwrap();
+
+        // A wildcard match for the dot in "a.b" would include this sibling.
+        create_entry_for_path(&db, user.id, "/pub/aXb/only-in-sibling.txt").await;
+
+        for folder in [
+            "/pub/a+b/",
+            "/pub/a(b/",
+            "/pub/a.b/",
+            "/pub/a[b/",
+            "/pub/café+b/",
+        ] {
+            // Two files in the same sub-folder, so a broken collapse would
+            // return both full paths instead of one de-duplicated folder,
+            // plus a direct file to cover a segment with no trailing slash.
+            for file in ["sub/x.txt", "sub/y.txt", "z.txt"] {
+                create_entry_for_path(&db, user.id, &format!("{folder}{file}")).await;
+            }
+
+            let entries = EntryRepository::list_shallow(
+                &entry_path(&user_pubkey, folder),
+                None,
+                None,
+                false,
+                &mut db.pool().into(),
+            )
+            .await
+            .unwrap();
+            let got: Vec<&str> = entries.iter().map(|e| e.path().as_str()).collect();
+            assert_eq!(
+                got,
+                vec![format!("{folder}sub/"), format!("{folder}z.txt")],
+                "listing {folder}"
+            );
         }
     }
 

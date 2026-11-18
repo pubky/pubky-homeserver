@@ -17,7 +17,7 @@ async function storedSessionIds(): Promise<string[]> {
 
 function openAuthDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("pubky-auth", 1);
+    const request = indexedDB.open("pubky-auth", 2);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });

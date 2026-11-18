@@ -65,18 +65,22 @@ where
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(|e| match e {})
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
         let state = self.state.clone();
-        let mut inner = self.inner.clone();
+        let replacement = self.inner.clone();
+        // Use the original service for this request: poll_ready checked it,
+        // but its clone may not be ready. Leave the clone in self.inner so
+        // Tower checks its readiness before the next request.
+        let mut inner = std::mem::replace(&mut self.inner, replacement);
 
         Box::pin(async move {
             let bearer = match extract_bearer_token(req.headers()) {
                 BearerTokenExtraction::Present(bearer) => bearer,
                 BearerTokenExtraction::Missing => {
-                    return inner.call(req).await.map_err(|e| match e {});
+                    return inner.call(req).await;
                 }
                 BearerTokenExtraction::InvalidBearer | BearerTokenExtraction::NonBearer => {
                     tracing::debug!(
@@ -102,7 +106,7 @@ where
                 }
             }
 
-            inner.call(req).await.map_err(|e| match e {})
+            inner.call(req).await
         })
     }
 }
@@ -113,6 +117,7 @@ mod tests {
     use crate::app_context::AppContext;
     use crate::client_server::auth::AuthSession;
     use crate::client_server::auth::AuthState;
+    use crate::shared::test_service::ReadinessRequiredService;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use pubky_common::crypto::Keypair;
@@ -220,5 +225,26 @@ mod tests {
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn calls_the_service_instance_that_was_polled_ready() {
+        let (state, _) = test_state().await;
+        let mut service =
+            GrantAuthenticationLayer::new(state).layer(ReadinessRequiredService::default());
+        for with_bearer in [false, true, false, true] {
+            let mut request = Request::builder();
+            if with_bearer {
+                // Exercise the async session lookup as well as the bypass path.
+                request = request.header(
+                    "Authorization",
+                    format!("Bearer {UNKNOWN_WELL_FORMED_BEARER}"),
+                );
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let response = service.ready().await.unwrap().call(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 }

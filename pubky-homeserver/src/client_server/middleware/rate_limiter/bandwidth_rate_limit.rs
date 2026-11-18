@@ -218,13 +218,16 @@ where
     }
 
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-        let mut inner = self.inner.clone();
-
         if !self.state.should_limit(&req) {
-            return Box::pin(async move { inner.call(req).await });
+            return Box::pin(self.inner.call(req));
         }
 
         let state = self.state.clone();
+        let replacement = self.inner.clone();
+        // Use the original service for this request: poll_ready checked it,
+        // but its clone may not be ready. Leave the clone in self.inner so
+        // Tower checks its readiness before the next request.
+        let mut inner = std::mem::replace(&mut self.inner, replacement);
 
         Box::pin(async move {
             // Resolve bandwidth throttler based on auth status.
@@ -277,6 +280,9 @@ mod tests {
     use crate::shared::quota::user_quota::QuotaOverride;
     use crate::shared::quota::{BandwidthQuota, UserQuota};
     use crate::shared::HttpResult;
+
+    use crate::shared::test_service::ReadinessRequiredService;
+    use tower::ServiceExt;
 
     use super::*;
     use axum::http::StatusCode;
@@ -515,5 +521,26 @@ mod tests {
             "Unauthenticated download at 1kb/s should take >2s for 3kb, took: {:?}",
             unauthenticated_time
         );
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn calls_the_service_instance_that_was_polled_ready() {
+        let user_service = UserService::new(SqlDb::test().await);
+        let mut service = BandwidthQuotaLimitLayer::new(user_service, Default::default())
+            .layer(ReadinessRequiredService::default());
+        for with_tenant in [false, true, false, true] {
+            let mut request = Request::new(Body::empty());
+            if with_tenant {
+                // Exercise async quota resolution as well as the bypass path.
+                let public_key = Keypair::random().public_key();
+                request
+                    .extensions_mut()
+                    .insert(RequestTenant::legacy(public_key.clone()));
+                request.extensions_mut().insert(auth_session(public_key));
+            }
+            let response = service.ready().await.unwrap().call(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 }

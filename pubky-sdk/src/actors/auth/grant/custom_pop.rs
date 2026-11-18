@@ -1,7 +1,7 @@
 //! Network-free custom proofs using the grant's existing signing key.
 
 use super::{
-    credential::{GrantCredential, now_unix},
+    credential::{GrantChain, GrantCredential, now_unix},
     pop_signer::GrantSigningError,
     shared_session::active_session,
 };
@@ -48,6 +48,13 @@ impl GrantCredential {
         &self,
         data: serde_json::Value,
     ) -> Result<CustomPop, CustomPopError> {
+        // A custom proof carries one root-signed grant, and its verifiers don't
+        // check a parent chain.
+        if matches!(self.chain, GrantChain::Child { .. }) {
+            return Err(CustomPopError::InvalidGrant(
+                "custom proofs don't support child grants".into(),
+            ));
+        }
         // Follow browser lock ordering and prevent removal/logout during signing.
         // Only local lifecycle state is read; bearer freshness is irrelevant.
         let coordinator = self.coordinator().await;

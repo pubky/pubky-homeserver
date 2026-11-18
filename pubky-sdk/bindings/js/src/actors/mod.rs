@@ -12,6 +12,7 @@ pub mod grant_session;
 mod in_flight;
 pub mod parent_grant;
 pub mod pkdns;
+pub mod redirect_auth_flow;
 pub mod session;
 pub mod session_store;
 pub mod signer;
