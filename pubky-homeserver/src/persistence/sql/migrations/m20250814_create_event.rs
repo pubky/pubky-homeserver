@@ -86,7 +86,7 @@ mod tests {
         pub event_type: String,
         pub user_id: i32,
         pub path: String,
-        pub created_at: time::PrimitiveDateTime,
+        pub created_at: time::PlainDateTime,
     }
 
     impl FromRow<'_, PgRow> for EventEntity {
@@ -95,7 +95,7 @@ mod tests {
             let event_type: String = row.try_get(EventIden::Type.to_string().as_str())?;
             let user_id: i32 = row.try_get(EventIden::User.to_string().as_str())?;
             let path: String = row.try_get(EventIden::Path.to_string().as_str())?;
-            let created_at: time::PrimitiveDateTime =
+            let created_at: time::PlainDateTime =
                 row.try_get(EventIden::CreatedAt.to_string().as_str())?;
             Ok(EventEntity {
                 id,

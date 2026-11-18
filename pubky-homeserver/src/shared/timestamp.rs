@@ -6,16 +6,16 @@
 //! and by none when the fraction is zero.
 
 use serde::Serializer;
-use time::{OffsetDateTime, PrimitiveDateTime};
+use time::{OffsetDateTime, PlainDateTime};
 
 /// The current UTC time, as stored in a `TIMESTAMP` (without time zone) column.
-pub(crate) fn now_naive_utc() -> PrimitiveDateTime {
+pub(crate) fn now_naive_utc() -> PlainDateTime {
     let now = OffsetDateTime::now_utc();
-    PrimitiveDateTime::new(now.date(), now.time())
+    PlainDateTime::new(now.date(), now.time())
 }
 
 /// ISO 8601 without a UTC offset, e.g. `2026-10-22T10:11:12.123456`.
-pub(crate) fn to_iso8601(datetime: &PrimitiveDateTime) -> String {
+pub(crate) fn to_iso8601(datetime: &PlainDateTime) -> String {
     let fraction = match datetime.nanosecond() {
         0 => String::new(),
         nanos if nanos % 1_000_000 == 0 => format!(".{:03}", nanos / 1_000_000),
@@ -34,13 +34,13 @@ pub(crate) fn to_iso8601(datetime: &PrimitiveDateTime) -> String {
 }
 
 /// RFC 3339 with an explicit `+00:00` offset, e.g. `2026-10-22T10:11:12.123456+00:00`.
-pub(crate) fn to_rfc3339_utc(datetime: &PrimitiveDateTime) -> String {
+pub(crate) fn to_rfc3339_utc(datetime: &PlainDateTime) -> String {
     format!("{}+00:00", to_iso8601(datetime))
 }
 
 /// Serde `serialize_with` for [`to_iso8601`].
 pub(crate) fn serialize_iso8601<S: Serializer>(
-    datetime: &PrimitiveDateTime,
+    datetime: &PlainDateTime,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&to_iso8601(datetime))
@@ -48,7 +48,7 @@ pub(crate) fn serialize_iso8601<S: Serializer>(
 
 /// Serde `serialize_with` for an optional [`to_iso8601`] value; `None` is `null`.
 pub(crate) fn serialize_option_iso8601<S: Serializer>(
-    datetime: &Option<PrimitiveDateTime>,
+    datetime: &Option<PlainDateTime>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     match datetime {
@@ -100,7 +100,7 @@ mod tests {
         #[derive(serde::Serialize)]
         struct Item {
             #[serde(serialize_with = "serialize_option_iso8601")]
-            at: Option<PrimitiveDateTime>,
+            at: Option<PlainDateTime>,
         }
         let json = serde_json::to_string(&Item {
             at: Some(datetime!(2026-10-22 10:11:12)),

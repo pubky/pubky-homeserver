@@ -161,7 +161,7 @@ pub struct SessionEntity {
     pub user_id: i32,
     pub user_pubkey: PublicKey,
     pub capabilities: Capabilities,
-    pub created_at: time::PrimitiveDateTime,
+    pub created_at: time::PlainDateTime,
 }
 
 impl SessionEntity {
@@ -188,7 +188,7 @@ impl FromRow<'_, PgRow> for SessionEntity {
         let capabilities: Capabilities = capabilities.parse().map_err(
             |e: pubky_common::capabilities::CapabilitiesParseError| sqlx::Error::Decode(e.into()),
         )?;
-        let created_at: time::PrimitiveDateTime =
+        let created_at: time::PlainDateTime =
             row.try_get(SessionIden::CreatedAt.to_string().as_str())?;
         Ok(SessionEntity {
             id,

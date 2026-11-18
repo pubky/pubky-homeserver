@@ -229,7 +229,7 @@ mod tests {
     use crate::client_server::auth::grant::session::GrantSession;
 
     fn bearer_auth(caps: Capabilities) -> AuthSession {
-        let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
+        let now = time::Timestamp::now().as_seconds() as u64;
         AuthSession::Grant(GrantSession::test(
             Keypair::random().public_key(),
             caps,

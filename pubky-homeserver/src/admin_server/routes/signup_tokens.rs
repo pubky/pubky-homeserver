@@ -13,7 +13,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use time::PrimitiveDateTime;
+use time::PlainDateTime;
 
 #[derive(Deserialize)]
 pub(crate) struct SignupTokensQuery {
@@ -36,9 +36,9 @@ impl SignupTokensQuery {
 pub(crate) struct SignupTokenItem {
     token: SignupCode,
     #[serde(serialize_with = "timestamp::serialize_iso8601")]
-    created_at: PrimitiveDateTime,
+    created_at: PlainDateTime,
     #[serde(serialize_with = "timestamp::serialize_option_iso8601")]
-    used_at: Option<PrimitiveDateTime>,
+    used_at: Option<PlainDateTime>,
     used_by: Option<String>,
     /// Quota overrides stored on the token, in the same shape as the
     /// `POST /generate_signup_token` body. Fields using the system default are omitted.

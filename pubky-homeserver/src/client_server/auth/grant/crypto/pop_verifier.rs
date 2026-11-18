@@ -15,7 +15,7 @@ use pubky_common::{
     crypto::PublicKey,
 };
 use serde::de::DeserializeOwned;
-use time::OffsetDateTime;
+use time::Timestamp;
 
 use super::jws_crypto::{self, JwsCompact};
 
@@ -35,7 +35,7 @@ pub struct PopProof {
     pub nonce: PopNonce,
     /// When the proof was issued.
     #[allow(dead_code)]
-    pub issued_at: OffsetDateTime,
+    pub issued_at: Timestamp,
 }
 
 /// Context required to verify a PoP proof.
@@ -119,7 +119,7 @@ fn check_grant_binding(raw: &PopProofClaims, expected: &GrantId) -> Result<(), E
 }
 
 fn check_timestamp(raw: &PopProofClaims) -> Result<(), Error> {
-    let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
+    let now = Timestamp::now().as_seconds() as u64;
     if now.abs_diff(raw.iat) > POP_MAX_AGE_SECS {
         return Err(Error::TimestampOutOfRange);
     }
@@ -127,8 +127,7 @@ fn check_timestamp(raw: &PopProofClaims) -> Result<(), Error> {
 }
 
 fn parse_verified_pop(raw: PopProofClaims) -> Result<PopProof, Error> {
-    let issued_at =
-        OffsetDateTime::from_unix_timestamp(raw.iat as i64).map_err(|_| Error::InvalidTimestamp)?;
+    let issued_at = Timestamp::from_seconds(raw.iat as i64).map_err(|_| Error::InvalidTimestamp)?;
     Ok(PopProof {
         grant_id: raw.gid,
         nonce: raw.nonce,
@@ -180,7 +179,7 @@ mod tests {
             aud: hs_kp.public_key(),
             gid: GrantId::generate(),
             nonce: PopNonce::generate(),
-            iat: OffsetDateTime::now_utc().unix_timestamp() as u64,
+            iat: Timestamp::now().as_seconds() as u64,
         }
     }
 

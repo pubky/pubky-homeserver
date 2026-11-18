@@ -329,8 +329,8 @@ pub struct SignupCodeOverview {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SignupCodeEntity {
     pub id: SignupCode,
-    pub created_at: time::PrimitiveDateTime,
-    pub used_at: Option<time::PrimitiveDateTime>,
+    pub created_at: time::PlainDateTime,
+    pub used_at: Option<time::PlainDateTime>,
     pub used_by: Option<PublicKey>,
     /// Per-user storage quota in MB. `None` = Default (resolved from system config at enforcement time).
     pub quota_storage_mb: Option<i32>,
@@ -369,9 +369,9 @@ impl FromRow<'_, PgRow> for SignupCodeEntity {
                 e,
             )))
         })?;
-        let created_at: time::PrimitiveDateTime =
+        let created_at: time::PlainDateTime =
             row.try_get(SignupCodeIden::CreatedAt.to_string().as_str())?;
-        let used_at: Option<time::PrimitiveDateTime> =
+        let used_at: Option<time::PlainDateTime> =
             row.try_get(SignupCodeIden::UsedAt.to_string().as_str())?;
         let used_by_raw: Option<String> =
             row.try_get(SignupCodeIden::UsedBy.to_string().as_str())?;
@@ -416,7 +416,7 @@ mod tests {
 
     use super::*;
 
-    async fn current_db_timestamp(db: &SqlDb) -> time::PrimitiveDateTime {
+    async fn current_db_timestamp(db: &SqlDb) -> time::PlainDateTime {
         sqlx::query_scalar("SELECT CURRENT_TIMESTAMP::timestamp")
             .fetch_one(db.pool())
             .await

@@ -2,7 +2,7 @@
 //! `GET /account` route, so both servers serialise the same shape.
 
 use serde::Serialize;
-use time::PrimitiveDateTime;
+use time::PlainDateTime;
 
 use crate::persistence::sql::user::UserEntity;
 use crate::shared::quota::UserQuota;
@@ -42,7 +42,7 @@ pub(crate) struct UserItem {
     /// z-base-32 user public key, named as in the client `GrantSessionInfo`.
     pubky: String,
     #[serde(serialize_with = "timestamp::serialize_iso8601")]
-    created_at: PrimitiveDateTime,
+    created_at: PlainDateTime,
     disabled: bool,
     used_bytes: u64,
     /// Same shape as `GET /users/{pubkey}/quota`.

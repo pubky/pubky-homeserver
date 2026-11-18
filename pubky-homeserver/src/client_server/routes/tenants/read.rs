@@ -19,7 +19,7 @@ use axum::{
 use httpdate::HttpDate;
 use std::str::FromStr;
 use std::time::SystemTime;
-use time::PrimitiveDateTime;
+use time::PlainDateTime;
 
 pub async fn legacy_head(
     state: State<AppState>,
@@ -215,8 +215,8 @@ pub(crate) fn not_modified_response(entry: &EntryEntity) -> HttpResult<Response<
         .body(Body::empty())?)
 }
 
-/// Convert a UTC `PrimitiveDateTime` to a `HttpDate`.
-fn to_http_date(date: &PrimitiveDateTime) -> HttpDate {
+/// Convert a UTC `PlainDateTime` to a `HttpDate`.
+fn to_http_date(date: &PlainDateTime) -> HttpDate {
     let sys_datetime = SystemTime::from(date.assume_utc());
     httpdate::HttpDate::from(sys_datetime)
 }

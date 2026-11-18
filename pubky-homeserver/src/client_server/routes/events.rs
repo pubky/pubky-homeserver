@@ -303,7 +303,7 @@ mod tests {
             user_id: 1,
             user_pubkey: user_key,
             capabilities,
-            created_at: time::macros::datetime!(1970-01-01 0:00),
+            created_at: time::UtcDateTime::UNIX_EPOCH.date().midnight(),
         })
     }
 
