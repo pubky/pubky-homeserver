@@ -1,7 +1,7 @@
 # ========================
 # Toolchain Stage
 # ========================
-FROM rust:1.99.0-alpine3.23@sha256:42c2519fdf75d9e34cc61a1aaf34b1a684da9bfd65fe5daefef98d92a801b001 AS chef
+FROM rust:1.99.1-alpine3.23@sha256:51e1b72c7f236093c084f6e3051239f033fba9e4c0c1430cc2ed479d0a3bd14c AS chef
 
 # Build platform argument (x86_64 or aarch64) (default: x86_64)
 RUN echo "TARGETARCH: $TARGETARCH"
@@ -76,7 +76,7 @@ RUN cargo build --profile "$(cat /cargo-profile)" --bin "pubky-$BUILD_TARGET" &&
 # ========================
 # Runtime Stage
 # ========================
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 ARG TARGETARCH
 
