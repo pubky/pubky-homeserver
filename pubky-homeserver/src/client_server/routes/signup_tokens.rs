@@ -69,7 +69,8 @@ pub async fn get(
     };
     let response = SignupTokenResponse {
         status,
-        created_at: timestamp::to_rfc3339_utc(&code.created_at),
+        created_at: timestamp::to_rfc3339_utc(&code.created_at)
+            .map_err(HttpError::internal_server_and_log)?,
     };
 
     Ok((
