@@ -100,7 +100,8 @@ impl Testnet {
     ///
     /// The homeserver uses this Testnet's bootstrap nodes and relays, in-memory
     /// storage, and a throwaway database on this Testnet's Postgres server.
-    /// `config.general.database_url` is not read.
+    /// Errors if `config.general.database_url` is set to anything other than the
+    /// built-in default; see [`AppContext::new_ephemeral`].
     pub async fn create_homeserver_with(
         &mut self,
         mut config: ConfigToml,

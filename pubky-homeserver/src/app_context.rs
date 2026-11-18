@@ -181,14 +181,29 @@ impl AppContext {
     /// database, both removed after use.
     ///
     /// `db_server` is the Postgres server to create the database on; see
-    /// [`DatabaseMode::ephemeral`] for the fallbacks. `config.general.database_url`
-    /// is not read.
+    /// [`DatabaseMode::ephemeral`] for the fallbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppContextBuildError::DatabaseResolution`] if
+    /// `config.general.database_url` is set to anything other than the
+    /// built-in default, because ephemeral mode does not read it.
     #[cfg(any(test, feature = "testing"))]
     pub async fn new_ephemeral(
         config: ConfigToml,
         keypair: Keypair,
         db_server: Option<ConnectionString>,
     ) -> Result<Self, AppContextBuildError> {
+        // Every config built from `config.default.toml` carries the default URL,
+        // so only a different value shows the caller expected it to be used.
+        if let Some(url) = &config.general.database_url {
+            if Some(url) != ConfigToml::default().general.database_url.as_ref() {
+                return Err(AppContextBuildError::DatabaseResolution(anyhow::anyhow!(
+                    "ephemeral mode does not read `general.database_url`; pass the Postgres server as `db_server` or set {}",
+                    DatabaseMode::EPHEMERAL_SERVER_ENV
+                )));
+            }
+        }
         let temp_dir =
             tempfile::TempDir::new().map_err(|e| AppContextBuildError::DataDir(e.into()))?;
         let db_mode =
@@ -413,5 +428,39 @@ mod tests {
             !data_path.exists(),
             "the data dir should be removed with the last clone"
         );
+    }
+
+    /// A custom `database_url` would be ignored, so it is rejected before any
+    /// connection is made. The error must not echo the URL's password.
+    #[tokio::test]
+    async fn new_ephemeral_rejects_a_custom_database_url() {
+        let mut config = ConfigToml::minimal_test_config();
+        config.general.database_url = Some(
+            ConnectionString::new("postgres://user:secret-password@127.0.0.1:1/postgres").unwrap(),
+        );
+
+        let error = AppContext::new_ephemeral(config, Keypair::random(), None)
+            .await
+            .err()
+            .expect("a custom database_url should be rejected");
+
+        assert!(matches!(error, AppContextBuildError::DatabaseResolution(_)));
+        let message = error.to_string();
+        assert!(message.contains("db_server"), "{message}");
+        assert!(!message.contains("secret-password"), "{message}");
+    }
+
+    /// Configs built from the embedded defaults carry the default
+    /// `database_url`, so it must not be rejected.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn new_ephemeral_accepts_the_default_database_url() {
+        let mut config = ConfigToml::minimal_test_config();
+        config.general.database_url = ConfigToml::default().general.database_url;
+        assert!(config.general.database_url.is_some());
+
+        AppContext::new_ephemeral(config, Keypair::random(), None)
+            .await
+            .expect("the default database_url should be accepted");
     }
 }

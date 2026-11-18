@@ -44,7 +44,7 @@ TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgr
   cargo run -p pubky-testnet
 ```
 
-In this mode the Postgres server always comes from `TEST_PUBKY_CONNECTION_STRING` (or `localhost:5432` if it is unset); a `database_url` in a `--homeserver-config` file is not read.
+In this mode the Postgres server always comes from `TEST_PUBKY_CONNECTION_STRING` (or `localhost:5432` if it is unset); a `--homeserver-config` file that sets `database_url` to anything other than the built-in default is rejected.
 
 ### Ports and addresses
 

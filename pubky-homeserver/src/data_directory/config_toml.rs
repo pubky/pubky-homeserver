@@ -292,7 +292,7 @@ impl ConfigToml {
     #[cfg(any(test, feature = "testing"))]
     pub fn default_test_config() -> Self {
         let mut config = Self::default();
-        config.general.database_url = None; // Ephemeral mode does not read it; see `DatabaseMode::ephemeral`.
+        config.general.database_url = None; // Ephemeral mode does not read it; see `AppContext::new_ephemeral`.
         config.general.signup_mode = SignupMode::Open;
         // Use ephemeral ports (0) so parallel tests don't collide.
         config.drive.icann_listen_socket = SocketAddr::from(([127, 0, 0, 1], 0));
