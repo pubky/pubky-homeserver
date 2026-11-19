@@ -125,9 +125,6 @@ impl AdminServer {
         let app = create_app(state);
         let listener = std::net::TcpListener::bind(socket)
             .map_err(|e| AdminServerBuildError::Server(e.into()))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| AdminServerBuildError::Server(e.into()))?;
         let socket = listener
             .local_addr()
             .map_err(|e| AdminServerBuildError::Server(e.into()))?;
