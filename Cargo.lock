@@ -2303,16 +2303,15 @@ dependencies = [
 
 [[package]]
 name = "http-relay"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e59032dcf91c8618220edb7467d73835b9987decfeac79c77c835e5fc3bfaaa"
+checksum = "022583256705b4a4bc0378bd8a574abb4e8558d24e274525a81c21b4cedcc964"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
  "bytes",
- "futures-util",
- "http-body",
+ "ipnet",
  "tokio",
  "tower-http 0.6.11",
  "tracing",
@@ -3114,21 +3113,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 
 [[package]]
-name = "ntimestamp"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c50f94c405726d3e0095e89e72f75ce7f6587b94a8bd8dc8054b73f65c0fd68c"
-dependencies = [
- "base32",
- "document-features",
- "getrandom 0.2.17",
- "httpdate",
- "js-sys",
- "once_cell",
- "serde",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3658,9 +3642,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkarr"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fa6e085dac5eb00b309bfafd0fa0db088a7d3aaad4b5de75db4732e7c7f7595"
+checksum = "c5e60e8b1fb1417698295416b1b1b1bd457b425deab835d6871422012ab3a50b"
 dependencies = [
  "async-compat",
  "base32",
@@ -3675,10 +3659,11 @@ dependencies = [
  "genawaiter",
  "getrandom 0.4.3",
  "heed",
+ "httpdate",
+ "js-sys",
  "log",
- "lru 0.18.5",
+ "lru 0.19.0",
  "mainline",
- "ntimestamp",
  "page_size",
  "reqwest",
  "rustls",
@@ -3695,9 +3680,9 @@ dependencies = [
 
 [[package]]
 name = "pkarr-relay"
-version = "2.1.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8273bf28c50d97c0f7394b88560fcda68a24ed165c2f4346ff899a016206e446"
+checksum = "ce38dc23eba4646433ba53d2d4ab906d97b240c607629be8d9e23d463216cc63"
 dependencies = [
  "anyhow",
  "axum",
@@ -5702,7 +5687,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6640,7 +6625,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

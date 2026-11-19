@@ -27,10 +27,10 @@ use crate::{
 };
 
 /// How long a pending request accepts its callback, unless the builder sets another.
-pub const DEFAULT_REDIRECT_FLOW_LIFETIME: Duration = Duration::from_secs(10 * 60);
+pub const DEFAULT_REDIRECT_FLOW_LIFETIME: Duration = Duration::from_mins(10);
 
 /// The longest a pending request may wait for its callback.
-const MAX_REDIRECT_FLOW_LIFETIME: Duration = Duration::from_secs(60 * 60);
+const MAX_REDIRECT_FLOW_LIFETIME: Duration = Duration::from_hours(1);
 
 /// The largest callback fragment accepted. Approvals are far smaller.
 const MAX_CALLBACK_FRAGMENT_BYTES: usize = 16 * 1024;

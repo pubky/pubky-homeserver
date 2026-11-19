@@ -377,8 +377,8 @@ impl Pkdns {
             return false;
         };
 
-        let elapsed = Timestamp::now() - record.timestamp();
-        let age = Duration::from_micros(elapsed.as_u64());
+        let elapsed = Timestamp::now().as_u64() - record.timestamp().as_u64();
+        let age = Duration::from_micros(elapsed);
         if age <= self.stale_after {
             cross_log!(
                 info,
