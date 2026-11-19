@@ -29,6 +29,10 @@ pub mod lock;
 pub mod read;
 pub mod write;
 
+/// The deprecated owner-relative storage route. Middleware compares it with
+/// `MatchedPath` to find requests whose raw path is a storage path.
+pub(crate) const LEGACY_STORAGE_ROUTE: &str = "/{*path}";
+
 pub fn router(metrics: Metrics) -> Router<AppState> {
     // PUT streams the body directly, so the limit must wrap the body itself.
     let upload_limit = RequestBodyLimitLayer::new(MAX_UPLOAD_BYTES);
@@ -44,7 +48,7 @@ pub fn router(metrics: Metrics) -> Router<AppState> {
                 .fallback(lock::dispatch),
         )
         .route(
-            "/{*path}",
+            LEGACY_STORAGE_ROUTE,
             get(read::legacy_get)
                 .head(read::legacy_head)
                 .merge(put(write::legacy_put).layer(upload_limit))
