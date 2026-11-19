@@ -407,6 +407,23 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
 dependencies = [
+ "bytes",
+ "either",
+ "fs-err",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-util",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-server"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3766086d344b8f8d2a9cf6fb211b581de5b160e052d7bc75a92e58cc41909054"
+dependencies = [
  "arc-swap",
  "bytes",
  "either",
@@ -418,6 +435,7 @@ dependencies = [
  "pin-project-lite",
  "rustls",
  "rustls-pki-types",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -1249,6 +1267,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "dav-server"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c010880e1aee46e0601cf1fc83b98ac1dcde7aba3c554401899a95e3037e2d83"
+dependencies = [
+ "bytes",
+ "chrono",
+ "derive-where",
+ "dyn-clone",
+ "futures-channel",
+ "futures-util",
+ "headers",
+ "htmlescape",
+ "http",
+ "http-body",
+ "http-body-util",
+ "libc",
+ "log",
+ "lru 0.16.4",
+ "mime_guess",
+ "parking_lot",
+ "percent-encoding",
+ "pin-project-lite",
+ "reflink-copy",
+ "tokio",
+ "url",
+ "uuid",
+ "xml-rs",
+ "xmltree",
+]
+
+[[package]]
 name = "dav-server-opendalfs"
 version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1256,7 +1306,7 @@ checksum = "d05911b3b1633b486ca9cff9e9701c322fd6d208372a230828a5db74daf7708b"
 dependencies = [
  "anyhow",
  "bytes",
- "dav-server",
+ "dav-server 0.11.0",
  "futures",
  "opendal-core",
 ]
@@ -1600,7 +1650,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2334,16 +2384,15 @@ dependencies = [
 
 [[package]]
 name = "http-relay"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e59032dcf91c8618220edb7467d73835b9987decfeac79c77c835e5fc3bfaaa"
+checksum = "022583256705b4a4bc0378bd8a574abb4e8558d24e274525a81c21b4cedcc964"
 dependencies = [
  "anyhow",
  "axum",
- "axum-server",
+ "axum-server 0.8.0",
  "bytes",
- "futures-util",
- "http-body",
+ "ipnet",
  "tokio",
  "tower-http 0.6.11",
  "tracing",
@@ -3147,21 +3196,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 
 [[package]]
-name = "ntimestamp"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c50f94c405726d3e0095e89e72f75ce7f6587b94a8bd8dc8054b73f65c0fd68c"
-dependencies = [
- "base32",
- "document-features",
- "getrandom 0.2.17",
- "httpdate",
- "js-sys",
- "once_cell",
- "serde",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3691,9 +3725,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkarr"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fa6e085dac5eb00b309bfafd0fa0db088a7d3aaad4b5de75db4732e7c7f7595"
+checksum = "c5e60e8b1fb1417698295416b1b1b1bd457b425deab835d6871422012ab3a50b"
 dependencies = [
  "async-compat",
  "base32",
@@ -3708,10 +3742,11 @@ dependencies = [
  "genawaiter",
  "getrandom 0.4.3",
  "heed",
+ "httpdate",
+ "js-sys",
  "log",
- "lru 0.18.5",
+ "lru 0.19.0",
  "mainline",
- "ntimestamp",
  "page_size",
  "reqwest",
  "rustls",
@@ -3728,9 +3763,9 @@ dependencies = [
 
 [[package]]
 name = "pkarr-relay"
-version = "2.1.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8273bf28c50d97c0f7394b88560fcda68a24ed165c2f4346ff899a016206e446"
+checksum = "ce38dc23eba4646433ba53d2d4ab906d97b240c607629be8d9e23d463216cc63"
 dependencies = [
  "anyhow",
  "axum",
@@ -4061,7 +4096,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
- "axum-server",
+ "axum-server 0.9.2",
  "axum-test",
  "backon",
  "base32",
@@ -4069,7 +4104,7 @@ dependencies = [
  "bytes",
  "clap",
  "dashmap",
- "dav-server",
+ "dav-server 0.12.0",
  "dav-server-opendalfs",
  "dirs",
  "dyn-clone",
@@ -4321,7 +4356,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4776,7 +4811,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4835,7 +4870,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5379,9 +5414,9 @@ checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spinning_top"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d96d2d1d716fb500937168cc09353ffdc7a012be8475ac7308e1bdf0e3923300"
+checksum = "9cf02766a1eb909bc7653557c66b384e44edc3ad979e6257c6173c65ea51bc7d"
 dependencies = [
  "lock_api",
 ]
@@ -5735,10 +5770,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6673,7 +6708,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
