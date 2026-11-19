@@ -351,7 +351,7 @@ mod tests {
             public_key,
             Capabilities::builder().cap(Capability::root()).finish(),
             GrantId::generate(),
-            chrono::Utc::now().timestamp() as u64 + 3600,
+            time::Timestamp::now().as_seconds() as u64 + 3600,
         ))
     }
 

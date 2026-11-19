@@ -87,7 +87,7 @@ mod tests {
     ) -> (TestServer, PublicKey) {
         let pubkey = Keypair::random().public_key();
         context.user_service.create(&pubkey).await.unwrap();
-        let expires_at = chrono::Utc::now().timestamp() as u64 + 3600;
+        let expires_at = time::Timestamp::now().as_seconds() as u64 + 3600;
         let session = AuthSession::Grant(GrantSession::test(
             pubkey.clone(),
             capabilities,

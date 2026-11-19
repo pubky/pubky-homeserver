@@ -2,10 +2,11 @@
 //! `GET /account` route, so both servers serialise the same shape.
 
 use serde::Serialize;
-use sqlx::types::chrono::NaiveDateTime;
+use time::PlainDateTime;
 
 use crate::persistence::sql::user::UserEntity;
 use crate::shared::quota::UserQuota;
+use crate::shared::timestamp;
 use crate::ConfigToml;
 
 /// The effective quota (overrides merged with system defaults) and the raw
@@ -40,7 +41,8 @@ impl UserQuotaResponse {
 pub(crate) struct UserItem {
     /// z-base-32 user public key, named as in the client `GrantSessionInfo`.
     pubky: String,
-    created_at: NaiveDateTime,
+    #[serde(serialize_with = "timestamp::serialize_iso8601")]
+    created_at: PlainDateTime,
     disabled: bool,
     used_bytes: u64,
     /// Same shape as `GET /users/{pubkey}/quota`.
@@ -73,7 +75,7 @@ mod tests {
         let user = UserEntity {
             id: 1,
             public_key: Keypair::random().public_key(),
-            created_at: sqlx::types::chrono::NaiveDateTime::default(),
+            created_at: time::macros::datetime!(2026-10-22 10:11:12.120394),
             disabled: true,
             used_bytes: 42,
             quota_storage_mb: Some(500),
@@ -89,10 +91,7 @@ mod tests {
         let info: AccountInfo = serde_json::from_value(json).unwrap();
 
         assert_eq!(info.pubky, user.public_key);
-        assert_eq!(
-            info.created_at,
-            user.created_at.to_string().replace(' ', "T")
-        );
+        assert_eq!(info.created_at, "2026-10-22T10:11:12.120394");
         assert!(info.disabled);
         assert_eq!(info.used_bytes, 42);
         let effective = &info.quota.effective;

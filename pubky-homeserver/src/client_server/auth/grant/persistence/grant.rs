@@ -136,7 +136,7 @@ impl GrantRepository {
         grant_id: &GrantId,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<(), sqlx::Error> {
-        let now = chrono::Utc::now().timestamp();
+        let now = time::Timestamp::now().as_seconds();
         let statement = Query::update()
             .table(GRANTS_TABLE)
             .value(GrantIden::RevokedAt, SimpleExpr::Value(now.into()))
@@ -173,7 +173,7 @@ impl GrantRepository {
         user_id: i32,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<Vec<GrantEntity>, sqlx::Error> {
-        let now = chrono::Utc::now().timestamp();
+        let now = time::Timestamp::now().as_seconds();
         let statement = Self::select_grant()
             .and_where(Expr::col((GRANTS_TABLE, GrantIden::User)).eq(user_id))
             .and_where(Expr::col((GRANTS_TABLE, GrantIden::RevokedAt)).is_null())
@@ -198,7 +198,7 @@ impl GrantRepository {
              WHERE parent_id = $2 AND revoked_at IS NULL AND ($3::TEXT IS NULL OR client_id = $3)
              RETURNING id",
         )
-        .bind(chrono::Utc::now().timestamp())
+        .bind(time::Timestamp::now().as_seconds())
         .bind(parent_id.as_str())
         .bind(client_id.map(ClientId::as_str))
         .fetch_all(con)
@@ -401,7 +401,7 @@ pub struct GrantEntity {
     pub issued_at: i64,
     pub expires_at: i64,
     pub revoked_at: Option<i64>,
-    pub created_at: sqlx::types::chrono::NaiveDateTime,
+    pub created_at: time::PlainDateTime,
     pub kind: GrantKind,
     pub parent_id: Option<GrantId>,
 }
@@ -491,16 +491,7 @@ fn parse_identity_fields(
 
 fn parse_grant_metadata(
     row: &PgRow,
-) -> Result<
-    (
-        Capabilities,
-        i64,
-        i64,
-        Option<i64>,
-        sqlx::types::chrono::NaiveDateTime,
-    ),
-    sqlx::Error,
-> {
+) -> Result<(Capabilities, i64, i64, Option<i64>, time::PlainDateTime), sqlx::Error> {
     let capabilities: String = row.try_get(GrantIden::Capabilities.to_string().as_str())?;
     let capabilities: Capabilities =
         capabilities
@@ -548,7 +539,7 @@ mod tests {
     use crate::services::user_service::UserService;
 
     fn make_new_grant(user_id: i32) -> NewGrant {
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = time::Timestamp::now().as_seconds() as u64;
         NewGrant {
             id: GrantId::generate(),
             user_id,
@@ -695,7 +686,7 @@ mod tests {
             .unwrap();
 
         // Expired grant
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = time::Timestamp::now().as_seconds() as u64;
         let mut expired = make_new_grant(user.id);
         expired.issued_at = now.saturating_sub(7200);
         expired.expires_at = now.saturating_sub(3600);
@@ -736,7 +727,7 @@ mod tests {
             issued_at: 1000,
             expires_at,
             revoked_at,
-            created_at: chrono::Utc::now().naive_utc(),
+            created_at: crate::shared::timestamp::now_naive_utc(),
             kind: GrantKind::Direct,
             parent_id: None,
         }

@@ -140,7 +140,7 @@ fn verify_signed<T: DeserializeOwned>(
 
 /// Check that the grant has not expired.
 fn check_expiry(raw: &GrantClaims) -> Result<(), Error> {
-    let now = chrono::Utc::now().timestamp() as u64;
+    let now = time::Timestamp::now().as_seconds() as u64;
     if raw.exp <= now {
         return Err(Error::Expired);
     }
@@ -150,7 +150,7 @@ fn check_expiry(raw: &GrantClaims) -> Result<(), Error> {
 /// Check that a delegated grant has not expired or been issued too far ahead.
 fn check_usable(raw: &GrantClaims) -> Result<(), Error> {
     check_expiry(raw)?;
-    if raw.iat > chrono::Utc::now().timestamp() as u64 + POP_MAX_AGE_SECS {
+    if raw.iat > time::Timestamp::now().as_seconds() as u64 + POP_MAX_AGE_SECS {
         return Err(Error::IssuedInFuture);
     }
     Ok(())
@@ -226,12 +226,12 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
     use pubky_common::{
         auth::jws::{sign_jws, ClientId, GrantId},
         capabilities::Capability,
         crypto::Keypair,
     };
+    use time::Timestamp;
 
     use super::*;
 
@@ -241,7 +241,7 @@ mod tests {
     }
 
     fn make_valid_raw_grant(user_kp: &Keypair, client_kp: &Keypair) -> GrantClaims {
-        let now = Utc::now().timestamp() as u64;
+        let now = Timestamp::now().as_seconds() as u64;
         GrantClaims {
             iss: user_kp.public_key(),
             client_id: ClientId::new("test.app").unwrap(),
@@ -344,7 +344,7 @@ mod tests {
         fn new() -> Self {
             let user = Keypair::random();
             let accounts = Keypair::random();
-            let now = Utc::now().timestamp() as u64;
+            let now = Timestamp::now().as_seconds() as u64;
             let parent = GrantClaims {
                 iss: user.public_key(),
                 client_id: ClientId::new(PARENT_CALLBACK).unwrap(),
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn expired_overlong_parents_can_still_be_revoked() {
         let mut chain = ChainFixture::new();
-        let now = Utc::now().timestamp() as u64;
+        let now = Timestamp::now().as_seconds() as u64;
         chain.parent.iat = now - 2 * 365 * 24 * 3600 - 60;
         chain.parent.exp = now - 1;
         chain.child.grant.iat = chain.parent.iat;
@@ -539,7 +539,7 @@ mod tests {
 
         // Only the child has expired.
         let mut expired_child = ChainFixture::new();
-        let now = Utc::now().timestamp() as u64;
+        let now = Timestamp::now().as_seconds() as u64;
         expired_child.parent.iat = now - 120;
         expired_child.child.grant.iat = now - 120;
         expired_child.child.grant.exp = now - 60;

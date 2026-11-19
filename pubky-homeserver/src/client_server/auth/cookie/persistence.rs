@@ -161,14 +161,14 @@ pub struct SessionEntity {
     pub user_id: i32,
     pub user_pubkey: PublicKey,
     pub capabilities: Capabilities,
-    pub created_at: sqlx::types::chrono::NaiveDateTime,
+    pub created_at: time::PlainDateTime,
 }
 
 impl SessionEntity {
     pub fn to_legacy(&self) -> CookieSessionRecord {
         let mut record =
             CookieSessionRecord::new(&self.user_pubkey, self.capabilities.clone(), None);
-        record.set_created_at(self.created_at.and_utc().timestamp() as u64);
+        record.set_created_at(self.created_at.assume_utc().unix_timestamp() as u64);
         record
     }
 }
@@ -188,7 +188,7 @@ impl FromRow<'_, PgRow> for SessionEntity {
         let capabilities: Capabilities = capabilities.parse().map_err(
             |e: pubky_common::capabilities::CapabilitiesParseError| sqlx::Error::Decode(e.into()),
         )?;
-        let created_at: sqlx::types::chrono::NaiveDateTime =
+        let created_at: time::PlainDateTime =
             row.try_get(SessionIden::CreatedAt.to_string().as_str())?;
         Ok(SessionEntity {
             id,

@@ -70,9 +70,9 @@ opendal-http-transport-reqwest = "=0.59.5"
 dav-server-opendalfs = "=0.7.11"
 
 dav-server = "0.11"
-sea-query = { version = "1", features = ["with-chrono", "postgres-array"] }
+sea-query = { version = "1", features = ["with-time", "postgres-array"] }
 sea-query-sqlx = { version = "0.8", features = [
-    "with-chrono",
+    "with-time",
     "runtime-tokio",
     "sqlx-postgres",
     "postgres-array",
@@ -80,7 +80,7 @@ sea-query-sqlx = { version = "0.8", features = [
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
     "postgres",
-    "chrono",
+    "time",
     "tls-rustls",
     "json",
 ] }
@@ -94,7 +94,7 @@ opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "metrics"] }
 opentelemetry-prometheus = "0.33"
 prometheus = "0.14"
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
-chrono = { version = "0.4", features = ["serde"] }
+time = { version = "0.3.55", features = ["formatting"] }
 sha2 = "0.11"
 rand.workspace = true
 
@@ -103,6 +103,7 @@ async-dropper = { version = "0.3", features = ["tokio", "simple"] }
 axum-test = "21"
 hex = "0.4"
 mainline.workspace = true
+time = { version = "0.3.55", features = ["macros"] }
 tokio-rustls = "0.26"
 
 [features]

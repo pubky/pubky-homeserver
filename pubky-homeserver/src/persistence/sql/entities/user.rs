@@ -425,7 +425,7 @@ pub enum UserIden {
 pub struct UserEntity {
     pub id: i32,
     pub public_key: PublicKey,
-    pub created_at: sqlx::types::chrono::NaiveDateTime,
+    pub created_at: time::PlainDateTime,
     pub disabled: bool,
     pub used_bytes: u64,
     /// Per-user storage quota in MB. `None` = Default (resolved from system config at enforcement time).
@@ -474,7 +474,7 @@ impl FromRow<'_, PgRow> for UserEntity {
         let disabled: bool = row.try_get(UserIden::Disabled.to_string().as_str())?;
         let raw_used_bytes: i64 = row.try_get(UserIden::UsedBytes.to_string().as_str())?;
         let used_bytes = raw_used_bytes as u64;
-        let created_at: sqlx::types::chrono::NaiveDateTime =
+        let created_at: time::PlainDateTime =
             row.try_get(UserIden::CreatedAt.to_string().as_str())?;
         let quota_storage_mb: Option<i32> =
             row.try_get(UserIden::QuotaStorageMb.to_string().as_str())?;
@@ -709,7 +709,7 @@ mod tests {
         let user = UserEntity {
             id: 1,
             public_key: Keypair::random().public_key(),
-            created_at: sqlx::types::chrono::NaiveDateTime::default(),
+            created_at: time::UtcDateTime::UNIX_EPOCH.date().midnight(),
             disabled: false,
             used_bytes: 0,
             quota_storage_mb: None,
@@ -736,7 +736,7 @@ mod tests {
         let user = UserEntity {
             id: 1,
             public_key: Keypair::random().public_key(),
-            created_at: sqlx::types::chrono::NaiveDateTime::default(),
+            created_at: time::UtcDateTime::UNIX_EPOCH.date().midnight(),
             disabled: false,
             used_bytes: 0,
             quota_storage_mb: Some(500),
@@ -763,7 +763,7 @@ mod tests {
         let user = UserEntity {
             id: 1,
             public_key: Keypair::random().public_key(),
-            created_at: sqlx::types::chrono::NaiveDateTime::default(),
+            created_at: time::UtcDateTime::UNIX_EPOCH.date().midnight(),
             disabled: false,
             used_bytes: 0,
             quota_storage_mb: Some(-1),
@@ -787,7 +787,7 @@ mod tests {
         let user = UserEntity {
             id: 1,
             public_key: Keypair::random().public_key(),
-            created_at: sqlx::types::chrono::NaiveDateTime::default(),
+            created_at: time::UtcDateTime::UNIX_EPOCH.date().midnight(),
             disabled: false,
             used_bytes: 0,
             quota_storage_mb: None,

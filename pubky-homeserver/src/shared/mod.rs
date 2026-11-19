@@ -5,6 +5,7 @@ mod http_handlers;
 mod pubkey_path_validator;
 pub(crate) mod quota;
 mod signup_mode;
+pub(crate) mod timestamp;
 pub(crate) mod toml_merge;
 mod user_item;
 mod utils;

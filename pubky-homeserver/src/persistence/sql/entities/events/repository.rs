@@ -1,7 +1,7 @@
 use pubky_common::events::{EventCursor, EventType};
 use sea_query::{Condition, Expr, ExprTrait, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
 use sea_query_sqlx::SqlxBinder;
-use sqlx::{postgres::PgRow, types::chrono::Utc, Row};
+use sqlx::{postgres::PgRow, Row};
 
 use crate::{
     constants::PUBLIC_ROOT,
@@ -11,7 +11,7 @@ use crate::{
         user::{UserIden, USER_TABLE},
         UnifiedExecutor,
     },
-    shared::{effective_list_limit, webdav::EntryPath},
+    shared::{effective_list_limit, timestamp, webdav::EntryPath},
 };
 
 use super::PathFilter;
@@ -57,7 +57,7 @@ impl EventRepository {
         path: &EntryPath,
         executor: &mut UnifiedExecutor<'a>,
     ) -> Result<EventEntity, sqlx::Error> {
-        let created_at = Utc::now();
+        let created_at = timestamp::now_naive_utc();
         let mut columns = vec![
             EventIden::Type,
             EventIden::User,
@@ -68,7 +68,7 @@ impl EventRepository {
             SimpleExpr::Value(event_type.to_string().into()),
             SimpleExpr::Value(user_id.into()),
             SimpleExpr::Value(path.path().as_str().into()),
-            SimpleExpr::Value(created_at.naive_utc().into()),
+            SimpleExpr::Value(created_at.into()),
         ];
 
         if let Some(hash) = event_type.content_hash() {
@@ -108,7 +108,7 @@ impl EventRepository {
             user_pubkey: path.pubkey().clone(),
             event_type,
             path: path.clone(),
-            created_at: created_at.naive_utc(),
+            created_at,
         })
     }
 

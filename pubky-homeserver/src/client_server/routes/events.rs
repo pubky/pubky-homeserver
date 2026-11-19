@@ -303,9 +303,7 @@ mod tests {
             user_id: 1,
             user_pubkey: user_key,
             capabilities,
-            created_at: sqlx::types::chrono::DateTime::from_timestamp(0, 0)
-                .expect("valid timestamp")
-                .naive_utc(),
+            created_at: time::UtcDateTime::UNIX_EPOCH.date().midnight(),
         })
     }
 

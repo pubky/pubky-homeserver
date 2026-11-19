@@ -235,7 +235,6 @@ pub(super) fn stream_events(
 #[cfg(test)]
 mod tests {
     use pubky_common::crypto::Keypair;
-    use sqlx::types::chrono::NaiveDateTime;
 
     use super::*;
     use crate::{
@@ -251,7 +250,7 @@ mod tests {
             user_pubkey: user_pubkey.clone(),
             event_type: EventType::Delete,
             path: EntryPath::new(user_pubkey, StoragePath::new(path).unwrap()),
-            created_at: NaiveDateTime::default(),
+            created_at: time::UtcDateTime::UNIX_EPOCH.date().midnight(),
         }
     }
 
