@@ -303,8 +303,13 @@ export function __pubkySessionAcquire(id, homeserver, exclusive) {
 }
 export function __pubkyParentStoreAcquire(id) {
   if (!globalThis.navigator?.locks) throw new Error("The parent grant store requires Web Locks in a secure context.");
-  return acquireLock(sessionLeases, ++nextSessionLease, {}, (signal, hold) =>
+  const lease = {};
+  const token = acquireLock(sessionLeases, ++nextSessionLease, lease, (signal, hold) =>
     navigator.locks.request(`pubky-parent-grant:${id}`, { signal }, hold));
+  const timeout = setTimeout(() => lease.abort.abort(new Error("Waiting for the parent grant lock timed out.")), 10_000);
+  const clear = () => clearTimeout(timeout);
+  lease.waiting.then(clear, clear);
+  return token;
 }
 export function __pubkySessionWait(token) {
   return sessionLeases.get(token).waiting;
