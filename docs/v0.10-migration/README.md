@@ -2,14 +2,26 @@
 
 This guide covers applications upgrading from `v0.9.x`. `v0.10` includes multiple breaking changes, most notably a new, more secure grant authentication system.
 
-We strongly recommend upgrading to **grant authentication**. **Cookie authentication is now deprecated** and will be removed in a future version because it is [insecure](https://github.com/pubky/pubky-homeserver/issues/520). Cookie auth still exists in v0.10, but the SDK now names the cookie-compatible APIs explicitly. If you do not want to upgrade to grant authentication, the main migration is to replace the old generic sign-in and sign-up methods with the new `*Cookie` methods.
-
 You will need to consider whether each of the breaking changes listed below will affect your code.
 
 
 ## Migrate the Authentication System
 
-Migrate to the new, secure [grant authentication system](./grant-auth.md), or keep the [cookie authentication system](./cookie-auth.md).
+> [!WARNING]
+> **Cookie authentication is deprecated and no longer receives security
+> updates.** [Migrate to grant authentication](./grant-auth.md).
+> See the [known issues](./cookie-auth.md#known-issues) before continuing to use
+> the cookie-compatible APIs.
+
+Cookie authentication remains available for compatibility pending
+[removal](../STORAGE_ADDRESSING_MIGRATION.md#breaking-release-review). The SDK
+names the cookie-compatible APIs explicitly with `Cookie` or `_cookie`.
+Renaming calls to these APIs preserves legacy behavior; it does not address
+cookie authentication's security issues.
+
+Migrate to [grant authentication](./grant-auth.md). If you need the legacy API
+mapping during migration, see the
+[deprecated cookie authentication guide](./cookie-auth.md).
 
 
 ## Homeserver Resolution Errors

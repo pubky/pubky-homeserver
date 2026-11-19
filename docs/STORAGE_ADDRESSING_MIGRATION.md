@@ -12,6 +12,12 @@ The homeserver will keep legacy storage addressing, `pubky-host`, and cookie
 authentication during the migration. Maintainers may remove them only after
 the minimum migration period and an explicit review.
 
+> [!WARNING]
+> **Cookie authentication no longer receives security updates.** The migration
+> period preserves compatibility only; it does not extend security support.
+> [Migrate to grant authentication](v0.10-migration/grant-auth.md) and review the
+> [known issues](v0.10-migration/cookie-auth.md#known-issues).
+
 [Websites](WEBSITES.md) also select the owner by `Host`. Removing legacy
 `Host` addressing must keep website routing, and website requests are not
 counted in the metric below. Websites can't use some top-level folders, such
