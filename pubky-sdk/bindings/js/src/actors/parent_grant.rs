@@ -4,8 +4,8 @@
 //! change. Signing keys stay non-extractable WebCrypto keys in the existing delegated
 //! key store, and `BrowserSessionStore.clearAll()` leaves the keys of saved parents
 //! in place.
-//! Approvals are stored as plaintext in IndexedDB, the same as signed approvals in
-//! `BrowserSessionStore`.
+//! Each saved approval is encrypted with its own non-extractable WebCrypto
+//! key, stored separately from the parent record.
 
 use std::str::FromStr;
 
@@ -18,8 +18,8 @@ use wasm_bindgen_futures::JsFuture;
 use zeroize::Zeroize;
 
 use super::{
-    browser_grant_key_store::BrowserGrantKeyStore, encryption_keys::EncryptionKeys,
-    session_store::store_error,
+    browser_grant_key_store::BrowserGrantKeyStore, browser_session::BrowserSessionLease,
+    encryption_keys::EncryptionKeys, session_store::store_error,
 };
 use crate::{
     js_error::{JsResult, PubkyError, PubkyErrorName},
@@ -28,50 +28,84 @@ use crate::{
 
 #[wasm_bindgen(inline_js = r#"
 const DB_NAME = "pubky-delegated-auth";
-const DB_VERSION = 1;
 const PARENT_STORE = "parentGrants";
+const APPROVAL_KEYS = "approvalKeys";
 
 function openDb() {
   if (!globalThis.indexedDB) throw new Error("Pubky parent grants require IndexedDB.");
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(DB_NAME, 2);
+    // Opens queued behind a blocked upgrade don't receive their own "blocked" event.
+    const timeout = setTimeout(() => {
+      request.onupgradeneeded = () => request.transaction.abort();
+      request.onsuccess = () => request.result.close();
+      reject(new Error(
+        "Opening the parent grant store timed out. Close other tabs using this site and retry.",
+      ));
+    }, 10_000);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore(PARENT_STORE, { keyPath: "id" });
+      clearTimeout(timeout);
+      const db = request.result;
+      // Replace the unreleased development layout, including any plaintext approvals.
+      for (const name of Array.from(db.objectStoreNames)) db.deleteObjectStore(name);
+      db.createObjectStore(PARENT_STORE, { keyPath: "id" });
+      db.createObjectStore(APPROVAL_KEYS);
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Opening the parent grant store failed."));
+    request.onsuccess = () => {
+      clearTimeout(timeout);
+      const db = request.result;
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
+    request.onerror = () => {
+      clearTimeout(timeout);
+      reject(request.error ?? new Error("Opening the parent grant store failed."));
+    };
   });
 }
 
 /** Run an operation and resolve with its request's result once the transaction commits. */
-async function inStore(mode, operation) {
+async function inParentStores(mode, operation) {
   const db = await openDb();
   try {
     return await new Promise((resolve, reject) => {
-      const tx = db.transaction(PARENT_STORE, mode);
-      const request = operation(tx.objectStore(PARENT_STORE));
-      tx.oncomplete = () => resolve(request.result);
+      const tx = db.transaction([PARENT_STORE, APPROVAL_KEYS], mode);
       tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("The parent grant store failed."));
+      try {
+        const request = operation(tx.objectStore(PARENT_STORE), tx.objectStore(APPROVAL_KEYS));
+        tx.oncomplete = () => resolve(request.result);
+      } catch (error) {
+        tx.abort();
+        reject(error);
+      }
     });
   } finally {
     db.close();
   }
 }
 
-export function __pubkyParentGrantPut(record) {
-  return inStore("readwrite", store => store.put(record));
+function approvalCipher(id, iv) {
+  return { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(id) };
 }
 
-/**
- * Save a record unless the saved one is being signed out. The check and the write
- * share one transaction, so a sign-out can't land between them. Resolves to whether
- * the record was saved.
- */
-export async function __pubkyParentGrantSave(record) {
-  const previous = await inStore("readwrite", store => {
+/** Finish WebCrypto work before opening the IndexedDB write transaction. */
+export async function __pubkyParentGrantSave(record, signedApproval) {
+  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(signedApproval);
+  let ciphertext;
+  try {
+    ciphertext = await crypto.subtle.encrypt(approvalCipher(record.id, iv), key, plaintext);
+  } finally {
+    plaintext.fill(0);
+  }
+
+  const previous = await inParentStores("readwrite", (store, keys) => {
     const get = store.get(record.id);
     get.onsuccess = () => {
-      if (!get.result?.logoutPending) store.put(record);
+      if (get.result?.logoutPending) return;
+      store.put({ ...record, encryptedApproval: { iv, ciphertext } });
+      keys.put(key, record.id);
     };
     return get;
   });
@@ -80,36 +114,79 @@ export async function __pubkyParentGrantSave(record) {
 
 /** Whether a saved parent's sign-out has started. False for a parent that was never saved. */
 export async function __pubkyParentGrantLogoutPending(id) {
-  return Boolean((await inStore("readonly", store => store.get(id)))?.logoutPending);
+  return Boolean((await __pubkyParentGrantGet(id))?.logoutPending);
 }
+
 export function __pubkyParentGrantGet(id) {
-  return inStore("readonly", store => store.get(id));
+  return inParentStores("readonly", store => store.get(id));
 }
+
+export async function __pubkyParentGrantRestore(id) {
+  let keyRequest;
+  const record = await inParentStores("readonly", (store, keys) => {
+    keyRequest = keys.get(id);
+    return store.get(id);
+  });
+  if (!record || record.logoutPending) return record;
+  let bytes;
+  try {
+    const { iv, ciphertext } = record.encryptedApproval;
+    bytes = new Uint8Array(await crypto.subtle.decrypt(approvalCipher(id, iv), keyRequest.result, ciphertext));
+    record.signedApproval = new TextDecoder().decode(bytes);
+    return record;
+  } catch {
+    throw new Error("Invalid stored parent grant record.");
+  } finally {
+    bytes?.fill(0);
+  }
+}
+
+/** Remove the approval and its key before returning the public record for revocation. */
+export function __pubkyParentGrantBeginSignOut(id) {
+  return inParentStores("readwrite", (store, keys) => {
+    const get = store.get(id);
+    get.onsuccess = () => {
+      const record = get.result;
+      if (!record) return;
+      record.logoutPending = true;
+      delete record.encryptedApproval;
+      store.put(record);
+      keys.delete(id);
+    };
+    return get;
+  });
+}
+
 export function __pubkyParentGrantDelete(id) {
-  return inStore("readwrite", store => store.delete(id));
+  return inParentStores("readwrite", (store, keys) => {
+    keys.delete(id);
+    return store.delete(id);
+  });
 }
 
 /** List parent metadata, leaving confidential and restore material out of the result. */
 export async function __pubkyParentGrantList() {
-  const records = await inStore("readonly", store => store.getAll());
-  return records.map(({ signedApproval, parentGrant, keyId, ...metadata }) => metadata);
+  const records = await inParentStores("readonly", store => store.getAll());
+  return records.map(({ encryptedApproval, parentGrant, keyId, ...metadata }) => metadata);
 }
 
 /** Ids of the signing keys that saved parents need, also to finish a pending sign-out. */
 export async function __pubkyParentGrantKeyIds() {
-  const records = await inStore("readonly", store => store.getAll());
+  const records = await inParentStores("readonly", store => store.getAll());
   return records.map(record => record.keyId);
 }
 "#)]
 extern "C" {
-    #[wasm_bindgen(js_name = __pubkyParentGrantPut)]
-    fn js_put(record: JsValue) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantSave)]
-    fn js_save(record: JsValue) -> js_sys::Promise;
+    fn js_save(record: JsValue, signed_approval: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantLogoutPending)]
     fn js_logout_pending(id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantGet)]
     fn js_get(id: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkyParentGrantRestore)]
+    fn js_restore(id: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = __pubkyParentGrantBeginSignOut)]
+    fn js_begin_signout(id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantDelete)]
     fn js_delete(id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkyParentGrantList)]
@@ -166,8 +243,8 @@ struct ParentMetadata {
     logout_pending: bool,
 }
 
-/// A saved parent grant. Signing out deletes `signed_approval` before it revokes
-/// the grant, which leaves only what's needed to retry the revocation.
+/// Public restore and revocation material. Only an in-memory restore includes
+/// the decrypted approval.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ParentRecord {
@@ -175,13 +252,12 @@ struct ParentRecord {
     metadata: ParentMetadata,
     key_id: String,
     parent_grant: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     signed_approval: Option<String>,
 }
 
 impl Drop for ParentRecord {
     fn drop(&mut self) {
-        // JS/IndexedDB retain their own copies; clear the Rust-owned secret.
         self.signed_approval.zeroize();
     }
 }
@@ -398,8 +474,8 @@ impl ParentGrantInfo {
 
 /// Browser-backed store for parent grants.
 ///
-/// Stores confidential approvals as plaintext in IndexedDB. Signing keys remain
-/// non-extractable, and `browserSessionStore.clearAll()` leaves them in place.
+/// Encrypts each approval with a non-extractable AES key in a separate
+/// IndexedDB object store. Scripts on this origin can still decrypt it.
 #[wasm_bindgen]
 pub struct ParentGrantStore(pub(crate) pubky::Pubky);
 
@@ -407,15 +483,13 @@ pub struct ParentGrantStore(pub(crate) pubky::Pubky);
 impl ParentGrantStore {
     /// Save a parent grant so it survives reloads and browser restarts.
     ///
-    /// Only parents with a browser-held signing key can be saved. Rejects a
+    /// Saving requires Web Locks and a browser-held signing key. Rejects a
     /// parent whose sign-out is still pending.
     #[wasm_bindgen]
     pub async fn save(&self, parent: &ParentGrant) -> JsResult<ParentGrantInfo> {
         let key_id = parent.0.delegated_key_id().ok_or_else(|| {
             client_state_error("Only parent grants with a browser-held key can be saved.")
         })?;
-        // `clearAll()` may have removed the key since the flow finished.
-        BrowserGrantKeyStore::load_public_key(key_id.clone()).await?;
         let claims = parent.0.claims();
         let metadata = ParentMetadata {
             id: parent.record_id(),
@@ -427,14 +501,18 @@ impl ParentGrantStore {
             created_at: js_sys::Date::now(),
             logout_pending: false,
         };
+        // The signing key lives in another database. A completed sign-out must
+        // not land between checking that key and committing the encrypted record.
+        let _lease = BrowserSessionLease::for_parent(&metadata.id).await?;
+        BrowserGrantKeyStore::load_public_key(key_id.clone()).await?;
         let record = ParentRecord {
             metadata: metadata.clone(),
             key_id,
             parent_grant: parent.0.parent_grant().to_owned(),
-            signed_approval: Some(parent.0.signed_approval().to_owned()),
+            signed_approval: None,
         };
         // Saving again would bring back a parent whose sign-out hasn't finished.
-        let saved = store_call(js_save(to_js_record(&record)?)).await?;
+        let saved = store_call(js_save(to_js_record(&record)?, parent.0.signed_approval())).await?;
         if !saved.is_truthy() {
             return Err(signing_out());
         }
@@ -460,7 +538,7 @@ impl ParentGrantStore {
     /// revocation and then rejects.
     #[wasm_bindgen]
     pub async fn restore(&self, id: String) -> JsResult<ParentGrant> {
-        let record = self.load(&id).await?;
+        let record = load_record(&id, js_restore(&id)).await?;
         if record.metadata.logout_pending {
             self.finish_signout(&record).await?;
             return Err(client_state_error("Parent grant was signed out."));
@@ -493,10 +571,7 @@ impl ParentGrantStore {
     /// can't be taken back.
     #[wasm_bindgen(js_name = "signOut")]
     pub async fn sign_out(&self, id: String) -> JsResult<()> {
-        let mut record = self.load(&id).await?;
-        record.metadata.logout_pending = true;
-        record.signed_approval = None;
-        store_call(js_put(to_js_record(&record)?)).await?;
+        let record = load_record(&id, js_begin_signout(&id)).await?;
         self.finish_signout(&record).await
     }
 
@@ -524,22 +599,22 @@ impl ParentGrantStore {
     /// revokes it from Ring. Prefer `signOut`.
     #[wasm_bindgen]
     pub async fn remove(&self, id: String) -> JsResult<()> {
-        let record = self.load(&id).await?;
+        let record = load_record(&id, js_get(&id)).await?;
         self.delete(&record).await
     }
 }
 
-impl ParentGrantStore {
-    async fn load(&self, id: &str) -> JsResult<ParentRecord> {
-        let value = store_call(js_get(id)).await?;
-        if value.is_undefined() {
-            return Err(client_state_error(format!(
-                "Stored parent grant not found: {id}"
-            )));
-        }
-        serde_wasm_bindgen::from_value(value).map_err(|_| invalid_record())
+async fn load_record(id: &str, request: js_sys::Promise) -> JsResult<ParentRecord> {
+    let value = store_call(request).await?;
+    if value.is_undefined() {
+        return Err(client_state_error(format!(
+            "Stored parent grant not found: {id}"
+        )));
     }
+    serde_wasm_bindgen::from_value(value).map_err(|_| invalid_record())
+}
 
+impl ParentGrantStore {
     async fn finish_signout(&self, record: &ParentRecord) -> JsResult<()> {
         ParentGrantCredential::revoke_delegated(
             self.0.client(),
@@ -552,7 +627,8 @@ impl ParentGrantStore {
     }
 
     async fn delete(&self, record: &ParentRecord) -> JsResult<()> {
-        // Record first: once it's gone, `clearAll()` removes a key left behind here.
+        let _lease = BrowserSessionLease::for_parent(&record.metadata.id).await?;
+        // Once the parent record is gone, clearAll() can collect an orphaned signing key.
         store_call(js_delete(&record.metadata.id)).await?;
         BrowserGrantKeyStore::delete_key(record.key_id.clone()).await
     }

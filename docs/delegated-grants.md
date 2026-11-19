@@ -52,9 +52,9 @@ The check covers only the homeserver: Ring must also support `parent_grant` link
 
 ### Get a parent grant in Accounts
 
-Request the parent with `parentGrant: true`, and use your exact HTTPS callback as
-the client ID. The SDK keeps the signing key non-extractable, and the request fails
-if the browser can't do that.
+Request the parent with `parentGrant: true` and your exact HTTPS callback as
+the client ID. The browser must support non-extractable signing keys. Saving
+or removing a parent also requires Web Locks.
 
 ```js
 const flow = await pubky.startGrantAuthFlow(
@@ -68,9 +68,12 @@ const parent = await flow.awaitParentGrant();
 const { id } = await pubky.parentGrantStore.save(parent);
 ```
 
-`save()` stores the approval and its keys as plaintext in IndexedDB. Any script on
-the Accounts origin can read them. To finish a flow after a reload, use
-`flow.saveDelegated()` and `pubky.resumeDelegatedGrantAuthFlow()`.
+`save()` encrypts the signed approval with a non-extractable AES-GCM key in
+a separate IndexedDB store. Copying the parent record alone won't reveal its
+scoped keys. Scripts on the Accounts origin can still decrypt it.
+
+To finish a pending sign-in after a reload, use `flow.saveDelegated()` and
+`pubky.resumeDelegatedGrantAuthFlow()`.
 
 ### Approve the parent in Ring
 

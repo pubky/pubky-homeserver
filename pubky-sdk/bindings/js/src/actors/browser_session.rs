@@ -5,10 +5,11 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 
 use super::session_store::browser::{
-    js_session_acquire, js_session_release, js_session_wait, store_error,
+    js_parent_store_acquire, js_session_acquire, js_session_release, js_session_wait, store_error,
 };
 #[cfg(target_arch = "wasm32")]
 use super::session_store::browser::{js_shared_load, js_shared_remove, js_shared_store};
+use crate::js_error::JsResult;
 
 #[derive(Debug)]
 pub(crate) struct BrowserSessionCoordinator {
@@ -30,18 +31,29 @@ impl BrowserSessionCoordinator {
     ) -> pubky::Result<BrowserSessionLease> {
         let token =
             js_session_acquire(&self.id, &self.homeserver, exclusive).map_err(browser_error)?;
-        // Drop cancels a queued acquisition as well as releasing a held lock.
-        let lease = BrowserSessionLease { token };
-        JsFuture::from(js_session_wait(token))
+        BrowserSessionLease::wait(token)
             .await
-            .map_err(browser_error)?;
-        Ok(lease)
+            .map_err(browser_error)
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct BrowserSessionLease {
     pub(crate) token: u32,
+}
+
+impl BrowserSessionLease {
+    pub(crate) async fn for_parent(id: &str) -> JsResult<Self> {
+        let token = js_parent_store_acquire(id).map_err(store_error)?;
+        Self::wait(token).await.map_err(store_error)
+    }
+
+    async fn wait(token: u32) -> Result<Self, JsValue> {
+        // Drop cancels a queued acquisition as well as releasing a held lock.
+        let lease = Self { token };
+        JsFuture::from(js_session_wait(token)).await?;
+        Ok(lease)
+    }
 }
 
 impl Drop for BrowserSessionLease {

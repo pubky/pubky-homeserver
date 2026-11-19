@@ -481,6 +481,9 @@ const parent = await pubky.parentGrantStore.restore(id);
 location.replace(await parent.issueChild(request));
 ```
 
+`save()` encrypts the approval in IndexedDB. A copied parent record alone won't
+reveal its scoped keys. Scripts on the Accounts origin can still decrypt it.
+
 `issueChild()` rejects requests that exceed the parent, such as keys the user
 declined to share. The error has `data.denial === "insufficient_permissions"`:
 send the user to `request.declinedUrl(error.data.denial)`. Redirect only to

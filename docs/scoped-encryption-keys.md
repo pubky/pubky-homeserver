@@ -203,12 +203,12 @@ How each storage option keeps the signed approval:
   signed approval don't. IndexedDB is the trust boundary: any script on the same
   origin, or anyone with a copy of the browser profile, can read the saved keys.
   Don't log or export browser records.
-- **Parent grant store:** `parentGrantStore.save()` stores a holder's approval as
-  plaintext in IndexedDB too, with the same trust boundary. That approval holds
-  the keys for every scope the holder was approved for.
-- **Child sessions:** a redirect sign-in stores the app's child approval the same
-  way, with keys for only the app's scopes. Signing out deletes it before the
-  revocation request, so local recovery is no longer possible afterwards.
+- **Parent grant store:** `parentGrantStore.save()` encrypts the approval. A
+  copy of the parent record alone won't reveal its scoped keys. Scripts on the
+  holder's origin can still use the separately stored key to decrypt it.
+- **Child sessions:** a redirect sign-in stores the app's child approval in the
+  browser session store, with keys for only the app's scopes. Signing out deletes
+  it before the revocation request, so local recovery is no longer possible afterwards.
 
 Offline recovery returns the keys from saved restore material without network
 access. It verifies the approval signature, its binding to the grant, and the
