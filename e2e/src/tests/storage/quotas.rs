@@ -270,21 +270,19 @@ async fn streaming_quota_checks_preserve_files_accounting_and_events() {
             .send();
         let upload = tokio::spawn(upload);
 
-        // Observe server-side staging, not just client-side delivery, before
-        // issuing the competing write. No fixed sleep decides the ordering.
+        // OpenDAL creates the staging file on the first write, but can keep
+        // that chunk in memory until the upload resumes.
         timeout(Duration::from_secs(10), async {
             loop {
                 let mut staged = tokio::fs::read_dir(&staging_dir).await.unwrap();
-                if let Some(entry) = staged.next_entry().await.unwrap() {
-                    if entry.metadata().await.unwrap().len() > 0 {
-                        break;
-                    }
+                if staged.next_entry().await.unwrap().is_some() {
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("upload should stage bytes before it finishes");
+        .expect("paused upload should create a staging file");
 
         // Completing this write while the first is paused also proves the
         // streaming request does not hold the user's database row lock.
