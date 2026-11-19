@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, time::Duration};
 
 use js_sys::{Error as JsError, Reflect};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -101,6 +101,8 @@ impl Display for PubkyErrorName {
 ///     const data = error.data as RequestErrorData;
 ///     if (data.statusCode === 404) {
 ///       // Handle not found...
+///     } else if (data.retryAfter !== undefined) {
+///       // Wait data.retryAfter seconds before retrying...
 ///     }
 ///   }
 /// }
@@ -175,6 +177,17 @@ impl PubkyError {
         };
         self
     }
+
+    /// Add the server's requested wait, in whole seconds, to request error data.
+    fn with_retry_after(mut self, wait: Option<Duration>) -> Self {
+        if let (Some(wait), Some(Value::Object(map))) = (wait, &mut self.data) {
+            // The serializer drops the whole payload for integers a JS number
+            // can't hold exactly, so saturate instead.
+            let seconds = wait.as_secs().min(js_sys::Number::MAX_SAFE_INTEGER as u64);
+            map.insert("retryAfter".to_string(), json!(seconds));
+        }
+        self
+    }
 }
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -196,6 +209,8 @@ const TS_PUBKY_ERROR: &str = r#"/**
  *     const data = error.data as RequestErrorData;
  *     if (data.statusCode === 404) {
  *       // Handle not found...
+ *     } else if (data.retryAfter !== undefined) {
+ *       // Wait data.retryAfter seconds before retrying...
  *     }
  *   }
  * }
@@ -222,12 +237,15 @@ export type RequestErrorReason =
 /**
  * `PubkyError.data` for a `RequestError`.
  *
- * `statusCode` is present when `reason` is `"Http"`. A reason describes the
- * failure, not whether retrying is safe.
+ * `statusCode` is present when `reason` is `"Http"`. `retryAfter` is the wait
+ * in seconds that the server asked for in a `Retry-After` header, usually on a
+ * 429 or 503. It is absent when the header is missing or isn't a whole number
+ * of seconds. A reason describes the failure, not whether retrying is safe.
  */
 export interface RequestErrorData {
   reason: RequestErrorReason;
   statusCode?: number;
+  retryAfter?: number;
 }"#;
 
 // --- Rust-to-JavaScript pubky::Error Conversion Pipeline ---
@@ -236,7 +254,9 @@ export interface RequestErrorData {
 impl From<pubky::Error> for PubkyError {
     fn from(err: pubky::Error) -> Self {
         let name = match &err {
-            pubky::Error::Request(request) => return Self::request(&err, request.kind()),
+            pubky::Error::Request(request) => {
+                return Self::request(&err, request.kind()).with_retry_after(request.retry_after());
+            }
             pubky::Error::CredentialRefresh(_) => PubkyErrorName::CredentialRefreshError,
             pubky::Error::Parse(_) => PubkyErrorName::InvalidInput,
             pubky::Error::Authentication(_) => PubkyErrorName::AuthenticationError,
@@ -454,8 +474,30 @@ mod tests {
                 RequestError::Server {
                     status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
                     message: "unavailable".into(),
+                    retry_after: None,
                 },
                 json!({ "reason": "Http", "statusCode": 503 }),
+            ),
+            (
+                RequestError::Server {
+                    status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    message: "rate limited".into(),
+                    retry_after: Some(Duration::from_secs(7)),
+                },
+                json!({ "reason": "Http", "statusCode": 429, "retryAfter": 7 }),
+            ),
+            (
+                // Larger waits than a JS number holds exactly are saturated.
+                RequestError::Server {
+                    status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    message: "rate limited".into(),
+                    retry_after: Some(Duration::from_secs(u64::MAX)),
+                },
+                json!({
+                    "reason": "Http",
+                    "statusCode": 429,
+                    "retryAfter": js_sys::Number::MAX_SAFE_INTEGER as u64,
+                }),
             ),
             (
                 RequestError::Validation {

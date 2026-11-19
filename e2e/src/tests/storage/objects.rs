@@ -574,7 +574,10 @@ async fn configured_error_limit_preserves_private_grant_and_cookie_reads() {
             .get("/priv/test/missing")
             .await
             .unwrap_err();
-        let Error::Request(RequestError::Server { status, message }) = error else {
+        let Error::Request(RequestError::Server {
+            status, message, ..
+        }) = error
+        else {
             panic!("unexpected error: {error:?}");
         };
         assert_eq!(status, StatusCode::NOT_FOUND);

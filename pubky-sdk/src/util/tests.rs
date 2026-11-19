@@ -1,4 +1,4 @@
-use super::{read_json_body, read_response_body};
+use super::{parse_retry_after, read_json_body, read_response_body};
 use crate::{
     Error, PubkyHttpClient,
     errors::{RequestError, RequestErrorKind},
@@ -87,7 +87,10 @@ async fn server_error(response: Response, client: PubkyHttpClient) -> (StatusCod
         .await
         .expect("status handling must not wait for the rest of an oversized body")
         .unwrap_err();
-    let Error::Request(RequestError::Server { status, message }) = error else {
+    let Error::Request(RequestError::Server {
+        status, message, ..
+    }) = error
+    else {
         panic!("unexpected error: {error:?}");
     };
     (status, message)
@@ -422,5 +425,49 @@ async fn body_limit_is_inclusive_under_both_framings() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn retry_after_accepts_only_delta_seconds() {
+    for (value, expected) in [
+        ("7", Some(7)),
+        ("0", Some(0)),
+        (" 7\t", Some(7)),
+        ("18446744073709551615", Some(u64::MAX)),
+        ("18446744073709551616", None),
+        ("", None),
+        ("+7", None),
+        ("-1", None),
+        ("1.5", None),
+        ("7, 8", None),
+        ("\u{0663}", None),
+        ("Wed, 21 Oct 2015 07:28:00 GMT", None),
+    ] {
+        assert_eq!(
+            parse_retry_after(value),
+            expected.map(Duration::from_secs),
+            "{value:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn server_errors_keep_retry_after() {
+    for (status, headers, expected) in [
+        (429, "Retry-After: 7\r\n", Some(7)),
+        (503, "Retry-After: 2\r\n", Some(2)),
+        (429, "", None),
+        (429, "Retry-After: soon\r\n", None),
+        (429, "Retry-After: 7\r\nRetry-After: 8\r\n", None),
+    ] {
+        let (response, _connection) =
+            serve_response(status, &format!("{headers}Content-Length: 0\r\n"), b"").await;
+        let error = client(None).check_http_status(response).await.unwrap_err();
+        let expected = expected.map(Duration::from_secs);
+        assert!(
+            matches!(&error, Error::Request(error @ RequestError::Server { .. }) if error.retry_after() == expected),
+            "{headers:?}: {error:?}"
+        );
     }
 }

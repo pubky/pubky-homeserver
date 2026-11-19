@@ -310,7 +310,9 @@ async fn direct_signup_deeplink_rejects_missing_or_invalid_token() {
 
 fn assert_signup_rejected(error: Error, expected_status: StatusCode, expected_message: &str) {
     match error {
-        Error::Request(RequestError::Server { status, message }) => {
+        Error::Request(RequestError::Server {
+            status, message, ..
+        }) => {
             assert_eq!(status, expected_status);
             assert_eq!(message, expected_message);
         }
