@@ -23,9 +23,18 @@ updates:
       - dependency-name: "sea-query-sqlx"
         versions: [">= 0.9"]
     groups:
-      cargo-dependencies:
+      # Cargo treats 0.x to 0.(x+1) and 0.0.x patch updates as major.
+      cargo-minor-and-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   - package-ecosystem: "npm"
     directories:
@@ -44,9 +53,17 @@ updates:
     allow:
       - dependency-type: "all"
     groups:
-      npm-dependencies:
+      npm-minor-and-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -59,9 +76,17 @@ updates:
     cooldown:
       default-days: 7
     groups:
-      docker-images:
+      docker-minor-and-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -74,6 +99,14 @@ updates:
     cooldown:
       default-days: 7
     groups:
-      github-actions:
+      github-actions-minor-and-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      github-actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
