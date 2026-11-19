@@ -12,7 +12,7 @@
     "testnet": "cargo run -p pubky-testnet",
     "build:test": "rm -rf dist/tests && tsc --project tsconfig.json && mkdir -p dist && cp index.js dist/index.js",
     "test": "npm run test-nodejs && npm run test-browser",
-    "test-nodejs": "npm run build:test && node --require ./node-header.cjs node_modules/tape/bin/tape dist/tests/*.js -cov",
+    "test-nodejs": "npm run build:test && node --expose-gc --require ./node-header.cjs node_modules/tape/bin/tape dist/tests/*.js -cov",
     "test-browser": "npm run build:test && browserify dist/tests/setup.js dist/tests/*.js -p esmify | npx tape-run",
     "test-browser:ci": "npm run build:test && browserify dist/tests/setup.js dist/tests/*.js -p esmify | tape-run --browser electron --electron-arg=--no-sandbox --electron-arg=--disable-gpu",
     "build": "cargo run --bin bundle_npm",

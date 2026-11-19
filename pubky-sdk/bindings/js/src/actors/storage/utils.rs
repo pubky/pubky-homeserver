@@ -7,9 +7,9 @@ use wasm_bindgen::JsValue;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 use wasm_streams::ReadableStream;
-use web_sys::{Headers, Response, ResponseInit};
 #[cfg(target_arch = "wasm32")]
-use web_sys::{Request, RequestCredentials, RequestInit};
+use web_sys::{AbortSignal, RequestCredentials, RequestInit};
+use web_sys::{Headers, Response, ResponseInit};
 
 #[cfg(target_arch = "wasm32")]
 use crate::client::http::{js_fetch, map_fetch_error};
@@ -96,8 +96,13 @@ pub(crate) async fn send_blob_put(
     init.set_credentials(RequestCredentials::Include);
     init.set_headers(&headers);
     init.set_body(body);
-    let request = Request::new_with_str_and_init(request.url().as_str(), &init)?;
-    JsFuture::from(js_fetch(&request))
+    // The raw fetch bypasses reqwest, so carry over the client's request deadline.
+    if let Some(timeout) = request.timeout() {
+        // `build()` caps the timeout at `i32::MAX` ms, so it always fits.
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+        init.set_signal(Some(&AbortSignal::timeout_with_u32(timeout_ms)));
+    }
+    JsFuture::from(js_fetch(request.url().as_str(), &init))
         .await
         .map_err(map_fetch_error)?
         .dyn_into::<Response>()
