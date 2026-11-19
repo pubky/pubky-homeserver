@@ -36,6 +36,12 @@ pub struct PubkyClientConfig {
     /// truncation marker. This does not cap final message size or total memory use.
     #[tsify(optional)]
     pub(crate) max_error_body_bytes: Option<usize>,
+    /// Total deadline for each HTTP request in milliseconds, from sending until the
+    /// response body finishes. Also ends event streams and auth relay long-polls.
+    /// In Node it may not end a body that stalls after the response arrives.
+    /// No deadline by default. Pkarr lookups use `pkarr.requestTimeout` instead.
+    #[tsify(optional)]
+    pub(crate) request_timeout: Option<u64>,
 }
 
 /// Low-level HTTP bridge used by the Pubky facade and actors.
@@ -56,18 +62,25 @@ impl Client {
     /// Create a Pubky HTTP client.
     ///
     /// @param {PubkyClientConfig} [config]
-    /// Optional error-body limit and PKARR overrides:
-    /// `{ maxErrorBodyBytes?: number, pkarr?: { relays?: string[], requestTimeout?: number } }`.
+    /// Optional request deadline, error-body limit and PKARR overrides:
+    /// `{ requestTimeout?: number, maxErrorBodyBytes?: number, pkarr?: { relays?: string[], requestTimeout?: number } }`.
+    /// `requestTimeout` bounds each SDK HTTP request in milliseconds (no deadline by default),
+    /// including event streams and auth relay long-polls; requests that exceed it reject with
+    /// `RequestError` reason `Timeout`. `Client.fetch` does not apply it; pass a `signal` instead.
+    /// In Node it may not end a body that stalls after the response arrives (see the README).
+    /// `pkarr.requestTimeout` only bounds pkarr relay lookups.
     ///
     /// @returns {Client}
     /// A configured low-level client. Prefer `new Pubky().client` unless you
     /// need custom relays, timeouts or error-body limits.
     ///
     /// @throws {InvalidInput}
-    /// If a relay URL is invalid or the error-body limit is not an integer in 0..=4294967295.
+    /// If a relay URL is invalid, the error-body limit is not an integer in 0..=4294967295,
+    /// or `requestTimeout` is not an integer in 1..=2147483647.
     ///
     /// @example
     /// const client = new Client({
+    ///   requestTimeout: 30000,
     ///   maxErrorBodyBytes: 1024,
     ///   pkarr: { relays: ["https://relay1/","https://relay2/"], requestTimeout: 8000 }
     /// });
@@ -84,6 +97,16 @@ impl Client {
         if let Some(config) = config_opt {
             if let Some(limit) = config.max_error_body_bytes {
                 builder.max_error_body_bytes(limit);
+            }
+            if let Some(timeout_ms) = config.request_timeout {
+                // Zero would abort every request; `build()` rejects values above the maximum.
+                if timeout_ms == 0 {
+                    return Err(PubkyError::new(
+                        PubkyErrorName::InvalidInput,
+                        "requestTimeout must be at least 1 ms",
+                    ));
+                }
+                builder.request_timeout(Duration::from_millis(timeout_ms));
             }
             if let Some(pkarr) = config.pkarr {
                 // Relays

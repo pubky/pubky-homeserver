@@ -122,6 +122,14 @@ const url = resolvePubky(`${userId}/pub/my-cool-app/file.txt`);
 const res = await client.fetch(url);
 ```
 
+By default SDK requests have no deadline, so a server that accepts the connection but never answers holds the request open. Set `requestTimeout` (milliseconds, `1` to `2147483647`) to bound each request from sending until the response body finishes:
+
+```js
+const pubky = Pubky.withClient(new Client({ requestTimeout: 30_000 }));
+```
+
+A request that exceeds it rejects with `RequestError` reason `Timeout`. The deadline also ends long-lived responses such as event streams and each auth relay long-poll; an auth flow polls the relay again when a poll times out before the relay answers. In Node, the deadline reliably bounds the wait for a response, but it may not end a body that stalls after the response arrives, including an idle event stream: Node can garbage-collect the abort signal the HTTP layer puts on its `Request`. `putBlob` is not affected. `client.fetch` does not apply `requestTimeout`; pass your own `signal`, such as `AbortSignal.timeout(30_000)`, in its `init`. `pkarr.requestTimeout` is separate and only bounds pkarr relay lookups.
+
 ---
 
 ### Keys
