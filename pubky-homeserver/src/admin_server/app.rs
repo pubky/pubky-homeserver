@@ -11,9 +11,7 @@ use super::routes::{
 use super::trace::with_trace_layer;
 use super::{app_state::AppState, auth_middleware::AdminAuthLayer};
 use crate::AppContext;
-#[cfg(any(test, feature = "testing"))]
-use crate::MockDataDir;
-use crate::{shared::reject_allow, AppContextConversionError, PersistentDataDir};
+use crate::{shared::reject_allow, AppContextBuildError};
 use axum::routing::{any, delete, post};
 use axum::{http::Method, routing::get, Router};
 use axum_server::Handle;
@@ -77,9 +75,9 @@ pub enum AdminServerBuildError {
     #[error("Failed to create admin server: {0}")]
     Server(anyhow::Error),
 
-    /// Failed to boostrap from the data directory.
-    #[error("Failed to boostrap from the data directory: {0}")]
-    DataDir(AppContextConversionError),
+    /// Failed to build the AppContext.
+    #[error("Failed to build AppContext: {0}")]
+    AppContext(AppContextBuildError),
 }
 
 /// Admin server
@@ -95,26 +93,11 @@ pub struct AdminServer {
 }
 
 impl AdminServer {
-    /// Create a new admin server from a data directory.
-    pub async fn from_data_dir(data_dir: PersistentDataDir) -> Result<Self, AdminServerBuildError> {
-        let context = AppContext::read_from(data_dir)
-            .await
-            .map_err(AdminServerBuildError::DataDir)?;
-        Self::start(Arc::new(context)).await
-    }
-
     /// Create a new admin server from a data directory path.
     pub async fn from_data_dir_path(data_dir_path: PathBuf) -> Result<Self, AdminServerBuildError> {
-        let data_dir = PersistentDataDir::new(data_dir_path);
-        Self::from_data_dir(data_dir).await
-    }
-
-    /// Create a new admin server from a mock data directory.
-    #[cfg(any(test, feature = "testing"))]
-    pub async fn from_mock_dir(mock_dir: MockDataDir) -> Result<Self, AdminServerBuildError> {
-        let context = AppContext::read_from(mock_dir)
+        let context = AppContext::from_persistent_dir(data_dir_path)
             .await
-            .map_err(AdminServerBuildError::DataDir)?;
+            .map_err(AdminServerBuildError::AppContext)?;
         Self::start(Arc::new(context)).await
     }
 

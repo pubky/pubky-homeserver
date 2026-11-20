@@ -8,8 +8,8 @@ use anyhow::Result;
 use http_relay::HttpRelay;
 use pubky::{Keypair, Pubky};
 use pubky_homeserver::{
-    storage_config::StorageConfigToml, ConfigToml, ConnectionString, DomainPort, HomeserverApp,
-    MockDataDir,
+    storage_config::StorageConfigToml, AppContext, ConfigToml, ConnectionString, DomainPort,
+    HomeserverApp,
 };
 use std::{str::FromStr, time::Duration};
 use url::Url;
@@ -79,10 +79,11 @@ impl Testnet {
     /// Uses [`ConfigToml::default_test_config()`] which enables the admin server.
     /// Automatically listens on ephemeral ports and uses this Testnet's bootstrap nodes and relays.
     pub async fn create_homeserver(&mut self) -> Result<&HomeserverApp> {
-        let mut config = ConfigToml::default_test_config();
-        config.general.database_url = self.postgres_connection_string.clone();
-        let mock_dir = MockDataDir::new(config, Some(crate::common::testnet_keypair()))?;
-        self.create_homeserver_app_with_mock(mock_dir).await
+        self.create_homeserver_with(
+            ConfigToml::default_test_config(),
+            crate::common::testnet_keypair(),
+        )
+        .await
     }
 
     /// Run the full homeserver app with core and admin server using a freshly generated random keypair.
@@ -90,25 +91,31 @@ impl Testnet {
     /// Uses [`ConfigToml::default_test_config()`] which enables the admin server.
     /// Automatically listens on ephemeral ports and uses this Testnet's bootstrap nodes and relays.
     pub async fn create_random_homeserver(&mut self) -> Result<&HomeserverApp> {
-        let mut config = ConfigToml::default_test_config();
-        config.general.database_url = self.postgres_connection_string.clone();
-        let mock_dir = MockDataDir::new(config, Some(Keypair::random()))?;
-        self.create_homeserver_app_with_mock(mock_dir).await
+        self.create_homeserver_with(ConfigToml::default_test_config(), Keypair::random())
+            .await
     }
 
-    /// Run the full homeserver app with core and admin server
-    /// Automatically listens on the configured ports.
-    /// Automatically uses the configured bootstrap nodes and relays in this Testnet.
-    pub async fn create_homeserver_app_with_mock(
+    /// Run the full homeserver app with the given config and keypair, on an
+    /// ephemeral data directory and database.
+    ///
+    /// The homeserver uses this Testnet's bootstrap nodes and relays, in-memory
+    /// storage, and a throwaway database on this Testnet's Postgres server.
+    /// Errors if `config.general.database_url` is set to anything other than the
+    /// built-in default; see [`AppContext::new_ephemeral`].
+    pub async fn create_homeserver_with(
         &mut self,
-        mut mock_dir: MockDataDir,
+        mut config: ConfigToml,
+        keypair: Keypair,
     ) -> Result<&HomeserverApp> {
-        mock_dir.config_toml.pkdns.dht_bootstrap_nodes = Some(self.dht_bootstrap_nodes());
+        config.pkdns.dht_bootstrap_nodes = Some(self.dht_bootstrap_nodes());
         if !self.dht_relay_urls().is_empty() {
-            mock_dir.config_toml.pkdns.dht_relay_nodes = Some(self.dht_relay_urls().to_vec());
+            config.pkdns.dht_relay_nodes = Some(self.dht_relay_urls().to_vec());
         }
-        mock_dir.config_toml.storage.backend = StorageConfigToml::InMemory;
-        let homeserver = HomeserverApp::start_with_mock_data_dir(mock_dir).await?;
+        config.storage.backend = StorageConfigToml::InMemory;
+        let context =
+            AppContext::new_ephemeral(config, keypair, self.postgres_connection_string.clone())
+                .await?;
+        let homeserver = HomeserverApp::start(context).await?;
         self.homeservers.push(homeserver);
         Ok(self
             .homeservers

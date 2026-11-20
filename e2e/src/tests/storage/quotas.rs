@@ -3,7 +3,9 @@ use std::{convert::Infallible, path::Path, time::Duration};
 use futures::{stream, StreamExt};
 use pubky_testnet::{
     pubky::ClientId,
-    pubky_homeserver::{storage_config::StorageConfigToml, DataDir, HomeserverApp},
+    pubky_homeserver::{
+        storage_config::StorageConfigToml, AppContext, ConfigToml, DatabaseMode, HomeserverApp,
+    },
 };
 use tokio::{sync::oneshot, time::timeout};
 
@@ -16,10 +18,10 @@ async fn put_quota_applied() {
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
 
-    let mut mock_dir = MockDataDir::test();
-    mock_dir.config_toml.storage.default_quota_mb = Some(1); // 1 MB
+    let mut config = ConfigToml::default_test_config();
+    config.storage.default_quota_mb = Some(1); // 1 MB
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::from_secret(&[0; 32]))
         .await
         .unwrap();
 
@@ -103,12 +105,12 @@ async fn put_quota_applied_with_bandwidth_throttling() {
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
 
-    let mut mock_dir = MockDataDir::test();
-    mock_dir.config_toml.storage.default_quota_mb = Some(1); // 1 MB
-                                                             // Enable bandwidth throttling so the BandwidthQuotaLimitLayer wraps the body.
-    mock_dir.config_toml.default_quotas.rate_write = Some("10mb/s".parse().unwrap());
+    let mut config = ConfigToml::default_test_config();
+    // Enable bandwidth throttling so the BandwidthQuotaLimitLayer wraps the body.
+    config.default_quotas.rate_write = Some("10mb/s".parse().unwrap());
+    config.storage.default_quota_mb = Some(1); // 1 MB
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::from_secret(&[0; 32]))
         .await
         .unwrap();
 
@@ -179,17 +181,24 @@ async fn streaming_quota_checks_preserve_files_accounting_and_events() {
     let mut testnet = Testnet::new().await.unwrap();
     testnet.create_pkarr_relay().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mut data_dir = MockDataDir::test();
-    data_dir.config_toml.storage.default_quota_mb = Some(1);
-    data_dir.config_toml.storage.backend = StorageConfigToml::FileSystem;
-    data_dir.config_toml.default_quotas.rate_write = Some("10mb/s".parse().unwrap());
-    data_dir.config_toml.pkdns.dht_bootstrap_nodes = Some(testnet.dht_bootstrap_nodes());
-    data_dir.config_toml.pkdns.dht_relay_nodes = Some(testnet.dht_relay_urls());
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut config = ConfigToml::default_test_config();
+    config.storage.default_quota_mb = Some(1);
+    config.storage.backend = StorageConfigToml::FileSystem;
+    config.default_quotas.rate_write = Some("10mb/s".parse().unwrap());
+    config.pkdns.dht_bootstrap_nodes = Some(testnet.dht_bootstrap_nodes());
+    config.pkdns.dht_relay_nodes = Some(testnet.dht_relay_urls());
     let staging_dir = data_dir.path().join("data/files-tmp");
     // The Testnet helper forces in-memory storage; use real staging files here.
-    let server = HomeserverApp::start_with_mock_data_dir(data_dir)
-        .await
-        .unwrap();
+    let context = AppContext::new(
+        data_dir.path().to_path_buf(),
+        config,
+        Keypair::from_secret(&[0; 32]),
+        DatabaseMode::ephemeral(None).unwrap(),
+    )
+    .await
+    .unwrap();
+    let server = HomeserverApp::start(context).await.unwrap();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()

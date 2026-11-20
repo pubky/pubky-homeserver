@@ -18,30 +18,33 @@ docker run --name pubky-postgres \
 
 > For more Postgres setup options see the [Install Guide — Set Up PostgreSQL](../docs/INSTALL.md#set-up-postgresql).
 
-Run a local testnet with persistent state:
+Run a local testnet with persistent state, in a database created for it:
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
+docker exec pubky-postgres createdb -U postgres pubky_testnet  # first run only
+PUBKY_TESTNET_DATABASE_URL='postgres://postgres:postgres@localhost:5432/pubky_testnet' \
   cargo run -p pubky-testnet -- persist ./my-testnet-data
 ```
 
 The data directory is auto-initialized on first run with a `config.toml` and server keypair. On subsequent runs, the existing state is picked up and the homeserver keeps the same identity.
 
-The `TEST_PUBKY_CONNECTION_STRING` environment variable is read on every startup and overrides the `database_url` in the on-disk config.
+The `PUBKY_TESTNET_DATABASE_URL` environment variable names the database the homeserver keeps its tables in. It is read on every startup and overrides the `database_url` in the on-disk config. Use a dedicated database, not the `postgres` maintenance database. Database rows are not stored in the data directory, so deleting the directory does not reset them.
 
 To seed a custom homeserver config on first run (errors if `config.toml` already exists):
 
 ```bash
-TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
+PUBKY_TESTNET_DATABASE_URL='postgres://postgres:postgres@localhost:5432/pubky_testnet' \
   cargo run -p pubky-testnet -- --homeserver-config my-config.toml persist ./my-testnet-data
 ```
 
-If you don't need persistent state, simply omit the `persist` subcommand. An ephemeral database is auto-created on startup and cleaned up on shutdown:
+If you don't need persistent state, simply omit the `persist` subcommand. An ephemeral database is auto-created on the server named by `TEST_PUBKY_CONNECTION_STRING` on startup and cleaned up on shutdown:
 
 ```bash
 TEST_PUBKY_CONNECTION_STRING='postgres://postgres:postgres@localhost:5432/postgres' \
   cargo run -p pubky-testnet
 ```
+
+In this mode the Postgres server always comes from `TEST_PUBKY_CONNECTION_STRING` (or `localhost:5432` if it is unset); a `--homeserver-config` file that sets `database_url` to anything other than the built-in default is rejected.
 
 ### Ports and addresses
 

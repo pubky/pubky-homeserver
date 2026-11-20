@@ -3,10 +3,7 @@ use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 use pubky_testnet::pubky::Keypair;
-use pubky_testnet::{
-    pubky_homeserver::{ConfigToml, MockDataDir},
-    Testnet,
-};
+use pubky_testnet::{pubky_homeserver::ConfigToml, Testnet};
 
 fn cli_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
@@ -84,11 +81,10 @@ async fn spawn_homeserver_with_user_config(
     let admin_password = config.admin.admin_password.clone();
 
     let mut testnet = Testnet::new().await.unwrap();
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
 
     let (endpoint, server_pk) = {
         let server = testnet
-            .create_homeserver_app_with_mock(mock_dir)
+            .create_homeserver_with(config, Keypair::random())
             .await
             .unwrap();
         let admin_socket = server

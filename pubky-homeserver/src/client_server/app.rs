@@ -1,12 +1,9 @@
 use super::AppState;
 
-#[cfg(any(test, feature = "testing"))]
-use crate::MockDataDir;
-
 use crate::{
-    app_context::{AppContext, AppContextConversionError},
+    app_context::{AppContext, AppContextBuildError},
     shared::reject_allow,
-    ClientIdentityToml, PersistentDataDir,
+    ClientIdentityToml,
 };
 use anyhow::Result;
 use futures_util::TryFutureExt;
@@ -52,9 +49,9 @@ pub enum ClientServerBuildError {
     /// Failed to run the Pubky TLS web server.
     #[error("Pubky TLS web server error: {0}")]
     PubkyTlsServer(anyhow::Error),
-    /// Failed to convert the data directory to an AppContext.
-    #[error("AppContext conversion error: {0}")]
-    AppContext(#[from] AppContextConversionError),
+    /// Failed to build the AppContext.
+    #[error("Failed to build AppContext: {0}")]
+    AppContext(#[from] AppContextBuildError),
     /// Failed to build request-count rate limit layer.
     #[error("Request-count rate limit configuration error: {0}")]
     RequestRateLimits(String),
@@ -94,25 +91,7 @@ impl ClientServer {
     pub async fn start_with_persistent_data_dir_path(
         dir_path: PathBuf,
     ) -> Result<Self, ClientServerBuildError> {
-        let data_dir = PersistentDataDir::new(dir_path);
-        let context = AppContext::read_from(data_dir).await?;
-        Self::start(Arc::new(context)).await
-    }
-
-    /// Run the homeserver with configurations from a data directory.
-    pub async fn start_with_persistent_data_dir(
-        dir: PersistentDataDir,
-    ) -> Result<Self, ClientServerBuildError> {
-        let context = AppContext::read_from(dir).await?;
-        Self::start(Arc::new(context)).await
-    }
-
-    /// Run the homeserver with configurations from a data directory mock.
-    #[cfg(any(test, feature = "testing"))]
-    pub async fn start_with_mock_data_dir(
-        dir: MockDataDir,
-    ) -> Result<Self, ClientServerBuildError> {
-        let context = AppContext::read_from(dir).await?;
+        let context = AppContext::from_persistent_dir(dir_path).await?;
         Self::start(Arc::new(context)).await
     }
 
@@ -370,7 +349,7 @@ mod tests {
     use crate::{
         app_context::AppContext,
         client_server::ClientServer,
-        data_directory::{ConfigToml, MockDataDir},
+        data_directory::ConfigToml,
         shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
     };
 
@@ -653,8 +632,11 @@ mod tests {
     #[tokio::test]
     #[pubky_test_utils::test]
     async fn storage_metrics_only_count_resolved_requests_with_low_cardinality_labels() {
-        let data_dir = MockDataDir::new(ConfigToml::minimal_test_config(), None).unwrap();
-        let context = Arc::new(AppContext::read_from(data_dir).await.unwrap());
+        let context = Arc::new(
+            AppContext::new_ephemeral(ConfigToml::minimal_test_config(), Keypair::random(), None)
+                .await
+                .unwrap(),
+        );
         let metrics = context.metrics.clone();
         let router = ClientServer::create_router(Arc::clone(&context)).unwrap();
         let server = TestServer::new(router);

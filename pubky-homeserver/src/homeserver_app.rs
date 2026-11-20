@@ -7,6 +7,7 @@
 //! migration) and graceful shutdown.
 
 use crate::admin_server::{AdminServer, AdminServerBuildError};
+use crate::app_context::AppContext;
 use crate::client_server::{ClientServer, ClientServerBuildError};
 use crate::metrics_server::{MetricsServer, MetricsServerBuildError};
 use crate::persistence::files::StorageRepair;
@@ -14,9 +15,6 @@ use crate::republishers::{
     HomeserverKeyRepublisher, KeyRepublisherBuildError, UserKeysRepublisherJob,
 };
 use crate::tracing::init_tracing_logs_with_config_if_set;
-#[cfg(any(test, feature = "testing"))]
-use crate::MockDataDir;
-use crate::{app_context::AppContext, data_directory::PersistentDataDir};
 use anyhow::Result;
 use pubky_common::crypto::PublicKey;
 use std::path::PathBuf;
@@ -66,21 +64,7 @@ pub struct HomeserverApp {
 impl HomeserverApp {
     /// Run the homeserver with configurations from a data directory.
     pub async fn start_with_persistent_data_dir_path(dir_path: PathBuf) -> Result<Self> {
-        let data_dir = PersistentDataDir::new(dir_path);
-        let context = AppContext::read_from(data_dir).await?;
-        Self::start(context).await
-    }
-
-    /// Run the homeserver with configurations from a data directory.
-    pub async fn start_with_persistent_data_dir(dir: PersistentDataDir) -> Result<Self> {
-        let context = AppContext::read_from(dir).await?;
-        Self::start(context).await
-    }
-
-    /// Run the homeserver with configurations from a data directory mock.
-    #[cfg(any(test, feature = "testing"))]
-    pub async fn start_with_mock_data_dir(dir: MockDataDir) -> Result<Self> {
-        let context = AppContext::read_from(dir).await?;
+        let context = AppContext::from_persistent_dir(dir_path).await?;
         Self::start(context).await
     }
 
@@ -90,7 +74,7 @@ impl HomeserverApp {
         let _ = init_tracing_logs_with_config_if_set(&context.config_toml);
         let context = Arc::new(context);
 
-        tracing::debug!("Homeserver data dir: {}", context.data_dir.path().display());
+        tracing::debug!("Homeserver data dir: {}", context.data_path.display());
 
         let republish_interval =
             Duration::from_secs(context.config_toml.pkdns.user_keys_republisher_interval);
