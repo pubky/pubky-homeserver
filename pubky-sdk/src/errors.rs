@@ -356,6 +356,10 @@ pub enum RequestError {
         /// The client's error-body limit caps raw bytes; decoded text can be up to
         /// three times larger, plus a truncation marker when the body exceeds the limit.
         message: String,
+        /// How long the server asked the client to wait before retrying, from a
+        /// `Retry-After` header, usually on a 429 or 503. `None` when the header
+        /// is missing, uses the HTTP-date form, or isn't a whole number of seconds.
+        retry_after: Option<Duration>,
     },
 
     /// Caller supplied an invalid URL/path/argument for this API.
@@ -393,6 +397,15 @@ impl RequestError {
             Self::Validation { .. } => RequestErrorKind::InvalidRequest,
             Self::DecodeJson { .. } => RequestErrorKind::Decode,
             Self::Oversized { .. } => RequestErrorKind::Oversized,
+        }
+    }
+
+    /// The wait before retrying that a [`Self::Server`] error carries. The SDK
+    /// never retries on its own; the caller decides whether to wait.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Server { retry_after, .. } => *retry_after,
+            _ => None,
         }
     }
 }
@@ -437,6 +450,7 @@ mod tests {
                 RequestError::Server {
                     status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
                     message: "private response".into(),
+                    retry_after: None,
                 },
                 RequestErrorKind::Http { status: 503 },
             ),

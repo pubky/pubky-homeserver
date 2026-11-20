@@ -588,7 +588,9 @@ impl EventStreamBuilder {
     ///   [`RequestError::Oversized`] and ends the stream
     /// - A transport failure mid-stream yields one [`RequestError::Transport`]
     ///   and ends the stream
-    /// - Propagates HTTP request errors
+    /// - Propagates HTTP request errors. A rate-limited (429) subscription
+    ///   returns [`RequestError::Server`]; [`RequestError::retry_after`] gives
+    ///   the wait the homeserver asked for
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn subscribe(self) -> Result<Pin<Box<dyn Stream<Item = Result<Event>> + Send>>> {
         let stream = self.subscribe_internal().await?;
@@ -613,7 +615,9 @@ impl EventStreamBuilder {
     ///   [`RequestError::Oversized`] and ends the stream
     /// - A transport failure mid-stream yields one [`RequestError::Transport`]
     ///   and ends the stream
-    /// - Propagates HTTP request errors
+    /// - Propagates HTTP request errors. A rate-limited (429) subscription
+    ///   returns [`RequestError::Server`]; [`RequestError::retry_after`] gives
+    ///   the wait the homeserver asked for
     #[cfg(target_arch = "wasm32")]
     pub async fn subscribe(self) -> Result<Pin<Box<dyn Stream<Item = Result<Event>>>>> {
         let stream = self.subscribe_internal().await?;

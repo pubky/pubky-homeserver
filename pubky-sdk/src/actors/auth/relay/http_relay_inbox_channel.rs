@@ -819,7 +819,10 @@ mod tests {
                 .build()
                 .unwrap();
             let error = channel.ack(&client).await.unwrap_err();
-            let Error::Request(RequestError::Server { status, message }) = error else {
+            let Error::Request(RequestError::Server {
+                status, message, ..
+            }) = error
+            else {
                 panic!("unexpected error: {error:?}");
             };
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);

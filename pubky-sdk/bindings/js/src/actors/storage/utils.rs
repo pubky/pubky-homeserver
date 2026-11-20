@@ -114,6 +114,13 @@ pub(crate) async fn check_web_http_status(
     if status.is_success() {
         return Ok(());
     }
+    // A browser joins repeated headers into one value, which then fails to parse.
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .ok()
+        .flatten()
+        .and_then(|value| pubky::parse_retry_after(&value));
     let message = read_error_message(response, limit)
         .await
         .unwrap_or_else(|| {
@@ -122,7 +129,12 @@ pub(crate) async fn check_web_http_status(
                 .unwrap_or("Unknown Error")
                 .to_owned()
         });
-    Err(pubky::Error::from(pubky::errors::RequestError::Server { status, message }).into())
+    Err(pubky::Error::from(pubky::errors::RequestError::Server {
+        status,
+        message,
+        retry_after,
+    })
+    .into())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -155,4 +167,29 @@ async fn read_error_message(response: Response, limit: usize) -> Option<String> 
         message.push_str(&format!("\n[response body truncated at {limit} bytes]"));
     }
     Some(message)
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    async fn status_errors_keep_retry_after() {
+        for (header, expected) in [(Some("7"), Some(7)), (None, None), (Some("soon"), None)] {
+            let headers = Headers::new().unwrap();
+            if let Some(value) = header {
+                headers.set("Retry-After", value).unwrap();
+            }
+            let init = ResponseInit::new();
+            init.set_status(429);
+            init.set_headers(&headers);
+            let response = Response::new_with_opt_str_and_init(None, &init).unwrap();
+
+            let error = check_web_http_status(response, 0).await.unwrap_err();
+            let data = error.data.unwrap();
+            assert_eq!(data["statusCode"], 429, "{header:?}");
+            assert_eq!(data["retryAfter"].as_u64(), expected, "{header:?}");
+        }
+    }
 }

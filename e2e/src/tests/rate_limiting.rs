@@ -65,6 +65,7 @@ async fn test_limit_signin_get_session() {
     assert!(
         matches!(err, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::TOO_MANY_REQUESTS)
     );
+    assert_one_minute_retry_after(&err);
 
     // Second signin should be rate-limited (429)
     let err = signer
@@ -73,6 +74,19 @@ async fn test_limit_signin_get_session() {
         .expect_err("Second signin should be rate limited");
     assert!(
         matches!(err, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert_one_minute_retry_after(&err);
+}
+
+/// A `1r/m` quota asks for a wait of at least a second and at most the minute.
+fn assert_one_minute_retry_after(err: &Error) {
+    let retry_after = match err {
+        Error::Request(err) => err.retry_after(),
+        _ => None,
+    };
+    assert!(
+        retry_after.is_some_and(|wait| (1..=60).contains(&wait.as_secs())),
+        "unexpected Retry-After: {retry_after:?}"
     );
 }
 

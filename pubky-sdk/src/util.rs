@@ -1,7 +1,10 @@
-use std::fmt::Write;
+use std::{fmt::Write, time::Duration};
 
 use futures_util::{StreamExt, TryStreamExt};
-use reqwest::{Response, StatusCode};
+use reqwest::{
+    Response, StatusCode,
+    header::{HeaderMap, RETRY_AFTER},
+};
 
 use crate::{
     PubkyHttpClient,
@@ -59,6 +62,30 @@ pub(crate) async fn read_json_body<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Parse a delta-seconds `Retry-After` value (RFC 9110). Anything else,
+/// including the HTTP-date form the homeserver doesn't send, gives `None`.
+/// Public only so the JS bindings share it.
+#[doc(hidden)]
+pub fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim_matches([' ', '\t']);
+    // `u64::from_str` would also accept a leading `+`.
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok().map(Duration::from_secs)
+}
+
+/// Repeated `Retry-After` headers are ambiguous, so they count as none, as in
+/// a browser, which joins them into one unparseable value.
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let mut values = headers.get_all(RETRY_AFTER).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    parse_retry_after(value.to_str().ok()?)
+}
+
 impl PubkyHttpClient {
     pub(crate) async fn check_http_status(
         &self,
@@ -68,6 +95,7 @@ impl PubkyHttpClient {
             return Ok(response);
         }
         let status = response.status();
+        let retry_after = retry_after(response.headers());
         let message = if self.max_error_body_bytes == 0 {
             // `bytes_stream()` acquires the browser body reader; dropping the unpolled
             // stream cancels the underlying `ReadableStream`.
@@ -77,7 +105,11 @@ impl PubkyHttpClient {
             self.read_error_message(response).await.ok()
         }
         .unwrap_or_else(|| Self::status_reason(status));
-        Err(Error::from(RequestError::Server { status, message }))
+        Err(Error::from(RequestError::Server {
+            status,
+            message,
+            retry_after,
+        }))
     }
 
     fn status_reason(status: StatusCode) -> String {

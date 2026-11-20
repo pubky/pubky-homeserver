@@ -91,6 +91,8 @@ pub use actors::{DEFAULT_HTTP_RELAY_INBOX, EncryptedHttpRelayInboxChannel, HttpR
 pub use actors::{DelegatedSignFn, GrantSigningError, delegated_sign_callback};
 #[doc(inline)]
 pub use pkarr;
+#[doc(hidden)]
+pub use util::parse_retry_after;
 
 // Re-exports
 #[doc(inline)]
