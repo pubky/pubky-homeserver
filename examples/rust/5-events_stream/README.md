@@ -1,6 +1,6 @@
 # Event Stream
 
-Subscribe to Server-Sent Events (SSE) from one or more Pubky users' homeserver `/events-stream` endpoint.
+Subscribe to Server-Sent Events (SSE) from a homeserver's `/events-stream` endpoint, for one or more Pubky users or for every user on the homeserver.
 
 ## Prerequisites
 
@@ -10,12 +10,15 @@ Examples using `--testnet` require a running local testnet. See the [examples RE
 
 ```bash
 cargo run --bin events_stream -- <USER_PUBKEY>... [OPTIONS]
+cargo run --bin events_stream -- --all-users <HOMESERVER_PUBKEY> [OPTIONS]
 ```
 
 ### Options
 
 - `<USER_PUBKEY>...`: One or more user public keys in z32 format (1-50 users)
 - `--cursors <CURSORS>`: Comma-separated cursors for each user (optional, must match user count)
+- `--all-users <HOMESERVER_PUBKEY>`: Stream every user's public events on this homeserver instead of listing users
+- `--cursor <N>`: Global cursor to resume an `--all-users` stream after
 - `-l, --limit <N>`: Maximum number of events to fetch
 - `-L, --live`: Enable live streaming mode (receive new events as they occur)
 - `-r, --reverse`: Reverse chronological order (newest first)
@@ -56,6 +59,17 @@ cargo run --bin events_stream -- \
   pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy \
   --cursors "1234567890,9876543210" \
   --limit 50
+```
+
+### Every user's events on a homeserver
+
+Without `--limit` or `--live`, the homeserver closes the stream after 100 events. Pass the last cursor printed to `--cursor` to fetch the next page.
+
+```bash
+cargo run --bin events_stream -- \
+  --all-users 8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty \
+  --path "/pub/pubky.app/" \
+  --cursor 1234567890
 ```
 
 ### Use with testnet

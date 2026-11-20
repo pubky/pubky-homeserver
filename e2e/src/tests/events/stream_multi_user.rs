@@ -127,16 +127,12 @@ async fn events_stream_multiple_users() {
                 let path = lines[0].strip_prefix("pubky://").unwrap();
                 first_two_events.push(path.to_string());
 
-                // Extract cursor and associate with the user
-                if let Some(cursor_line) = lines.iter().find(|l| l.starts_with("cursor: ")) {
-                    let cursor = cursor_line.strip_prefix("cursor: ").unwrap().to_string();
-
-                    // Determine which user this event belongs to
-                    if lines[0].contains(&pubky1.z32()) {
-                        user1_cursor = cursor;
-                    } else if lines[0].contains(&pubky2.z32()) {
-                        user2_cursor = cursor;
-                    }
+                // Associate the cursor with the user the event belongs to
+                let cursor = sse_cursor(&event.data).to_string();
+                if lines[0].contains(&pubky1.z32()) {
+                    user1_cursor = cursor;
+                } else if lines[0].contains(&pubky2.z32()) {
+                    user2_cursor = cursor;
                 }
             }
         } else {
