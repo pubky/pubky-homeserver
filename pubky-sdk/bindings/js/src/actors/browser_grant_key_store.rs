@@ -92,7 +92,12 @@ export async function __pubkyGrantCanUseDelegation() {
         });
         await deleteRecord(keyId);
         return true;
-      } catch (_error) {
+      } catch (error) {
+        // Another tab can unblock the key store. Let the next sign-in probe again.
+        if (error?.cause?.name === "TimeoutError") {
+          canUseDelegationPromise = undefined;
+          throw error;
+        }
         return false;
       }
     })();
@@ -114,7 +119,10 @@ function openGrantKeyDb() {
     const timeout = setTimeout(() => {
       request.onupgradeneeded = () => request.transaction.abort();
       request.onsuccess = () => request.result.close();
-      reject(new DOMException("Opening the delegated grant key store timed out. Retry.", "TimeoutError"));
+      reject(new DOMException(
+        "Opening the delegated grant key store timed out. Close or reload other tabs using this site and retry.",
+        "TimeoutError",
+      ));
     }, PUBKY_GRANT_KEYS_OPEN_TIMEOUT_MS);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -339,11 +347,11 @@ impl BrowserGrantKeyStore {
     }
 
     /// Return whether this runtime can create, persist, and use browser-held Ed25519 keys.
-    pub(crate) async fn can_use_delegation() -> bool {
-        match JsFuture::from(js_can_use_delegation()).await {
-            Ok(value) => value.as_bool().unwrap_or(false),
-            Err(_) => false,
-        }
+    pub(crate) async fn can_use_delegation() -> JsResult<bool> {
+        let value = JsFuture::from(js_can_use_delegation())
+            .await
+            .map_err(js_error)?;
+        Ok(value.as_bool().unwrap_or(false))
     }
 
     /// Ensure a browser-held delegated grant key exists and return its key id and public key.

@@ -156,9 +156,26 @@ async function scenario(browserType, origins) {
     await user.approve(await call(accounts, "accounts.startParent"), "/pub/:rw,/priv/:rwe");
     await call(accounts, "accounts.finishParent");
 
-    // Starting again replaces an unanswered request, even from another tab.
+    // Queue the first sign-in behind an upgrade held open by an older tab.
+    const olderTab = await open(context, `${CHAT}/`);
+    await olderTab.evaluate(() => new Promise((resolve, reject) => {
+      const open = indexedDB.open("pubky-auth", 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        addEventListener("pagehide", () => db.close(), { once: true });
+        db.onversionchange = () => resolve();
+        globalThis.harness.app.list().catch(reject);
+      };
+    }));
     let chat = await open(context, `${CHAT}/`);
+    await assert.rejects(call(chat, "app.start", CHAT_CAPS), error =>
+      error.pubky?.name === "ClientStateError" &&
+      /key store timed out.*close or reload other tabs/i.test(error.pubky.message));
+    await olderTab.close();
     let started = await call(chat, "app.start", CHAT_CAPS);
+
+    // Starting again replaces an unanswered request, even from another tab.
     const pending = await call(chat, "app.rawFlow");
     assert.equal(pending.status, "awaitingCallback");
     assert.ok(!started.authorizationUrl.includes(pending.approvalKeySecret));

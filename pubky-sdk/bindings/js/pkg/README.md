@@ -315,6 +315,9 @@ legacy `callback` parameter is accepted as an `xSuccess` fallback.
 Save pending grant auth state before a refresh, then restore it afterwards.
 The browser example below uses a delegated signing key stored in IndexedDB.
 It requires a secure context with WebCrypto Ed25519 support and IndexedDB.
+All browser operations that use delegated signing keys have a 10-second timeout
+when opening the key store. If another tab blocks an upgrade, close or reload
+that tab and retry from the same page.
 
 For signed approvals, saved flow state includes a temporary HPKE private key
 that decrypts the signer's response. The authorization URL carries the matching
