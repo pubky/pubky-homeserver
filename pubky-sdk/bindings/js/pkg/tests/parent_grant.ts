@@ -22,6 +22,8 @@ const ACCOUNTS = "https://accounts.example/auth/callback";
 const AUTHORIZE = "https://accounts.example/authorize";
 const CHAT = "https://chat.example/auth/callback";
 const CHAT_CAPS = "/pub/chat/:rw,/priv/chat/:rwe" as Capabilities;
+const PARENTS = "parentGrants";
+const APPROVAL_KEYS = "approvalKeys";
 
 type Facade = ReturnType<typeof Pubky.testnet>;
 type _DelegationSupport = Assert<
@@ -90,6 +92,31 @@ async function userWithParent(capabilities?: string) {
 /** Issue a child for a fresh request and return the delivered callback URL. */
 async function issue(parent: ParentGrant, caps: Capabilities = CHAT_CAPS) {
   return new URL(await parent.issueChild(ChildGrantRequest.parse(childRequestUrl({ caps }))));
+}
+
+/** Inspect or edit the actual IndexedDB records, waiting for the transaction to commit. */
+async function parentStoreRequest<T>(
+  name: string, mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const open = indexedDB.open("pubky-delegated-auth");
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(open.error);
+  });
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const tx = db.transaction(name, mode);
+      const request = operation(tx.objectStore(name));
+      tx.oncomplete = () => resolve(request.result);
+      tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function readStored(name: string, id: string) {
+  return parentStoreRequest(name, "readonly", store => store.get(id));
 }
 
 test("ChildGrantRequest: reads a request and rejects inexact callbacks", (t) => {
@@ -180,7 +207,12 @@ test("parent grant: issues children within its limits only", async (t) => {
   t.ok(delivered.hash.includes("approval="), "the approval travels in the fragment");
   t.ok(delivered.hash.includes("state=state-1"));
 
-  const { parent: storageOnly } = await userWithParent("/pub/:rw,/priv/:rw");
+  const { sdk, parent: approved } = await userWithParent("/pub/:rw,/priv/:rw");
+  const { id } = await sdk.parentGrantStore.save(approved);
+  const record = await readStored(PARENTS, id);
+  t.ok(record.encryptedApproval.ciphertext.byteLength > 0, "approvals without e are encrypted too");
+  t.notOk("signedApproval" in record);
+  const storageOnly = await sdk.parentGrantStore.restore(id);
   t.deepEqual(storageOnly.encryptionKeys.scopes, [], "the user declined keys");
   const declined = await expectRejection(
     storageOnly.issueChild(ChildGrantRequest.parse(childRequestUrl())),
@@ -195,7 +227,7 @@ test("parent grant: issues children within its limits only", async (t) => {
   t.end();
 });
 
-test("ParentGrantStore: survives a restart and hides secrets from listings", async (t) => {
+test("ParentGrantStore: encrypts the approval and restores its scoped keys after a restart", async (t) => {
   if (typeof indexedDB === "undefined") {
     t.comment("browser-only store test skipped without IndexedDB");
     t.end();
@@ -206,16 +238,39 @@ test("ParentGrantStore: survives a restart and hides secrets from listings", asy
   t.equal(info.grantId, parent.grantId);
   t.equal(info.logoutPending, false);
 
+  const record = await readStored(PARENTS, info.id);
+  t.notOk("signedApproval" in record, "the record has no plaintext approval");
+  t.notOk("key" in record || "key" in record.encryptedApproval, "the approval key is stored separately");
+  const { iv, ciphertext } = record.encryptedApproval;
+  t.equal(iv.byteLength, 12);
+  t.ok(ciphertext instanceof ArrayBuffer && ciphertext.byteLength > 0);
+  const key: CryptoKey = await readStored(APPROVAL_KEYS, info.id);
+  t.deepEqual(key.algorithm, { name: "AES-GCM", length: 256 });
+  t.equal(key.extractable, false);
+  const cipher = { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(info.id) };
+  const plaintext = new Uint8Array(await crypto.subtle.decrypt(cipher, key, ciphertext));
+  t.ok(plaintext.byteLength > 0, "the parent ID authenticates the encrypted approval");
+  plaintext.fill(0);
+
+  await sdk.parentGrantStore.save(parent);
+  const replacement = await readStored(PARENTS, info.id);
+  t.notDeepEqual(replacement.encryptedApproval.iv, iv, "each save uses a fresh IV");
+  const replacementKey: CryptoKey = await readStored(APPROVAL_KEYS, info.id);
+  const wrongKey = await expectRejection(crypto.subtle.decrypt(cipher, replacementKey, ciphertext));
+  t.equal((wrongKey as DOMException).name, "OperationError", "each save uses a fresh AES key");
+
   const listed = (await sdk.parentGrantStore.list()).find((item) => item.id === info.id)!;
   t.deepEqual(listed.capabilities, ["/pub/:rwe", "/priv/:rwe"]);
 
-  for (const secret of ["signedApproval", "parentGrant", "keyId"]) {
+  for (const secret of ["signedApproval", "encryptedApproval", "parentGrant", "keyId"]) {
     t.notOk(secret in listed, `listings leave out ${secret}`);
   }
 
   const restarted = Pubky.testnet();
   const restored = await restarted.parentGrantStore.restore(info.id);
   t.deepEqual(restored.encryptionKeys.scopes, ["/pub/", "/priv/"]);
+  t.deepEqual(restored.encryptionKeys.deriveForPath("/priv/chat/message"),
+    parent.encryptionKeys.deriveForPath("/priv/chat/message"), "the restored file key matches");
   await issue(restored);
   t.end();
 });
@@ -239,8 +294,51 @@ test("ParentGrantStore: clearing browser sessions keeps saved parents usable", a
     "InvalidInput",
     /./,
   );
+  const record = await readStored(PARENTS, id);
+  await parentStoreRequest(PARENTS, "readwrite", store => store.put({ ...record, createdAt: null }));
   await sdk.parentGrantStore.signOut(id);
+  t.equal(await readStored(PARENTS, id), undefined, "damaged display metadata still allows revocation");
+  t.end();
+});
+
+test("ParentGrantStore: sign-out waits for a save that already checked the signing key", async (t) => {
+  if (typeof indexedDB === "undefined") {
+    t.comment("browser-only store test skipped without IndexedDB");
+    t.end();
+    return;
+  }
+  const { sdk, parent } = await userWithParent();
+  const { id } = await sdk.parentGrantStore.save(parent);
+  const encrypt = crypto.subtle.encrypt;
+  let signOut: Promise<void> | undefined;
+  crypto.subtle.encrypt = async function(...args) {
+    // Pause save after its signing-key check until sign-out queues for final deletion.
+    const request = navigator.locks.request;
+    const queued = new Promise<string>(resolve => {
+      navigator.locks.request = function(name: string, ...options: unknown[]) {
+        const result = Reflect.apply(request, this, [name, ...options]);
+        resolve(name);
+        return result;
+      };
+    });
+    try {
+      signOut = sdk.parentGrantStore.signOut(id);
+      const lockName = await Promise.race([queued, signOut]);
+      const { pending } = await navigator.locks.query();
+      t.ok(lockName && pending?.some(lock => lock.name === lockName), "final deletion waits for the save's lock");
+    } finally {
+      navigator.locks.request = request;
+    }
+    return encrypt.apply(this, args);
+  };
+  try {
+    assertRejects(t, await expectRejection(sdk.parentGrantStore.save(parent)), "ClientStateError", /signed out/);
+  } finally {
+    crypto.subtle.encrypt = encrypt;
+    await signOut;
+  }
   t.notOk((await sdk.parentGrantStore.list()).some((item) => item.id === id), "the record is gone");
+  t.equal(await readStored(APPROVAL_KEYS, id), undefined, "a completed sign-out leaves no AES key");
   t.end();
 });
 
@@ -261,15 +359,16 @@ test("ParentGrantStore: signing out retries and leaves delivered keys alone", as
   globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     if (request.method === "DELETE" && new URL(request.url).pathname === "/auth/grant/session") {
+      const record = await readStored(PARENTS, id);
+      t.ok(record.logoutPending, "the parent is pending before network revocation");
+      t.notOk("encryptedApproval" in record, "the ciphertext is already gone");
+      t.equal(await readStored(APPROVAL_KEYS, id), undefined, "the AES key is already gone");
       throw new TypeError("Simulated connection failure");
     }
     return await realFetch(input, init);
   };
   try {
-    // A save racing the sign-out can't undo it, whichever of the two lands first.
-    const racingSave = sdk.parentGrantStore.save(parent).catch(() => {});
     await expectRejection(sdk.parentGrantStore.signOut(id));
-    await racingSave;
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -283,10 +382,13 @@ test("ParentGrantStore: signing out retries and leaves delivered keys alone", as
 
   // Saving again can't bring the parent back while its sign-out is pending.
   assertRejects(t, await expectRejection(sdk.parentGrantStore.save(parent)), "ClientStateError", /signed out/);
+  t.equal(await readStored(APPROVAL_KEYS, id), undefined, "the rejected save leaves no AES key");
 
   // Restoring finishes the sign-out instead of enabling issuance.
+  const record = await readStored(PARENTS, id);
+  await parentStoreRequest(PARENTS, "readwrite", store => store.put({ ...record, capabilities: null }));
   assertRejects(t, await expectRejection(sdk.parentGrantStore.restore(id)), "ClientStateError", /signed out/);
-  t.notOk((await sdk.parentGrantStore.list()).some((item) => item.id === id), "the record is gone");
+  t.equal(await readStored(PARENTS, id), undefined, "the retry removes the pending record");
   assertPubkyError(t, await expectRejection(issue(parent)), "the parent's key is deleted");
 
   // Keys already handed out can't be taken back.
@@ -303,57 +405,78 @@ test("ParentGrantStore: rejects missing keys and corrupted records", async (t) =
   const { sdk, parent } = await userWithParent();
   const { id } = await sdk.parentGrantStore.save(parent);
 
-  const edit = (dbName: string, storeName: string, change: (store: IDBObjectStore) => void) =>
-    new Promise<void>((resolve, reject) => {
-      const open = indexedDB.open(dbName);
-      open.onerror = () => reject(open.error);
-      open.onsuccess = () => {
-        const tx = open.result.transaction(storeName, "readwrite");
-        change(tx.objectStore(storeName));
-        tx.oncomplete = () => {
-          open.result.close();
-          resolve();
-        };
-        tx.onerror = () => reject(tx.error);
-      };
-    });
-  const tamper = (mutate: (record: Record<string, unknown>) => void) =>
-    edit("pubky-delegated-auth", "parentGrants", (store) => {
-      const get = store.get(id);
-      get.onsuccess = () => {
-        mutate(get.result);
-        store.put(get.result);
-      };
-    });
-
-  // A changed approval fails its signature check, and no issuance is enabled.
-  let original = "";
-  await tamper((record) => {
-    original = record.signedApproval as string;
-    const [header, payload, signature] = original.split(".");
-    record.signedApproval = `${header}.${payload}x.${signature}`;
-  });
-  assertPubkyError(t, await expectRejection(sdk.parentGrantStore.restore(id)));
+  const original = await readStored(PARENTS, id);
+  const put = (record: Record<string, unknown>) =>
+    parentStoreRequest(PARENTS, "readwrite", store => store.put(record));
+  const restoreError = () => expectRejection(sdk.parentGrantStore.restore(id));
+  const changed = structuredClone(original);
+  new Uint8Array(changed.encryptedApproval.ciphertext)[0] ^= 1;
+  await put(changed);
+  assertRejects(t, await restoreError(), "ClientStateError", /Invalid stored parent grant/);
 
   // A record that names another identity is rejected too.
-  await tamper((record) => {
-    record.signedApproval = original;
-    record.publicKey = Keypair.random().publicKey.z32();
-  });
-  assertRejects(t, await expectRejection(sdk.parentGrantStore.restore(id)), "ClientStateError", /Invalid stored parent grant/);
+  await put({ ...original, publicKey: Keypair.random().publicKey.z32() });
+  assertRejects(t, await restoreError(), "ClientStateError", /Invalid stored parent grant/);
+  await put({ ...original, logoutPending: "invalid" });
+  assertRejects(t, await restoreError(), "ClientStateError", /Invalid stored parent grant/);
 
-  // A missing signing key can't be used, and the record can still be removed.
-  await tamper((record) => {
-    record.publicKey = parent.publicKey.z32();
-    record.keyId = "missing-key";
-  });
-  assertRejects(t, await expectRejection(sdk.parentGrantStore.restore(id)), "ClientStateError", /not found/);
+  // Each credential needs both its approval key and its signing key.
+  await put(original);
+  await parentStoreRequest(APPROVAL_KEYS, "readwrite", store => store.delete(id));
+  assertRejects(t, await restoreError(), "ClientStateError", /Invalid stored parent grant/);
+  await sdk.parentGrantStore.save(parent);
+  const saved = await readStored(PARENTS, id);
+  await put({ ...saved, keyId: "missing-key" });
+  assertRejects(t, await restoreError(), "ClientStateError", /not found/);
+  for (const invalid of [{ keyId: null }, { parentGrant: "unreadable" }]) {
+    await put({ ...saved, ...invalid });
+    assertRejects(t, await expectRejection(sdk.parentGrantStore.signOut(id)), "ClientStateError", /Invalid stored parent grant/);
+    const kept = await readStored(PARENTS, id);
+    t.equal(kept.logoutPending, false);
+    t.deepEqual(kept.encryptedApproval, saved.encryptedApproval, "invalid revocation data leaves the approval intact");
+    t.ok(await readStored(APPROVAL_KEYS, id), "the approval key is intact");
+  }
   await sdk.parentGrantStore.remove(id);
-  assertRejects(t, await expectRejection(sdk.parentGrantStore.restore(id)), "ClientStateError", /not found/);
+  t.equal(await readStored(APPROVAL_KEYS, id), undefined, "removal deletes the approval key");
+  assertRejects(t, await expectRejection(sdk.parentGrantStore.save(parent)), "ClientStateError", /not found/);
+  assertRejects(t, await restoreError(), "ClientStateError", /not found/);
 
   // A record this version can't read is left out of listings instead of breaking them.
-  await edit("pubky-delegated-auth", "parentGrants", (store) => store.put({ id: "unreadable" }));
+  await put({ id: "unreadable" });
   t.notOk((await sdk.parentGrantStore.list()).some((item) => item.id === "unreadable"));
-  await edit("pubky-delegated-auth", "parentGrants", (store) => store.delete("unreadable"));
+  await sdk.parentGrantStore.remove("unreadable");
+  t.equal(await readStored(PARENTS, "unreadable"), undefined);
+  assertRejects(t, await expectRejection(sdk.parentGrantStore.remove("unreadable")), "ClientStateError", /not found/);
   t.end();
+});
+
+test("ParentGrantStore: stalled signing-key opens and queued parent locks time out", { skip: typeof indexedDB === "undefined" }, async (t) => {
+  const { sdk, parent } = await userWithParent();
+  const store = sdk.parentGrantStore;
+  const { id } = await store.save(parent);
+  t.timeoutAfter(35_000);
+  const open = indexedDB.open;
+  // A queued open receives no events until the upgrade ahead of it finishes.
+  const queuedOpen = new EventTarget() as IDBOpenDBRequest;
+  t.teardown(() => {
+    indexedDB.open = open;
+    queuedOpen.onerror?.call(queuedOpen, new Event("error"));
+  });
+  indexedDB.open = function(name, version) {
+    if (name !== "pubky-auth") return open.call(this, name, version);
+    indexedDB.open = open;
+    return queuedOpen;
+  };
+  assertRejects(t, await expectRejection(store.save(parent)), "ClientStateError", /key store timed out/i);
+
+  let unlock!: () => void;
+  const hold = new Promise<void>(resolve => { unlock = resolve; });
+  t.teardown(unlock);
+  const held = navigator.locks.request(`pubky-parent-grant:${id}`, () => hold);
+  assertRejects(t, await expectRejection(store.signOut(id)), "ClientStateError", /lock timed out/i);
+  t.ok((await readStored(PARENTS, id)).logoutPending, "sign-out can retry the pending cleanup");
+  unlock();
+  await held;
+  await store.signOut(id);
+  t.equal(await readStored(PARENTS, id), undefined, "retry finishes cleanup after the lock is released");
 });

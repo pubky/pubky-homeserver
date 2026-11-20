@@ -20,7 +20,7 @@ const PUBKY_GRANT_KEYS_DB_VERSION = 2;
 const PUBKY_GRANT_KEYS_STORE_NAME = "delegatedGrantKeys";
 const PUBKY_GRANT_KEYS_SESSION_STORE_NAME = "storedSessions";
 const PUBKY_GRANT_KEYS_REDIRECT_STORE_NAME = "redirectFlows";
-const PUBKY_GRANT_KEYS_BLOCKED_TIMEOUT_MS = 10000;
+const PUBKY_GRANT_KEYS_OPEN_TIMEOUT_MS = 10_000;
 let canUseDelegationPromise;
 const TEST_CAN_USE_DELEGATION_OVERRIDE = "__pubkyGrantCanUseDelegationOverride";
 
@@ -43,7 +43,7 @@ function requireBrowserCrypto() {
 }
 
 function contextualError(message, cause) {
-  const error = new Error(message, { cause });
+  const error = new Error(cause?.name === "TimeoutError" ? cause.message : message, { cause });
   if (cause !== undefined && error.cause === undefined) {
     error.cause = cause;
   }
@@ -92,7 +92,12 @@ export async function __pubkyGrantCanUseDelegation() {
         });
         await deleteRecord(keyId);
         return true;
-      } catch (_error) {
+      } catch (error) {
+        // Another tab can unblock the key store. Let the next sign-in probe again.
+        if (error?.cause?.name === "TimeoutError") {
+          canUseDelegationPromise = undefined;
+          throw error;
+        }
         return false;
       }
     })();
@@ -110,8 +115,15 @@ function openGrantKeyDb() {
   requireBrowserCrypto();
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(PUBKY_GRANT_KEYS_DB_NAME, PUBKY_GRANT_KEYS_DB_VERSION);
-    let settled = false;
-    let blocked;
+    // Opens queued behind a blocked upgrade do not receive their own blocked event.
+    const timeout = setTimeout(() => {
+      request.onupgradeneeded = () => request.transaction.abort();
+      request.onsuccess = () => request.result.close();
+      reject(new DOMException(
+        "Opening the delegated grant key store timed out. Close or reload other tabs using this site and retry.",
+        "TimeoutError",
+      ));
+    }, PUBKY_GRANT_KEYS_OPEN_TIMEOUT_MS);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(PUBKY_GRANT_KEYS_STORE_NAME)) {
@@ -124,31 +136,14 @@ function openGrantKeyDb() {
         db.createObjectStore(PUBKY_GRANT_KEYS_REDIRECT_STORE_NAME, { keyPath: "callbackUrl" });
       }
     };
-    // A tab with the previous version open blocks the upgrade; see openSessionStoreDb.
-    request.onblocked = () => {
-      if (blocked === undefined) blocked = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error(
-          "Another tab of this site is using an older Pubky SDK. Reload or close it to finish the browser storage upgrade.",
-        ));
-      }, PUBKY_GRANT_KEYS_BLOCKED_TIMEOUT_MS);
-    };
     request.onsuccess = () => {
-      clearTimeout(blocked);
+      clearTimeout(timeout);
       const db = request.result;
-      if (settled) {
-        db.close();
-        return;
-      }
-      settled = true;
       db.onversionchange = () => db.close();
       resolve(db);
     };
     request.onerror = () => {
-      clearTimeout(blocked);
-      if (settled) return;
-      settled = true;
+      clearTimeout(timeout);
       reject(request.error ?? new Error("Opening delegated grant key store failed."));
     };
   });
@@ -352,11 +347,11 @@ impl BrowserGrantKeyStore {
     }
 
     /// Return whether this runtime can create, persist, and use browser-held Ed25519 keys.
-    pub(crate) async fn can_use_delegation() -> bool {
-        match JsFuture::from(js_can_use_delegation()).await {
-            Ok(value) => value.as_bool().unwrap_or(false),
-            Err(_) => false,
-        }
+    pub(crate) async fn can_use_delegation() -> JsResult<bool> {
+        let value = JsFuture::from(js_can_use_delegation())
+            .await
+            .map_err(js_error)?;
+        Ok(value.as_bool().unwrap_or(false))
     }
 
     /// Ensure a browser-held delegated grant key exists and return its key id and public key.

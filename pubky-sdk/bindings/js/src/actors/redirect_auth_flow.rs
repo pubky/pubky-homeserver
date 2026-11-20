@@ -460,7 +460,7 @@ pub(crate) async fn start(
             "The callback URL must be on this page's origin.",
         ));
     }
-    if !BrowserGrantKeyStore::can_use_delegation().await {
+    if !BrowserGrantKeyStore::can_use_delegation().await? {
         return Err(PubkyError::new(
             PubkyErrorName::ClientStateError,
             "Redirect sign-in needs a browser-held Ed25519 key in a secure context.",

@@ -301,6 +301,16 @@ export function __pubkySessionAcquire(id, homeserver, exclusive) {
         mode: exclusive ? "exclusive" : "shared", signal,
       }, hold)));
 }
+export function __pubkyParentStoreAcquire(id) {
+  if (!globalThis.navigator?.locks) throw new Error("The parent grant store requires Web Locks in a secure context.");
+  const lease = {};
+  const token = acquireLock(sessionLeases, ++nextSessionLease, lease, (signal, hold) =>
+    navigator.locks.request(`pubky-parent-grant:${id}`, { signal }, hold));
+  const timeout = setTimeout(() => lease.abort.abort(new Error("Waiting for the parent grant lock timed out.")), 10_000);
+  const clear = () => clearTimeout(timeout);
+  lease.waiting.then(clear, clear);
+  return token;
+}
 export function __pubkySessionWait(token) {
   return sessionLeases.get(token).waiting;
 }
@@ -473,6 +483,8 @@ extern "C" {
         homeserver: &str,
         exclusive: bool,
     ) -> Result<u32, JsValue>;
+    #[wasm_bindgen(catch, js_name = __pubkyParentStoreAcquire)]
+    pub(crate) fn js_parent_store_acquire(id: &str) -> Result<u32, JsValue>;
     #[wasm_bindgen(js_name = __pubkySessionWait)]
     pub(crate) fn js_session_wait(token: u32) -> js_sys::Promise;
     #[wasm_bindgen(js_name = __pubkySessionRelease)]

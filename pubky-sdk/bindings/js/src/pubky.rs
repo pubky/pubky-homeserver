@@ -175,7 +175,7 @@ impl Pubky {
             )
             .await;
         }
-        if BrowserGrantKeyStore::can_use_delegation().await {
+        if let Ok(true) = BrowserGrantKeyStore::can_use_delegation().await {
             let delegated = GrantAuthFlow::start_delegated_with_client(
                 capabilities.clone(),
                 kind.clone(),
