@@ -40,6 +40,9 @@ use super::middleware::{
 };
 use super::routes::{account, events, info, root, signup_tokens, tenants, website};
 
+// Starts after client identification and any TLS handshake, and ends at request dispatch.
+const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Errors that can occur when building a `HomeserverCore`.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientServerBuildError {
@@ -158,12 +161,12 @@ impl ClientServer {
     ) -> Result<(Handle<SocketAddr>, SocketAddr)> {
         // Icann http server
         let http_listener = TcpListener::bind(context.config_toml.drive.icann_listen_socket)?;
-        http_listener.set_nonblocking(true)?;
         let http_socket = http_listener.local_addr()?;
         let http_handle = Handle::new();
         let server = axum_server::from_tcp(http_listener)?;
         tokio::spawn(
             server
+                .first_request_timeout(FIRST_REQUEST_TIMEOUT)
                 .acceptor(identity_acceptor)
                 .handle(http_handle.clone())
                 .serve(router.into_make_service())
@@ -184,7 +187,6 @@ impl ClientServer {
     ) -> Result<(Handle<SocketAddr>, SocketAddr)> {
         // Pubky tls server
         let https_listener = TcpListener::bind(context.config_toml.drive.pubky_listen_socket)?;
-        https_listener.set_nonblocking(true)?;
         let https_socket = https_listener.local_addr()?;
         let https_handle = Handle::new();
         let server = axum_server::from_tcp(https_listener)?;
@@ -193,6 +195,7 @@ impl ClientServer {
         let acceptor = pubky_tls_acceptor(tls_config, identity_acceptor);
         tokio::spawn(
             server
+                .first_request_timeout(FIRST_REQUEST_TIMEOUT)
                 .acceptor(acceptor)
                 .handle(https_handle.clone())
                 .serve(router.into_make_service())
@@ -349,6 +352,7 @@ mod tests {
     use axum_test::TestServer;
     use pubky_common::{capabilities::Capability, crypto::Keypair};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
     use tokio::task::JoinHandle;
     use tokio_rustls::{
         rustls::{
@@ -370,7 +374,7 @@ mod tests {
         shared::quota::{GlobPattern, HttpMethod, LimitKeyType, PathLimit},
     };
 
-    use super::{pubky_tls_acceptor, ClientIdentityAcceptor, RustlsConfig};
+    use super::{pubky_tls_acceptor, ClientIdentityAcceptor, RustlsConfig, FIRST_REQUEST_TIMEOUT};
 
     // Certificate verification is outside this test's scope. Raw public keys
     // must still be negotiated for the Pubky TLS handshake to succeed.
@@ -426,6 +430,28 @@ mod tests {
         .with_custom_certificate_verifier(Arc::new(AcceptAnyRawPublicKeyVerifier))
         .with_no_client_auth();
         TlsConnector::from(Arc::new(config))
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn client_listeners_close_connections_without_a_first_request() {
+        let server = ClientServer::start(AppContext::test().await).await.unwrap();
+        let mut http = TcpStream::connect(server.icann_http_socket).await.unwrap();
+        let tcp = TcpStream::connect(server.pubky_tls_socket).await.unwrap();
+        let tls = test_tls_connector()
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .unwrap();
+
+        // Observe the socket close even if TLS sends session tickets first.
+        let (mut tls_socket, _) = tls.into_inner();
+        let deadline = FIRST_REQUEST_TIMEOUT + Duration::from_secs(5);
+        tokio::time::timeout(deadline, async {
+            http.read_to_end(&mut Vec::new()).await.unwrap();
+            tls_socket.read_to_end(&mut Vec::new()).await.unwrap();
+        })
+        .await
+        .expect("both listeners should close an idle connection");
     }
 
     async fn proxied_tls_status(
@@ -494,7 +520,6 @@ mod tests {
                 .unwrap(),
             );
         let listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let socket = listener.local_addr().unwrap();
         let keypair = Keypair::random();
         let tls_config = RustlsConfig::from_config(Arc::new(keypair.to_rpk_rustls_server_config()));
