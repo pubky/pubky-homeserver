@@ -58,15 +58,14 @@ futures-util = "0.3"
 hpke = { version = "0.15", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
 # Test relays use in-memory storage; keep SQLite persistence and the CLI disabled.
 http-body-util = "0.1"
-http-relay = { version = "0.7", default-features = false }
+http-relay = { version = "0.8", default-features = false }
 httpdate = "1"
 ipnet = { version = "2", features = ["serde"] }
 js-sys = "0.3"
 log = "0.4"
 mainline = "8"
-# Separate DHT and relay request timeout setters require Pkarr 8.1 or newer.
-pkarr = { version = "8.1", default-features = false }
-pkarr-relay = { version = "2", default-features = false }
+pkarr = { version = "9", default-features = false }
+pkarr-relay = { version = "3", default-features = false }
 percent-encoding = "2"
 pubky = { path = "pubky-sdk", version = "0.18", default-features = false }
 pubky-common = { path = "pubky-common", version = "0.18" }
