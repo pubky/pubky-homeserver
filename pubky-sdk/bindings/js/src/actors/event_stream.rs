@@ -263,8 +263,9 @@ impl EventStreamBuilder {
     ///
     /// @throws {PubkyError}
     /// - `{ name: "RequestError" }` if the homeserver cannot be resolved
-    /// - `{ name: "ValidationError" }` if `live=true` and `reverse=true` (invalid combination),
-    ///   if no users were added without `allUsers()`, or if both were given
+    /// - `{ name: "RequestError" }` with `data.reason` `"InvalidRequest"` if
+    ///   `live=true` and `reverse=true` (invalid combination), if no users were
+    ///   added without `allUsers()`, or if both were given
     /// - Propagates HTTP request errors
     ///
     /// Reading the stream rejects with `{ name: "RequestError" }` and ends it:

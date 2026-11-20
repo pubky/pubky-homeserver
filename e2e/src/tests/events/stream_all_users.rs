@@ -138,9 +138,14 @@ async fn events_stream_all_users_batch_defaults_to_100_events() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut stream = response.bytes_stream().eventsource();
+    // The page must end by the server closing the stream: a timeout or a
+    // stream error is a failure, not the end of the page.
     let mut cursors = Vec::new();
-    while let Ok(Some(Ok(event))) = timeout(Duration::from_secs(10), stream.next()).await {
-        cursors.push(sse_cursor(&event.data).to_string());
+    while let Some(event) = timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("the batch should close, not stay open")
+    {
+        cursors.push(sse_cursor(&event.unwrap().data).to_string());
     }
     assert_eq!(cursors.len(), 100, "default limit for an all-users batch");
 
@@ -158,7 +163,11 @@ async fn events_stream_all_users_batch_defaults_to_100_events() {
         .unwrap();
     let mut stream = response.bytes_stream().eventsource();
     let mut remaining = 0;
-    while let Ok(Some(Ok(_))) = timeout(Duration::from_secs(10), stream.next()).await {
+    while let Some(event) = timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("the batch should close, not stay open")
+    {
+        event.unwrap();
         remaining += 1;
     }
     assert_eq!(

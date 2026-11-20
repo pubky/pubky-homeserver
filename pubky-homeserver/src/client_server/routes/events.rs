@@ -30,8 +30,8 @@ use crate::{
         AppState,
     },
     constants::{PRIVATE_ROOT, PUBLIC_ROOT},
-    persistence::sql::events::{EventCursor, EventEntity, PathFilter},
-    services::events_service::{EventStreamFilter, EventStreamQuery, Resume},
+    persistence::sql::events::{EventEntity, PathFilter},
+    services::events_service::{parse_cursor, EventStreamFilter, EventStreamQuery, Resume},
     shared::{webdav::StoragePath, HttpError, HttpResult},
 };
 
@@ -106,10 +106,7 @@ pub async fn feed(
     State(state): State<AppState>,
     params: ListQueryParams,
 ) -> HttpResult<impl IntoResponse> {
-    let cursor = params.cursor.as_deref().unwrap_or("0");
-    let cursor = cursor
-        .parse::<EventCursor>()
-        .map_err(|_| HttpError::bad_request(format!("Invalid cursor: {cursor}")))?;
+    let cursor = parse_cursor(params.cursor.as_deref().unwrap_or("0"))?;
 
     let events = state
         .context

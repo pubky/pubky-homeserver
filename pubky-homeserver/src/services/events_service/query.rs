@@ -242,10 +242,14 @@ fn parse_public_key(value: &str) -> Result<PublicKey, EventStreamError> {
         .map_err(|_| EventStreamError::InvalidPublicKey(value.to_string()))
 }
 
-fn parse_cursor(value: &str) -> Result<EventCursor, EventStreamError> {
+/// Parse a numeric event id. Ids are a Postgres `BIGINT`, so a value above
+/// `i64::MAX` can match no event, and binding one panics in the query builder.
+pub(crate) fn parse_cursor(value: &str) -> Result<EventCursor, EventStreamError> {
     value
-        .parse()
-        .map_err(|_| EventStreamError::InvalidCursor(value.to_string()))
+        .parse::<EventCursor>()
+        .ok()
+        .filter(|cursor| i64::try_from(cursor.id()).is_ok())
+        .ok_or_else(|| EventStreamError::InvalidCursor(value.to_string()))
 }
 
 fn parse_path(value: &str) -> Result<StoragePath, EventStreamError> {
@@ -295,6 +299,13 @@ mod tests {
     fn global_cursor_with_optional_user_filter() {
         let u = pk();
         assert_eq!(
+            parse("cursor=9223372036854775807").resume,
+            Resume::Global {
+                cursor: Some(EventCursor::new(i64::MAX as u64)),
+                users: vec![],
+            }
+        );
+        assert_eq!(
             parse("cursor=42").resume,
             Resume::Global {
                 cursor: Some(EventCursor::new(42)),
@@ -337,8 +348,13 @@ mod tests {
 
     #[test]
     fn rejects_non_numeric_cursors() {
-        // Legacy timestamp cursors and out-of-range ids are rejected alike.
-        for cursor in ["yyyyyyyyyyyyy", "-1", "18446744073709551616"] {
+        // Legacy timestamp cursors and ids outside the BIGINT range are rejected alike.
+        for cursor in [
+            "yyyyyyyyyyyyy",
+            "-1",
+            "9223372036854775808",
+            "18446744073709551616",
+        ] {
             assert_eq!(
                 message(&format!("user={}:{cursor}", pk().z32())),
                 format!("Invalid cursor: {cursor}")

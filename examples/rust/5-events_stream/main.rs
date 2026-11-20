@@ -21,7 +21,9 @@ struct Cli {
     /// Format: cursor1,cursor2,... (must match number of users if provided)
     #[arg(long)]
     cursors: Option<String>,
-    /// Maximum number of events to fetch (omit for unlimited)
+    /// Maximum number of events to fetch. Omit for unlimited, except with
+    /// `--all-users` and no `--live`, which stops after 100 events: pass the
+    /// last printed cursor as `--cursor` to fetch the next page
     #[arg(short, long)]
     limit: Option<u16>,
     /// Enable live streaming mode

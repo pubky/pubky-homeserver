@@ -331,6 +331,8 @@ async fn event_apis_validate_numeric_cursors() {
         ("1", StatusCode::OK, &event_uris[1..]),
         // A legacy z-base-32 timestamp cursor.
         ("yyyyyyyyyyyyy", StatusCode::BAD_REQUEST, &[]),
+        // One past the largest event id Postgres can hold.
+        ("9223372036854775808", StatusCode::BAD_REQUEST, &[]),
     ] {
         let requests = [
             (
