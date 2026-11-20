@@ -214,9 +214,14 @@ async fn events_stream_all_users_never_shows_private_writes() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut stream = response.bytes_stream().eventsource();
+    // The batch must end by the server closing the stream: a timeout or a
+    // stream error is a failure, not the end of the batch.
     let mut seen = Vec::new();
-    while let Ok(Some(Ok(event))) = timeout(Duration::from_secs(10), stream.next()).await {
-        seen.push(event.data);
+    while let Some(event) = timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("the batch should close, not stay open")
+    {
+        seen.push(event.unwrap().data);
     }
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert!(seen[0].contains("/pub/note.txt"), "{seen:?}");
@@ -302,9 +307,14 @@ async fn events_stream_global_cursor_user_filter_excludes_other_users() {
             let response = client.request(Method::GET, &url).send().await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let mut stream = response.bytes_stream().eventsource();
+            // Clean EOF only: a hang or a body error must not pass for an
+            // empty result.
             let mut data = Vec::new();
-            while let Ok(Some(Ok(event))) = timeout(Duration::from_secs(10), stream.next()).await {
-                data.push(event.data);
+            while let Some(event) = timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("the batch should close, not stay open")
+            {
+                data.push(event.unwrap().data);
             }
             data
         }

@@ -698,9 +698,8 @@ async fn admin_event_stream_resumes_per_user() {
 
     let mut testnet = Testnet::new().await.unwrap();
     let pubky = testnet.sdk().unwrap();
-    let mock_dir = MockDataDir::new(config, Some(Keypair::random())).unwrap();
     let server = testnet
-        .create_homeserver_app_with_mock(mock_dir)
+        .create_homeserver_with(config, Keypair::random())
         .await
         .unwrap();
     let admin_socket = server
