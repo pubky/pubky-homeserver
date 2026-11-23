@@ -4,7 +4,6 @@ mod listing;
 mod locks;
 mod objects;
 mod quotas;
-mod upload_limits;
 
 use super::build_full_testnet;
 use bytes::Bytes;
