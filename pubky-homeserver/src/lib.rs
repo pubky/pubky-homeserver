@@ -28,7 +28,6 @@ pub mod tracing;
 pub use admin_server::{AdminServer, AdminServerBuildError};
 pub use app_context::{AppContext, AppContextBuildError};
 pub use client_server::{ClientServer, ClientServerBuildError};
-pub use constants::MAX_UPLOAD_BYTES;
 pub use data_directory::{
     storage_config, AdminToml, ClientIdentityToml, ConfigReadError, ConfigToml, LoggingToml,
     MetricsToml, PersistentDataDir,
