@@ -14,3 +14,4 @@ pub mod rate_limiter;
 pub mod request_tenant;
 pub mod storage_metrics;
 pub mod trace;
+pub(super) mod upload_idle_timeout;

@@ -10,6 +10,7 @@ pub(crate) mod gcs_test_bucket;
 mod test_storage;
 mod versioned;
 
+pub(crate) use super::opendal_service::FILE_SYSTEM_STAGING_DIR;
 pub(crate) use counting_reads::CountingReads;
 #[cfg(feature = "storage-gcs")]
 pub(crate) use gcs_test_bucket::TestBucket;

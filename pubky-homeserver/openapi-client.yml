@@ -825,6 +825,8 @@ paths:
             Session user does not match `user_z32`, the session lacks write
             capability for the path, the path is outside `pub/` and `priv/`,
             or the user account is disabled.
+        '408':
+          description: The server waited 60 seconds for upload data and discarded the upload.
         '409':
           description: File/folder path collision, or the file changed since the write was prepared (see Locking); read it again and retry.
         '412':
@@ -1111,6 +1113,8 @@ paths:
           description: |
             Session user does not match target tenant, path is outside `/pub/` and
             `/priv/`, session lacks write capability for path, or user account is disabled.
+        '408':
+          description: The server waited 60 seconds for upload data and discarded the upload.
         '409':
           description: File/folder path collision, or the file changed since the write was prepared (see Locking)
         '412':
