@@ -35,7 +35,7 @@ pub fn build_storage_operators(
     let backend_operator = backend_operator(&storage_config.backend, data_directory)?;
     Ok(layer_storage_operators(
         backend_operator,
-        storage_config.default_quota_mb,
+        storage_config,
         sql_db,
         events_service,
         user_service,
@@ -106,7 +106,7 @@ pub(super) fn backend_operator(
 /// where separate instances would have independent data.
 pub(super) fn layer_storage_operators(
     backend_operator: Operator,
-    default_quota_mb: Option<u64>,
+    storage_config: &StorageToml,
     sql_db: SqlDb,
     events_service: EventsService,
     user_service: UserService,
@@ -117,17 +117,19 @@ pub(super) fn layer_storage_operators(
         user_service.clone(),
         sql_db.clone(),
         events_service.clone(),
-        default_quota_mb,
+        storage_config.default_quota_mb,
         false,
     ));
+    let user_writes = WriteFinalizationLayer::new(
+        user_service.clone(),
+        sql_db,
+        events_service,
+        storage_config.default_quota_mb,
+        true,
+    )
+    .with_upload_limit(storage_config.max_concurrent_uploads_per_user_per_replica);
     let operator = backend_operator
-        .layer(WriteFinalizationLayer::new(
-            user_service.clone(),
-            sql_db,
-            events_service,
-            default_quota_mb,
-            true,
-        ))
+        .layer(user_writes)
         .layer(WritePathLayer::new(user_service));
     (operator, admin_operator)
 }

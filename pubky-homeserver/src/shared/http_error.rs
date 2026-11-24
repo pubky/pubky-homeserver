@@ -167,6 +167,9 @@ impl From<EventStreamError> for HttpError {
 impl From<FileIoError> for HttpError {
     fn from(error: FileIoError) -> Self {
         match error {
+            FileIoError::TooManyUploads => {
+                Self::too_many_requests("Too many concurrent uploads", 1)
+            }
             FileIoError::NotFound => Self::not_found(),
             FileIoError::DiskSpaceQuotaExceeded => Self::insufficient_storage(),
             FileIoError::WritePathForbidden => {

@@ -13,6 +13,7 @@ use crate::shared::webdav::EntryPath;
 use opendal::raw::oio;
 use opendal::{Operator, Result};
 
+use super::upload_limit::UploadSlot;
 use super::{
     layer::{
         already_closed, check_no_path_collision, generation_under_lock, spawn_finalization,
@@ -51,6 +52,25 @@ impl PreparedWrite {
     }
 }
 
+/// The backend writer and its slot move together, including into background cleanup.
+struct StagedUpload<R> {
+    writer: R,
+    _slot: Option<UploadSlot>,
+}
+
+impl<R: oio::Write> StagedUpload<R> {
+    async fn abort(mut self) -> Result<()> {
+        self.writer.abort().await
+    }
+
+    /// The caller already has the reason for rejecting the upload.
+    async fn discard(self, path: &EntryPath, reason: &str) {
+        if let Err(error) = self.abort().await {
+            tracing::warn!(%path, %error, "Failed to abort {reason} upload");
+        }
+    }
+}
+
 /// Writer that commits entry metadata, its event, and quota accounting together.
 ///
 /// Closing finalizes on a task of its own, so a caller dropped mid-close (a
@@ -58,9 +78,8 @@ impl PreparedWrite {
 /// before it is closed or aborted discards its staged bytes on a spawned task,
 /// so a disconnect mid-upload leaves nothing behind either.
 pub struct WriteFinalizationWriter<R: oio::Write + 'static> {
-    /// `None` once the backend writer has been handed to the finalization task
-    /// or aborted.
-    inner: Option<R>,
+    /// Taken once, by close, abort, or disconnect cleanup.
+    upload: Option<StagedUpload<R>>,
     /// The backend, to read the object's generation from before publishing.
     backend: Operator,
     finalizer: Arc<Finalizer>,
@@ -70,13 +89,17 @@ pub struct WriteFinalizationWriter<R: oio::Write + 'static> {
 
 impl<R: oio::Write + 'static> WriteFinalizationWriter<R> {
     pub(super) fn new(
-        inner: R,
+        writer: R,
         backend: Operator,
         finalizer: Arc<Finalizer>,
         entry_path: EntryPath,
+        upload_slot: Option<UploadSlot>,
     ) -> Self {
         Self {
-            inner: Some(inner),
+            upload: Some(StagedUpload {
+                writer,
+                _slot: upload_slot,
+            }),
             backend,
             finalizer,
             entry_path,
@@ -87,28 +110,28 @@ impl<R: oio::Write + 'static> WriteFinalizationWriter<R> {
 
 impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
     async fn write(&mut self, bs: opendal::Buffer) -> Result<()> {
-        let inner = self
-            .inner
+        let upload = self
+            .upload
             .as_mut()
             .ok_or_else(|| already_closed("Writer"))?;
         self.metadata_builder.update(&bs.to_vec());
-        inner.write(bs).await
+        upload.writer.write(bs).await
     }
 
     /// After a failed close there is nothing left to abort: the finalization
     /// already discarded the staged bytes if the failure came before
     /// publication, and must not touch them if it came after.
     async fn abort(&mut self) -> Result<()> {
-        match self.inner.take() {
-            Some(mut inner) => inner.abort().await,
-            None => Ok(()),
-        }
+        let Some(upload) = self.upload.take() else {
+            return Ok(());
+        };
+        spawn_finalization(upload.abort()).await
     }
 
     /// Publish the staged bytes and commit their entry together. An upload
     /// that fails before publication is aborted here, see [`WriteFailure`].
     async fn close(&mut self) -> Result<opendal::Metadata> {
-        let mut inner = self.inner.take().ok_or_else(|| already_closed("Writer"))?;
+        let mut upload = self.upload.take().ok_or_else(|| already_closed("Writer"))?;
         self.metadata_builder
             .guess_mime_type_from_path(self.entry_path.path().as_str());
         let file_metadata = self.metadata_builder.clone().finalize();
@@ -117,12 +140,12 @@ impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
         let entry_path = self.entry_path.clone();
         spawn_finalization(async move {
             match finalizer
-                .finalize_write(&mut inner, &backend, &entry_path, &file_metadata)
+                .finalize_write(&mut upload.writer, &backend, &entry_path, &file_metadata)
                 .await
             {
                 Ok(metadata) => Ok(metadata),
                 Err(WriteFailure::BeforePublication(error)) => {
-                    abort_unpublished_upload(&mut inner, &entry_path, "rejected").await;
+                    upload.discard(&entry_path, "rejected").await;
                     Err(error)
                 }
                 Err(WriteFailure::AfterPublication(error)) => Err(error),
@@ -134,7 +157,7 @@ impl<R: oio::Write + 'static> oio::Write for WriteFinalizationWriter<R> {
 
 impl<R: oio::Write + 'static> Drop for WriteFinalizationWriter<R> {
     fn drop(&mut self) {
-        let Some(mut inner) = self.inner.take() else {
+        let Some(upload) = self.upload.take() else {
             return;
         };
         let entry_path = self.entry_path.clone();
@@ -143,20 +166,8 @@ impl<R: oio::Write + 'static> Drop for WriteFinalizationWriter<R> {
             return;
         };
         runtime.spawn(async move {
-            abort_unpublished_upload(&mut inner, &entry_path, "dropped").await;
+            upload.discard(&entry_path, "dropped").await;
         });
-    }
-}
-
-/// Discard the staged bytes of an upload that will not be published. The
-/// caller reports why, so a failed cleanup is only logged.
-async fn abort_unpublished_upload<R: oio::Write>(
-    backend_writer: &mut R,
-    entry_path: &EntryPath,
-    reason: &str,
-) {
-    if let Err(error) = backend_writer.abort().await {
-        tracing::warn!(path = %entry_path, %error, "Failed to abort {reason} upload");
     }
 }
 
@@ -358,7 +369,7 @@ impl Finalizer {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
     use pubky_common::crypto::Keypair;
     use tokio::sync::Barrier;
@@ -367,12 +378,12 @@ mod tests {
     use crate::persistence::sql::{entry::EntryRepository, entry_lock::EntryLockRepository, SqlDb};
     use crate::services::user_service::FILE_METADATA_SIZE;
     use crate::shared::webdav::{EntryPath, StoragePath};
+    use crate::AppContext;
 
     use super::super::layer::test_support::{
-        all_events, backend_throttle, create_user, install_events_insert_trigger,
-        install_slow_event_insert, memory_backend, staged_count, test_finalizer, test_fs_operator,
-        test_operator, test_user_service, user_usage, wait_for_slow_event_insert,
-        wait_for_staged_count, wait_until,
+        all_events, backend_throttle, create_user, install_events_insert_trigger, memory_backend,
+        staged_count, test_finalizer, test_fs_operator, test_operator, test_user_service,
+        user_usage, wait_for_slow_event_insert, wait_for_staged_count, wait_until,
     };
     use super::*;
 
@@ -407,6 +418,7 @@ mod tests {
             memory_backend(),
             Arc::new(test_finalizer(&db)),
             entry_path.clone(),
+            None,
         );
         oio::Write::write(&mut writer, vec![1u8; 10].into())
             .await
@@ -432,28 +444,44 @@ mod tests {
     /// published blob and the entry row would disagree.
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn write_finalization_completes_after_the_caller_is_dropped() {
-        let db = SqlDb::test().await;
-        let operator = test_operator(&db);
-        let pubkey = create_user(&db).await;
-        let entry_path = EntryPath::new(pubkey, StoragePath::new("/test.txt").unwrap());
-        install_slow_event_insert(&db).await;
+    async fn disconnected_upload_keeps_its_slot_until_finalization_completes() {
+        let context = AppContext::test_with_config(|config| {
+            config.storage.max_concurrent_uploads_per_user_per_replica = NonZeroUsize::MIN;
+        })
+        .await;
+        let db = &context.sql_db;
+        let operator = &context.file_service.opendal.operator;
+        let pubkey = create_user(db).await;
+        let entry_path = EntryPath::new(pubkey, StoragePath::new("/pub/test.txt").unwrap());
+        // Hold publication at the event insert until we've checked the slot.
+        let mut gate = db.pool().begin().await.unwrap();
+        sqlx::query("LOCK TABLE events IN SHARE MODE")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
 
         let write = {
             let (operator, path) = (operator.clone(), entry_path.as_str().to_string());
             tokio::spawn(async move { operator.write(&path, b"committed".to_vec()).await })
         };
-        wait_for_slow_event_insert(&db).await;
+        wait_for_slow_event_insert(db).await;
         write.abort();
         assert!(write.await.unwrap_err().is_cancelled());
 
-        let entry = wait_for_entry(&db, &entry_path).await;
+        let next_upload = operator
+            .writer(entry_path.as_str())
+            .await
+            .map_err(FileIoError::from);
+        assert!(matches!(next_upload, Err(FileIoError::TooManyUploads)));
+        gate.commit().await.unwrap();
+
+        let entry = wait_for_entry(db, &entry_path).await;
         assert_eq!(entry.content_length, 9);
         assert_eq!(
             operator.read(entry_path.as_str()).await.unwrap().to_vec(),
             b"committed"
         );
-        assert_eq!(all_events(&db).await.len(), 1);
+        assert_eq!(all_events(db).await.len(), 1);
     }
 
     async fn wait_for_entry(db: &SqlDb, path: &EntryPath) -> EntryEntity {

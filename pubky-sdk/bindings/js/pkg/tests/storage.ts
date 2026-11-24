@@ -371,20 +371,21 @@ test("list shallow under /pub/", async (t) => {
   const session = await signer.signin("storage.test");
 
   const pubky = session.info.publicKey.z32();
-  const put = (p: Path) => session.storage.putBytes(p, new Uint8Array());
-
-  await Promise.all([
-    put("/pub/a.com/a.txt" as Path),
-    put("/pub/example.com/a.txt" as Path),
-    put("/pub/example.com/b.txt" as Path),
-    put("/pub/example.com/c.txt" as Path),
-    put("/pub/example.com/d.txt" as Path),
-    put("/pub/example.con/d.txt" as Path),
-    put("/pub/example.con-file" as Path),
-    put("/pub/file" as Path),
-    put("/pub/file2" as Path),
-    put("/pub/z.com/a.txt" as Path),
-  ]);
+  const files: Path[] = [
+    "/pub/a.com/a.txt",
+    "/pub/example.com/a.txt",
+    "/pub/example.com/b.txt",
+    "/pub/example.com/c.txt",
+    "/pub/example.com/d.txt",
+    "/pub/example.con/d.txt",
+    "/pub/example.con-file",
+    "/pub/file",
+    "/pub/file2",
+    "/pub/z.com/a.txt",
+  ];
+  for (const path of files) {
+    await session.storage.putBytes(path, new Uint8Array());
+  }
 
   const dirPath: Path = "/pub/";
 

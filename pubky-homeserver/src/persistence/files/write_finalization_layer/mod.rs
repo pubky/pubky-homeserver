@@ -3,6 +3,7 @@
 mod delete;
 mod layer;
 mod quota;
+mod upload_limit;
 mod write;
 pub(crate) mod write_lock;
 

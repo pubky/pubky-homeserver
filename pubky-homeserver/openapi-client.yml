@@ -824,7 +824,9 @@ paths:
           description: |
             Session user does not match `user_z32`, the session lacks write
             capability for the path, the path is outside `pub/` and `priv/`,
-            or the user account is disabled.
+            the account's write-path policy forbids the path, or the account
+            is disabled. The server checks this policy before reserving an
+            upload slot.
         '408':
           description: The server waited 60 seconds for upload data and discarded the upload.
         '409':
@@ -833,6 +835,16 @@ paths:
           description: The `If` header names a token that is not the live lock on this path.
         '423':
           description: The path is locked and the request carries no lock token.
+        '429':
+          description: >
+            The user has reached the concurrent upload limit on this replica,
+            the request exceeds a configured request-count limit, or the
+            storage backend is throttling writes.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
         '507':
           description: Storage quota exceeded.
     delete:
@@ -1111,8 +1123,11 @@ paths:
           description: No valid session
         '403':
           description: |
-            Session user does not match target tenant, path is outside `/pub/` and
-            `/priv/`, session lacks write capability for path, or user account is disabled.
+            Session user does not match the target tenant, the path is outside
+            `/pub/` and `/priv/`, the session lacks write capability for the
+            path, the account's write-path policy forbids the path, or the
+            account is disabled. The server checks this policy before
+            reserving an upload slot.
         '408':
           description: The server waited 60 seconds for upload data and discarded the upload.
         '409':
@@ -1121,6 +1136,16 @@ paths:
           description: The `If` header names a token that is not the live lock on this path
         '423':
           description: The path is locked and the request carries no lock token (see Locking)
+        '429':
+          description: >
+            The user has reached the concurrent upload limit on this replica,
+            the request exceeds a configured request-count limit, or the
+            storage backend is throttling writes.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
         '507':
           description: Storage quota exceeded
     delete:

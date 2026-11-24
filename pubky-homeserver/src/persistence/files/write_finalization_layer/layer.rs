@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::{future::Future, num::NonZeroUsize, sync::Arc};
 
 use crate::persistence::files::{
     layer_domain_error::LayerDomainError,
@@ -12,7 +12,9 @@ use opendal::raw::*;
 use opendal::{Capability, OperationContext, Operator, Result};
 use tracing::Instrument;
 
-use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
+use super::{
+    upload_limit::UploadLimit, write_lock, WriteFinalizationDeleter, WriteFinalizationWriter,
+};
 
 /// Keeps file entries, events, and user quotas in sync with blob writes and deletes.
 ///
@@ -27,6 +29,7 @@ use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
 /// module docs.
 #[derive(Debug, Clone)]
 pub struct WriteFinalizationLayer {
+    upload_limit: Option<Arc<UploadLimit>>,
     finalizer: Arc<Finalizer>,
 }
 
@@ -68,6 +71,7 @@ impl WriteFinalizationLayer {
         enforce_path_collisions: bool,
     ) -> Self {
         Self {
+            upload_limit: None,
             finalizer: Arc::new(Finalizer::new(
                 user_service,
                 sql_db,
@@ -76,6 +80,12 @@ impl WriteFinalizationLayer {
                 CollisionPolicy::from_enforcement(enforce_path_collisions),
             )),
         }
+    }
+
+    /// Limit simultaneous writers per user on the app-facing operator.
+    pub(crate) fn with_upload_limit(mut self, per_user: NonZeroUsize) -> Self {
+        self.upload_limit = Some(Arc::new(UploadLimit::new(per_user)));
+        self
     }
 }
 
@@ -189,6 +199,7 @@ pub(super) async fn check_no_path_collision(
 impl Layer for WriteFinalizationLayer {
     fn apply_service(&self, inner: Servicer) -> Servicer {
         Arc::new(WriteFinalizationService {
+            upload_limit: self.upload_limit.clone(),
             inner,
             finalizer: self.finalizer.clone(),
         })
@@ -197,6 +208,7 @@ impl Layer for WriteFinalizationLayer {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WriteFinalizationService {
+    upload_limit: Option<Arc<UploadLimit>>,
     inner: Servicer,
     finalizer: Arc<Finalizer>,
 }
@@ -262,12 +274,17 @@ impl Service for WriteFinalizationService {
 
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         let entry_path = EntryPath::parse_opendal(path)?;
+        let slot = match &self.upload_limit {
+            Some(limit) => Some(limit.try_acquire(entry_path.pubkey())?),
+            None => None,
+        };
         let writer = self.inner.write(ctx, entry_path.as_str(), args)?;
         let writer = WriteFinalizationWriter::new(
             writer,
             self.backend(ctx),
             self.finalizer.clone(),
             entry_path.clone(),
+            slot,
         );
         Ok(CheckedWriter::new(writer, self.collision_check(entry_path)))
     }

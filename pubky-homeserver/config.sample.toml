@@ -126,6 +126,10 @@ type = "file_system"
 # Omit for unlimited. 0 means zero storage (not unlimited).
 # default_quota_mb = 1024
 
+# Maximum simultaneous uploads for one user on this replica (positive integer).
+# Both storage PUT routes share the limit. Additional uploads receive HTTP 429.
+max_concurrent_uploads_per_user_per_replica = 4
+
 # Google Cloud Bucket
 # Files are saved in a Google Cloud Bucket.
 # type = "google_bucket"
