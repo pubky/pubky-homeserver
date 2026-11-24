@@ -23,6 +23,8 @@ pub mod lock;
 pub mod read;
 pub mod write;
 
+pub(crate) const STORAGE_ROUTE: &str = "/storage/{user_z32}/{*path}";
+
 /// The deprecated owner-relative storage route. Middleware compares it with
 /// `MatchedPath` to find requests whose raw path is a storage path.
 pub(crate) const LEGACY_STORAGE_ROUTE: &str = "/{*path}";
@@ -30,7 +32,7 @@ pub(crate) const LEGACY_STORAGE_ROUTE: &str = "/{*path}";
 pub fn router(metrics: Metrics) -> Router<AppState> {
     Router::new()
         .route(
-            "/storage/{user_z32}/{*path}",
+            STORAGE_ROUTE,
             get(read::get)
                 .head(read::head)
                 .put(write::put)

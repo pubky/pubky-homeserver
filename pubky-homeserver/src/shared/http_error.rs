@@ -1,8 +1,10 @@
 //! Server error
+use anyhow::Chain;
 use axum::{
     http::{header::RETRY_AFTER, StatusCode},
     response::IntoResponse,
 };
+use tower_http::timeout::TimeoutError;
 
 use crate::{persistence::files::FileIoError, services::events_service::EventStreamError};
 
@@ -172,6 +174,12 @@ impl From<FileIoError> for HttpError {
             }
             FileIoError::PathCollision => {
                 Self::new_with_message(StatusCode::CONFLICT, "File/folder path collision")
+            }
+            // The bandwidth limiter can wrap the original body error in another axum error.
+            FileIoError::StreamBroken(error)
+                if Chain::new(&error).any(|e| e.is::<TimeoutError>()) =>
+            {
+                Self::new_with_message(StatusCode::REQUEST_TIMEOUT, "Upload body idle timeout")
             }
             FileIoError::StreamBroken(_) => Self::bad_request("Stream broken"),
             FileIoError::BackendRateLimited(error) => {

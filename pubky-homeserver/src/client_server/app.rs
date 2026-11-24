@@ -34,6 +34,7 @@ use super::middleware::{
     rate_limiter::{BandwidthQuotaLimitLayer, RequestRateLimitLayer},
     request_tenant::RequestTenant,
     trace::with_trace_layer,
+    upload_idle_timeout,
 };
 use super::routes::{account, events, info, root, signup_tokens, tenants, website};
 
@@ -286,6 +287,8 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
         .layer(CookieManagerLayer::new())
         .layer(request_rate_limit_layer)
         .layer(AuthenticationLayer::new(auth_state.clone()))
+        // Time only reads from the client, before the bandwidth limiter delays delivery.
+        .map_request(upload_idle_timeout::apply)
         .layer(BandwidthQuotaLimitLayer::from_context(&state.context))
         // Last, so website requests marked by `website::resolve` pass every layer
         // above. Inert for other requests.

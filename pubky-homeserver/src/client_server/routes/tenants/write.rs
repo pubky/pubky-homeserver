@@ -104,3 +104,137 @@ fn content_length_from_headers(headers: &HeaderMap) -> Option<u64> {
         .parse()
         .ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{convert::Infallible, fs, future, num::NonZeroU32, time::Duration};
+
+    use axum::{
+        body::{Body, Bytes},
+        http::{header, Request, StatusCode},
+        Router,
+    };
+    use axum_test::TestServer;
+    use futures_util::{stream, StreamExt};
+    use pubky_common::{capabilities::Capability, crypto::Keypair};
+    use tokio::{
+        sync::oneshot,
+        time::{self, timeout},
+    };
+    use tower::ServiceExt;
+
+    use crate::{
+        client_server::test_utils::signup_cookie,
+        persistence::files::test_support::FILE_SYSTEM_STAGING_DIR,
+        storage_config::StorageConfigToml, AppContext, ClientServer,
+    };
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn idle_uploads_discard_staged_data_and_preserve_the_file_on_both_put_routes() {
+        let context = AppContext::test_with_config(|config| {
+            config.storage.backend = StorageConfigToml::FileSystem;
+            // Exercise the error path through the bandwidth middleware as well.
+            config.default_quotas.rate_write = Some("1mb/s".parse().unwrap());
+        })
+        .await;
+        let staging_dir = context.data_path.join(FILE_SYSTEM_STAGING_DIR);
+        let router = ClientServer::create_router(context).unwrap();
+        let server = TestServer::new(router.clone());
+        let owner = Keypair::random();
+        let cookie = signup_cookie(&server, &owner, vec![Capability::root()]).await;
+        let owner_id = owner.public_key().z32();
+        let addressed = format!("/storage/{owner_id}/pub/upload");
+
+        for path in [addressed.as_str(), "/pub/upload"] {
+            for prefix in [None, Some(Bytes::from_static(b"partial overwrite"))] {
+                server
+                    .put(&addressed)
+                    .add_header(header::COOKIE, &cookie)
+                    .text("original")
+                    .await
+                    .assert_status(StatusCode::CREATED);
+
+                let (waiting, body_polled) = oneshot::channel();
+                let stall = stream::once(async move {
+                    waiting.send(()).unwrap();
+                    future::pending().await
+                });
+                let chunks = stream::iter(prefix.map(Ok::<_, Infallible>)).chain(stall);
+                let mut request = Request::put(path).header(header::COOKIE, &cookie);
+                if path == "/pub/upload" {
+                    request = request.header("pubky-host", &owner_id);
+                }
+                let upload = request.body(Body::from_stream(chunks)).unwrap();
+                let status = upload_across_idle_interval(&router, upload, body_polled).await;
+
+                assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+                assert!(fs::read_dir(&staging_dir).unwrap().next().is_none());
+                server.get(&addressed).await.assert_text("original");
+
+                // EOF without any bytes is a valid replacement.
+                server
+                    .put(&addressed)
+                    .add_header(header::COOKIE, &cookie)
+                    .await
+                    .assert_status(StatusCode::CREATED);
+                server.get(&addressed).await.assert_text("");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn bandwidth_throttling_can_take_longer_than_the_upload_idle_timeout() {
+        let context = AppContext::test_with_config(|config| {
+            config.default_quotas.rate_write = Some("1kb/s".parse().unwrap());
+            config.default_quotas.rate_write_burst = Some(NonZeroU32::MIN);
+        })
+        .await;
+        let router = ClientServer::create_router(context).unwrap();
+        let server = TestServer::new(router.clone());
+        let owner = Keypair::random();
+        let cookie = signup_cookie(&server, &owner, vec![Capability::root()]).await;
+        let path = format!("/storage/{}/pub/upload", owner.public_key().z32());
+
+        // The limiter must wait to deliver this frame because it exceeds the burst.
+        let contents = Bytes::from(vec![b'a'; 3 * 1024]);
+        let chunk = contents.clone();
+        let (available, body_polled) = oneshot::channel();
+        let body = Body::from_stream(stream::once(async move {
+            available.send(()).unwrap();
+            Ok::<_, Infallible>(chunk)
+        }));
+        let upload = Request::put(&path)
+            .header(header::COOKIE, cookie)
+            .body(body)
+            .unwrap();
+        let status = upload_across_idle_interval(&router, upload, body_polled).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(server.get(&path).await.as_bytes(), &contents);
+    }
+
+    async fn upload_across_idle_interval(
+        router: &Router,
+        request: Request<Body>,
+        body_polled: oneshot::Receiver<()>,
+    ) -> StatusCode {
+        let upload = tokio::spawn(router.clone().oneshot(request));
+        timeout(Duration::from_secs(10), body_polled)
+            .await
+            .expect("writer should poll the body")
+            .unwrap();
+        // Jump past the deadline after the handler has opened its writer, then
+        // restore real time for filesystem cleanup and database finalization.
+        time::pause();
+        time::advance(Duration::from_secs(61)).await;
+        time::resume();
+        timeout(Duration::from_secs(10), upload)
+            .await
+            .expect("upload should finish")
+            .unwrap()
+            .unwrap()
+            .status()
+    }
+}
