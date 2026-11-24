@@ -5,8 +5,6 @@
 
 use std::fmt;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use pubky_common::crypto::PublicKey;
 use serde::{Deserialize, Deserializer};
@@ -62,17 +60,10 @@ impl std::error::Error for JwsCompactError {}
 
 // ── Key conversion ───────────────────────────────────────────────────────────
 
-/// Fixed ASN.1 prefix for Ed25519 SPKI public keys (RFC 8410).
-/// Structure: SEQUENCE { AlgorithmIdentifier { Ed25519 }, BIT STRING { pubkey } }
-const ED25519_SPKI_PREFIX: [u8; 12] = [
-    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-];
-
 /// Create a `jsonwebtoken` [`DecodingKey`] from a pubky [`PublicKey`].
 pub fn decoding_key(pubkey: &PublicKey) -> DecodingKey {
-    let pem = ed25519_pubkey_to_pem(pubkey.as_bytes());
-    DecodingKey::from_ed_pem(pem.as_bytes())
-        .expect("invariant: PEM is constructed from valid Ed25519 key bytes")
+    // For Ed25519, the AWS-LC verifier expects the raw 32-byte public key.
+    DecodingKey::from_ed_der(pubkey.as_bytes())
 }
 
 /// Create a [`Validation`] configured for EdDSA without default claim checks.
@@ -87,19 +78,6 @@ pub fn eddsa_validation() -> Validation {
     validation
 }
 
-/// Encode an Ed25519 public key as SPKI PEM.
-fn ed25519_pubkey_to_pem(pubkey: &[u8; 32]) -> String {
-    let mut der = Vec::with_capacity(ED25519_SPKI_PREFIX.len() + 32);
-    der.extend_from_slice(&ED25519_SPKI_PREFIX);
-    der.extend_from_slice(pubkey);
-
-    let b64 = STANDARD.encode(&der);
-    format!(
-        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
-        b64
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use pubky_common::{auth::jws::sign_jws, crypto::Keypair};
@@ -108,11 +86,7 @@ mod tests {
 
     #[test]
     fn pubky_common_sign_jws_round_trips_through_jsonwebtoken_decode() {
-        // The SDK signs with raw ed25519-dalek via `pubky_common::auth::jws::sign_jws`,
-        // while the homeserver verifies with `jsonwebtoken` + PEM-wrapped keys. This
-        // proves the two sides agree on the byte-level JWS Compact format (RFC 7515 +
-        // RFC 8037). If this test ever breaks, the SDK and homeserver would silently
-        // disagree on signature shape — a critical interop bug.
+        // The SDK signs with ed25519-dalek and the homeserver verifies with AWS-LC.
         let kp = Keypair::random();
         let claims = serde_json::json!({"sub": "interop", "exp": 9_999_999_999u64});
         let compact = pubky_common::auth::jws::sign_jws(&kp, "test-jws", &claims);

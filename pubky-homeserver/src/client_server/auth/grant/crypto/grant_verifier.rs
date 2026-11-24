@@ -285,6 +285,35 @@ mod tests {
     }
 
     #[test]
+    fn verifies_grant_signed_by_v0_18_0() {
+        // Signed with GrantClaims::sign at tag v0.18.0 (3b615c34), using
+        // [1; 32] and [2; 32] as the issuer and client test seeds, respectively.
+        let token = include_str!("fixtures/grant-v0.18.0.jws").trim_end();
+        let compact = JwsCompact::parse(token).unwrap();
+        // Revocation verifies the signature and token type even after expiry.
+        let claims = verify_grant_for_revocation(&compact).unwrap();
+
+        assert_eq!(
+            claims,
+            GrantClaims {
+                iss: PublicKey::try_from_z32(
+                    "tkrq8zmwb8a3m9k15csu3q17qmfgqnp9dskbrg9uq1rydpyxp7qy"
+                )
+                .unwrap(),
+                client_id: ClientId::new("fixture.example").unwrap(),
+                caps: vec!["/pub/fixture/:r".parse().unwrap()],
+                cnf: PublicKey::try_from_z32(
+                    "orhzqdiexwmi6iidktucgud63ufa5nwtsuzdxe176a8izd6jsqky"
+                )
+                .unwrap(),
+                jti: GrantId::parse("v0-18-0-fixture").unwrap(),
+                iat: 1_794_182_400,
+                exp: 1_794_186_000,
+            }
+        );
+    }
+
+    #[test]
     fn reject_wrong_signer() {
         let user_kp = Keypair::random();
         let wrong_kp = Keypair::random();
