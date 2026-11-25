@@ -1,30 +1,58 @@
-//! Counts open upload writers on one homeserver replica.
+//! Counts upload reservations on one homeserver replica.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
 };
 
+use opendal::{Operator, Writer};
 use pubky_common::crypto::PublicKey;
 
 use crate::persistence::files::layer_domain_error::LayerDomainError;
+use crate::shared::webdav::EntryPath;
+
+tokio::task_local! {
+    // OpenDAL has no argument for a reserved slot. Only writer construction
+    // runs in this scope. The finalization layer takes ownership of the slot.
+    static RESERVED_SLOT: RefCell<Option<UploadSlot>>;
+}
 
 #[derive(Debug)]
-pub(super) struct UploadLimit {
+pub(in crate::persistence::files) struct UploadLimit {
     per_user: NonZeroUsize,
     active: Mutex<HashMap<PublicKey, usize>>,
 }
 
 impl UploadLimit {
-    pub(super) fn new(per_user: NonZeroUsize) -> Self {
+    pub(in crate::persistence::files) fn new(per_user: NonZeroUsize) -> Self {
         Self {
             per_user,
             active: Mutex::default(),
         }
     }
 
-    pub(super) fn try_acquire(self: &Arc<Self>, user: &PublicKey) -> opendal::Result<UploadSlot> {
+    /// Direct operator writers acquire a slot here. HTTP uploads bring the
+    /// slot they reserved before checking the WebDAV lock.
+    pub(super) fn slot_for_writer(
+        self: &Arc<Self>,
+        user: &PublicKey,
+    ) -> opendal::Result<UploadSlot> {
+        let reserved = RESERVED_SLOT.try_with(|slot| {
+            slot.borrow_mut()
+                .take_if(|slot| Arc::ptr_eq(self, &slot.limit) && &slot.user == user)
+        });
+        match reserved {
+            Ok(Some(slot)) => Ok(slot),
+            _ => self.try_acquire(user),
+        }
+    }
+
+    pub(in crate::persistence::files) fn try_acquire(
+        self: &Arc<Self>,
+        user: &PublicKey,
+    ) -> opendal::Result<UploadSlot> {
         let mut active = self.active.lock().expect("upload counts poisoned");
         let count = active.entry(user.clone()).or_default();
         if *count >= self.per_user.get() {
@@ -43,9 +71,21 @@ impl UploadLimit {
 }
 
 /// Stays with the writer through finalization or disconnect cleanup.
-pub(super) struct UploadSlot {
+pub(in crate::persistence::files) struct UploadSlot {
     limit: Arc<UploadLimit>,
     user: PublicKey,
+}
+
+impl UploadSlot {
+    pub(in crate::persistence::files) async fn open_writer(
+        self,
+        operator: &Operator,
+        path: &EntryPath,
+    ) -> opendal::Result<Writer> {
+        RESERVED_SLOT
+            .scope(RefCell::new(Some(self)), operator.writer(path.as_str()))
+            .await
+    }
 }
 
 impl Drop for UploadSlot {

@@ -12,4 +12,5 @@ pub use delete::WriteFinalizationDeleter;
 pub(crate) use layer::test_support;
 pub use layer::WriteFinalizationLayer;
 pub(crate) use quota::{would_exceed_quota, write_bytes_delta};
+pub(in crate::persistence::files) use upload_limit::{UploadLimit, UploadSlot};
 pub use write::WriteFinalizationWriter;

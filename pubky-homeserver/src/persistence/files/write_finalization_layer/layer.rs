@@ -1,4 +1,4 @@
-use std::{future::Future, num::NonZeroUsize, sync::Arc};
+use std::{future::Future, sync::Arc};
 
 use crate::persistence::files::{
     layer_domain_error::LayerDomainError,
@@ -83,8 +83,11 @@ impl WriteFinalizationLayer {
     }
 
     /// Limit simultaneous writers per user on the app-facing operator.
-    pub(crate) fn with_upload_limit(mut self, per_user: NonZeroUsize) -> Self {
-        self.upload_limit = Some(Arc::new(UploadLimit::new(per_user)));
+    pub(in crate::persistence::files) fn with_upload_limit(
+        mut self,
+        limit: Arc<UploadLimit>,
+    ) -> Self {
+        self.upload_limit = Some(limit);
         self
     }
 }
@@ -275,7 +278,7 @@ impl Service for WriteFinalizationService {
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         let entry_path = EntryPath::parse_opendal(path)?;
         let slot = match &self.upload_limit {
-            Some(limit) => Some(limit.try_acquire(entry_path.pubkey())?),
+            Some(limit) => Some(limit.slot_for_writer(entry_path.pubkey())?),
             None => None,
         };
         let writer = self.inner.write(ctx, entry_path.as_str(), args)?;
@@ -516,8 +519,8 @@ pub(crate) mod test_support {
         install_events_insert_trigger(db, "slow_event_insert", "PERFORM pg_sleep(1);").await;
     }
 
-    /// Poll until an insert held by [`install_slow_event_insert`] is running.
-    pub(in super::super) async fn wait_for_slow_event_insert(db: &SqlDb) {
+    /// Poll until a finalization is running its event insert.
+    pub(crate) async fn wait_for_slow_event_insert(db: &SqlDb) {
         wait_for_active_query(db, "%INSERT INTO \"events\"%").await;
     }
 

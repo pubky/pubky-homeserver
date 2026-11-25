@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures_util::stream::StreamExt;
+use futures_util::TryStreamExt;
 
 use super::{authorize::authorize_write, lock::if_header_tokens};
 use crate::{
@@ -65,38 +65,25 @@ pub async fn put(
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
     let user = authorize_write(&state, &session, &entry_path, true).await?;
-    // Opening a writer reserves an upload slot before the storage layer checks the path.
+    // A forbidden path should never consume an upload slot.
     let quota = user.quota();
     if !quota.is_write_path_allowed(entry_path.path().as_str()) {
         return Err(FileIoError::WritePathForbidden.into());
     }
 
-    // Early fail: check Content-Length header against the user's storage quota
-    // so we can reject before streaming the entire body.
-    // We read from the header rather than body.size_hint() because middleware
-    // layers (e.g. bandwidth throttling) may replace the body with a stream
-    // that loses the size hint.
+    // Bandwidth middleware can erase the stream's size hint, so use the header.
+    let files = &state.context.file_service;
     let content_length = content_length_from_headers(&headers);
-    state
-        .context
-        .file_service
+    files
         .check_size_hint(&user, content_length, &entry_path)
         .await?;
 
-    // Convert body stream to the format expected by file_service
-    let body_stream = body.into_data_stream();
-    let converted_stream =
-        body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
-
-    let write = state
-        .context
-        .file_service
-        .write_stream(&entry_path, converted_stream);
-    state
-        .context
-        .lock_service
-        .run_write(&entry_path, &if_header_tokens(&headers), write)
-        .await??;
+    // Reserve capacity before the WebDAV lock check can wait on a finalizing PUT.
+    let body = body.into_data_stream().map_err(WriteStreamError::Axum);
+    let upload = files.reserve_upload(&entry_path, body)?;
+    let tokens = if_header_tokens(&headers);
+    let locks = &state.context.lock_service;
+    locks.run_write(&entry_path, &tokens, upload).await??;
     Ok((StatusCode::CREATED, ()))
 }
 

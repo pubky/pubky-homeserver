@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 #[cfg(test)]
 use crate::AppContext;
@@ -6,7 +6,8 @@ use crate::{
     persistence::{
         files::{
             staged_publish_layer::StagedPublishLayer,
-            write_finalization_layer::WriteFinalizationLayer, write_path_layer::WritePathLayer,
+            write_finalization_layer::{UploadLimit, UploadSlot, WriteFinalizationLayer},
+            write_path_layer::WritePathLayer,
         },
         sql::SqlDb,
     },
@@ -18,29 +19,9 @@ use bytes::Bytes;
 use futures_util::{stream::StreamExt, Stream};
 #[cfg(test)]
 use opendal::Buffer;
-use opendal::Operator;
+use opendal::{Operator, Writer};
 
 use super::super::{FileIoError, FileStream, WriteStreamError};
-
-/// Build storage operators with one transactional finalization layer and an
-/// app-facing operator that additionally enforces write paths and collisions,
-/// over the backend `storage_config` names, see [`layer_storage_operators`].
-pub fn build_storage_operators(
-    storage_config: &StorageToml,
-    data_directory: &Path,
-    sql_db: SqlDb,
-    events_service: EventsService,
-    user_service: UserService,
-) -> Result<(Operator, Operator), FileIoError> {
-    let backend_operator = backend_operator(&storage_config.backend, data_directory)?;
-    Ok(layer_storage_operators(
-        backend_operator,
-        storage_config,
-        sql_db,
-        events_service,
-        user_service,
-    ))
-}
 
 /// Where the filesystem backend keeps the files, under the data directory.
 const FILE_SYSTEM_FILES_DIR: &str = "data/files";
@@ -97,10 +78,9 @@ pub(super) fn backend_operator(
     Ok(operator)
 }
 
-/// The app-facing and the admin operator over `backend_operator`, in that
-/// order. Both finalize every write and delete in one transaction with its
-/// entry, events and quota; the app-facing one also enforces write paths and
-/// collisions.
+/// Build the app-facing and admin operators over the same backend. Both commit
+/// the entry, events and quota for each mutation in one transaction. The
+/// app-facing operator also enforces upload capacity, write paths and collisions.
 ///
 /// Both share `backend_operator`, which matters for backends like `InMemory`,
 /// where separate instances would have independent data.
@@ -110,7 +90,7 @@ pub(super) fn layer_storage_operators(
     sql_db: SqlDb,
     events_service: EventsService,
     user_service: UserService,
-) -> (Operator, Operator) {
+) -> OpendalService {
     // Collision checks apply only to app-facing mutations, so each operator
     // needs its own finalization layer.
     let admin_operator = backend_operator.clone().layer(WriteFinalizationLayer::new(
@@ -120,6 +100,9 @@ pub(super) fn layer_storage_operators(
         storage_config.default_quota_mb,
         false,
     ));
+    let upload_limit = Arc::new(UploadLimit::new(
+        storage_config.max_concurrent_uploads_per_user_per_replica,
+    ));
     let user_writes = WriteFinalizationLayer::new(
         user_service.clone(),
         sql_db,
@@ -127,11 +110,15 @@ pub(super) fn layer_storage_operators(
         storage_config.default_quota_mb,
         true,
     )
-    .with_upload_limit(storage_config.max_concurrent_uploads_per_user_per_replica);
+    .with_upload_limit(upload_limit.clone());
     let operator = backend_operator
         .layer(user_writes)
         .layer(WritePathLayer::new(user_service));
-    (operator, admin_operator)
+    OpendalService {
+        operator,
+        admin_operator,
+        upload_limit,
+    }
 }
 
 /// Longest any one call to the remote backend may take before it is
@@ -186,23 +173,10 @@ pub(super) fn with_own_http_client(operator: Operator) -> Operator {
     )
 }
 
-/// Build the storage operators from an `AppContext` (test-only convenience).
-#[cfg(test)]
-pub fn build_storage_operators_from_context(
-    context: &AppContext,
-) -> Result<(Operator, Operator), FileIoError> {
-    build_storage_operators(
-        &context.config_toml.storage,
-        &context.data_path,
-        context.sql_db.clone(),
-        context.events_service.clone(),
-        context.user_service.clone(),
-    )
-}
-
 /// The service to write and read files to and from the configured opendal storage.
 #[derive(Debug, Clone)]
 pub struct OpendalService {
+    upload_limit: Arc<UploadLimit>,
     /// Operator with all layers including `WritePathLayer` (for user-facing operations).
     pub(crate) operator: Operator,
     /// Operator without `WritePathLayer` (for admin operations that bypass write-path restrictions).
@@ -217,17 +191,40 @@ impl OpendalService {
         events_service: EventsService,
         user_service: UserService,
     ) -> Result<Self, FileIoError> {
-        let (operator, admin_operator) = build_storage_operators(
+        let backend = backend_operator(&storage_config.backend, data_directory)?;
+        Ok(layer_storage_operators(
+            backend,
             storage_config,
-            data_directory,
             sql_db,
             events_service,
             user_service,
-        )?;
-        Ok(Self {
-            operator,
-            admin_operator,
-        })
+        ))
+    }
+
+    /// Reserve a slot without opening a writer or touching the backend.
+    pub(in crate::persistence::files) fn reserve_slot(
+        &self,
+        path: &EntryPath,
+    ) -> Result<UploadSlot, FileIoError> {
+        Ok(self.upload_limit.try_acquire(path.pubkey())?)
+    }
+
+    /// Open the reserved writer and keep its slot through close or abort.
+    pub(in crate::persistence::files) async fn write_reserved_stream(
+        &self,
+        path: &EntryPath,
+        slot: UploadSlot,
+        body: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+    ) -> Result<(), FileIoError> {
+        let mut writer = slot.open_writer(&self.operator, path).await?;
+        if let Err(error) = write_chunks(&mut writer, body).await {
+            if let Err(abort_error) = writer.abort().await {
+                tracing::warn!(%path, %abort_error, "Failed to abort upload");
+            }
+            return Err(error);
+        }
+        writer.close().await?;
+        Ok(())
     }
 
     /// Delete a file.
@@ -240,36 +237,6 @@ impl OpendalService {
     /// Used by `FileService::admin_delete` for the admin `/webdav` REST route.
     pub async fn admin_delete(&self, path: &EntryPath) -> Result<(), FileIoError> {
         Ok(self.admin_operator.delete(path.as_str()).await?)
-    }
-
-    /// Write a stream to the storage. A stream that breaks mid-way aborts the
-    /// upload, and the caller gets the stream error rather than a cleanup error.
-    pub async fn write_stream(
-        &self,
-        path: &EntryPath,
-        mut stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-    ) -> Result<(), FileIoError> {
-        let mut writer = self.operator.writer(path.as_str()).await?;
-        let write_result: Result<(), FileIoError> = async {
-            while let Some(chunk_result) = stream.next().await {
-                writer.write(chunk_result?).await?;
-            }
-            Ok(())
-        }
-        .await;
-
-        match write_result {
-            Ok(()) => {
-                writer.close().await?;
-                Ok(())
-            }
-            Err(stream_error) => {
-                if let Err(error) = writer.abort().await {
-                    tracing::warn!(path = %path, %error, "Failed to abort broken upload");
-                }
-                Err(stream_error)
-            }
-        }
     }
 
     /// The size of the stored blob and a stream of its bytes.
@@ -310,20 +277,33 @@ impl OpendalService {
     }
 }
 
+async fn write_chunks(
+    writer: &mut Writer,
+    mut body: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+) -> Result<(), FileIoError> {
+    while let Some(chunk) = body.next().await {
+        writer.write(chunk?).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 impl OpendalService {
     pub fn new(context: &AppContext) -> Result<Self, FileIoError> {
-        let (operator, admin_operator) = build_storage_operators_from_context(context)?;
-        Ok(Self {
-            operator,
-            admin_operator,
-        })
+        Self::new_from_config(
+            &context.config_toml.storage,
+            &context.data_path,
+            context.sql_db.clone(),
+            context.events_service.clone(),
+            context.user_service.clone(),
+        )
     }
 
     /// Create a new opendal service from an existing operator.
     /// This is useful for testing.
     pub fn new_from_operator(operator: Operator) -> Self {
         Self {
+            upload_limit: Arc::new(UploadLimit::new(std::num::NonZeroUsize::MAX)),
             admin_operator: operator.clone(),
             operator,
         }
@@ -345,6 +325,15 @@ impl OpendalService {
             content.extend_from_slice(&chunk);
         }
         Ok(Bytes::from(content))
+    }
+
+    pub async fn write_stream(
+        &self,
+        path: &EntryPath,
+        body: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+    ) -> Result<(), FileIoError> {
+        let slot = self.reserve_slot(path)?;
+        self.write_reserved_stream(path, slot, body).await
     }
 
     /// Write the content of a file to the storage.

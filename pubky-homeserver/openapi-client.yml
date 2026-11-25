@@ -839,7 +839,8 @@ paths:
           description: >
             The user has reached the concurrent upload limit on this replica,
             the request exceeds a configured request-count limit, or the
-            storage backend is throttling writes.
+            storage backend is throttling writes. The server checks upload
+            capacity before waiting for a WebDAV lock.
           headers:
             Retry-After:
               description: Seconds to wait before retrying.
@@ -1140,7 +1141,8 @@ paths:
           description: >
             The user has reached the concurrent upload limit on this replica,
             the request exceeds a configured request-count limit, or the
-            storage backend is throttling writes.
+            storage backend is throttling writes. The server checks upload
+            capacity before waiting for a WebDAV lock.
           headers:
             Retry-After:
               description: Seconds to wait before retrying.

@@ -19,7 +19,7 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 #[cfg(test)]
 use opendal::Buffer;
-use std::path::Path;
+use std::{future::Future, path::Path};
 
 use super::super::{FileIoError, FileStream, OpendalService, WriteStreamError};
 
@@ -153,14 +153,18 @@ impl FileService {
         self.opendal.get_sized_stream(path).await
     }
 
-    /// Write a file to the database and storage depending on the selected target location.
-    pub async fn write_stream(
-        &self,
-        path: &EntryPath,
-        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
-    ) -> Result<EntryEntity, FileIoError> {
-        self.opendal.write_stream(path, stream).await?;
-        self.get_info(path).await
+    /// Reserve capacity now and return the write to run after the lock check.
+    /// Dropping the unpolled write releases its slot without opening a writer.
+    pub(crate) fn reserve_upload<'a>(
+        &'a self,
+        path: &'a EntryPath,
+        body: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send + 'a,
+    ) -> Result<impl Future<Output = Result<EntryEntity, FileIoError>> + 'a, FileIoError> {
+        let slot = self.opendal.reserve_slot(path)?;
+        Ok(async move {
+            self.opendal.write_reserved_stream(path, slot, body).await?;
+            self.get_info(path).await
+        })
     }
 
     /// Delete a file.
@@ -214,6 +218,14 @@ impl FileService {
         }
 
         Ok(Bytes::from(collected_data))
+    }
+
+    pub async fn write_stream(
+        &self,
+        path: &EntryPath,
+        stream: impl Stream<Item = Result<Bytes, WriteStreamError>> + Unpin + Send,
+    ) -> Result<EntryEntity, FileIoError> {
+        self.reserve_upload(path, stream)?.await
     }
 
     /// Write a file to the database and storage depending on the selected target location.
