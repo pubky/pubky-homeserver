@@ -321,7 +321,12 @@ impl From<pubky::custom_pop::CustomPopVerificationError> for PubkyError {
 /// Converts a `pubky::BuildError` into a `PubkyError`.
 impl From<BuildError> for PubkyError {
     fn from(err: BuildError) -> Self {
-        Self::new(PubkyErrorName::InternalError, err)
+        let name = match err {
+            // Comes from a caller-supplied `requestTimeout`.
+            BuildError::RequestTimeoutTooLong(_) => PubkyErrorName::InvalidInput,
+            _ => PubkyErrorName::InternalError,
+        };
+        Self::new(name, err)
     }
 }
 

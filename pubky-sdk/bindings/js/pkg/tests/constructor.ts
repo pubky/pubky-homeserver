@@ -1,5 +1,6 @@
 import test from "tape";
 import { Client } from "../index.js";
+import { assertPubkyError } from "./utils.js";
 type ClientOptions = ConstructorParameters<typeof Client>[0];
 
 test("new Client() without config", async (t) => {
@@ -48,6 +49,22 @@ test("error-body limit without pkarr options", (t) => {
   }
   for (const maxErrorBodyBytes of [-1, 1.5, NaN, Infinity, 4294967296]) {
     t.throws(() => new Client({ maxErrorBodyBytes }), `rejects ${maxErrorBodyBytes}`);
+  }
+  t.end();
+});
+
+test("request timeout validation", (t) => {
+  for (const requestTimeout of [1, 5000, 2147483647]) {
+    t.doesNotThrow(() => new Client({ requestTimeout }), `accepts ${requestTimeout}`);
+  }
+  for (const requestTimeout of [0, -1, 1.5, NaN, Infinity, 2147483648]) {
+    try {
+      new Client({ requestTimeout });
+      t.fail(`must reject ${requestTimeout}`);
+    } catch (error) {
+      assertPubkyError(t, error);
+      t.equal(error.name, "InvalidInput", `rejects ${requestTimeout} as InvalidInput`);
+    }
   }
   t.end();
 });

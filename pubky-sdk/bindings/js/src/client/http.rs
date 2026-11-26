@@ -4,9 +4,7 @@ use js_sys::{JsString, Object, Promise, Reflect};
 use url::Url;
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{
-    Headers, Request, RequestCredentials, RequestInit, Response, ServiceWorkerGlobalScope,
-};
+use web_sys::{Headers, RequestCredentials, RequestInit, Response, ServiceWorkerGlobalScope};
 
 use super::constructor::Client;
 use crate::js_error::{JsResult, PubkyError, PubkyErrorName};
@@ -103,12 +101,8 @@ impl Client {
             req_init.set_credentials(RequestCredentials::Include);
         }
 
-        // 5) Build the Request *after* headers/credentials are set
-        let js_req = Request::new_with_str_and_init(url.as_str(), &req_init)
-            .map_err(|_| JsValue::from_str("invalid RequestInit"))?;
-
-        // 6) Dispatch using the proper global (SW or Window)
-        let promise = js_fetch(&js_req);
+        // 5) Dispatch using the proper global (SW or Window)
+        let promise = js_fetch(url.as_str(), &req_init);
         let value = JsFuture::from(promise).await.map_err(map_fetch_error)?;
         value.dyn_into::<Response>().map_err(PubkyError::from)
     }
@@ -117,11 +111,18 @@ impl Client {
 pub(crate) fn map_fetch_error(err: JsValue) -> PubkyError {
     if err.is_instance_of::<js_sys::Error>() {
         let js_err: js_sys::Error = err.unchecked_into();
+        // `AbortSignal.timeout()` rejects the fetch with a `TimeoutError` DOMException. A
+        // caller's own timeout signal is reported the same way.
+        let kind = if js_err.name() == "TimeoutError" {
+            pubky::errors::RequestErrorKind::Timeout
+        } else {
+            pubky::errors::RequestErrorKind::Other
+        };
         let message = js_err
             .to_string()
             .as_string()
             .unwrap_or_else(|| "fetch failed".to_string());
-        return PubkyError::request(message, pubky::errors::RequestErrorKind::Other);
+        return PubkyError::request(message, kind);
     }
 
     let message = err
@@ -138,19 +139,24 @@ extern "C" {
     pub type RequestInitArg;
 
     #[wasm_bindgen(js_name = fetch)]
-    fn fetch_with_request(input: &web_sys::Request) -> Promise;
+    fn fetch_with_str_and_init(input: &str, init: &RequestInit) -> Promise;
 }
 
-pub(crate) fn js_fetch(req: &web_sys::Request) -> Promise {
+/// Fetch `url` with `init` through the proper global (SW or Window).
+///
+/// This takes a URL and init rather than a `Request` on purpose: Node holds the signals
+/// behind a `Request` weakly once `fetch` resolves, so a deadline signal on one can be
+/// collected and never fire while the body is read.
+pub(crate) fn js_fetch(url: &str, init: &RequestInit) -> Promise {
     let global = js_sys::global();
     if let Ok(true) = js_sys::Reflect::has(&global, &JsValue::from_str("ServiceWorkerGlobalScope"))
     {
         global
             .unchecked_into::<ServiceWorkerGlobalScope>()
-            .fetch_with_request(req)
+            .fetch_with_str_and_init(url, init)
     } else {
         // Browser
-        fetch_with_request(req)
+        fetch_with_str_and_init(url, init)
     }
 }
 
@@ -176,6 +182,16 @@ mod tests {
             assert_eq!(error.name.to_string(), "RequestError");
             assert_eq!(error.message, message);
             assert_eq!(error.data, Some(serde_json::json!({ "reason": "Other" })));
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn aborted_fetches_report_timeout_only_for_timeout_errors() {
+        for (name, reason) in [("TimeoutError", "Timeout"), ("AbortError", "Other")] {
+            let source = js_sys::Error::new("aborted");
+            source.set_name(name);
+            let error = map_fetch_error(source.into());
+            assert_eq!(error.data, Some(serde_json::json!({ "reason": reason })));
         }
     }
 
