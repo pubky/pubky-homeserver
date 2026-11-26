@@ -1,5 +1,9 @@
 # Pubky Request Auth
 
+This document describes the legacy cookie protocol used by older apps. Signers
+still support these requests. Apps using the current SDK start new sessions
+with [grant authentication](v0.10-migration/grant-auth.md).
+
 Pubky Request Auth is a protocol for using user's keypair to authenticate themselves to a 3rd party app and to authorize that app to access resources on the user's homeserver.
 
 ### Glossary

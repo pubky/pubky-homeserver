@@ -1,24 +1,13 @@
-#![allow(
-    deprecated,
-    reason = "This module preserves deprecated cookie signer compatibility methods"
-)]
-
-use std::sync::Arc;
-
 use pubky_common::auth::{
-    AuthToken,
     grant::GrantClaims,
     jws::{ClientId, GRANT_JWS_TYP, GrantId},
 };
 use pubky_common::crypto::Keypair;
-use reqwest::Method;
-use url::Url;
 
 use super::PubkySigner;
 use crate::{
     Capabilities, Capability, PubkySession, PublicKey, Result,
     actors::auth::{
-        cookie::CookieCredential,
         grant::constants::DEFAULT_GRANT_LIFETIME_SECS,
         grant::credential::GrantChain,
         grant::grant_exchange::{credential_from_grant_exchange, signup_account_from_grant},
@@ -158,65 +147,6 @@ impl PubkySigner {
         Ok(session)
     }
 
-    /// Legacy cookie signup. Prefer [`Self::signup`] plus [`Self::signin`].
-    ///
-    /// # Errors
-    /// - Returns [`crate::errors::Error::Parse`] if the homeserver URL cannot be constructed.
-    /// - Propagates transport failures while creating the account or publishing the homeserver record.
-    /// - Propagates validation errors while hydrating the cookie session.
-    #[deprecated(note = "Use PubkySigner::signup followed by PubkySigner::signin instead.")]
-    pub async fn signup_cookie(
-        &self,
-        homeserver: &PublicKey,
-        signup_token: Option<&str>,
-    ) -> Result<PubkySession> {
-        let url = Self::build_signup_url(homeserver, signup_token)?;
-        let auth_token = self.root_capability_token();
-        let response = self
-            .send_signup_request(url, auth_token.serialize())
-            .await?;
-
-        self.publish_signup_homeserver(homeserver).await?;
-        let cookie_credential =
-            CookieCredential::from_response(response, Some(homeserver.clone())).await?;
-        Ok(PubkySession::from_credential(
-            self.client.clone(),
-            Arc::new(cookie_credential),
-        ))
-    }
-
-    /// Legacy cookie signin. Prefer [`Self::signin`].
-    ///
-    /// # Errors
-    /// - Propagates transport failures during the session exchange.
-    /// - Propagates validation errors while creating the cookie credential.
-    #[deprecated(note = "Use PubkySigner::signin instead.")]
-    pub async fn signin_cookie(&self) -> Result<PubkySession> {
-        self.signin_cookie_with_publish(PublishMode::Background)
-            .await
-    }
-
-    /// Legacy cookie signin with blocking PKDNS refresh. Prefer [`Self::signin_blocking`].
-    ///
-    /// # Errors
-    /// - Propagates transport failures during the session exchange.
-    /// - Propagates failures while refreshing the homeserver record.
-    #[deprecated(note = "Use PubkySigner::signin_blocking instead.")]
-    pub async fn signin_cookie_blocking(&self) -> Result<PubkySession> {
-        self.signin_cookie_with_publish(PublishMode::Blocking).await
-    }
-
-    async fn signin_cookie_with_publish(&self, mode: PublishMode) -> Result<PubkySession> {
-        let token = self.root_capability_token();
-        let user = self.keypair.public_key();
-        let homeserver = self.pkdns().get_homeserver_of(&user).await?;
-        let credential =
-            CookieCredential::from_auth_token(&token, &self.client, homeserver).await?;
-        let session = PubkySession::from_cookie_credential(self.client.clone(), credential);
-        self.publish_after_signin(mode).await?;
-        Ok(session)
-    }
-
     async fn publish_after_signin(&self, mode: PublishMode) -> Result<()> {
         match mode {
             PublishMode::Blocking => {
@@ -259,20 +189,6 @@ impl PubkySigner {
         Ok(())
     }
 
-    fn build_signup_url(homeserver: &PublicKey, signup_token: Option<&str>) -> Result<Url> {
-        let mut url = Url::parse(&format!("https://{}", homeserver.z32()))?;
-        url.set_path("/signup");
-        if let Some(token) = signup_token {
-            url.query_pairs_mut().append_pair("signup_token", token);
-        }
-        Ok(url)
-    }
-
-    fn root_capability_token(&self) -> AuthToken {
-        let capabilities = Capabilities::builder().cap(Capability::root()).finish();
-        AuthToken::sign(&self.keypair, capabilities)
-    }
-
     fn signup_grant(&self, client_keypair: &Keypair) -> Result<(String, GrantClaims)> {
         let client_id = ClientId::new(SIGNUP_CLIENT_ID)
             .map_err(|e| crate::errors::AuthError::Validation(e.to_string()))?;
@@ -312,19 +228,6 @@ impl PubkySigner {
             iat: now,
             exp: now + lifetime_secs,
         }
-    }
-
-    async fn send_signup_request(&self, url: Url, body: Vec<u8>) -> Result<reqwest::Response> {
-        let response = self
-            .client
-            .cross_request(Method::POST, url)
-            .await?
-            .body(body)
-            .send()
-            .await?;
-
-        // Map non-2xx into our error type; keep body/headers intact for the caller.
-        self.client.check_http_status(response).await
     }
 
     async fn publish_signup_homeserver(&self, homeserver: &PublicKey) -> Result<()> {

@@ -1,3 +1,4 @@
+use crate::tests::signup_and_signin;
 use std::time::Duration;
 
 use futures::{channel::mpsc, SinkExt};
@@ -20,11 +21,7 @@ async fn write_to_locked_path_returns_locked() {
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
 
-    let session = pubky
-        .signer(Keypair::random())
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&pubky.signer(Keypair::random()), &server.public_key()).await;
     let storage = session.storage();
     storage
         .lock("/pub/state.bin", Duration::from_secs(30))
@@ -48,11 +45,7 @@ async fn locked_write_excludes_others_until_unlocked() {
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
 
-    let session = pubky
-        .signer(Keypair::random())
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&pubky.signer(Keypair::random()), &server.public_key()).await;
     let storage = session.storage();
     let path = "/pub/state.bin";
 
@@ -119,11 +112,7 @@ async fn lock_refresh_unlock() {
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
 
-    let session = pubky
-        .signer(Keypair::random())
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&pubky.signer(Keypair::random()), &server.public_key()).await;
     let storage = session.storage();
     let path = "/pub/state.bin";
     storage.put(path, vec![1]).await.unwrap();

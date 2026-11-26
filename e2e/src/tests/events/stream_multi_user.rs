@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::signup_and_signin;
 
 #[tokio::test]
 #[pubky_testnet::test]
@@ -20,18 +21,9 @@ async fn events_stream_multiple_users() {
     let signer2 = pubky.signer(keypair2);
     let signer3 = pubky.signer(keypair3);
 
-    let session1 = signer1
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
-    let session2 = signer2
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
-    let session3 = signer3
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session1 = signup_and_signin(&signer1, &server.public_key()).await;
+    let session2 = signup_and_signin(&signer2, &server.public_key()).await;
+    let session3 = signup_and_signin(&signer3, &server.public_key()).await;
 
     let pubky1 = signer1.public_key();
     let pubky2 = signer2.public_key();

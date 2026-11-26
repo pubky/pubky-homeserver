@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::{legacy_cookie_session, signup_and_signin};
 
 #[tokio::test]
 #[pubky_testnet::test]
@@ -9,10 +10,7 @@ async fn unauthorized_put_delete() {
 
     // Owner user
     let owner = pubky.signer(Keypair::random());
-    let owner_session = owner
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let owner_session = signup_and_signin(&owner, &server.public_key()).await;
 
     let path = "/pub/foo.txt";
 
@@ -81,10 +79,8 @@ async fn path_addressed_cross_tenant_cookie_is_unauthorized() {
     owner.signup(&server.public_key(), None).await.unwrap();
 
     let other = pubky.signer(Keypair::random());
-    let other_session = other
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    other.signup(&server.public_key(), None).await.unwrap();
+    let other_session = legacy_cookie_session(&pubky, &other).await;
     let cookie_secret = other_session.as_cookie().unwrap().export_secret().unwrap();
     let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
     let cookie = format!("{cookie_name}={cookie_value}");
@@ -126,10 +122,7 @@ async fn priv_owner_with_cap_is_authorized() {
     let pubky = testnet.sdk().unwrap();
 
     let owner = pubky.signer(Keypair::random());
-    let session = owner
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&owner, &server.public_key()).await;
 
     let path = "/priv/app/secret.txt";
     let content = vec![1, 2, 3];

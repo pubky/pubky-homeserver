@@ -13,7 +13,7 @@ use crate::wrappers::session_info::SessionInfo;
 
 /// An authenticated context “as the user”.
 /// - Use `storage` for reads/writes (absolute paths like `/pub/app/file.txt`)
-/// - Cookie is managed automatically by the underlying fetch client
+/// - Storage requests use the session's grant or restored legacy cookie.
 #[wasm_bindgen]
 pub struct Session(pub(crate) pubky::PubkySession);
 
@@ -56,8 +56,9 @@ impl Session {
         self.0.as_cookie().map(|_| CookieSession(self.0.clone()))
     }
 
-    /// Invalidate the session on the server (clears server cookie).
-    /// Further calls to storage API will fail.
+    /// Revoke this session's grant on the homeserver. This signs out every
+    /// tab that uses the same grant. For a legacy cookie session, the
+    /// homeserver invalidates the session cookie.
     ///
     /// @returns {Promise<void>}
     #[wasm_bindgen]
@@ -86,15 +87,15 @@ impl Session {
         result.and(cleanup)
     }
 
-    /// Export the session metadata so it can be restored after a tab refresh.
-    ///
-    /// The export string contains **no secrets**; it only serializes the public `SessionInfo`.
-    /// Browsers remain responsible for persisting the HTTP-only session cookie.
+    /// Export metadata for a legacy cookie session only. To restore the
+    /// snapshot, the browser must still hold the original HTTP-only cookie.
     ///
     /// @returns {string}
     /// A base64 string to store (e.g. in `localStorage`).
     ///
-    /// @deprecated Use `GrantSession.exportLocalSecret()` instead.
+    /// @deprecated For grant sessions in a browser, use
+    /// `pubky.browserSessionStore.save(session)`. To export a local grant
+    /// session's secret, use `session.exportLocalSecret()`.
     #[wasm_bindgen]
     pub fn export(&self) -> String {
         self.0

@@ -1,23 +1,14 @@
 use crate::PublicKey;
 
-/// The kind of authentication flow to perform.
-///
-/// Used when starting a [`PubkyGrantAuthFlow`](crate::PubkyGrantAuthFlow) or
-/// legacy cookie auth flow to tell the SDK whether the user already has an
-/// account (`SignIn`) or needs to create one (`SignUp`).
-///
-/// # When to use which
-///
-/// - **`SignUp`** — the user does not yet have an account. The flow creates
-///   the account on the specified homeserver as part of the auth handshake.
-///   Some homeservers require a `signup_token` (invite code).
-/// - **`SignIn`** — the user already signed up on a homeserver. The flow
-///   authenticates against the existing account.
+/// The intent a requesting app sends to the signer in a
+/// [`PubkyGrantAuthFlow`](crate::PubkyGrantAuthFlow).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthFlowKind {
     /// Sign in to an existing account.
     SignIn,
-    /// Sign up for a new account on a specific homeserver.
+    /// Request a new account on a specific homeserver. The signer app must call
+    /// [`PubkySigner::signup`](crate::PubkySigner::signup) with the homeserver
+    /// and optional invite token before approving the request.
     SignUp {
         /// The public key of the homeserver to sign up on.
         homeserver_public_key: Box<PublicKey>,

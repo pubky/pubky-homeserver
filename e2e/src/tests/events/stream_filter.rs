@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::signup_and_signin;
 
 /// Comprehensive test for directory filtering (`path` parameter):
 /// - Basic filtering, cursor pagination, multiple users, reverse ordering, wildcard escaping
@@ -18,14 +19,8 @@ async fn events_stream_path_filter() {
     let keypair2 = Keypair::random();
     let signer1 = pubky.signer(keypair1);
     let signer2 = pubky.signer(keypair2);
-    let session1 = signer1
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
-    let session2 = signer2
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session1 = signup_and_signin(&signer1, &server.public_key()).await;
+    let session2 = signup_and_signin(&signer2, &server.public_key()).await;
     let pubky1 = signer1.public_key();
     let pubky2 = signer2.public_key();
 

@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::tests::auth::child_grant::ParentGrant;
+use crate::tests::legacy_cookie_session;
 use eventsource_stream::{Event, Eventsource};
 use futures::{Stream, StreamExt};
 use pubky_testnet::pubky::ClientId;
@@ -458,10 +459,8 @@ async fn cookie_user(
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let session = legacy_cookie_session(&pubky, &signer).await;
     // `export_secret()` returns `<pubkey_z32>:<secret>`; the wire cookie is
     // `<pubkey_z32>=<secret>`.
     let token = session.as_cookie().unwrap().export_secret().unwrap();
@@ -644,10 +643,8 @@ async fn events_stream_live_closes_when_cookie_session_is_revoked() {
     let server_host = server.public_key().z32();
 
     let signer = pubky.signer(Keypair::random());
-    let streamed_session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let streamed_session = legacy_cookie_session(&pubky, &signer).await;
     let user = signer.public_key();
     let token = streamed_session
         .as_cookie()
@@ -656,7 +653,7 @@ async fn events_stream_live_closes_when_cookie_session_is_revoked() {
         .unwrap();
     let (cookie_name, cookie_secret) = token.split_once(':').unwrap();
     let streamed_cookie = format!("{cookie_name}={cookie_secret}");
-    let writer_session = signer.signin_cookie().await.unwrap();
+    let writer_session = legacy_cookie_session(&pubky, &signer).await;
 
     let url = format!(
         "https://{}/events-stream?user={}&path=/priv/app/&live=true",

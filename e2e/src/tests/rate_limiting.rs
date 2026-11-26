@@ -1,3 +1,5 @@
+use crate::tests::{exchange_cookie_token, legacy_cookie_session, signup_and_signin};
+use pubky_testnet::pubky_common::{auth::AuthToken, capabilities::Capability};
 use std::time::{Duration, Instant};
 
 use pubky_testnet::pubky::{
@@ -46,16 +48,12 @@ async fn test_limit_signin_get_session() {
 
     // Create a user (signup should not hit the POST /session signin limit)
     let signer = pubky.signer(Keypair::random());
-    signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
 
     // First signin should be OK
-    let session = signer.signin_cookie().await.unwrap();
+    let session = legacy_cookie_session(&pubky, &signer).await;
 
-    // First GET /session (validate/fetch) should be OK
-    session.revalidate().await.unwrap();
+    // Restoring the cookie above used the first GET /session.
 
     // Second GET /session should be rate-limited (429)
     let err = session
@@ -68,14 +66,15 @@ async fn test_limit_signin_get_session() {
     assert_one_minute_retry_after(&err);
 
     // Second signin should be rate-limited (429)
-    let err = signer
-        .signin_cookie()
-        .await
-        .expect_err("Second signin should be rate limited");
-    assert!(
-        matches!(err, Error::Request(RequestError::Server { status, .. }) if status == StatusCode::TOO_MANY_REQUESTS)
-    );
-    assert_one_minute_retry_after(&err);
+    let token = AuthToken::sign(signer.keypair(), vec![Capability::root()]);
+    let response = exchange_cookie_token(&pubky, &token).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&retry_after));
 }
 
 /// A `1r/m` quota asks for a wait of at least a second and at most the minute.
@@ -124,10 +123,10 @@ async fn test_limit_signin_get_session_whitelist() {
     // --- Whitelisted user ---
     let whitelisted_signer = pubky.signer(whitelisted_keypair);
     whitelisted_signer
-        .signup_cookie(&server.public_key(), None)
+        .signup(&server.public_key(), None)
         .await
         .unwrap();
-    let session_w = whitelisted_signer.signin_cookie().await.unwrap();
+    let session_w = legacy_cookie_session(&pubky, &whitelisted_signer).await;
 
     // First GET /session OK
     session_w.revalidate().await.unwrap();
@@ -136,14 +135,10 @@ async fn test_limit_signin_get_session_whitelist() {
 
     // --- Non-whitelisted user ---
     let other = pubky.signer(Keypair::random());
-    other
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
-    let session_o = other.signin_cookie().await.unwrap();
+    other.signup(&server.public_key(), None).await.unwrap();
+    let session_o = legacy_cookie_session(&pubky, &other).await;
 
-    // First GET /session OK
-    session_o.revalidate().await.unwrap();
+    // Restoring the cookie above used the first GET /session.
     // Second GET /session should be rate-limited (429)
     let err = session_o
         .revalidate()
@@ -208,10 +203,7 @@ async fn test_limit_upload() {
 
     // User + session-bound session
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
 
     // Upload ~3 KB; at 1 KB/s it should take > 2s total
     let path = "/pub/test.txt";
@@ -254,10 +246,7 @@ async fn test_concurrent_write_read() {
     let mut sessions: Vec<PubkySession> = Vec::with_capacity(user_count);
     for _ in 0..user_count {
         let signer = pubky.signer(Keypair::random());
-        let session = signer
-            .signup_cookie(&server.public_key(), None)
-            .await
-            .unwrap();
+        let session = signup_and_signin(&signer, &server.public_key()).await;
         sessions.push(session);
     }
 
@@ -388,11 +377,8 @@ async fn encoded_legacy_paths_share_rate_limits() {
         ("%70ub/file.txt", "pub/file.txt"),
     ] {
         // A new owner starts with a full user quota.
-        let session = pubky
-            .signer(Keypair::random())
-            .signup_cookie(&server.public_key(), None)
-            .await
-            .unwrap();
+        let session =
+            signup_and_signin(&pubky.signer(Keypair::random()), &server.public_key()).await;
         session
             .storage()
             .put("/pub/file.txt", "public file")
@@ -424,11 +410,7 @@ async fn encoded_legacy_paths_share_rate_limits() {
     }
 
     // An encoded private path is still a private path.
-    let session = pubky
-        .signer(Keypair::random())
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&pubky.signer(Keypair::random()), &server.public_key()).await;
     session
         .storage()
         .put("/priv/secret.txt", "private file")

@@ -1,4 +1,5 @@
 import test from "tape";
+import { restoreLegacyCookie } from "./legacy-cookie.js";
 import { Client, Keypair, Pubky, PublicKey, type Path, type StorageLock } from "../index.js";
 import {
   type Assert,
@@ -152,7 +153,7 @@ for (const credential of ["cookie", "grant"]) {
     const sdk = Pubky.testnet();
     const signer = sdk.signer(Keypair.random());
     const token = await createSignupToken();
-    const cookie = credential === "cookie" ? await signer.signupCookie(HOMESERVER, token) : undefined;
+    const cookie = credential === "cookie" ? await restoreLegacyCookie(sdk, signer, HOMESERVER, token) : undefined;
     if (credential === "grant") await signer.signup(HOMESERVER, token);
     const originalFetch = globalThis.fetch;
     let uploads = 0;
@@ -229,7 +230,7 @@ for (const credential of ["cookie", "grant"]) {
     const sdk = Pubky.testnet();
     const signer = sdk.signer(Keypair.random());
     const token = await createSignupToken();
-    const cookie = credential === "cookie" ? await signer.signupCookie(HOMESERVER, token) : undefined;
+    const cookie = credential === "cookie" ? await restoreLegacyCookie(sdk, signer, HOMESERVER, token) : undefined;
     if (credential === "grant") await signer.signup(HOMESERVER, token);
     const session = cookie ?? await signer.signin("blob-upload.test");
     const storage = session.storage;

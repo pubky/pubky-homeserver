@@ -1,3 +1,4 @@
+use crate::tests::signup_and_signin;
 use pubky_testnet::pubky::{
     errors::RequestError, ClientId, Error, Keypair, Method, PubkyHttpClient, StatusCode,
 };
@@ -99,17 +100,11 @@ async fn per_user_quota_via_admin_api() {
 
     // Create two users
     let signer_a = pubky.signer(Keypair::random());
-    let session_a = signer_a
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_a = signup_and_signin(&signer_a, &server.public_key()).await;
     let pubkey_a = signer_a.public_key().z32();
 
     let signer_b = pubky.signer(Keypair::random());
-    let session_b = signer_b
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_b = signup_and_signin(&signer_b, &server.public_key()).await;
 
     // Set a 1 MB quota on user A via admin API
     let admin_client = PubkyHttpClient::new().unwrap();
@@ -191,17 +186,11 @@ async fn per_user_speed_override_throttles_via_admin_api() {
 
     // Create two users
     let signer_a = pubky.signer(Keypair::random());
-    let session_a = signer_a
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_a = signup_and_signin(&signer_a, &server.public_key()).await;
     let pubkey_a_z32 = signer_a.public_key().z32();
 
     let signer_b = pubky.signer(Keypair::random());
-    let session_b = signer_b
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_b = signup_and_signin(&signer_b, &server.public_key()).await;
 
     // Override user A to 1kb/s write speed via admin API
     let admin_client = PubkyHttpClient::new().unwrap();
@@ -280,17 +269,11 @@ async fn per_user_read_speed_override_throttles_via_admin_api() {
 
     // Create two users
     let signer_a = pubky.signer(Keypair::random());
-    let session_a = signer_a
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_a = signup_and_signin(&signer_a, &server.public_key()).await;
     let pubkey_a_z32 = signer_a.public_key().z32();
 
     let signer_b = pubky.signer(Keypair::random());
-    let session_b = signer_b
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_b = signup_and_signin(&signer_b, &server.public_key()).await;
 
     // Both users upload a 3 KB file (fast, using default 1mb/s)
     let body = vec![0u8; 3 * 1024];
@@ -507,10 +490,7 @@ async fn admin_event_stream_exposes_private_events() {
 
     // Create a user/session and write one public and one private file.
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
     session
         .storage()
         .put("/pub/note.txt", vec![1, 2, 3])
@@ -634,11 +614,7 @@ async fn admin_event_stream_live_limit_closes_after_last_event() {
         .expect("admin server should be enabled")
         .listen_socket();
 
-    let session = pubky
-        .signer(Keypair::random())
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&pubky.signer(Keypair::random()), &server.public_key()).await;
     for path in ["/pub/a.txt", "/pub/b.txt"] {
         session.storage().put(path, vec![1]).await.unwrap();
     }

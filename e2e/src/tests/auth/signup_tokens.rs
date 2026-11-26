@@ -1,4 +1,5 @@
 use super::*;
+use pubky_testnet::pubky_common::{auth::AuthToken, session::CookieSessionRecord};
 
 #[tokio::test]
 #[pubky_testnet::test]
@@ -82,7 +83,6 @@ async fn get_signup_token() {
         .unwrap();
 
     let server = testnet.homeserver_app();
-    let pubky = testnet.sdk().unwrap();
     let client = PubkyHttpClient::new().unwrap();
     let base_url = server.icann_http_url();
 
@@ -154,11 +154,26 @@ async fn get_signup_token() {
     );
 
     // 6. Use token with POST /signup
-    let signer = pubky.signer(Keypair::random());
-    let _session = signer
-        .signup_cookie(&server.public_key(), Some(&valid_token))
+    let keypair = Keypair::random();
+    let auth_token = AuthToken::sign(&keypair, vec![Capability::root()]);
+    let response = client
+        .request(
+            Method::POST,
+            &format!("{base_url}signup?signup_token={valid_token}"),
+        )
+        .body(auth_token.serialize())
+        .send()
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie_name = keypair.public_key().z32();
+    assert!(response
+        .cookies()
+        .any(|cookie| cookie.name() == cookie_name));
+    let body = response.bytes().await.unwrap();
+    let session = CookieSessionRecord::deserialize(&body).unwrap();
+    assert_eq!(session.public_key(), &keypair.public_key());
+    assert_eq!(session.capabilities(), &[Capability::root()]);
 
     // 7. GET /signup_tokens/<used> → 200 with status: "used"
     let response = client

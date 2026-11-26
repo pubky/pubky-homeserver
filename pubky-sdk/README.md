@@ -290,9 +290,29 @@ Request an authorization URL and await approval.
 
 **Typical usage:**
 
-1. Start an auth flow with `pubky.start_grant_auth_flow(&caps, ..)`. You can also use `PubkyGrantAuthFlow::builder()` to set a custom relay. The deprecated cookie flow remains available only for compatibility.
+1. Start a flow with `pubky.start_grant_auth_flow(&caps, ..)`. To set a custom
+   relay, use `PubkyGrantAuthFlow::builder()`.
 2. Show `authorization_url()` (QR/deeplink) to the signing device (e.g., [Pubky Ring](https://github.com/pubky/pubky-ring) — [iOS](https://apps.apple.com/om/app/pubky-ring/id6739356756) / [Android](https://play.google.com/store/apps/details?id=to.pubky.ring)).
-3. Await `await_approval()` to obtain a session-bound `PubkySession`, or `await_credential()` for a raw `GrantCredential`/`CookieCredential` that you can persist, inspect, or lift into a session later via `PubkySession::from_{grant,cookie}_credential`.
+3. Call `await_approval()` to get a `PubkySession`. To work with the grant
+   credential directly, call `await_credential()`. You can build a session
+   from it later with `PubkySession::from_grant_credential`.
+
+Grant sign-up and sign-in require homeserver v0.10.0 or later. If your app
+uses cookie requests for QR or deep-link login, confirm that the signing apps
+your users rely on support grant links before upgrading the requesting app.
+
+Start a grant sign-in if the signer has already registered the account. Use
+grant sign-up if the account still needs to be created. Signers can still
+approve legacy requests from older apps.
+
+You can use a restored cookie session until signout or expiry. Choose the
+restore method that matches what your app saved.
+
+- For a `<pubkey>:<cookie_secret>` string, use `pubky.restore_session(&secret)`.
+- For a browser WASM snapshot from `PubkySession::export()`, use
+  `PubkySession::import(&snapshot, Some(pubky.client().clone()))`. The
+  snapshot holds base64-encoded metadata. The original browser cookie jar
+  must still contain the session cookie.
 
 ```rust
 # use pubky::{AuthFlowKind, Capabilities, ClientId, Keypair, Pubky};
@@ -322,8 +342,7 @@ let session = flow.await_approval().await?;
 ```
 
 Optional x-callback parameters let the authenticator return control to the
-requesting app after it has handled the deep link. They work with both cookie
-and grant flows:
+requesting app after it has handled the deep link.
 
 ```rust
 # use pubky::{AuthFlowKind, Capabilities, ClientId, PubkyGrantAuthFlow};

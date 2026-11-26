@@ -45,6 +45,7 @@
     "electron": "45.3.3",
     "esmify": "^2.1.1",
     "playwright-core": "1.65.1",
+    "pubky-legacy": "npm:@synonymdev/pubky@0.18.0",
     "tape": "^5.8.1",
     "tape-run": "^11.0.0",
     "typedoc": "^0.28.20",

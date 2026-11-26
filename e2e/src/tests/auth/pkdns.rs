@@ -17,10 +17,7 @@ async fn republish_if_stale_triggers_timestamp_bump() {
     // Sign up a brand-new user (initial publish happens on signup)
     let signer = pubky.signer(Keypair::random());
     let pubky = signer.public_key().clone();
-    signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
 
     // Capture initial record timestamp
     let ts1 = client
@@ -66,10 +63,7 @@ async fn conditional_publish_skips_when_fresh() {
 
     let signer = pubky.signer(Keypair::random());
     let pubky = signer.public_key().clone();
-    signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
 
     let ts1 = client
         .pkarr()
@@ -109,10 +103,7 @@ async fn test_republish_homeserver() {
     // Create user and publish initial record via signup.
     let signer = pubky.signer(Keypair::random());
     let public_key = signer.public_key().clone();
-    signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
 
     // Initial timestamp.
     let ts1 = pubky

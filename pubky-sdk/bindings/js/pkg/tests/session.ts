@@ -1,4 +1,5 @@
 import test from "tape";
+import { restoreLegacyCookie } from "./legacy-cookie.js";
 
 import {
   AccountInfo,
@@ -32,8 +33,8 @@ const TESTNET_HTTP_RELAY = "http://localhost:15412/inbox";
 
 type Facade = ReturnType<typeof Pubky.testnet>;
 type Signer = ReturnType<Facade["signer"]>;
-type SignupSession = Awaited<ReturnType<Signer["signupCookie"]>>;
-type SessionStorageType = SignupSession["storage"];
+type SigninSession = Awaited<ReturnType<Signer["signin"]>>;
+type SessionStorageType = SigninSession["storage"];
 type PublicStorageType = Facade["publicStorage"];
 
 type _StoragePutText = Assert<
@@ -47,10 +48,10 @@ type _PublicGetText = Assert<
 >;
 
 type _SessionGrant = Assert<
-  IsExact<SignupSession["grant"], GrantSession | undefined>
+  IsExact<SigninSession["grant"], GrantSession | undefined>
 >;
 type _SessionCookie = Assert<
-  IsExact<SignupSession["cookie"], CookieSession | undefined>
+  IsExact<SigninSession["cookie"], CookieSession | undefined>
 >;
 type _GrantSessionInfo = Assert<
   IsExact<ReturnType<GrantSession["sessionInfo"]>, Promise<GrantSessionInfo>>
@@ -90,7 +91,7 @@ test("Session: export/import uses browser cookie", async (t) => {
   const signer = sdk.signer(Keypair.random());
   const signupToken = await createSignupToken();
 
-  const session = await signer.signupCookie(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await restoreLegacyCookie(sdk, signer, HOMESERVER_PUBLICKEY, signupToken);
   const cookie = session.cookie;
   t.ok(cookie, "cookie-backed session exposes cookie view");
   t.equal(session.grant, undefined, "cookie-backed session has no grant view");
@@ -137,7 +138,7 @@ test("Session: cookie exportSecret restores from secret token", async (t) => {
   const signer = sdk.signer(Keypair.random());
   const signupToken = await createSignupToken();
 
-  const session = await signer.signupCookie(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await restoreLegacyCookie(sdk, signer, HOMESERVER_PUBLICKEY, signupToken);
   const cookie = session.cookie;
   t.ok(cookie, "cookie-backed session exposes cookie view");
   if (!cookie) {
@@ -254,7 +255,7 @@ test("Session: cookie sessions expose cookie-only view", async (t) => {
   const signer = sdk.signer(Keypair.random());
   const signupToken = await createSignupToken();
 
-  const session = await signer.signupCookie(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await restoreLegacyCookie(sdk, signer, HOMESERVER_PUBLICKEY, signupToken);
   const cookie = session.cookie;
   t.ok(cookie, "cookie-backed session exposes cookie view");
   t.equal(session.grant, undefined, "cookie-backed session has no grant view");
@@ -390,7 +391,7 @@ test("Auth: basic", async (t) => {
   const signupToken = await createSignupToken();
 
   // 1) Signup -> valid session
-  const session = await signer.signupCookie(HOMESERVER_PUBLICKEY, signupToken);
+  const session = await restoreLegacyCookie(sdk, signer, HOMESERVER_PUBLICKEY, signupToken);
   t.ok(session, "signup returned a session");
   const userPk = session.info.publicKey.z32();
 
@@ -426,7 +427,7 @@ test("Auth: basic", async (t) => {
   t.equal(res401.status, 401, "PUT without session returns 401");
 
   // 5) Sign in again (local key proves identity)
-  const session2 = await signer.signinCookie();
+  const session2 = await signer.signin("session.test");
   t.ok(session2, "signin returned a new session");
 
   // 6) Write succeeds again
@@ -452,12 +453,12 @@ test("Auth: multi-user (cookies)", async (t) => {
   const bobSignup = await createSignupToken();
 
   // 1) Signup Alice
-  const aliceSession = await alice.signupCookie(HOMESERVER_PUBLICKEY, aliceSignup);
+  const aliceSession = await restoreLegacyCookie(sdk, alice, HOMESERVER_PUBLICKEY, aliceSignup);
   t.ok(aliceSession, "alice signed up");
   const alicePk = aliceSession.info.publicKey.z32();
 
   // 2) Signup Bob (cookie jar now holds both sessions)
-  const bobSession = await bob.signupCookie(HOMESERVER_PUBLICKEY, bobSignup);
+  const bobSession = await restoreLegacyCookie(sdk, bob, HOMESERVER_PUBLICKEY, bobSignup);
   t.ok(bobSession, "bob signed up");
   const bobPk = bobSession.info.publicKey.z32();
 
@@ -530,8 +531,8 @@ test("Auth: multi-user host isolation + stale-handle safety", async (t) => {
   const aliceToken = await createSignupToken();
   const bobToken = await createSignupToken();
 
-  const aliceSession = await alice.signupCookie(HOMESERVER_PUBLICKEY, aliceToken);
-  const bobSession = await bob.signupCookie(HOMESERVER_PUBLICKEY, bobToken);
+  const aliceSession = await restoreLegacyCookie(sdk, alice, HOMESERVER_PUBLICKEY, aliceToken);
+  const bobSession = await restoreLegacyCookie(sdk, bob, HOMESERVER_PUBLICKEY, bobToken);
 
   const A = aliceSession.info.publicKey.z32();
   const B = bobSession.info.publicKey.z32();
@@ -598,7 +599,7 @@ test("Auth: multi-user host isolation + stale-handle safety", async (t) => {
   // 5) Stale-handle safety: Create a third user; ensure earlier Session handles still write correctly.
   const carol = sdk.signer(Keypair.random());
   const carolToken = await createSignupToken();
-  const carolSession = await carol.signupCookie(HOMESERVER_PUBLICKEY, carolToken);
+  const carolSession = await restoreLegacyCookie(sdk, carol, HOMESERVER_PUBLICKEY, carolToken);
   const C = carolSession.info.publicKey.z32();
 
   await aliceSession.storage.putText(P, "alice#4");
@@ -640,12 +641,12 @@ test("Auth: signup/signout loops keep cookies and host in sync", async (t) => {
 
   async function signupAndMark(label: string): Promise<{
     signer: ReturnType<Facade["signer"]>;
-    session: SignupSession;
+    session: SigninSession;
     user: string;
   }> {
     const signer = sdk.signer(Keypair.random());
     const token = await createSignupToken();
-    const session = await signer.signupCookie(HOMESERVER_PUBLICKEY, token);
+    const session = await restoreLegacyCookie(sdk, signer, HOMESERVER_PUBLICKEY, token);
     const user = session.info.publicKey.z32();
     await session.storage.putText(P, label);
     return { signer, session, user };
@@ -821,12 +822,12 @@ test("Auth: signout removes persisted session cookies", async (t) => {
     return undefined;
   };
 
-  const sessions: Array<{ session: SignupSession; user: string }> = [];
+  const sessions: Array<{ session: SigninSession; user: string }> = [];
 
   for (let i = 0; i < 3; i += 1) {
     const signer = sdk.signer(Keypair.random());
     const token = await createSignupToken();
-    const session = await signer.signupCookie(HOMESERVER_PUBLICKEY, token);
+    const session = await restoreLegacyCookie(sdk, signer, HOMESERVER_PUBLICKEY, token);
     const user = session.info.publicKey.z32();
 
     sessions.push({ session, user });

@@ -231,7 +231,8 @@ This example defaults to `../sample_recovery.key`, which has an empty passphrase
   The testnet is not running, is not ready, or the public key has not published/resolved yet. Use `node 6-check-testnet.mjs` as the first smoke test because it performs an authenticated write/read without requiring public PKDNS resolution for the new user.
 
 - **401 Unauthorized**
-  You tried to write without a valid session cookie (e.g., after `signout()`), or against the wrong user.
+  Check that the session belongs to the user whose storage you are writing to.
+  If you signed out or the grant was revoked, sign in again.
 - **403 Forbidden**
   The path is outside `/pub/` and `/priv/`, targets another user, or the session lacks a covering capability.
 - **Wrong passphrase**

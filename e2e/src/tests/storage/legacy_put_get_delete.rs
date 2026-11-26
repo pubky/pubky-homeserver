@@ -1,20 +1,15 @@
 use super::*;
+use crate::tests::legacy_cookie_session;
 
 #[tokio::test]
 #[pubky_testnet::test]
-#[allow(
-    deprecated,
-    reason = "This test covers legacy cookie and routing compatibility"
-)]
 async fn legacy_and_storage_routes_interoperate() {
     let testnet = build_full_testnet().await;
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let session = legacy_cookie_session(&pubky, &signer).await;
     let cookie_secret = session.as_cookie().unwrap().export_secret().unwrap();
     let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
     let cookie = format!("{cookie_name}={cookie_value}");

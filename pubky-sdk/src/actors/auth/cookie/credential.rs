@@ -25,14 +25,12 @@ use std::any::Any;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use pubky_common::{auth::AuthToken, crypto::PublicKey, session::CookieSessionRecord};
+use pubky_common::{crypto::PublicKey, session::CookieSessionRecord};
 
 use reqwest::{Method, RequestBuilder, Response};
 
 use crate::actors::session::core::PubkySession;
 use crate::actors::session::credential::{SessionCredential, credential_session_missing};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::errors::AuthError;
 use crate::util::read_response_body;
 use crate::{
     Error, PubkyHttpClient,
@@ -44,7 +42,7 @@ use crate::{
 
 const SESSION_PATH: &str = "/session";
 
-/// Maximum size, inclusive, of a `/session` or `/signup` response body. A
+/// Maximum size, inclusive, of a `/session` response body. A
 /// session record holds a public key and the capabilities from the signed
 /// auth token; the server does not cap those, so this bounds the client
 /// rather than mirrors a server limit.
@@ -128,93 +126,6 @@ impl CookieCredential {
         Self::homeserver_for_unbound_session(user, resolution)
     }
 
-    /// Build a cookie credential from a successful `/session` or `/signup`
-    /// response. `homeserver` is the homeserver that served it, when known.
-    pub(crate) async fn from_response(
-        response: Response,
-        homeserver: Option<PublicKey>,
-    ) -> Result<Self> {
-        let raw_set_cookies = collect_set_cookies(&response);
-
-        let bytes = read_session_body(response).await?;
-        let record = CookieSessionRecord::deserialize(&bytes)?;
-        let user = record.public_key().clone();
-        let cookie_name = user.z32();
-        let cookie = raw_set_cookies
-            .iter()
-            .filter_map(|raw| cookie::Cookie::parse(raw.clone()).ok())
-            .find(|c| c.name() == cookie_name)
-            .map(|c| c.value().to_string());
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if cookie.is_none() {
-                return Err(AuthError::Validation("missing session cookie".into()).into());
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        if cookie.is_none() {
-            cross_log!(
-                info,
-                "Hydrating WASM cookie credential without captured secret \
-                 (browser jar will handle attachment) for {}",
-                user
-            );
-        }
-
-        cross_log!(info, "Hydrated cookie credential for {}", user);
-        Ok(Self::new(user, cookie, record, homeserver))
-    }
-
-    /// Establish a cookie credential from a verified, signed [`AuthToken`]
-    /// (legacy flow).
-    ///
-    /// This is the second stage of split cookie authentication. Obtain the
-    /// token with [`crate::PubkyCookieAuthFlow::await_token`], retain it, then
-    /// call this method to resolve the homeserver and exchange the token at
-    /// `/session`. Because the token is borrowed, callers may retry failures
-    /// independently from relay polling while the token remains valid.
-    ///
-    /// [`AuthToken`] is short-lived and one-shot at the homeserver. A retry is
-    /// therefore not guaranteed to recover an exchange whose request reached
-    /// the homeserver but whose response was lost.
-    ///
-    /// `homeserver` binds signup credentials to the homeserver named by the
-    /// signup deep link. Pass `None` for signin, whose deep link does not name
-    /// a homeserver.
-    ///
-    /// # Errors
-    /// - Propagates homeserver resolution, HTTP transport, authentication, and
-    ///   response decoding failures.
-    pub async fn from_auth_token(
-        token: &AuthToken,
-        client: &PubkyHttpClient,
-        homeserver: Option<PublicKey>,
-    ) -> Result<Self> {
-        cross_log!(
-            info,
-            "Establishing new session exchange for {}",
-            token.public_key()
-        );
-        let request = session_request(
-            client,
-            Method::POST,
-            token.public_key(),
-            homeserver.as_ref(),
-        )
-        .await?;
-        let response = request.body(token.serialize()).send().await?;
-
-        let response = client.check_http_status(response).await?;
-        cross_log!(
-            info,
-            "Session exchange for {} succeeded; constructing credential",
-            token.public_key()
-        );
-        Self::from_response(response, homeserver).await
-    }
-
     /// Cookie secret accessor — used by [`super::view::CookieSessionView`]
     /// to export sessions for later restore. Returns `None` on browser WASM.
     pub(crate) fn cookie_secret(&self) -> Option<&str> {
@@ -252,17 +163,6 @@ async fn session_request(
     client
         .cross_request(method, user_endpoint_url(user, SESSION_PATH)?)
         .await
-}
-
-/// Cross-target reader for `Set-Cookie` response header values.
-fn collect_set_cookies(response: &Response) -> Vec<String> {
-    let mut out = Vec::new();
-    for val in response.headers().get_all(reqwest::header::SET_COOKIE) {
-        if let Ok(raw) = std::str::from_utf8(val.as_bytes()) {
-            out.push(raw.to_owned());
-        }
-    }
-    out
 }
 
 // Mirrors the cfg pair on the trait definition: native gets `Send` bounds
@@ -358,11 +258,6 @@ impl SessionCredential for CookieCredential {
 
 impl PubkySession {
     /// Build a cookie-backed [`PubkySession`] from a [`CookieCredential`].
-    ///
-    /// Typical use: after
-    /// [`PubkyCookieAuthFlow::await_credential`](crate::PubkyCookieAuthFlow::await_credential)
-    /// returns a credential you want to hold separately, this lifts it into
-    /// a full session bound to the given HTTP client.
     #[must_use]
     #[deprecated(note = "Use PubkySession::from_grant_credential instead.")]
     pub fn from_cookie_credential(client: PubkyHttpClient, credential: CookieCredential) -> Self {
