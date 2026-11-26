@@ -38,7 +38,7 @@
     "identity"
   ],
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.19.3",
     "@types/tape": "^5.6.4",
     "browser-resolve": "^2.0.0",
     "browserify": "^17.0.1",
@@ -48,7 +48,7 @@
     "tape": "^5.8.1",
     "tape-run": "^11.0.0",
     "typedoc": "^0.28.20",
-    "typescript": "^5.4.5"
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "fetch-cookie": "^3.0.1"
