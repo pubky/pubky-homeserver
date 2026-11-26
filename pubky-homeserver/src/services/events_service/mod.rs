@@ -6,6 +6,6 @@ mod service;
 mod stream;
 
 pub(crate) use query::{parse_cursor, EventStreamError, EventStreamQuery, Resume};
-pub use service::{EventsService, MAX_EVENT_STREAM_USERS};
+pub use service::{EventsService, MAX_EVENT_STREAM_PATHS, MAX_EVENT_STREAM_USERS};
 pub(crate) use service::{Mode, PG_NOTIFY_CHANNEL};
 pub(crate) use stream::{EventStreamFilter, NoGuard, StreamCursor, StreamGuard};

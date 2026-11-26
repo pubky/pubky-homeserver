@@ -15,6 +15,13 @@ use crate::shared::webdav::EntryPath;
 /// - Set to 50 for clean limit with safety margin for longer cursors
 pub const MAX_EVENT_STREAM_USERS: usize = 50;
 
+/// Maximum number of distinct `path=` filters in a single event stream request.
+///
+/// Each filter is one more predicate on every row the query reads, and a
+/// long list of them makes the planner give up on the path indexes and scan
+/// the whole events table.
+pub const MAX_EVENT_STREAM_PATHS: usize = 5;
+
 /// Postgres channel name for event notifications.
 pub(crate) const PG_NOTIFY_CHANNEL: &str = "events";
 

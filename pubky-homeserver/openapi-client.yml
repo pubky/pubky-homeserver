@@ -1291,6 +1291,7 @@ paths:
           Path filter (repeatable; union semantics). A trailing slash matches a directory
           and its descendants; otherwise the exact file is matched. Private `/priv/...`
           filters require exactly one target user and an authorized session capability.
+          A repeated path counts once; more than 5 distinct paths returns `400`.
         schema:
           type: array
           items:

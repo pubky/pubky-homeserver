@@ -227,7 +227,8 @@ impl EventStreamBuilder {
     /// trailing slash matches an exact file (`/pub/notes.txt`).
     ///
     /// Private (`/priv/...`) paths require a session attached via `session()`;
-    /// without one the homeserver rejects the subscription with 401.
+    /// without one the homeserver rejects the subscription with 401. It also
+    /// rejects more than 5 distinct paths with 400.
     ///
     /// @param {string} path - Path filter (repeatable)
     /// @returns {EventStreamBuilder} - Builder for chaining

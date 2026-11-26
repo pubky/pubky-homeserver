@@ -407,7 +407,8 @@ impl EventStreamBuilder {
     ///
     /// Private (`/priv/...`) paths require a session attached via
     /// [`Self::session`]; without one the homeserver rejects the subscription
-    /// with `401 Unauthorized`.
+    /// with `401 Unauthorized`. The homeserver also rejects more than 5
+    /// distinct paths with `400 Bad Request`.
     #[must_use]
     pub fn path<S: Into<String>>(mut self, path: S) -> Self {
         self.paths.push(path.into());

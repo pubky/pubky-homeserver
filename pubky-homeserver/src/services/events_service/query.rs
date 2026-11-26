@@ -8,7 +8,7 @@
 use pubky_common::crypto::PublicKey;
 use url::form_urlencoded;
 
-use super::{Mode, StreamCursor, MAX_EVENT_STREAM_USERS};
+use super::{Mode, StreamCursor, MAX_EVENT_STREAM_PATHS, MAX_EVENT_STREAM_USERS};
 use crate::{
     constants::DEFAULT_LIST_LIMIT, persistence::sql::events::EventCursor,
     services::user_service::UserService, shared::webdav::StoragePath,
@@ -37,6 +37,8 @@ pub(crate) enum EventStreamError {
     LiveWithReverse,
     #[error("Too many users. Maximum allowed: {}", MAX_EVENT_STREAM_USERS)]
     TooManyUsers,
+    #[error("Too many paths. Maximum allowed: {}", MAX_EVENT_STREAM_PATHS)]
+    TooManyPaths,
     #[error("Cannot combine cursor with per-user cursors")]
     MixedCursors,
     #[error("Invalid path: {0}")]
@@ -159,6 +161,9 @@ impl EventStreamQuery {
         if user_cursors.len() > MAX_EVENT_STREAM_USERS {
             return Err(EventStreamError::TooManyUsers);
         }
+        if shared.paths.len() > MAX_EVENT_STREAM_PATHS {
+            return Err(EventStreamError::TooManyPaths);
+        }
 
         let has_suffix = user_cursors.iter().any(|(_, suffix)| suffix.is_some());
         let resume = match cursor {
@@ -216,7 +221,13 @@ impl SharedParams {
             }
             "live" => self.live = is_true(value),
             "reverse" => self.reverse = is_true(value),
-            "path" if !value.is_empty() => self.paths.push(parse_path(value)?),
+            "path" if !value.is_empty() => {
+                // A repeated path counts once towards `MAX_EVENT_STREAM_PATHS`.
+                let path = parse_path(value)?;
+                if !self.paths.contains(&path) {
+                    self.paths.push(path);
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -442,6 +453,25 @@ mod tests {
             message("live=true&reverse=true"),
             "Cannot use live mode with reverse ordering"
         );
+    }
+
+    #[test]
+    fn rejects_too_many_distinct_paths() {
+        let paths = |count: usize| {
+            (0..count)
+                .map(|i| format!("path=/pub/{i}/"))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        assert_eq!(parse(&paths(MAX_EVENT_STREAM_PATHS)).paths.len(), 5);
+        assert_eq!(
+            message(&paths(MAX_EVENT_STREAM_PATHS + 1)),
+            format!("Too many paths. Maximum allowed: {MAX_EVENT_STREAM_PATHS}")
+        );
+
+        // Repeats of one path count once, with or without the leading slash.
+        let repeated = "path=/pub/a/&path=pub/a/&".repeat(MAX_EVENT_STREAM_PATHS);
+        assert_eq!(parse(&repeated).paths.len(), 1);
     }
 
     #[test]
