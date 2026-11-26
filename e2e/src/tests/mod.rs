@@ -9,8 +9,13 @@ mod rate_limiting;
 mod storage;
 mod website;
 
-use pubky_testnet::pubky::{AuthFlowKind, ClientId, PubkyGrantAuthFlow, PubkySession, PubkySigner};
-use pubky_testnet::pubky_common::capabilities::Capabilities;
+use pubky_testnet::pubky::{
+    AuthFlowKind, ClientId, Method, Pubky, PubkyGrantAuthFlow, PubkySession, PubkySigner, PublicKey,
+};
+use pubky_testnet::pubky_common::{
+    auth::AuthToken,
+    capabilities::{Capabilities, Capability},
+};
 use pubky_testnet::EphemeralTestnet;
 
 async fn build_full_testnet() -> EphemeralTestnet {
@@ -20,6 +25,37 @@ async fn build_full_testnet() -> EphemeralTestnet {
         .build()
         .await
         .unwrap()
+}
+
+async fn signup_and_signin(signer: &PubkySigner, homeserver: &PublicKey) -> PubkySession {
+    signer.signup(homeserver, None).await.unwrap();
+    signer
+        .signin(ClientId::new("e2e.test").unwrap())
+        .await
+        .unwrap()
+}
+
+/// Exchange an older client's approval at the homeserver's cookie endpoint.
+async fn exchange_cookie_token(pubky: &Pubky, token: &AuthToken) -> reqwest::Response {
+    let url = format!("https://_pubky.{}/session", token.public_key().z32());
+    pubky
+        .client()
+        .request(Method::POST, &url)
+        .body(token.serialize())
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn legacy_cookie_session(pubky: &Pubky, signer: &PubkySigner) -> PubkySession {
+    let token = AuthToken::sign(signer.keypair(), vec![Capability::root()]);
+    let response = exchange_cookie_token(pubky, &token)
+        .await
+        .error_for_status()
+        .unwrap();
+    let cookie = response.cookies().next().unwrap();
+    let secret = format!("{}:{}", cookie.name(), cookie.value());
+    pubky.restore_session(&secret).await.unwrap()
 }
 
 /// Approve a grant with `caps` for `signer` as `client_id` and return the

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::{legacy_cookie_session, signup_and_signin};
 use futures::StreamExt;
 use pubky_testnet::pubky::errors::{Error, RequestError};
 use pubky_testnet::pubky::{
@@ -85,18 +86,9 @@ async fn events_stream_sdk_builder_api() {
     let signer2 = pubky.signer(keypair2);
     let signer3 = pubky.signer(keypair3);
 
-    let session1 = signer1
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
-    let session2 = signer2
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
-    let session3 = signer3
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session1 = signup_and_signin(&signer1, &server.public_key()).await;
+    let session2 = signup_and_signin(&signer2, &server.public_key()).await;
+    let session3 = signup_and_signin(&signer3, &server.public_key()).await;
 
     let pubky1 = signer1.public_key();
     let pubky2 = signer2.public_key();
@@ -505,7 +497,7 @@ async fn events_stream_sdk_signin_cookie_private_authorized() {
 
     let signer = pubky.signer(Keypair::random());
     signer.signup(&server.public_key(), None).await.unwrap();
-    let session = signer.signin_cookie().await.unwrap();
+    let session = legacy_cookie_session(&pubky, &signer).await;
     let user = signer.public_key();
 
     session
@@ -557,7 +549,8 @@ async fn events_stream_sdk_cookie_bound_homeserver_is_enforced() {
     let pubky = testnet.sdk().unwrap();
 
     let me = pubky.signer(Keypair::random());
-    let my_session = me.signup_cookie(&hs1, None).await.unwrap();
+    me.signup(&hs1, None).await.unwrap();
+    let my_session = legacy_cookie_session(&pubky, &me).await;
     let my_user = me.public_key();
 
     let result = pubky
@@ -589,10 +582,8 @@ async fn events_stream_sdk_cookie_live_private_receives_in_scope() {
     let pubky = testnet.sdk().unwrap();
 
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let session = legacy_cookie_session(&pubky, &signer).await;
     let user = signer.public_key();
 
     let mut stream = pubky

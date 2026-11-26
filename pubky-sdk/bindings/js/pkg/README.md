@@ -304,8 +304,7 @@ renderQr(flow.authorizationUrl); // show to user
 const session = await flow.awaitApproval();
 ```
 
-The same callback object can be passed as the fourth argument to legacy cookie
-auth: `startCookieAuthFlow(caps, kind, relay, xCallback)`. The SDK emits
+The SDK emits
 `x-source`, `x-success`, `x-error`, and `x-cancel` using the encoding expected
 by Pubky Ring. Parsed deep-link objects expose them through `xCallback`; the
 legacy `callback` parameter is accepted as an `xSuccess` fallback.
@@ -350,10 +349,18 @@ if (saved) {
 For local signing keys, use `GrantAuthFlow.start()`, `flow.saveLocal()`, and
 `pubky.resumeGrantAuthFlow(saved)`.
 
-Legacy cookie auth flows can be resumed with
-`pubky.resumeCookieAuthFlow(authorizationUrl)`. Store pending auth state in
-`sessionStorage`, not `localStorage`, and delete it once the flow completes or
-is abandoned.
+Grant sign-up and sign-in require homeserver v0.10.0 or later. If your app
+uses cookie requests for QR or deep-link login, confirm that the signing apps
+your users rely on support grant links before upgrading the requesting app.
+
+After upgrading, restart a pending cookie request with `startGrantAuthFlow`.
+Use `AuthFlowKind.signin()` for an existing account, including a pending
+sign-up where the signer already registered the user and redeemed their invite.
+Use `AuthFlowKind.signup(homeserver, signupToken)` if the signer has yet to
+register the account.
+
+You can restore a completed cookie session with `restoreSession` and use it
+until signout or expiry. Signers can still approve requests from older apps.
 
 #### Require the signed-in identity
 
@@ -711,7 +718,11 @@ Both `pubky<pk>/…` (preferred) and `pubky://<pk>/…` resolve to the same HTTP
 
 ## WASM memory (`free()` helpers)
 
-`wasm-bindgen` generates `free()` methods on exported classes (for example `Pubky`, `AuthFlow` `PublicKey`). JavaScript's GC eventually releases the underlying Rust structs on its own, but calling `free()` lets you drop them **immediately** if you are creating many short-lived instances (e.g. in a long-running worker). It is safe to skip manual frees in typical browser or Node apps.
+`wasm-bindgen` generates `free()` methods on exported classes such as `Pubky`,
+`GrantAuthFlow`, and `PublicKey`. JavaScript's garbage collector eventually
+releases the underlying Rust structs. Call `free()` to release them immediately
+when creating many short-lived instances, for example in a long-running worker.
+Typical browser and Node apps can rely on garbage collection.
 
 ---
 

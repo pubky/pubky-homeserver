@@ -1,15 +1,9 @@
-#![allow(
-    deprecated,
-    reason = "JS bindings preserve deprecated cookie compatibility APIs"
-)]
-
 use tsify::Ts;
 use wasm_bindgen::prelude::*;
 
 use crate::actors::{
-    auth_flow::{AuthFlow, AuthFlowKind},
+    auth_flow::AuthFlowKind,
     browser_grant_key_store::BrowserGrantKeyStore,
-    deep_links::XCallbackParams,
     event_stream::EventStreamBuilder,
     grant_auth_flow::{GrantAuthFlow, GrantAuthFlowOptions},
     parent_grant::ParentGrantStore,
@@ -83,59 +77,6 @@ impl Pubky {
         Pubky(pubky::Pubky::with_client(client.0.clone()))
     }
 
-    /// Start a **pubkyauth** flow.
-    ///
-    /// Provide a **capabilities string** and (optionally) a relay base URL.
-    /// The capabilities string is a comma-separated list of entries:
-    /// `"<scope>:<actions>"`, where:
-    /// - `scope` starts with `/` (e.g. `/pub/example.com/`).
-    /// - `actions` is any combo of `r` and/or `w` (order normalized; `wr` -> `rw`).
-    /// Pass `""` for no scopes (read-only public session).
-    ///
-    /// **Security:** `authorizationUrl` contains the `client_secret` in plaintext.
-    /// If you need resume after refresh/app switch, save it in `sessionStorage`
-    /// (not `localStorage`), then delete it once approval arrives or is abandoned.
-    ///
-    /// @param {string} capabilities Comma-separated caps, e.g. `"/pub/app/:rw,/pub/foo/file:r"`.
-    /// @param {AuthFlowKind} kind The kind of authentication flow to perform.
-    /// Examples:
-    /// - `AuthFlowKind.signin()` - Sign in to an existing account.
-    /// - `AuthFlowKind.signup(homeserverPublicKey, signupToken)` - Sign up for a new account.
-    /// @param {string=} relay Optional HTTP relay base (e.g. `"https://…/inbox/"`).
-    /// @param {XCallbackParams=} xCallback Optional app return destinations.
-    /// @returns {AuthFlow}
-    /// A running auth flow. Show `authorizationUrl` as QR/deeplink,
-    /// then `awaitApproval()` to obtain a `Session`.
-    ///
-    /// @throws {PubkyError}
-    /// - `{ name: "InvalidInput" }` for malformed capabilities or bad relay URL
-    /// - `{ name: "RequestError" }` if the flow cannot be started (network/relay)
-    ///
-    /// @example
-    /// const flow = pubky.startCookieAuthFlow("/pub/my-cool-app/:rw");
-    /// renderQr(flow.authorizationUrl);
-    /// const session = await flow.awaitApproval();
-    ///
-    /// @deprecated Use `startGrantAuthFlow(...)` instead.
-    #[wasm_bindgen(js_name = "startCookieAuthFlow")]
-    pub fn start_cookie_auth_flow(
-        &self,
-        #[wasm_bindgen(unchecked_param_type = "Capabilities")] capabilities: String,
-        kind: AuthFlowKind,
-        relay: Option<String>,
-        x_callback: Option<Ts<XCallbackParams>>,
-    ) -> JsResult<AuthFlow> {
-        let x_callback = x_callback.as_ref().map(deserialize_ts).transpose()?;
-        let flow = AuthFlow::start_with_client(
-            capabilities,
-            kind,
-            relay,
-            x_callback,
-            Some(self.0.client().clone()),
-        )?;
-        Ok(flow)
-    }
-
     /// Start a grant-backed **pubkyauth** flow.
     ///
     /// Grant auth uses a user-signed grant JWS plus Proof-of-Possession and
@@ -189,50 +130,6 @@ impl Pubky {
         }
 
         GrantAuthFlow::start_with_client(capabilities, kind, options, Some(self.0.client().clone()))
-    }
-
-    /// Resume a previously started **pubkyauth** flow from its saved `authorizationUrl`.
-    ///
-    /// If the user refreshes or navigates away mid-flow, WASM memory is lost and
-    /// the original `AuthFlow` object is gone. You can reconnect to the same relay
-    /// channel by saving the `authorizationUrl` beforehand and calling this method
-    /// after reload.
-    ///
-    /// The relay inbox retains messages for **~5 minutes**. Resume is only
-    /// viable within that window; afterwards start a fresh flow.
-    ///
-    /// **Security:** The URL contains the `client_secret` in plaintext.
-    /// Store it in `sessionStorage` (scoped to the tab), **not** `localStorage`,
-    /// and delete it as soon as the resumed flow completes or is abandoned.
-    /// See `startCookieAuthFlow()` docs for full storage guidance.
-    ///
-    /// @param {string} authorizationUrl The `pubkyauth://…` URL from a previous flow.
-    /// @returns {AuthFlow} A flow reconnected to the original relay channel.
-    /// @throws {PubkyError}
-    /// - `{ name: "AuthenticationError" }` if the URL is invalid or not a signin/signup link
-    /// - `{ name: "RequestError" }` on network/relay failure
-    ///
-    /// @example
-    /// // 1) Before a potential refresh, persist the URL.
-    /// const flow = pubky.startCookieAuthFlow("/pub/my-cool-app/:rw", AuthFlowKind.signin());
-    /// sessionStorage.setItem("pubky-auth-url", flow.authorizationUrl);
-    /// renderQr(flow.authorizationUrl);
-    ///
-    /// // 2) After reload, resume from the saved URL.
-    /// const savedUrl = sessionStorage.getItem("pubky-auth-url");
-    /// if (savedUrl) {
-    ///   try {
-    ///     const resumed = pubky.resumeCookieAuthFlow(savedUrl);
-    ///     const session = await resumed.awaitApproval();
-    ///   } finally {
-    ///     sessionStorage.removeItem("pubky-auth-url");
-    ///   }
-    /// }
-    ///
-    /// @deprecated Use `resumeGrantAuthFlow(...)` instead.
-    #[wasm_bindgen(js_name = "resumeCookieAuthFlow")]
-    pub fn resume_cookie_auth_flow(&self, authorization_url: String) -> JsResult<AuthFlow> {
-        AuthFlow::resume_with_client(authorization_url, Some(self.0.client().clone()))
     }
 
     /// Resume a previously saved pending grant auth flow.
@@ -428,6 +325,7 @@ impl Pubky {
     ///
     /// @example
     /// const restored = await pubky.restoreSession(localStorage.getItem("pubky-session")!);
+    #[allow(deprecated, reason = "Restore metadata exported by older SDKs")]
     #[wasm_bindgen(js_name = "restoreSession")]
     pub async fn restore_session(&self, exported: String) -> JsResult<Session> {
         let session = if exported.starts_with("pubky-grant-credential-") || exported.contains(':') {

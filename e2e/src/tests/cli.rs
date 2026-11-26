@@ -96,7 +96,7 @@ async fn spawn_homeserver_with_user_config(
 
     let pubky = testnet.sdk().unwrap();
     let signer = pubky.signer(Keypair::random());
-    signer.signup_cookie(&server_pk, None).await.unwrap();
+    signer.signup(&server_pk, None).await.unwrap();
     let pk = signer.public_key().z32();
 
     (testnet, endpoint, admin_password, pk)

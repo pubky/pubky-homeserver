@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::{legacy_cookie_session, signup_and_signin};
 use base64::Engine;
 use pubky_testnet::pubky::{ClientId, Pubky};
 
@@ -23,10 +24,8 @@ async fn put_get_delete() {
 
     let signer = pubky.signer(Keypair::random());
 
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let session = legacy_cookie_session(&pubky, &signer).await;
     let public_key = session.public_key();
     let cookie_secret = session.as_cookie().unwrap().export_secret().unwrap();
     let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
@@ -152,10 +151,7 @@ async fn path_collisions_return_conflict_and_recover_after_delete() {
     let pubky = testnet.sdk().unwrap();
 
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
 
     let exact = "/pub/app/foo";
     let descendant = "/pub/app/foo/bar.json";
@@ -203,10 +199,7 @@ async fn deleting_legacy_exact_file_does_not_delete_descendants() {
     let pubky = testnet.sdk().unwrap();
 
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
     let user = session.public_key().z32();
 
     let admin_password = pubky_testnet::pubky_homeserver::ConfigToml::default_test_config()
@@ -273,10 +266,7 @@ async fn put_then_get_json_roundtrip() {
 
     let signer = pubky.signer(Keypair::random());
 
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
     let public_key = session.public_key();
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,14 +324,8 @@ async fn dont_delete_shared_blobs() {
     let u1 = pubky.signer(Keypair::random());
     let u2 = pubky.signer(Keypair::random());
 
-    let a1 = u1
-        .signup_cookie(&homeserver.public_key(), None)
-        .await
-        .unwrap();
-    let a2 = u2
-        .signup_cookie(&homeserver.public_key(), None)
-        .await
-        .unwrap();
+    let a1 = signup_and_signin(&u1, &homeserver.public_key()).await;
+    let a2 = signup_and_signin(&u2, &homeserver.public_key()).await;
 
     let user_1_id = u1.public_key();
     let user_2_id = u2.public_key();
@@ -395,10 +379,7 @@ async fn stream() {
     let pubky = testnet.sdk().unwrap();
 
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
 
     let path = "/pub/foo.txt";
     let bytes = Bytes::from(vec![0; 1024 * 1024]); // 1 MiB
@@ -434,15 +415,9 @@ async fn write_same_path_separate_users() {
     let pubky = testnet.sdk().unwrap();
 
     let signer_a = pubky.signer(Keypair::random());
-    let session_a = signer_a
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_a = signup_and_signin(&signer_a, &server.public_key()).await;
     let signer_b = pubky.signer(Keypair::random());
-    let session_b = signer_b
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session_b = signup_and_signin(&signer_b, &server.public_key()).await;
 
     let path = "/pub/foo.txt";
     let content1 = Bytes::from(b"content1".to_vec());
@@ -565,7 +540,7 @@ async fn configured_error_limit_preserves_private_grant_and_cookie_reads() {
         .put("/priv/test/file", "private")
         .await
         .unwrap();
-    let cookie = signer.signin_cookie().await.unwrap();
+    let cookie = legacy_cookie_session(&pubky, &signer).await;
     for session in [&grant, &cookie] {
         let response = session.storage().get("/priv/test/file").await.unwrap();
         assert_eq!(response.text().await.unwrap(), "private");

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::signup_and_signin;
 use tokio::time::{timeout, Duration};
 
 #[tokio::test]
@@ -17,10 +18,7 @@ async fn events_stream_validation_errors() {
 
     // Sign up user1, leave user2 not registered
     let signer1 = pubky.signer(keypair1);
-    let session1 = signer1
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session1 = signup_and_signin(&signer1, &server.public_key()).await;
 
     let pubky1 = signer1.public_key();
     let pubky2 = keypair2.public_key(); // Not registered
@@ -303,10 +301,7 @@ async fn event_apis_validate_numeric_cursors() {
     let server = testnet.homeserver_app();
     let pubky = testnet.sdk().unwrap();
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
     for path in ["/pub/cursor-first.txt", "/pub/cursor-second.txt"] {
         session.storage().put(path, vec![1]).await.unwrap();
     }

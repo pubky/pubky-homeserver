@@ -1,6 +1,6 @@
 import test from "tape";
+import * as legacy from "pubky-legacy/index.js";
 import {
-  SigninDeepLink,
   SigninGrantDeepLink,
   SignupGrantDeepLink,
   GrantAuthFlow,
@@ -15,6 +15,7 @@ import {
   IsExact,
   assertPubkyError,
   createSignupToken,
+  getStatusCode,
 } from "./utils.js";
 
 const HOMESERVER_PUBLICKEY = PublicKey.from(
@@ -24,42 +25,34 @@ const HOMESERVER_PUBLICKEY = PublicKey.from(
 // relay base (no trailing slash is fine; the flow will append the channel id)
 const TESTNET_HTTP_RELAY = "http://localhost:15412/inbox";
 
-test("Auth: 3rd party signup", async (t) => {
-  const sdk = Pubky.testnet();
-
-  const signer = sdk.signer(Keypair.random());
-  const pubky = signer.publicKey.z32();
-  const signupToken = await createSignupToken();
-
-  const capabilities = "/pub/pubky.app/:rw,/pub/foo.bar/file:r";
-  const flow = sdk.startCookieAuthFlow(capabilities, AuthFlowKind.signup(HOMESERVER_PUBLICKEY, signupToken), TESTNET_HTTP_RELAY);
-
-  type Flow = typeof flow;
-  type SessionPromise = ReturnType<Flow["awaitApproval"]>;
-  type Session = Awaited<SessionPromise>;
-
-  const _flowUrl: Assert<IsExact<Flow["authorizationUrl"], string>> = true;
-  const _sessionInfo: Assert<IsExact<Session["info"], SessionInfo>> = true;
-
-  {
-
-    await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
+test("Signer approves legacy sign-in and sign-up links", async (t) => {
+  const requester = legacy.Pubky.testnet();
+  const signer = Pubky.testnet().signer(Keypair.random());
+  const token = await createSignupToken();
+  const homeserver = legacy.PublicKey.from(HOMESERVER_PUBLICKEY.z32());
+  const readOnlyFile = "/pub/other.app/read-only";
+  const capabilities = `/pub/legacy.app/:rw,${readOnlyFile}:r`;
+  for (const kind of [legacy.AuthFlowKind.signup(homeserver, token), legacy.AuthFlowKind.signin()]) {
+    const intent = kind.intent;
+    const flow = requester.startCookieAuthFlow(capabilities, kind, TESTNET_HTTP_RELAY);
+    if (intent === "signup") await signer.signup(HOMESERVER_PUBLICKEY, token);
     await signer.approveAuthRequest(flow.authorizationUrl);
+    const session = await flow.awaitApproval();
+    t.equal(session.info.publicKey.z32(), signer.publicKey.z32());
+    t.deepEqual(session.info.capabilities, capabilities.split(","));
+    await session.storage.putText("/pub/legacy.app/data", intent);
+    t.equal(await session.storage.getText("/pub/legacy.app/data"), intent);
+    for (const path of ["/pub/legacy.app", "/pub/other.app/data", readOnlyFile] as const) {
+      try {
+        await session.storage.putText(path, intent);
+        t.fail(`unexpected write access to ${path}`);
+      } catch (error) {
+        assertPubkyError(t, error);
+        t.equal(getStatusCode(error), 403, `${intent} cannot write to ${path}`);
+      }
+    }
+    await session.signout();
   }
-
-  const session = await flow.awaitApproval();
-
-  t.equal(
-    session.info.publicKey.z32(),
-    pubky,
-    "session belongs to expected user",
-  );
-  t.deepEqual(
-    session.info.capabilities,
-    capabilities.split(","),
-    "session capabilities match",
-  );
-
   t.end();
 });
 
@@ -80,44 +73,6 @@ test("Auth: direct signup deeplink", async (t) => {
     session.info.publicKey.z32(),
     signer.publicKey.z32(),
     "session belongs to expected user",
-  );
-
-  t.end();
-});
-
-test("Auth: 3rd party signin", async (t) => {
-  const sdk = Pubky.testnet();
-
-  const signer = sdk.signer(Keypair.random());
-  const pubky = signer.publicKey.z32();
-
-  const capabilities = "/pub/pubky.app/:rw,/pub/foo.bar/file:r";
-  const flow = sdk.startCookieAuthFlow(capabilities, AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-
-  type Flow = typeof flow;
-  type SessionPromise = ReturnType<Flow["awaitApproval"]>;
-  type Session = Awaited<SessionPromise>;
-
-  const _flowUrl: Assert<IsExact<Flow["authorizationUrl"], string>> = true;
-  const _sessionInfo: Assert<IsExact<Session["info"], SessionInfo>> = true;
-
-  {
-    const signupToken = await createSignupToken();
-    await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
-    await signer.approveAuthRequest(flow.authorizationUrl);
-  }
-
-  const session = await flow.awaitApproval();
-
-  t.equal(
-    session.info.publicKey.z32(),
-    pubky,
-    "session belongs to expected user",
-  );
-  t.deepEqual(
-    session.info.capabilities,
-    capabilities.split(","),
-    "session capabilities match",
   );
 
   t.end();
@@ -221,30 +176,6 @@ test("Grant auth: 3rd party signup", async (t) => {
   t.end();
 });
 
-test("startCookieAuthFlow validates capabilities", (t) => {
-  const sdk = Pubky.testnet();
-
-  try {
-    // @ts-ignore: malformed capability string for runtime validation.
-    sdk.startCookieAuthFlow("/ok/:rw,not/a/cap", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-    t.fail("startCookieAuthFlow() should reject malformed capabilities");
-  } catch (error) {
-    assertPubkyError(t, error);
-    t.equal(error.name, "InvalidInput", "invalid capabilities -> InvalidInput");
-  }
-
-  // @ts-ignore: unordered actions are accepted and normalized at runtime.
-  const flow = sdk.startCookieAuthFlow("/pub/example/:wr", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-  const url = new URL(flow.authorizationUrl);
-  t.equal(url.searchParams.get("caps"), "/pub/example/:rw", "normalizes capabilities");
-
-  const emptyFlow = sdk.startCookieAuthFlow("", AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-  const emptyUrl = new URL(emptyFlow.authorizationUrl);
-  t.equal(emptyUrl.searchParams.get("caps"), "", "allows empty capabilities");
-
-  t.end();
-});
-
 test("auth flow builders add Ring-compatible x-callback parameters", async (t) => {
   const sdk = Pubky.testnet();
   const xCallback = {
@@ -253,15 +184,6 @@ test("auth flow builders add Ring-compatible x-callback parameters", async (t) =
     xError: "bitkit://auth/error?nonce=builder",
     xCancel: "bitkit://auth/cancel?nonce=builder",
   };
-
-  const cookieFlow = sdk.startCookieAuthFlow(
-    "/pub/example/:rw",
-    AuthFlowKind.signin(),
-    TESTNET_HTTP_RELAY,
-    xCallback,
-  );
-  const cookieLink = SigninDeepLink.parse(cookieFlow.authorizationUrl);
-  t.deepEqual(cookieLink.xCallback, xCallback, "cookie flow carries callbacks");
 
   const grantFlow = await sdk.startGrantAuthFlow(
     "/pub/example/:rw",
@@ -275,7 +197,6 @@ test("auth flow builders add Ring-compatible x-callback parameters", async (t) =
   const grantLink = SigninGrantDeepLink.parse(grantFlow.authorizationUrl);
   t.deepEqual(grantLink.xCallback, xCallback, "grant flow carries callbacks");
 
-  cookieFlow.free();
   grantFlow.free();
   t.end();
 });
@@ -438,157 +359,6 @@ test("Grant auth: resume signin flow from saved state", async (t) => {
   const keys = session.grant!.encryptionKeys!;
   t.deepEqual(keys.scopes, ["/pub/pubky.app/"], "resumed signed approval flow decrypts scoped keys");
   keys.free();
-
-  t.end();
-});
-
-test("Auth: resume signin flow reconnects to same channel", async (t) => {
-  const sdk = Pubky.testnet();
-
-  const signer = sdk.signer(Keypair.random());
-  const pubky = signer.publicKey.z32();
-
-  const capabilities = "/pub/pubky.app/:rw,/pub/foo.bar/file:r";
-
-  // 1) Start a flow and save the URL (as the app would before a refresh).
-  const originalFlow = sdk.startCookieAuthFlow(capabilities, AuthFlowKind.signin(), TESTNET_HTTP_RELAY);
-  const savedUrl = originalFlow.authorizationUrl;
-  // Explicitly free the WASM handle — simulates page refresh killing WASM memory.
-  // JS block scoping does NOT trigger WASM destructors; .free() does.
-  originalFlow.free();
-
-  // 2) Signer approves while the original flow is gone (token waits in the relay inbox).
-  {
-    const signupToken = await createSignupToken();
-    await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
-    await signer.approveAuthRequest(savedUrl);
-  }
-
-  // 3) Resume from the saved URL — reconnects to the same relay channel.
-  const resumedFlow = sdk.resumeCookieAuthFlow(savedUrl);
-
-  t.equal(
-    resumedFlow.authorizationUrl,
-    savedUrl,
-    "resumed flow produces the same authorization URL",
-  );
-
-  const session = await resumedFlow.awaitApproval();
-
-  t.equal(
-    session.info.publicKey.z32(),
-    pubky,
-    "resumed flow session belongs to expected user",
-  );
-  t.deepEqual(
-    session.info.capabilities,
-    capabilities.split(","),
-    "resumed flow session capabilities match",
-  );
-
-  t.end();
-});
-
-test("Auth: resume signup flow preserves signup params and channel", async (t) => {
-  const sdk = Pubky.testnet();
-
-  const signer = sdk.signer(Keypair.random());
-  const pubky = signer.publicKey.z32();
-  const signupToken = await createSignupToken();
-
-  const capabilities = "/pub/pubky.app/:rw,/pub/foo.bar/file:r";
-
-  // 1) Start a signup flow and save URL before refresh.
-  const originalFlow = sdk.startCookieAuthFlow(
-    capabilities,
-    AuthFlowKind.signup(HOMESERVER_PUBLICKEY, signupToken),
-    TESTNET_HTTP_RELAY,
-  );
-  const savedUrl = originalFlow.authorizationUrl;
-
-  // Signup-specific params are present in the persisted URL.
-  const savedParsed = new URL(savedUrl);
-  t.equal(
-    savedParsed.searchParams.get("hs"),
-    HOMESERVER_PUBLICKEY.z32(),
-    "saved URL keeps homeserver parameter",
-  );
-  t.equal(
-    savedParsed.searchParams.get("st"),
-    signupToken,
-    "saved URL keeps signup token parameter",
-  );
-
-  // Simulate page refresh destroying the in-memory flow handle.
-  originalFlow.free();
-
-  // 2) Signer approves while original flow is gone.
-  await signer.signup(HOMESERVER_PUBLICKEY, signupToken);
-  await signer.approveAuthRequest(savedUrl);
-
-  // 3) Resume from persisted URL.
-  const resumedFlow = sdk.resumeCookieAuthFlow(savedUrl);
-
-  t.equal(
-    resumedFlow.authorizationUrl,
-    savedUrl,
-    "resumed signup flow produces the same authorization URL",
-  );
-
-  const resumedParsed = new URL(resumedFlow.authorizationUrl);
-  t.equal(
-    resumedParsed.searchParams.get("hs"),
-    HOMESERVER_PUBLICKEY.z32(),
-    "resumed URL keeps homeserver parameter",
-  );
-  t.equal(
-    resumedParsed.searchParams.get("st"),
-    signupToken,
-    "resumed URL keeps signup token parameter",
-  );
-
-  const session = await resumedFlow.awaitApproval();
-
-  t.equal(
-    session.info.publicKey.z32(),
-    pubky,
-    "resumed signup flow session belongs to expected user",
-  );
-  t.deepEqual(
-    session.info.capabilities,
-    capabilities.split(","),
-    "resumed signup flow session capabilities match",
-  );
-
-  t.end();
-});
-
-test("resumeCookieAuthFlow: rejects invalid URL", async (t) => {
-  const sdk = Pubky.testnet();
-
-  try {
-    sdk.resumeCookieAuthFlow("https://not-a-pubkyauth-url.com");
-    t.fail("resumeCookieAuthFlow() should throw on non-pubkyauth URL");
-  } catch (error) {
-    assertPubkyError(t, error);
-    t.equal(error.name, "AuthenticationError", "invalid URL -> AuthenticationError");
-    t.ok(
-      /Failed to parse/i.test(error.message),
-      "error message explains parse failure",
-    );
-  }
-
-  try {
-    sdk.resumeCookieAuthFlow("pubkyauth://secret_export?secret=kqnceEMgrNQM_xi06oQXjA3cJHX_RQmw1BY6JE1bse8");
-    t.fail("resumeCookieAuthFlow() should reject seed export URLs");
-  } catch (error) {
-    assertPubkyError(t, error);
-    t.equal(error.name, "AuthenticationError", "seed export URL -> AuthenticationError");
-    t.ok(
-      /Only signin and signup/i.test(error.message),
-      "error message explains only auth URLs are valid",
-    );
-  }
 
   t.end();
 });

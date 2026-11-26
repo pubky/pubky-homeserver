@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::signup_and_signin;
 
 #[tokio::test]
 #[pubky_testnet::test]
@@ -9,10 +10,7 @@ async fn list_deep() {
 
     // Owner user
     let owner = pubky.signer(Keypair::random());
-    let owner_session = owner
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let owner_session = signup_and_signin(&owner, &server.public_key()).await;
     let public_key = owner_session.public_key();
     // Write files to the server. Names are stored as written and listed in
     // byte order, so `My File.txt` sorts first and `über.txt` last.
@@ -179,10 +177,7 @@ async fn list_shallow() {
 
     // Owner user
     let owner = pubky.signer(Keypair::random());
-    let owner_session = owner
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let owner_session = signup_and_signin(&owner, &server.public_key()).await;
     let public_key = owner_session.public_key();
 
     // Write files to the server

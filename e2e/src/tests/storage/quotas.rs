@@ -1,3 +1,4 @@
+use crate::tests::{legacy_cookie_session, signup_and_signin};
 use pubky_testnet::pubky_homeserver::ConfigToml;
 
 use super::*;
@@ -18,10 +19,8 @@ async fn put_quota_applied() {
 
     // Create a user/session
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    signer.signup(&server.public_key(), None).await.unwrap();
+    let session = legacy_cookie_session(&pubky, &signer).await;
     let cookie_secret = session.as_cookie().unwrap().export_secret().unwrap();
     let (cookie_name, cookie_value) = cookie_secret.split_once(':').unwrap();
     let cookie = format!("{cookie_name}={cookie_value}");
@@ -106,10 +105,7 @@ async fn put_quota_applied_with_bandwidth_throttling() {
         .unwrap();
 
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
 
     // First 600 KB → OK (201)
     let data_600k: Vec<u8> = vec![0; 600_000];

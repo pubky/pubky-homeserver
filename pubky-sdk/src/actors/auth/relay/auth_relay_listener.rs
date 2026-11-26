@@ -101,7 +101,7 @@ fn is_link_url(url: &Url) -> bool {
 ///
 /// Use it like this:
 /// 1. Construct with the builder
-///    [`AuthRelayListener::builder`] to override relay/client.
+///    [`AuthRelayListener::builder_for_channel`] to override relay/client.
 /// 2. Receive the decrypted relay message with [`await_message`](Self::await_message)
 ///    or [`try_message`](Self::try_message). HPKE messages remain encrypted;
 ///    the grant flow opens them after receipt.
@@ -115,11 +115,6 @@ pub struct AuthRelayListener {
 }
 
 impl AuthRelayListener {
-    /// Create a builder for [`AuthRelayListener`].
-    pub fn builder(secret: [u8; 32]) -> AuthRelayListenerBuilder {
-        Self::builder_for_channel(GrantRelayChannel::SharedSecret(secret))
-    }
-
     pub(crate) fn builder_for_channel(channel: GrantRelayChannel) -> AuthRelayListenerBuilder {
         AuthRelayListenerBuilder::new(channel)
     }
@@ -306,8 +301,8 @@ mod tests {
     use pubky_common::capabilities::Capabilities;
 
     use super::*;
-    use crate::AuthToken;
     use crate::Keypair;
+    use pubky_common::auth::AuthToken;
 
     #[test]
     fn is_link_url_with_link_path() {
@@ -372,16 +367,16 @@ mod tests {
             channel.produce(&client, &token_bytes).await.unwrap();
         });
 
-        let listener = AuthRelayListener::builder(encrypted_channel.secret().to_owned())
-            .relay_base_url(inbox_base)
-            .client(main_client.clone())
-            .start()
-            .unwrap();
+        let listener = AuthRelayListener::builder_for_channel(GrantRelayChannel::SharedSecret(
+            *encrypted_channel.secret(),
+        ))
+        .relay_base_url(inbox_base)
+        .client(main_client.clone())
+        .start()
+        .unwrap();
         let poll_handle = tokio::spawn(async move {
             let response = listener.await_message().await.unwrap();
-            let approval =
-                crate::actors::auth::cookie::approval::CookieApproval::decode(&response).unwrap();
-            assert_eq!(approval.0, token);
+            assert_eq!(AuthToken::verify(response.as_bytes()).unwrap(), token);
         });
 
         let (producer_result, poll_result) = tokio::join!(producer_handle, poll_handle);

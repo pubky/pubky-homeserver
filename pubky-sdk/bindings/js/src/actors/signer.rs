@@ -1,8 +1,3 @@
-#![allow(
-    deprecated,
-    reason = "JS bindings preserve deprecated cookie compatibility APIs"
-)]
-
 use wasm_bindgen::prelude::*;
 
 use super::{pkdns::Pkdns, session::Session};
@@ -91,39 +86,8 @@ impl Signer {
         Ok(Session(self.0.signin_blocking(client_id).await?))
     }
 
-    /// Legacy cookie signup. Prefer `signup()` plus `signin(clientId)`.
-    ///
-    /// @deprecated Prefer `signup()` followed by `signin(clientId)`.
-    #[wasm_bindgen(js_name = "signupCookie")]
-    pub async fn signup_cookie(
-        &self,
-        homeserver: &PublicKey,
-        signup_token: Option<String>,
-    ) -> JsResult<Session> {
-        let session = self
-            .0
-            .signup_cookie(homeserver.as_inner(), signup_token.as_deref())
-            .await?;
-        Ok(Session(session))
-    }
-
-    /// Legacy cookie signin. Prefer `signin(clientId)`.
-    ///
-    /// @deprecated Prefer `signin(clientId)`.
-    #[wasm_bindgen(js_name = "signinCookie")]
-    pub async fn signin_cookie(&self) -> JsResult<Session> {
-        Ok(Session(self.0.signin_cookie().await?))
-    }
-
-    /// Legacy cookie blocking signin. Prefer `signinBlocking(clientId)`.
-    ///
-    /// @deprecated Prefer `signinBlocking(clientId)`.
-    #[wasm_bindgen(js_name = "signinCookieBlocking")]
-    pub async fn signin_cookie_blocking(&self) -> JsResult<Session> {
-        Ok(Session(self.0.signin_cookie_blocking().await?))
-    }
-
     /// Approve all capabilities in a `pubkyauth://` auth request URL.
+    /// Accepts grant requests and legacy `signin` and `signup` requests.
     #[wasm_bindgen(js_name = "approveAuthRequest")]
     pub async fn approve_auth(&self, pubkyauth_url: String) -> JsResult<()> {
         self.0.approve_auth(&pubkyauth_url).await?;

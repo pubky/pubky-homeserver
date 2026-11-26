@@ -8,14 +8,10 @@ mod redirect;
 mod signup_tokens;
 
 use super::{build_full_testnet, grant_session};
-use pubky_testnet::pubky::deep_links::{
-    DeepLink, DeepLinkScheme, DirectSignupDeepLink, DirectSignupParams,
-};
+use pubky_testnet::pubky::deep_links::{DeepLinkScheme, DirectSignupDeepLink, DirectSignupParams};
 use pubky_testnet::pubky::errors::{Error, RequestError};
 use pubky_testnet::pubky::pkarr;
 use pubky_testnet::pubky::IntoPubkyResource;
-#[allow(deprecated, reason = "E2E tests cover the deprecated cookie flow")]
-use pubky_testnet::pubky::PubkyCookieAuthFlow;
 use pubky_testnet::pubky::{
     AuthFlowKind, ClientId, CredentialRefreshError, GrantManager, Keypair, Method,
     PubkyGrantAuthFlow, PubkyHttpClient, PubkySession, StatusCode,
@@ -26,7 +22,6 @@ use pubky_testnet::{
     pubky_homeserver::{ConfigToml, HomeserverApp, SignupMode},
     EphemeralTestnet, Testnet,
 };
-use std::str::FromStr;
 use std::time::Duration;
 
 /// Disable `user` through the homeserver's admin API.

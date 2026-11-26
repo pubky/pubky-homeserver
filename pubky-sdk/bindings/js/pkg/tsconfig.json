@@ -3,6 +3,10 @@
     "target": "ES2020",
     "module": "Node16",
     "moduleResolution": "Node16",
+    // The legacy ESM entry shares the package types and uses the harness's fetch.
+    "paths": {
+      "pubky-legacy/index.js": ["./node_modules/pubky-legacy/pubky.d.ts"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": false,

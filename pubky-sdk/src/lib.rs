@@ -37,9 +37,6 @@ pub use actors::AuthFlowKind;
 #[doc(inline)]
 pub use actors::Pkdns;
 #[doc(inline)]
-#[allow(deprecated, reason = "Re-exporting deprecated public API")]
-pub use actors::PubkyCookieAuthFlow;
-#[doc(inline)]
 pub use actors::PubkySession;
 #[doc(inline)]
 pub use actors::PubkySigner;

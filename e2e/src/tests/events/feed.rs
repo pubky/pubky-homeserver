@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::signup_and_signin;
 
 #[tokio::test]
 #[pubky_testnet::test]
@@ -11,10 +12,7 @@ async fn list_events() {
     let signer = pubky.signer(Keypair::random());
     let public_key = signer.public_key();
     let public_key_z32 = public_key.z32();
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
 
     // Write + delete a bunch of files to populate the event feed
     let paths = vec![
@@ -122,10 +120,7 @@ async fn read_after_event() {
     let signer = pubky.signer(Keypair::random());
     let public_key = signer.public_key();
     let public_key_z32 = public_key.z32();
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
 
     // Write one file
     let url = format!("pubky://{public_key_z32}/pub/a.com/a.txt");
@@ -181,10 +176,7 @@ async fn feed_excludes_private_paths() {
     let pubky = testnet.sdk().unwrap();
 
     let signer = pubky.signer(Keypair::random());
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
 
     // Interleave public and private writes.
     session.storage().put("/pub/a.txt", vec![1]).await.unwrap();

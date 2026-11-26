@@ -57,8 +57,6 @@
 //! # Ok(()) }
 //! ```
 
-use std::str::FromStr;
-
 use crate::actors::auth::cookie::secret::import_session_secret;
 use crate::{FeatureSupport, PublicKey};
 use pubky_common::constants::features;
@@ -66,15 +64,10 @@ use pubky_common::constants::features;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::actors::auth::cookie::secret::session_from_secret_file;
 
-#[allow(deprecated, reason = "Internal use of deprecated public API")]
-use crate::PubkyCookieAuthFlow;
 use crate::{
     Capabilities, ClientId, DelegatedGrantCredentialState, EventCursor, EventStreamBuilder,
     GrantCredential, Pkdns, PubkyGrantAuthFlow, PubkyHttpClient, PubkyRedirectAuthFlow,
-    PubkySession, PubkySigner, PublicStorage, Result,
-    actors::AuthFlowKind,
-    deep_links::{DeepLink, XCallbackParams},
-    errors::AuthError,
+    PubkySession, PubkySigner, PublicStorage, Result, actors::AuthFlowKind,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -183,35 +176,6 @@ impl Pubky {
         Self { client }
     }
 
-    /// Start an end-to-end **legacy (cookie)** auth flow (QR/deeplink).
-    /// Depending on the auth kind, the flow will be different.
-    /// - `AuthFlowKind::SignIn` - Sign in to an existing account.
-    /// - `AuthFlowKind::SignUp` - Sign up for a new account.
-    ///
-    /// Use with `flow.authorization_url()` and then `await_approval()` (blocking)
-    /// or `try_poll_once()` (non-blocking UI loops). Raw credentials are
-    /// available via `await_credential()` / `try_poll_credential_once()`.
-    ///
-    /// For long-lived, mirror-friendly sessions prefer [`Self::start_grant_auth_flow`].
-    ///
-    /// # Errors
-    /// - [`crate::errors::Error::Parse`] if internal URL construction for the flow
-    ///   fails (e.g., malformed relay URL when configured via the builder).
-    #[allow(
-        deprecated,
-        reason = "Cookie flow is intentionally exposed via this facade while deprecated"
-    )]
-    #[deprecated(note = "Use Pubky::start_grant_auth_flow instead.")]
-    pub fn start_cookie_auth_flow(
-        &self,
-        caps: &Capabilities,
-        auth_kind: AuthFlowKind,
-    ) -> Result<PubkyCookieAuthFlow> {
-        PubkyCookieAuthFlow::builder(caps, auth_kind)
-            .client(self.client.clone())
-            .start()
-    }
-
     /// Start an end-to-end **Grant + `PoP`** auth flow (QR/deeplink).
     ///
     /// The resulting [`PubkyGrantAuthFlow`] emits a deep link with `cid` and `cpk`
@@ -248,41 +212,6 @@ impl Pubky {
         accounts_url: url::Url,
     ) -> Result<PubkyRedirectAuthFlow> {
         PubkyRedirectAuthFlow::builder(caps, callback, accounts_url)
-            .client(self.client.clone())
-            .start()
-    }
-
-    /// Resume a previously started auth flow from its `authorization_url`.
-    /// **Cookie Auth Flow only**
-    ///
-    /// Parses the secret, capabilities, relay, and flow kind from the URL
-    /// and rebuilds the flow against the same relay channel. If the signer
-    /// already approved, the first `try_poll_once()` returns a session.
-    ///
-    /// The relay inbox persists messages for **~5 minutes**; resume is only
-    /// viable within that window. After the TTL expires the channel is gone
-    /// and you must start a fresh flow with
-    /// [`start_cookie_auth_flow`](Self::start_cookie_auth_flow).
-    ///
-    /// The `authorization_url` contains the `client_secret`; follow
-    /// [`start_cookie_auth_flow`](Self::start_cookie_auth_flow) storage guidance and delete it
-    /// once resume completes or is abandoned.
-    ///
-    /// # Errors
-    /// - Returns [`crate::errors::Error::Authentication`] if the URL cannot be parsed
-    ///   or is not a signin/signup deep link.
-    #[allow(
-        deprecated,
-        reason = "Cookie flow is intentionally exposed via this facade while deprecated"
-    )]
-    #[deprecated(note = "Use PubkyGrantAuthFlow::restore with GrantAuthFlowState instead.")]
-    pub fn resume_cookie_auth_flow(&self, authorization_url: &str) -> Result<PubkyCookieAuthFlow> {
-        let (caps, relay, secret, auth_kind, x_callback) = parse_auth_deep_link(authorization_url)?;
-
-        PubkyCookieAuthFlow::builder(&caps, auth_kind)
-            .client_secret(secret)
-            .relay(relay)
-            .x_callback(x_callback)
             .client(self.client.clone())
             .start()
     }
@@ -509,53 +438,5 @@ impl Pubky {
     #[must_use]
     pub const fn client(&self) -> &PubkyHttpClient {
         &self.client
-    }
-}
-
-/// Parse a `pubkyauth://` URL into the components needed to rebuild an auth flow.
-///
-/// Rejects `SeedExport` deep links since they cannot be resumed as auth flows.
-fn parse_auth_deep_link(
-    url: &str,
-) -> Result<(
-    Capabilities,
-    url::Url,
-    [u8; 32],
-    AuthFlowKind,
-    XCallbackParams,
-)> {
-    let deep_link = DeepLink::from_str(url)
-        .map_err(|e| AuthError::Validation(format!("Failed to parse authorization URL: {e}")))?;
-
-    match &deep_link {
-        DeepLink::Signin(s) => Ok((
-            s.params().capabilities.clone(),
-            s.params().relay.clone(),
-            s.params().secret,
-            AuthFlowKind::signin(),
-            s.x_callback().clone(),
-        )),
-        DeepLink::Signup(s) => Ok((
-            s.params().capabilities.clone(),
-            s.params().relay.clone(),
-            s.params().secret,
-            AuthFlowKind::signup(
-                s.params().homeserver.clone(),
-                s.params().signup_token.clone(),
-            ),
-            s.x_callback().clone(),
-        )),
-        DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) | DeepLink::ParentGrant(_) => Err(AuthError::Validation(
-            "grant auth flows cannot be resumed from the authorization URL alone; the PoP client private key is required and is not encoded in the deep link."
-                .into(),
-        )
-        .into()),
-        DeepLink::DirectSignup(_) => Err(AuthError::Validation(
-            "Direct signup URLs cannot be resumed as cookie auth flows.".into(),
-        )
-        .into()),
-        DeepLink::SeedExport(_) => {
-            Err(AuthError::Validation("Only signin and signup URLs can be resumed.".into()).into())
-        }
     }
 }

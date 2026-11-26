@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::signup_and_signin;
 
 /// Comprehensive test for single-user event streaming modes:
 /// - Historical event pagination (>100 events across internal batches)
@@ -24,10 +25,7 @@ async fn events_stream_basic_modes() {
     // Create one user with 250 events - reuse for all subtests
     let keypair = Keypair::random();
     let signer = pubky.signer(keypair);
-    let session = signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let session = signup_and_signin(&signer, &server.public_key()).await;
     let user_pubky = signer.public_key();
     let user_host = user_pubky.z32();
 
@@ -394,10 +392,7 @@ async fn events_stream_basic_modes() {
     // Create new user with no events
     let empty_keypair = Keypair::random();
     let empty_signer = pubky.signer(empty_keypair);
-    let empty_session = empty_signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let empty_session = signup_and_signin(&empty_signer, &server.public_key()).await;
     let empty_user_pubky = empty_signer.public_key();
 
     // Test 7a: Batch mode should close immediately
@@ -475,10 +470,7 @@ async fn events_stream_basic_modes() {
     // Create a clean user with known events to test reverse ordering
     let reverse_keypair = Keypair::random();
     let reverse_signer = pubky.signer(reverse_keypair);
-    let reverse_session = reverse_signer
-        .signup_cookie(&server.public_key(), None)
-        .await
-        .unwrap();
+    let reverse_session = signup_and_signin(&reverse_signer, &server.public_key()).await;
     let reverse_user_pubky = reverse_signer.public_key();
 
     // Create exactly 5 events with known order

@@ -1,5 +1,16 @@
 # Not Recommended: Keep Cookie Authentication
 
+> This guide describes v0.10. In the current SDK, use
+> [grant authentication](./grant-auth.md) for new sessions. Existing cookie
+> sessions can still be restored, and signers can approve requests from older
+> apps.
+>
+> The SDK removes `awaitToken()` (JS) and `await_token()` (Rust). Grant approval
+> returns a homeserver session. If your backend expects an `AuthToken`, both
+> the app and backend need to migrate. Apps that require account-free login
+> have no drop-in replacement. For direct grants, see the
+> [custom proof-of-possession guide](../CUSTOM_POP.md).
+
 Cookie authentication is deprecated and insecure. Prefer the new [grant authentication system](./grant-auth.md). This guide shows how to keep using cookie authentication while migrating from `v0.9` to `v0.10`.
 
 
