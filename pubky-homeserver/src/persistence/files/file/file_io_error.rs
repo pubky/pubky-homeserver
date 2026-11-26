@@ -17,6 +17,8 @@ pub enum FileIoError {
     StreamBroken(#[from] WriteStreamError),
     #[error("Disk space quota exceeded")]
     DiskSpaceQuotaExceeded,
+    #[error("Too many concurrent uploads")]
+    TooManyUploads,
     #[error("Write to path is forbidden")]
     WritePathForbidden,
     #[error("File/folder path collision")]
@@ -32,6 +34,7 @@ impl From<opendal::Error> for FileIoError {
         // Recover domain-specific errors embedded by our custom OpenDAL layers.
         if let Some(domain) = LayerDomainError::of(&e) {
             return match domain {
+                LayerDomainError::TooManyUploads => FileIoError::TooManyUploads,
                 LayerDomainError::WritePathForbidden => FileIoError::WritePathForbidden,
                 LayerDomainError::DiskSpaceQuotaExceeded => FileIoError::DiskSpaceQuotaExceeded,
                 LayerDomainError::PathCollision => FileIoError::PathCollision,

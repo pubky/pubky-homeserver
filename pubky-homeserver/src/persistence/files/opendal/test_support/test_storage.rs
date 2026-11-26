@@ -144,18 +144,15 @@ impl TestStorage {
             .create(&user)
             .await
             .expect("a new user is created");
-        let (operator, admin_operator) = layer_storage_operators(
+        let service = layer_storage_operators(
             backend_operator,
-            context.config_toml.storage.default_quota_mb,
+            &context.config_toml.storage,
             context.sql_db.clone(),
             context.events_service.clone(),
             context.user_service.clone(),
         );
         Self {
-            service: OpendalService {
-                operator,
-                admin_operator,
-            },
+            service,
             user,
             backend,
             context,

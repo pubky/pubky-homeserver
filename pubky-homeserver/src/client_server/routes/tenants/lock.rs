@@ -264,7 +264,7 @@ fn xml_escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
     use axum::{
         body::Bytes,
@@ -277,8 +277,10 @@ mod tests {
     use crate::{
         app_context::AppContext,
         client_server::ClientServer,
+        persistence::files::write_finalization_layer::test_support::wait_for_slow_event_insert,
         persistence::sql::{entry_lock::EntryLockRepository, SqlDb, UnifiedExecutor},
         shared::webdav::StoragePath,
+        storage_config::StorageConfigToml,
     };
 
     const LOCKINFO: &str = r#"<?xml version="1.0" encoding="utf-8"?><D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>"#;
@@ -412,6 +414,89 @@ mod tests {
             .await
             .unwrap()
             .map(|lock| lock.expires_at)
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn rejected_put_leaves_its_parent_available_as_a_file() {
+        let context = AppContext::test_with_config(|config| {
+            config.storage.backend = StorageConfigToml::FileSystem;
+            config.storage.max_concurrent_uploads_per_user_per_replica = NonZeroUsize::MIN;
+        })
+        .await;
+        let server = TestServer::new(ClientServer::create_router(context).unwrap());
+        let owner = Keypair::random();
+        let cookie = signup(&server, &owner).await;
+        let parent = storage_url(&owner, "/pub/parent");
+        let child = format!("{parent}/child");
+        server
+            .method(method("LOCK"), &child)
+            .add_header(header::COOKIE, &cookie)
+            .text(LOCKINFO)
+            .await
+            .assert_status(StatusCode::OK);
+
+        server
+            .put(&child)
+            .add_header(header::COOKIE, &cookie)
+            .text("refused")
+            .await
+            .assert_status(StatusCode::LOCKED);
+        server
+            .put(&parent)
+            .add_header(header::COOKIE, &cookie)
+            .text("parent file")
+            .await
+            .assert_status(StatusCode::CREATED);
+        server.get(&parent).await.assert_text("parent file");
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn full_upload_limit_rejects_put_before_waiting_for_a_webdav_lock() {
+        let context = AppContext::test_with_config(|config| {
+            config.storage.max_concurrent_uploads_per_user_per_replica = NonZeroUsize::MIN;
+        })
+        .await;
+        let server = TestServer::new(ClientServer::create_router(context.clone()).unwrap());
+        let owner = Keypair::random();
+        let cookie = signup(&server, &owner).await;
+        let url = storage_url(&owner, "/pub/state.bin");
+        let response = server
+            .method(method("LOCK"), &url)
+            .add_header(header::COOKIE, &cookie)
+            .text(LOCKINFO)
+            .await;
+        response.assert_status(StatusCode::OK);
+        let token = lock_token(&response);
+        let put = || server.put(&url).add_header(header::COOKIE, &cookie);
+        let locked_put = || put().add_header("if", holding(&token));
+
+        // A failed lock check must return the only slot for the next request.
+        put().await.assert_status(StatusCode::LOCKED);
+
+        // Pause the first PUT after it has taken the lock row and before commit.
+        let db = &context.sql_db;
+        let mut gate = db.pool().begin().await.unwrap();
+        sqlx::query("LOCK TABLE events IN SHARE MODE")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let check_capacity = async {
+            wait_for_slow_event_insert(db).await;
+            let excess = tokio::time::timeout(Duration::from_secs(5), async { locked_put().await })
+                .await
+                .expect("a full replica should respond before the first PUT commits");
+            excess.assert_status(StatusCode::TOO_MANY_REQUESTS);
+            excess.assert_header(header::RETRY_AFTER, "1");
+            gate.commit().await.unwrap();
+        };
+        let (first, ()) = tokio::join!(async { locked_put().text("first").await }, check_capacity);
+        first.assert_status(StatusCode::CREATED);
+        locked_put()
+            .text("next")
+            .await
+            .assert_status(StatusCode::CREATED);
     }
 
     #[tokio::test]

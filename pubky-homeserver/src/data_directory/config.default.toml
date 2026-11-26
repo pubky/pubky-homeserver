@@ -26,6 +26,7 @@ key = "ip"
 
 [storage]
 type = "file_system"
+max_concurrent_uploads_per_user_per_replica = 4
 
 [admin]
 enabled = true

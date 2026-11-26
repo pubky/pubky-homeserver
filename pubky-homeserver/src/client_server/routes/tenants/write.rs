@@ -5,12 +5,12 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures_util::stream::StreamExt;
+use futures_util::TryStreamExt;
 
 use super::{authorize::authorize_write, lock::if_header_tokens};
 use crate::{
     client_server::{auth::AuthSession, middleware::request_tenant::RequestTenant, AppState},
-    persistence::files::WriteStreamError,
+    persistence::files::{FileIoError, WriteStreamError},
     shared::{
         webdav::{EntryPath, WebDavFilePathAxum},
         HttpResult,
@@ -65,33 +65,25 @@ pub async fn put(
     body: Body,
 ) -> HttpResult<impl IntoResponse> {
     let user = authorize_write(&state, &session, &entry_path, true).await?;
+    // A forbidden path should never consume an upload slot.
+    let quota = user.quota();
+    if !quota.is_write_path_allowed(entry_path.path().as_str()) {
+        return Err(FileIoError::WritePathForbidden.into());
+    }
 
-    // Early fail: check Content-Length header against the user's storage quota
-    // so we can reject before streaming the entire body.
-    // We read from the header rather than body.size_hint() because middleware
-    // layers (e.g. bandwidth throttling) may replace the body with a stream
-    // that loses the size hint.
+    // Bandwidth middleware can erase the stream's size hint, so use the header.
+    let files = &state.context.file_service;
     let content_length = content_length_from_headers(&headers);
-    state
-        .context
-        .file_service
+    files
         .check_size_hint(&user, content_length, &entry_path)
         .await?;
 
-    // Convert body stream to the format expected by file_service
-    let body_stream = body.into_data_stream();
-    let converted_stream =
-        body_stream.map(|chunk_result| chunk_result.map_err(WriteStreamError::Axum));
-
-    let write = state
-        .context
-        .file_service
-        .write_stream(&entry_path, converted_stream);
-    state
-        .context
-        .lock_service
-        .run_write(&entry_path, &if_header_tokens(&headers), write)
-        .await??;
+    // Reserve capacity before the WebDAV lock check can wait on a finalizing PUT.
+    let body = body.into_data_stream().map_err(WriteStreamError::Axum);
+    let upload = files.reserve_upload(&entry_path, body)?;
+    let tokens = if_header_tokens(&headers);
+    let locks = &state.context.lock_service;
+    locks.run_write(&entry_path, &tokens, upload).await??;
     Ok((StatusCode::CREATED, ()))
 }
 
@@ -107,7 +99,12 @@ fn content_length_from_headers(headers: &HeaderMap) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{convert::Infallible, fs, future, num::NonZeroU32, time::Duration};
+    use std::{
+        convert::Infallible,
+        fs, future,
+        num::{NonZeroU32, NonZeroUsize},
+        time::Duration,
+    };
 
     use axum::{
         body::{Body, Bytes},
@@ -125,7 +122,7 @@ mod tests {
 
     use crate::{
         client_server::test_utils::signup_cookie,
-        persistence::files::test_support::FILE_SYSTEM_STAGING_DIR,
+        persistence::files::test_support::FILE_SYSTEM_STAGING_DIR, shared::quota::UserQuotaPatch,
         storage_config::StorageConfigToml, AppContext, ClientServer,
     };
 
@@ -236,5 +233,93 @@ mod tests {
             .unwrap()
             .unwrap()
             .status()
+    }
+
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn concurrent_upload_limit_is_shared_by_both_routes_and_scoped_to_the_user() {
+        let context = AppContext::test_with_config(|config| {
+            config.storage.max_concurrent_uploads_per_user_per_replica = NonZeroUsize::MIN;
+        })
+        .await;
+        let router = ClientServer::create_router(context.clone()).unwrap();
+        let server = TestServer::new(router.clone());
+        let owner = Keypair::random();
+        let other = Keypair::random();
+        let cookie = signup_cookie(&server, &owner, vec![Capability::root()]).await;
+        let other_cookie = signup_cookie(&server, &other, vec![Capability::root()]).await;
+        let quota = UserQuotaPatch {
+            allowed_write_paths: Some(Some(vec!["/pub/allowed/".parse().unwrap()])),
+            ..Default::default()
+        };
+        context
+            .user_service
+            .patch_quota(&owner.public_key(), &quota)
+            .await
+            .unwrap();
+        let owner_id = owner.public_key().z32();
+        let addressed_path = format!("/storage/{owner_id}/pub/allowed/upload");
+        let legacy_put = || {
+            server
+                .put("/pub/allowed/other")
+                .add_header("pubky-host", &owner_id)
+                .add_header(header::COOKIE, &cookie)
+        };
+
+        for (body_result, expected_status) in [
+            (Ok(Bytes::from_static(b"complete")), StatusCode::CREATED),
+            (
+                Err(std::io::Error::other("body interrupted")),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (started, wait_for_start) = oneshot::channel();
+            let (finish, wait_for_body) = oneshot::channel();
+            // The router polls this stream only after opening the writer.
+            let body = Body::from_stream(stream::once(async move {
+                started.send(()).unwrap();
+                wait_for_body.await.unwrap()
+            }));
+            let first = Request::put(&addressed_path)
+                .header(header::COOKIE, &cookie)
+                .body(body)
+                .unwrap();
+            let upload = tokio::spawn(router.clone().oneshot(first));
+            timeout(Duration::from_secs(5), wait_for_start)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let refused = legacy_put().await;
+            refused.assert_status(StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(refused.headers()[header::RETRY_AFTER], "1");
+
+            // A forbidden path gets 403 even when the only slot is occupied.
+            let body = Body::from_stream(stream::pending::<Result<Bytes, Infallible>>());
+            let forbidden = Request::put(format!("/storage/{owner_id}/pub/forbidden"))
+                .header(header::COOKIE, &cookie)
+                .body(body)
+                .unwrap();
+            let response = timeout(Duration::from_secs(5), router.clone().oneshot(forbidden))
+                .await
+                .expect("a forbidden upload must be rejected before reading its body")
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+            server
+                .put("/pub/other")
+                .add_header("pubky-host", other.public_key().z32())
+                .add_header(header::COOKIE, &other_cookie)
+                .text("independent upload")
+                .await
+                .assert_status(StatusCode::CREATED);
+
+            finish.send(body_result).unwrap();
+            assert_eq!(upload.await.unwrap().unwrap().status(), expected_status);
+            legacy_put()
+                .text("slot released")
+                .await
+                .assert_status(StatusCode::CREATED);
+        }
     }
 }

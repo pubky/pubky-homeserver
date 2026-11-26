@@ -12,7 +12,9 @@ use opendal::raw::*;
 use opendal::{Capability, OperationContext, Operator, Result};
 use tracing::Instrument;
 
-use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
+use super::{
+    upload_limit::UploadLimit, write_lock, WriteFinalizationDeleter, WriteFinalizationWriter,
+};
 
 /// Keeps file entries, events, and user quotas in sync with blob writes and deletes.
 ///
@@ -27,6 +29,7 @@ use super::{write_lock, WriteFinalizationDeleter, WriteFinalizationWriter};
 /// module docs.
 #[derive(Debug, Clone)]
 pub struct WriteFinalizationLayer {
+    upload_limit: Option<Arc<UploadLimit>>,
     finalizer: Arc<Finalizer>,
 }
 
@@ -68,6 +71,7 @@ impl WriteFinalizationLayer {
         enforce_path_collisions: bool,
     ) -> Self {
         Self {
+            upload_limit: None,
             finalizer: Arc::new(Finalizer::new(
                 user_service,
                 sql_db,
@@ -76,6 +80,15 @@ impl WriteFinalizationLayer {
                 CollisionPolicy::from_enforcement(enforce_path_collisions),
             )),
         }
+    }
+
+    /// Limit simultaneous writers per user on the app-facing operator.
+    pub(in crate::persistence::files) fn with_upload_limit(
+        mut self,
+        limit: Arc<UploadLimit>,
+    ) -> Self {
+        self.upload_limit = Some(limit);
+        self
     }
 }
 
@@ -189,6 +202,7 @@ pub(super) async fn check_no_path_collision(
 impl Layer for WriteFinalizationLayer {
     fn apply_service(&self, inner: Servicer) -> Servicer {
         Arc::new(WriteFinalizationService {
+            upload_limit: self.upload_limit.clone(),
             inner,
             finalizer: self.finalizer.clone(),
         })
@@ -197,6 +211,7 @@ impl Layer for WriteFinalizationLayer {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WriteFinalizationService {
+    upload_limit: Option<Arc<UploadLimit>>,
     inner: Servicer,
     finalizer: Arc<Finalizer>,
 }
@@ -262,12 +277,17 @@ impl Service for WriteFinalizationService {
 
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         let entry_path = EntryPath::parse_opendal(path)?;
+        let slot = match &self.upload_limit {
+            Some(limit) => Some(limit.slot_for_writer(entry_path.pubkey())?),
+            None => None,
+        };
         let writer = self.inner.write(ctx, entry_path.as_str(), args)?;
         let writer = WriteFinalizationWriter::new(
             writer,
             self.backend(ctx),
             self.finalizer.clone(),
             entry_path.clone(),
+            slot,
         );
         Ok(CheckedWriter::new(writer, self.collision_check(entry_path)))
     }
@@ -499,8 +519,8 @@ pub(crate) mod test_support {
         install_events_insert_trigger(db, "slow_event_insert", "PERFORM pg_sleep(1);").await;
     }
 
-    /// Poll until an insert held by [`install_slow_event_insert`] is running.
-    pub(in super::super) async fn wait_for_slow_event_insert(db: &SqlDb) {
+    /// Poll until a finalization is running its event insert.
+    pub(crate) async fn wait_for_slow_event_insert(db: &SqlDb) {
         wait_for_active_query(db, "%INSERT INTO \"events\"%").await;
     }
 
