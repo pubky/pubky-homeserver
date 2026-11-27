@@ -32,7 +32,7 @@ websites = true
 # Serve every user's public folder as a read-only WebDAV share at
 # /dav/<user-key>/pub/ on the two sockets above. Anyone can read and list
 # these folders without signing in. Default: false. See docs/WEBDAV.md.
-webdav_enabled = false
+webdav = false
 
 # Configure each listener independently. Default: "direct" (TCP peer address).
 # Behind a proxy, direct mode shares its IP-based limits across visitors.
@@ -60,7 +60,7 @@ pubky_client_identity = { mode = "direct" }
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 #  Storage requests match their decoded, normalized, owner-relative storage
 #  path: `/%70ub/file`, `/pub//file`, `/pub/./file`, `/storage/<user>/pub/file`
-#  and, with `webdav_enabled`, `/dav/<user>/pub/file` all match "/pub/file".
+#  and, with `webdav = true`, `/dav/<user>/pub/file` all match "/pub/file".
 #  Write encoded names decoded: "/pub/a b" matches
 #  `/pub/a%20b`. Other endpoints match the request path as sent.
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE
@@ -92,7 +92,7 @@ pubky_client_identity = { mode = "direct" }
 # quota = "60r/m"
 # key = "ip"
 #
-# With `webdav_enabled`, limit folder listings. One PROPFIND lists a whole
+# With `webdav = true`, limit folder listings. One PROPFIND lists a whole
 # folder, however large, and anyone can send it.
 # [[drive.rate_limits]]
 # path = "/pub/**"

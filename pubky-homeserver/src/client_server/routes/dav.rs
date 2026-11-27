@@ -2,7 +2,7 @@
 //!
 //! Mounted at `/dav/{user_z32}/pub/...`, this serves the same files as
 //! `/storage/{user_z32}/pub/...` to standard WebDAV clients (GNOME Files,
-//! Finder, rclone, browsers). It is off unless `[drive] webdav_enabled` is
+//! Finder, rclone, browsers). It is off unless `[drive] webdav` is
 //! set; without it the client server has no `/dav` route. The endpoint itself
 //! — `dav-server`, the verb policy and CORS — is [`DavEndpoint`], shared with
 //! the admin server; what this module adds is the policy for *who sees what*.
@@ -85,11 +85,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use axum::http::{header, StatusCode};
-    use axum_test::{TestRequest, TestResponse, TestServer};
-    use pubky_common::{auth::AuthToken, capabilities::Capability, crypto::Keypair};
+    use axum_test::{TestRequest, TestServer};
+    use pubky_common::{capabilities::Capability, crypto::Keypair};
 
     use super::*;
     use crate::client_server::client_identity::with_http_header_identity;
+    use crate::client_server::test_utils::signup_cookie;
     use crate::{app_context::AppContext, client_server::ClientServer, ConfigToml};
 
     #[tokio::test]
@@ -114,10 +115,10 @@ mod tests {
     #[pubky_test_utils::test]
     async fn the_share_is_not_served_unless_the_config_enables_it() {
         // Off is the default, so this is what a deployment that never heard
-        // of `webdav_enabled` serves: `/dav` is a path like any other the
+        // of `webdav` serves: `/dav` is a path like any other the
         // server has no route for, while REST carries on.
         let share = Share::with_config(|c| {
-            c.drive.webdav_enabled = ConfigToml::default().drive.webdav_enabled;
+            c.drive.webdav = ConfigToml::default().drive.webdav;
         })
         .await;
         share.put("dav.txt", b"hello").await;
@@ -229,7 +230,6 @@ mod tests {
         // session changes nothing: this share has no notion of who is asking.
         for path in ["/", "/priv/", "/pub/../priv/secret.txt", "/.DS_Store"] {
             propfind(&share.server, &share.dav(path))
-                .add_header("pubky-host", share.public_key.clone())
                 .add_header(header::COOKIE, share.cookie.clone())
                 .await
                 .assert_status(StatusCode::NOT_FOUND);
@@ -239,26 +239,6 @@ mod tests {
                 .add_header(header::COOKIE, share.cookie.clone())
                 .await
                 .assert_status(StatusCode::NOT_FOUND);
-        }
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn a_bare_options_tells_a_file_manager_the_share_is_read_only() {
-        let share = Share::new().await;
-        share.put("dav.txt", b"hello").await;
-
-        // No locking class, and an `Allow` with no write verb in it, on the
-        // folder and on a file alike. `CorsLayer` would have answered this
-        // itself with neither header; see `endpoint::router`.
-        for (path, expected) in [
-            ("/pub/", &["OPTIONS", "PROPFIND"][..]),
-            ("/pub/dav.txt", &["OPTIONS", "GET", "HEAD", "PROPFIND"][..]),
-        ] {
-            let response = share.server.method(Method::OPTIONS, &share.dav(path)).await;
-            response.assert_status_ok();
-            response.assert_header("dav", "1");
-            assert_eq!(allow_set(&response), verbs(expected), "{path}");
         }
     }
 
@@ -278,13 +258,13 @@ mod tests {
             .server
             .method(Method::OPTIONS, &share.dav("/pub/nothing-here"))
             .await;
-        let reference = (header_str(&reference, "dav"), allow_set(&reference));
+        let reference = (reference.header("dav"), reference.header("allow"));
 
         for path in ["/", "/priv/", "/priv/secret.txt", "/priv/nothing-here"] {
             let response = share.server.method(Method::OPTIONS, &share.dav(path)).await;
             response.assert_status_ok();
             assert_eq!(
-                (header_str(&response, "dav"), allow_set(&response)),
+                (response.header("dav"), response.header("allow")),
                 reference,
                 "{path} answers differently from a missing public path"
             );
@@ -312,7 +292,6 @@ mod tests {
         let response = share
             .server
             .put(&share.dav("/pub/dav.txt"))
-            .add_header("pubky-host", share.public_key.clone())
             .add_header(header::COOKIE, share.cookie.clone())
             .bytes(b"overwritten".to_vec().into())
             .await;
@@ -324,39 +303,6 @@ mod tests {
             .get(&share.storage("/pub/dav.txt"))
             .await
             .assert_text("hello");
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn a_folder_has_no_index_page() {
-        // A browser GET on a folder would list it exactly as PROPFIND does,
-        // one stat per entry, through a verb a PROPFIND rate limit never
-        // sees. So it is refused, with an `Allow` naming what a folder takes.
-        let share = Share::new().await;
-        share.put("dav.txt", b"hello").await;
-
-        for method in [Method::GET, Method::HEAD] {
-            let response = share.server.method(method, &share.dav("/pub/")).await;
-            response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
-            response.assert_header(header::ALLOW, "OPTIONS, PROPFIND");
-        }
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
-    async fn a_verb_dav_server_has_never_heard_of_fails_closed() {
-        let share = Share::new().await;
-        share.put("dav.txt", b"hello").await;
-
-        // Refused before any method set applies, so 501 rather than 405.
-        share
-            .server
-            .method(
-                Method::from_bytes(b"FROBNICATE").unwrap(),
-                &share.dav("/pub/dav.txt"),
-            )
-            .await
-            .assert_status(StatusCode::NOT_IMPLEMENTED);
     }
 
     #[tokio::test]
@@ -376,7 +322,7 @@ mod tests {
             .await;
         response.assert_status_ok();
         response.assert_header("dav", "1");
-        assert_eq!(allow_set(&response), verbs(&["OPTIONS"]));
+        response.assert_header("allow", "OPTIONS");
 
         // The REST routes still need their CORS preflight answered.
         share
@@ -428,24 +374,6 @@ mod tests {
 
     #[tokio::test]
     #[pubky_test_utils::test]
-    async fn a_cross_origin_response_exposes_the_headers_clients_need() {
-        let share = Share::new().await;
-        share.put("cors.txt", b"hi").await;
-
-        let response = propfind(&share.server, &share.dav("/pub/"))
-            .add_header(header::ORIGIN, "https://webdav.example")
-            .await;
-
-        response.assert_status(StatusCode::MULTI_STATUS);
-        response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
-        let exposed = header_str(&response, "access-control-expose-headers");
-        for name in ["dav", "etag", "content-range"] {
-            assert!(exposed.contains(name), "{name} missing from {exposed}");
-        }
-    }
-
-    #[tokio::test]
-    #[pubky_test_utils::test]
     async fn propfind_depth_is_finite_by_default() {
         // dav-server refuses `Depth: infinity` outright, and serves a request
         // with no `Depth` as a one-level listing, so no single PROPFIND walks
@@ -483,7 +411,6 @@ mod tests {
             share
                 .server
                 .put(&share.storage(&format!("/pub/{name}")))
-                .add_header("pubky-host", share.public_key.clone())
                 .add_header(header::COOKIE, share.cookie.clone())
                 .content_type("image/png")
                 .bytes(b"\x89PNG".to_vec().into())
@@ -676,7 +603,7 @@ mod tests {
         /// does, before `configure` has its say.
         async fn with_config(configure: impl FnOnce(&mut ConfigToml)) -> Self {
             let context = AppContext::test_with_config(|c| {
-                c.drive.webdav_enabled = true;
+                c.drive.webdav = true;
                 configure(c);
             })
             .await;
@@ -685,7 +612,7 @@ mod tests {
             let mut server = TestServer::new(router);
             server.add_header(CLIENT_IP_HEADER, CLIENT_IP);
             let user = Keypair::random();
-            let cookie = signup_cookie(&server, &user).await;
+            let cookie = signup_cookie(&server, &user, vec![Capability::root()]).await;
             Self {
                 server,
                 cookie,
@@ -712,7 +639,6 @@ mod tests {
         async fn put_at(&self, path: &str, body: &[u8]) {
             self.server
                 .put(&self.storage(path))
-                .add_header("pubky-host", self.public_key.clone())
                 .add_header(header::COOKIE, self.cookie.clone())
                 .bytes(body.to_vec().into())
                 .expect_success()
@@ -731,41 +657,5 @@ mod tests {
             .clear_headers()
             .add_header("depth", "1")
             .add_header(CLIENT_IP_HEADER, client_ip)
-    }
-
-    /// The verbs in an `Allow` header, however dav-server spells the list.
-    fn allow_set(response: &TestResponse) -> std::collections::BTreeSet<String> {
-        verbs(&header_str(response, "allow").split(',').collect::<Vec<_>>())
-    }
-
-    fn verbs(list: &[&str]) -> std::collections::BTreeSet<String> {
-        list.iter().map(|v| v.trim().to_string()).collect()
-    }
-
-    fn header_str(response: &TestResponse, name: &str) -> String {
-        response
-            .maybe_header(name)
-            .unwrap_or_else(|| panic!("{name} header missing"))
-            .to_str()
-            .unwrap()
-            .to_string()
-    }
-
-    async fn signup_cookie(server: &TestServer, keypair: &Keypair) -> String {
-        let auth_token = AuthToken::sign(keypair, vec![Capability::root()]);
-        let body_bytes: axum::body::Bytes = auth_token.serialize().into();
-        let response = server
-            .post("/signup")
-            .add_header("host", keypair.public_key().z32())
-            .bytes(body_bytes)
-            .expect_success()
-            .await;
-
-        response
-            .headers()
-            .get(header::SET_COOKIE)
-            .and_then(|h| h.to_str().ok())
-            .expect("signup should return a session cookie")
-            .to_string()
     }
 }

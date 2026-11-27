@@ -324,7 +324,7 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
             HeaderName::from_static("timeout"),
         ]));
 
-    if !state.context.config_toml.drive.webdav_enabled {
+    if !state.context.config_toml.drive.webdav {
         return Ok(cors_app);
     }
 

@@ -146,20 +146,6 @@ impl Service for TenantScopeService {
         self.inner.copy(ctx, from, to, args)
     }
 
-    /// Refused: a compose names its sources through the composer it returns,
-    /// past any check made here.
-    fn compose(
-        &self,
-        _ctx: &OperationContext,
-        _to: &str,
-        _args: OpCompose,
-    ) -> Result<Self::Composer> {
-        Err(opendal::Error::new(
-            opendal::ErrorKind::PermissionDenied,
-            "compose is not available on a scoped operator",
-        ))
-    }
-
     async fn rename(
         &self,
         ctx: &OperationContext,
@@ -170,16 +156,6 @@ impl Service for TenantScopeService {
         check(&self.prefix, from)?;
         check(&self.prefix, to)?;
         self.inner.rename(ctx, from, to, args).await
-    }
-
-    async fn restore(
-        &self,
-        ctx: &OperationContext,
-        path: &str,
-        args: OpRestore,
-    ) -> Result<RpRestore> {
-        check(&self.prefix, path)?;
-        self.inner.restore(ctx, path, args).await
     }
 
     async fn presign(

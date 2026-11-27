@@ -10,7 +10,7 @@ The share holds the same files as `/storage/<user-key>/pub/`. Anyone can read
 and list them without signing in, from a file manager, a sync tool such as
 rclone, or a browser.
 
-The share is off by default. Turn it on with `[drive] webdav_enabled = true`.
+The share is off by default. Turn it on with `[drive] webdav = true`.
 `/info` doesn't list it, so a client can't discover whether a homeserver
 serves it.
 
