@@ -29,6 +29,10 @@ icann_listen_socket = "127.0.0.1:6286"
 # `<user-key>` or `<label>.<user-key>`. See docs/WEBSITES.md.
 websites = true
 
+# Serve every user's public folder as a read-only WebDAV share at
+# /dav/<public-key>/pub/ on the two sockets above. Default: false
+webdav_enabled = false
+
 # Configure each listener independently. Default: "direct" (TCP peer address).
 # Behind a proxy, direct mode shares its IP-based limits across visitors.
 icann_client_identity = { mode = "direct" }

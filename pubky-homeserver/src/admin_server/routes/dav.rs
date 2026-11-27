@@ -23,8 +23,7 @@ pub async fn dav_handler(
             .expect("This response should always be valid"));
     }
 
-    let dav_response = state.inner_dav_handler.handle(req).await;
-    Ok(dav_response.into_response())
+    Ok(state.dav.handle(req).await)
 }
 
 /// Validate if the authorization header is correct.
