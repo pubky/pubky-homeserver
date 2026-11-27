@@ -15,7 +15,11 @@ use reqwest::Method;
 use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
 use crate::custom_pop::CustomPop;
-use crate::errors::{RequestError, Result};
+use crate::errors::Result;
+use crate::util::read_json_body;
+
+/// Both the effective quota and its overrides can include the full list of allowed write paths.
+const MAX_ACCOUNT_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// grant-only operations on a [`PubkySession`].
 #[derive(Debug)]
@@ -129,16 +133,18 @@ impl<'a> GrantSessionView<'a> {
     /// # Errors
     /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
     ///   auth or no read permission on the root scope).
-    /// - Returns [`RequestError::DecodeJson`] if the response does not parse.
+    /// - Returns [`RequestError::Oversized`](crate::errors::RequestError::Oversized)
+    ///   if the response body exceeds 1 MiB.
+    /// - Returns [`RequestError::Transport`](crate::errors::RequestError::Transport)
+    ///   if reading the response body fails, including when the request times out.
+    /// - Returns [`RequestError::DecodeJson`](crate::errors::RequestError::DecodeJson)
+    ///   if the complete body cannot be decoded as [`AccountInfo`].
     pub async fn account(&self) -> Result<AccountInfo> {
         let resp = self
             .session
             .send_account_request(Method::GET, "/account")
             .await?;
-        let account = resp.json().await.map_err(|e| RequestError::DecodeJson {
-            message: format!("decoding /account response: {e}"),
-        })?;
-        Ok(account)
+        read_json_body(resp, MAX_ACCOUNT_RESPONSE_BYTES, "/account response").await
     }
 
     /// Export the portable local secret material needed to restore this session.

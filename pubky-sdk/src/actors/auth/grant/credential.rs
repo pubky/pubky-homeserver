@@ -1130,6 +1130,7 @@ mod tests {
     use tokio::{
         io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        sync::oneshot,
     };
     use tokio_rustls::TlsAcceptor;
 
@@ -1601,10 +1602,8 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_error_status_does_not_wait_for_response_body() {
-        let fixture = RequestFailureFixture::new_with_timeout(
-            TestServerBehavior::ReplyThenStall(
-                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\n".to_vec(),
-            ),
+        let (fixture, _keep_connection_open) = RequestFailureFixture::with_open_response(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\n".to_vec(),
             Duration::from_secs(5),
         )
         .await;
@@ -1797,6 +1796,43 @@ mod tests {
                 status: None
             }))
         ));
+    }
+
+    #[tokio::test]
+    async fn account_reports_a_stalled_response_body_as_a_transport_timeout() {
+        let (fixture, _keep_connection_open) = RequestFailureFixture::with_open_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{".to_vec(),
+            Duration::from_secs(1),
+        )
+        .await;
+        let session = fixture.session(CredentialKind::Grant);
+
+        let error = session.as_grant().unwrap().account().await.unwrap_err();
+        let Error::Request(RequestError::Transport(source)) = error else {
+            panic!("expected a transport timeout reading the account body, got {error:?}");
+        };
+        assert!(source.is_timeout(), "{source:?}");
+        assert!(
+            source.is_body() || source.is_decode(),
+            "expected a body read failure: {source:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_rejects_oversized_body_without_content_length() {
+        const ONE_MIB: usize = 1024 * 1024;
+        let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend(std::iter::repeat_n(b' ', ONE_MIB + 1));
+        let (fixture, _keep_connection_open) =
+            RequestFailureFixture::with_open_response(response, Duration::from_secs(5)).await;
+        let session = fixture.session(CredentialKind::Grant);
+
+        let error = session.as_grant().unwrap().account().await.unwrap_err();
+        let Error::Request(RequestError::Oversized { limit, label }) = error else {
+            panic!("expected an oversized account response, got {error:?}");
+        };
+        assert_eq!(limit, ONE_MIB);
+        assert_eq!(label, "/account response");
     }
 
     #[tokio::test]
@@ -2040,6 +2076,19 @@ mod tests {
     }
 
     impl RequestFailureFixture {
+        /// The server flushes the response and withholds EOF until the sender is dropped.
+        async fn with_open_response(
+            response: Vec<u8>,
+            timeout: Duration,
+        ) -> (Self, oneshot::Sender<()>) {
+            let (keep_open, wait_for_close) = oneshot::channel();
+            let behavior = TestServerBehavior::HoldOpenAfterReply {
+                response,
+                wait_for_close,
+            };
+            (Self::new_with_timeout(behavior, timeout).await, keep_open)
+        }
+
         async fn new(behavior: TestServerBehavior) -> Self {
             Self::new_with_timeout(behavior, Duration::from_millis(100)).await
         }
@@ -2151,8 +2200,11 @@ mod tests {
         /// Write these raw HTTP bytes once the request headers have arrived.
         Reply(Vec<u8>),
         DeferredReply(tokio::sync::oneshot::Receiver<Vec<u8>>),
-        /// Write response headers, then keep the declared body pending.
-        ReplyThenStall(Vec<u8>),
+        /// Withhold EOF until the test finishes reading the response.
+        HoldOpenAfterReply {
+            response: Vec<u8>,
+            wait_for_close: oneshot::Receiver<()>,
+        },
         /// Keep the connection open without answering.
         Stall,
     }
@@ -2174,9 +2226,13 @@ mod tests {
                 TestServerBehavior::DeferredReply(response) => {
                     stream.write_all(&response.await.unwrap()).await.unwrap();
                 }
-                TestServerBehavior::ReplyThenStall(response) => {
+                TestServerBehavior::HoldOpenAfterReply {
+                    response,
+                    wait_for_close,
+                } => {
                     stream.write_all(&response).await.unwrap();
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    stream.flush().await.unwrap();
+                    let _ = wait_for_close.await;
                 }
                 TestServerBehavior::Stall => tokio::time::sleep(Duration::from_secs(1)).await,
             }
