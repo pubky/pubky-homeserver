@@ -5,15 +5,11 @@
 //! root capability required to list and revoke grants.
 
 use pubky_common::auth::{grant_session_responses::GrantInfo, jws::GrantId};
-use pubky_common::crypto::PublicKey;
 use reqwest::Method;
-use std::sync::Arc;
 
-use crate::actors::session::credential::SessionCredential;
-use crate::client::user_endpoint_url;
+use crate::PubkySession;
 use crate::errors::Result;
 use crate::util::read_json_body;
-use crate::{PubkyHttpClient, PubkySession};
 
 /// Maximum size, inclusive, of a `/auth/grant/sessions` listing. A client-side
 /// bound: the homeserver returns every grant in one uncapped response, so an
@@ -48,9 +44,7 @@ const MAX_GRANT_LIST_BYTES: usize = 1024 * 1024;
 /// ```
 #[derive(Debug, Clone)]
 pub struct GrantManager {
-    client: PubkyHttpClient,
-    user: PublicKey,
-    credential: Arc<dyn SessionCredential>,
+    session: PubkySession,
 }
 
 impl GrantManager {
@@ -58,9 +52,7 @@ impl GrantManager {
     #[must_use]
     pub fn new(session: &PubkySession) -> Self {
         Self {
-            client: session.client().clone(),
-            user: session.info().public_key().clone(),
-            credential: Arc::clone(session.credential()),
+            session: session.clone(),
         }
     }
 
@@ -74,10 +66,10 @@ impl GrantManager {
     /// - Propagates HTTP errors from the homeserver (`401`/`403` for invalid
     ///   auth or missing root capability).
     pub async fn list(&self) -> Result<Vec<GrantInfo>> {
-        let url = user_endpoint_url(&self.user, "/auth/grant/sessions")?;
-        let rb = self.client.cross_request(Method::GET, url).await?;
-        let resp = self.credential.send(rb, &self.client).await?;
-        let resp = self.client.check_http_status(resp).await?;
+        let resp = self
+            .session
+            .send_account_request(Method::GET, "/auth/grant/sessions")
+            .await?;
         read_json_body(resp, MAX_GRANT_LIST_BYTES, "/auth/grant/sessions response").await
     }
 
@@ -94,10 +86,9 @@ impl GrantManager {
     ///   auth or missing root capability).
     pub async fn revoke(&self, grant_id: &GrantId) -> Result<()> {
         let path = format!("/auth/grant/session/{}", grant_id.as_str());
-        let url = user_endpoint_url(&self.user, &path)?;
-        let rb = self.client.cross_request(Method::DELETE, url).await?;
-        let resp = self.credential.send(rb, &self.client).await?;
-        self.client.check_http_status(resp).await?;
+        self.session
+            .send_account_request(Method::DELETE, &path)
+            .await?;
         Ok(())
     }
 }

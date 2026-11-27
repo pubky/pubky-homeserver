@@ -4,10 +4,7 @@ use reqwest::{Method, RequestBuilder, Response};
 use std::sync::Arc;
 
 use super::resource::{IntoPubkyResource, IntoResourcePath, PubkyResource};
-use crate::{
-    PubkyHttpClient, PubkySession, cross_log,
-    errors::{RequestError, Result},
-};
+use crate::{PubkyHttpClient, PubkySession, Result, cross_log};
 
 /// Read and write **your own data** with simple path-based operations (authenticated).
 ///
@@ -17,13 +14,13 @@ use crate::{
 ///
 /// # Request failures
 ///
-/// Invalid paths return [`RequestError::Validation`] inside [`crate::Error::Request`];
+/// Invalid paths return [`Validation`](crate::errors::RequestError::Validation) inside [`crate::Error::Request`];
 /// URL parsing returns [`crate::Error::Parse`]. Automatic grant refresh failures
 /// return [`crate::Error::CredentialRefresh`]; its secret-safe payload retains
 /// an optional refresh HTTP status. Homeserver resolution, other credential
 /// preparation, and transport errors propagate.
 ///
-/// Non-success HTTP statuses return [`RequestError::Server`] with the status and
+/// Non-success HTTP statuses return [`Server`](crate::errors::RequestError::Server) with the status and
 /// server message, including authentication/permission failures (401/403) and 5xx.
 /// Only [`exists`](Self::exists) and [`stats`](Self::stats) treat 404/410 as missing.
 ///
@@ -178,15 +175,6 @@ impl PublicStorage {
         let resource: PubkyResource = addr.into_pubky_resource()?;
         let url = resource.to_transport_url()?;
         cross_log!(debug, "Public storage {} request {}", method, url);
-        let rb = self.client.cross_request(method, url).await?;
-        Ok(rb)
-    }
-}
-
-/// Helper: validation error for directory listings without trailing slash.
-#[inline]
-pub fn dir_trailing_slash_error() -> RequestError {
-    RequestError::Validation {
-        message: "directory listings must end with `/`".into(),
+        self.client.cross_request(method, url).await
     }
 }

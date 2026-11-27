@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use pubky_common::crypto::PublicKey;
+use reqwest::{Method, Response};
 
 use super::SessionInfo;
 
 use super::credential::SessionCredential;
+use crate::client::user_endpoint_url;
 use crate::errors::Error;
 use crate::{PubkyHttpClient, Result, SessionStorage, cross_log};
 
@@ -105,6 +107,18 @@ impl PubkySession {
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
         self.info().public_key().clone()
+    }
+
+    /// Send an authenticated account request and check the homeserver's response status.
+    pub(crate) async fn send_account_request(
+        &self,
+        method: Method,
+        path: &str,
+    ) -> Result<Response> {
+        let url = user_endpoint_url(self.info().public_key(), path)?;
+        let request = self.client.cross_request(method, url).await?;
+        let response = self.credential.send(request, &self.client).await?;
+        self.client.check_http_status(response).await
     }
 
     /// Round-trip the current session with the homeserver to verify it's still valid.

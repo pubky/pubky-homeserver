@@ -1,12 +1,12 @@
 use reqwest::Method;
 use url::Url;
 
-use super::core::{PublicStorage, SessionStorage, dir_trailing_slash_error};
-use crate::actors::storage::resource::{
-    IntoPubkyResource, IntoResourcePath, PubkyResource, ResourcePath,
-};
+use super::core::{PublicStorage, SessionStorage};
+use super::resource::{IntoPubkyResource, IntoResourcePath, PubkyResource};
+use crate::actors::session::credential::SessionCredential;
+use crate::errors::RequestError;
 use crate::util::read_response_body;
-use crate::{Result, cross_log};
+use crate::{PubkyHttpClient, Result, cross_log};
 
 /// Maximum size, inclusive, of a directory listing response. A client-side
 /// bound: the homeserver returns at most 1000 entries per page, so this leaves
@@ -47,13 +47,8 @@ impl SessionStorage {
     /// Sending can fail on invalid cursors (400), invalid response entries, or body
     /// reads. See [`SessionStorage`] for shared errors.
     pub fn list<P: IntoResourcePath>(&self, path: P) -> Result<ListBuilder<'_>> {
-        let path: ResourcePath = path.into_abs_path()?;
-        if !path.as_str().ends_with('/') {
-            return Err(dir_trailing_slash_error().into());
-        }
         let resource = PubkyResource::new(self.user.clone(), path)?;
-        let url = resource.to_transport_url()?;
-        Ok(ListBuilder::session(self, url))
+        ListBuilder::new(&resource, &self.client, Some(self.credential.as_ref()))
     }
 }
 
@@ -69,20 +64,9 @@ impl PublicStorage {
     /// - Returns [`crate::errors::RequestError::Validation`] if `addr` cannot be converted into an addressed directory ending with `/`.
     /// - Propagates transport preparation failures when building the request URL.
     pub fn list<A: IntoPubkyResource>(&self, addr: A) -> Result<ListBuilder<'_>> {
-        let resource: PubkyResource = addr.into_pubky_resource()?;
-        if !resource.path.as_str().ends_with('/') {
-            return Err(dir_trailing_slash_error().into());
-        }
-        let url = resource.to_transport_url()?;
-        Ok(ListBuilder::public(self, url))
+        let resource = addr.into_pubky_resource()?;
+        ListBuilder::new(&resource, &self.client, None)
     }
-}
-
-/// Internal scope for a listing request.
-#[derive(Debug)]
-enum ListScope<'a> {
-    Session(&'a SessionStorage),
-    Public(&'a PublicStorage),
 }
 
 /// Unified builder for homeserver `LIST` queries (works for session & public).
@@ -98,7 +82,8 @@ enum ListScope<'a> {
 #[derive(Debug)]
 #[must_use]
 pub struct ListBuilder<'a> {
-    scope: ListScope<'a>,
+    client: &'a PubkyHttpClient,
+    credential: Option<&'a dyn SessionCredential>,
     url: Url,
     reverse: bool,
     shallow: bool,
@@ -107,26 +92,26 @@ pub struct ListBuilder<'a> {
 }
 
 impl<'a> ListBuilder<'a> {
-    #[inline]
-    const fn new(scope: ListScope<'a>, url: Url) -> Self {
-        Self {
-            scope,
-            url,
+    fn new(
+        resource: &PubkyResource,
+        client: &'a PubkyHttpClient,
+        credential: Option<&'a dyn SessionCredential>,
+    ) -> Result<Self> {
+        if !resource.path.as_str().ends_with('/') {
+            return Err(RequestError::Validation {
+                message: "directory listings must end with `/`".into(),
+            }
+            .into());
+        }
+        Ok(Self {
+            client,
+            credential,
+            url: resource.to_transport_url()?,
             reverse: false,
             shallow: false,
             limit: None,
             cursor: None,
-        }
-    }
-
-    #[inline]
-    const fn session(storage: &'a SessionStorage, url: Url) -> Self {
-        Self::new(ListScope::Session(storage), url)
-    }
-
-    #[inline]
-    const fn public(storage: &'a PublicStorage, url: Url) -> Self {
-        Self::new(ListScope::Public(storage), url)
+        })
     }
 
     /// List newest-first instead of oldest-first.
@@ -183,35 +168,21 @@ impl<'a> ListBuilder<'a> {
         }
 
         // 2) Send with the scope's credentials.
-        let (client, resp) = match self.scope {
-            ListScope::Public(storage) => (
-                &storage.client,
-                storage
-                    .client
-                    .cross_request(Method::GET, url.clone())
-                    .await?
-                    .send()
-                    .await?,
-            ),
-            ListScope::Session(storage) => {
-                let rb = storage
-                    .client
-                    .cross_request(Method::GET, url.clone())
-                    .await?;
-                (&storage.client, storage.send(rb).await?)
-            }
+        let request = self.client.cross_request(Method::GET, url).await?;
+        let response = match self.credential {
+            Some(credential) => credential.send(request, self.client).await?,
+            None => request.send().await?,
         };
 
         // 3) Parse the response.
         cross_log!(
             debug,
             "Request completed with status {} (LIST {})",
-            resp.status(),
-            resp.url()
+            response.status(),
+            response.url()
         );
-        let resp = client.check_http_status(resp).await?;
-
-        let bytes = read_list_body(resp).await?;
+        let response = self.client.check_http_status(response).await?;
+        let bytes = read_list_body(response).await?;
         let mut out = Vec::new();
         for line in String::from_utf8_lossy(&bytes).lines() {
             let trimmed = line.trim();
@@ -239,7 +210,6 @@ impl<'a> ListBuilder<'a> {
 mod tests {
     use super::*;
     use crate::Error;
-    use crate::errors::RequestError;
     use crate::util::tests::serve_response;
 
     #[tokio::test]
