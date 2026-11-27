@@ -108,9 +108,10 @@ impl Testnet {
         keypair: Keypair,
     ) -> Result<&HomeserverApp> {
         config.pkdns.dht_bootstrap_nodes = Some(self.dht_bootstrap_nodes());
-        if !self.dht_relay_urls().is_empty() {
-            config.pkdns.dht_relay_nodes = Some(self.dht_relay_urls().to_vec());
-        }
+        // Always override the relays: a config built from the defaults lists the
+        // public ones, which a testnet without relays must not inherit.
+        let relays = self.dht_relay_urls();
+        config.pkdns.dht_relay_nodes = (!relays.is_empty()).then_some(relays);
         config.storage.backend = StorageConfigToml::InMemory;
         let context =
             AppContext::new_ephemeral(config, keypair, self.postgres_connection_string.clone())
@@ -246,6 +247,7 @@ mod test {
     use crate::Testnet;
     use pubky::Keypair;
     use pubky_common::auth::jws::ClientId;
+    use pubky_homeserver::ConfigToml;
 
     /// Make sure the components are kept alive even when dropped.
     #[tokio::test]
@@ -274,6 +276,25 @@ mod test {
             "expected only the testnet bootstrap nodes ({expected_bootstrap}): {builder_debug}"
         );
         // The testnet has no pkarr relay, so the homeserver must have none either.
+        assert!(
+            builder_debug.contains("relays: None"),
+            "expected no relays: {builder_debug}"
+        );
+    }
+
+    /// A config built from the defaults lists the public relays; a testnet
+    /// without relays must drop them rather than inherit or reject them.
+    #[tokio::test]
+    #[crate::test]
+    async fn create_homeserver_with_drops_the_default_relays() {
+        let mut testnet = Testnet::new().await.unwrap();
+
+        let homeserver = testnet
+            .create_homeserver_with(ConfigToml::default(), Keypair::random())
+            .await
+            .expect("a default config should start on a relay-less testnet");
+
+        let builder_debug = format!("{:?}", homeserver.pkarr_builder());
         assert!(
             builder_debug.contains("relays: None"),
             "expected no relays: {builder_debug}"

@@ -9,8 +9,6 @@
 use crate::services::lock_service::LockService;
 use crate::services::signup_service::SignupService;
 use crate::services::user_service::UserService;
-#[cfg(any(test, feature = "testing"))]
-use crate::ConnectionString;
 use crate::{
     client_server::auth::RevocationListener,
     observability::{Metrics, MetricsInitError},
@@ -21,6 +19,8 @@ use crate::{
     services::events_service::EventsService,
     ConfigToml, PersistentDataDir,
 };
+#[cfg(any(test, feature = "testing"))]
+use crate::{ConnectionString, DomainPort};
 use pubky_common::crypto::Keypair;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,6 +65,16 @@ pub enum AppContextBuildError {
     /// Failed to initialize metrics.
     #[error("Failed to initialize metrics: {0}")]
     Metrics(MetricsInitError),
+    /// An ephemeral context was given a config that uses the public pkarr relays.
+    #[error(
+        "Ephemeral homeservers must not use the public pkarr relays: remove them from `pkdns.dht_relay_nodes`"
+    )]
+    PublicPkarrRelays,
+    /// An ephemeral context was given a config that uses the mainnet DHT bootstrap nodes.
+    #[error(
+        "Ephemeral homeservers must not use the mainnet DHT bootstrap nodes: remove them from `pkdns.dht_bootstrap_nodes`"
+    )]
+    MainnetBootstrapNodes,
 }
 
 /// The application context shared between all components.
@@ -183,17 +193,48 @@ impl AppContext {
     /// `db_server` is the Postgres server to create the database on; see
     /// [`DatabaseMode::ephemeral`] for the fallbacks.
     ///
+    /// If `config.pkdns.dht_bootstrap_nodes` is unset, a placeholder node
+    /// replaces the mainnet ones and the relays are cleared, so a config that
+    /// does not choose a network stays off mainnet.
+    ///
     /// # Errors
     ///
-    /// Returns [`AppContextBuildError::DatabaseResolution`] if
-    /// `config.general.database_url` is set to anything other than the
-    /// built-in default, because ephemeral mode does not read it.
+    /// - [`AppContextBuildError::MainnetBootstrapNodes`] if
+    ///   `config.pkdns.dht_bootstrap_nodes` includes one of mainline's default
+    ///   bootstrap nodes.
+    /// - [`AppContextBuildError::PublicPkarrRelays`] if
+    ///   `config.pkdns.dht_relay_nodes` includes one of pkarr's default relays.
+    /// - [`AppContextBuildError::DatabaseResolution`] if
+    ///   `config.general.database_url` is set to anything other than the
+    ///   built-in default, because ephemeral mode does not read it.
     #[cfg(any(test, feature = "testing"))]
     pub async fn new_ephemeral(
-        config: ConfigToml,
+        mut config: ConfigToml,
         keypair: Keypair,
         db_server: Option<ConnectionString>,
     ) -> Result<Self, AppContextBuildError> {
+        if config.pkdns.dht_bootstrap_nodes.is_none() {
+            config.pkdns.use_isolated_network();
+        }
+        let is_mainnet = |node: &DomainPort| {
+            mainline::DEFAULT_BOOTSTRAP_NODES.contains(&node.to_string().as_str())
+        };
+        if config
+            .pkdns
+            .dht_bootstrap_nodes
+            .iter()
+            .flatten()
+            .any(is_mainnet)
+        {
+            return Err(AppContextBuildError::MainnetBootstrapNodes);
+        }
+        // `Url` adds a trailing slash to a bare host; pkarr's constants have none.
+        let is_public = |relay: &url::Url| {
+            pkarr::DEFAULT_RELAYS.contains(&relay.as_str().trim_end_matches('/'))
+        };
+        if config.pkdns.dht_relay_nodes.iter().flatten().any(is_public) {
+            return Err(AppContextBuildError::PublicPkarrRelays);
+        }
         // Every config built from `config.default.toml` carries the default URL,
         // so only a different value shows the caller expected it to be used.
         if let Some(url) = &config.general.database_url {
@@ -322,6 +363,7 @@ impl AppContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn pkarr_request_timeouts_are_configured_independently() {
@@ -448,6 +490,61 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("db_server"), "{message}");
         assert!(!message.contains("secret-password"), "{message}");
+    }
+
+    /// A config that leaves the network unset, such as the embedded defaults,
+    /// gets the placeholder node and no relays instead of mainnet.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn new_ephemeral_isolates_a_config_without_bootstrap_nodes() {
+        let mut config = ConfigToml::minimal_test_config();
+        config.pkdns.dht_bootstrap_nodes = None;
+        config.pkdns.dht_relay_nodes = ConfigToml::default().pkdns.dht_relay_nodes;
+
+        let context = AppContext::new_ephemeral(config, Keypair::random(), None)
+            .await
+            .expect("a config without bootstrap nodes should be isolated");
+
+        assert_eq!(
+            context.config_toml.pkdns,
+            ConfigToml::minimal_test_config().pkdns
+        );
+    }
+
+    /// Explicit bootstrap nodes are kept, so public relays next to them are
+    /// rejected before any connection is made.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn new_ephemeral_rejects_the_public_relays() {
+        let mut config = ConfigToml::minimal_test_config();
+        config.pkdns.dht_relay_nodes =
+            Some(vec![url::Url::parse(pkarr::DEFAULT_RELAYS[0]).unwrap()]);
+
+        let error = AppContext::new_ephemeral(config, Keypair::random(), None)
+            .await
+            .err()
+            .expect("public relays should be rejected");
+
+        assert!(matches!(error, AppContextBuildError::PublicPkarrRelays));
+    }
+
+    /// Mainnet bootstrap nodes, as listed in `config.sample.toml`, are
+    /// rejected before any connection is made.
+    #[tokio::test]
+    #[pubky_test_utils::test]
+    async fn new_ephemeral_rejects_the_mainnet_bootstrap_nodes() {
+        let mut config = ConfigToml::minimal_test_config();
+        config.pkdns.dht_bootstrap_nodes = Some(vec![DomainPort::from_str(
+            mainline::DEFAULT_BOOTSTRAP_NODES[0],
+        )
+        .unwrap()]);
+
+        let error = AppContext::new_ephemeral(config, Keypair::random(), None)
+            .await
+            .err()
+            .expect("mainnet bootstrap nodes should be rejected");
+
+        assert!(matches!(error, AppContextBuildError::MainnetBootstrapNodes));
     }
 
     /// Configs built from the embedded defaults carry the default

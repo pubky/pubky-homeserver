@@ -34,6 +34,8 @@ futures-lite = { workspace = true, features = ["default"] }
 futures-util.workspace = true
 httpdate.workspace = true
 ipnet.workspace = true
+# Only for `new_ephemeral`, which rejects mainnet bootstrap nodes.
+mainline = { workspace = true, optional = true }
 pkarr = { workspace = true, features = ["default", "dht", "tls"] }
 pubky-common.workspace = true
 serde.workspace = true
@@ -112,4 +114,4 @@ storage-gcs = ["opendal/services-gcs"]
 storage-memory = ["opendal/services-memory"]
 
 # Optional testing methods
-testing = ["storage-memory"]
+testing = ["storage-memory", "dep:mainline"]
