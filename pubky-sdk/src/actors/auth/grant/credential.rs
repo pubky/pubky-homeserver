@@ -95,7 +95,6 @@ impl GrantChain {
 ///
 /// Refresh paths take the mutex and hold it across the HTTP call so
 /// concurrent refreshes don't run into a race condition.
-#[derive(Debug)]
 pub(crate) struct GrantCredentialState {
     /// Current opaque bearer token (homeserver-issued).
     pub bearer: String,
@@ -125,7 +124,7 @@ impl GrantCredentialState {
 /// clones via `Arc<Mutex<…>>` so every `PubkySession` clone observes the
 /// same refreshes. Session info is derived from the immutable grant and
 /// never changes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GrantCredential {
     pub(crate) state: Arc<Mutex<GrantCredentialState>>,
     pub(crate) info: SessionInfo,
@@ -135,6 +134,14 @@ pub struct GrantCredential {
     /// Retaining an empty bundle preserves the approval format during export.
     /// A child's approval is its signed child approval.
     verified_approval: Option<Arc<VerifiedApproval>>,
+}
+
+impl fmt::Debug for GrantCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GrantCredential")
+            .field("user", self.info.public_key())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Validated restore inputs, including keys verified against the stored grant.
@@ -1134,6 +1141,8 @@ mod tests {
     )]
     use crate::CookieCredential;
 
+    const TEST_BEARER: &str = "test-bearer";
+
     #[tokio::test]
     #[pubky_testnet::test]
     async fn capped_bearer_requests_and_legacy_logout_do_not_refresh() {
@@ -1208,6 +1217,19 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn credential_debug_omits_bearer_and_grant() {
+        let (stored, claims) = stored_credential(now_unix() + 3600);
+        let signed_grant = stored.grant_jws.clone();
+        let signer = GrantPopSigner::local(Keypair::from_secret(&stored.client_key_secret));
+        let credential = test_credential(stored, claims, signer);
+
+        for output in [format!("{credential:?}"), format!("{credential:#?}")] {
+            assert!(!output.contains(TEST_BEARER));
+            assert!(!output.contains(&signed_grant));
+        }
     }
 
     #[test]
@@ -2250,7 +2272,7 @@ mod tests {
         let now = now_unix();
         GrantCredential::from_response(
             GrantSessionResponse {
-                token: "test-bearer".into(),
+                token: TEST_BEARER.into(),
                 session: GrantSessionInfo {
                     homeserver: stored.homeserver_pk.clone(),
                     pubky: claims.iss.clone(),

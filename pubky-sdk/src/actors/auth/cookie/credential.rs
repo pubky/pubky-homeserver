@@ -22,6 +22,7 @@
 //! the SDK owns the secret and exports/imports just like on native.
 
 use std::any::Any;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -61,7 +62,7 @@ async fn read_session_body(response: Response) -> Result<Vec<u8>> {
 /// and replays it on every request. On browser WASM the secret is
 /// inaccessible (the fetch spec hides `Set-Cookie`) and the browser cookie
 /// jar handles attachment automatically — `cookie` is `None`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[deprecated(note = "Use GrantCredential instead.")]
 pub struct CookieCredential {
     /// User public key — used to name the `Cookie` header.
@@ -73,6 +74,14 @@ pub struct CookieCredential {
     cookie: Option<String>,
     /// Homeserver this cookie may attach to.
     homeserver: Arc<RwLock<Option<PublicKey>>>,
+}
+
+impl fmt::Debug for CookieCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CookieCredential")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CookieCredential {
@@ -379,15 +388,26 @@ mod tests {
         crypto::Keypair,
     };
 
+    const TEST_COOKIE: &str = "cookie-secret";
+
     fn cookie_credential(user: &PublicKey, homeserver: Option<PublicKey>) -> CookieCredential {
         let record =
             CookieSessionRecord::new(user, Capabilities::from(vec![Capability::root()]), None);
         CookieCredential::new(
             user.clone(),
-            Some("cookie-secret".to_string()),
+            Some(TEST_COOKIE.to_owned()),
             record,
             homeserver,
         )
+    }
+
+    #[test]
+    fn credential_debug_omits_cookie_secret() {
+        let credential = cookie_credential(&Keypair::random().public_key(), None);
+
+        for output in [format!("{credential:?}"), format!("{credential:#?}")] {
+            assert!(!output.contains(TEST_COOKIE));
+        }
     }
 
     #[tokio::test]
