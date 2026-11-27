@@ -86,8 +86,11 @@ impl GrantSession {
     /// the quota that applies.
     ///
     /// Requires read permission on the root scope (`/:r`, `/:rw`, ...).
-    /// Path-scoped sessions surface the homeserver `403` as the standard
-    /// request error.
+    /// Path-scoped sessions get HTTP `403`. For a successful HTTP response,
+    /// the promise can still reject with a `RequestError`. Its `data.reason`
+    /// is `"Timeout"` if the body read times out, `"Oversized"` if the body
+    /// exceeds 1 MiB, or `"Decode"` if the complete body cannot be decoded
+    /// as `AccountInfo`.
     ///
     /// @returns {Promise<AccountInfo>}
     #[wasm_bindgen]
