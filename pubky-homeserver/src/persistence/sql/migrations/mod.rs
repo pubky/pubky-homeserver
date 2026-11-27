@@ -12,6 +12,7 @@ mod m20260723_sanitize_capabilities;
 mod m20260921_create_entry_locks;
 mod m20261002_entry_path_c_collation;
 mod m20261103_add_grant_delegation;
+mod m20261113_events_path_index;
 
 pub(crate) use m20250806_create_user::M20250806CreateUserMigration;
 pub(crate) use m20250812_create_signup_code::M20250812CreateSignupCodeMigration;
@@ -27,3 +28,4 @@ pub(crate) use m20260723_sanitize_capabilities::M20260723SanitizeCapabilitiesMig
 pub(crate) use m20260921_create_entry_locks::M20260921CreateEntryLocksMigration;
 pub(crate) use m20261002_entry_path_c_collation::M20261002EntryPathCCollationMigration;
 pub(crate) use m20261103_add_grant_delegation::M20261103AddGrantDelegationMigration;
+pub(crate) use m20261113_events_path_index::M20261113EventsPathIndexMigration;

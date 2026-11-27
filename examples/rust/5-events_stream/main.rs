@@ -8,13 +8,22 @@ use std::env;
 #[command(version, about = "Subscribe to Pubky users' event streams")]
 struct Cli {
     /// User public keys (z32 format, 1-50 users)
-    #[arg(required = true)]
+    #[arg(required_unless_present = "all_users")]
     users: Vec<String>,
+    /// Stream every user's public events on this homeserver (z32 public key)
+    /// instead of listing users
+    #[arg(long, value_name = "HOMESERVER", conflicts_with_all = ["users", "cursors"])]
+    all_users: Option<String>,
+    /// Global cursor to resume an `--all-users` stream after
+    #[arg(long, requires = "all_users")]
+    cursor: Option<u64>,
     /// Cursors for each user (comma-separated, optional)
     /// Format: cursor1,cursor2,... (must match number of users if provided)
     #[arg(long)]
     cursors: Option<String>,
-    /// Maximum number of events to fetch (omit for unlimited)
+    /// Maximum number of events to fetch. Omit for unlimited, except with
+    /// `--all-users` and no `--live`, which stops after 100 events: pass the
+    /// last printed cursor as `--cursor` to fetch the next page
     #[arg(short, long)]
     limit: Option<u16>,
     /// Enable live streaming mode
@@ -84,7 +93,13 @@ async fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     // Build event stream subscription using the appropriate constructor
-    let mut builder: EventStreamBuilder = if users.len() == 1 {
+    let mut builder: EventStreamBuilder = if let Some(homeserver) = &args.all_users {
+        // Every user: one global cursor over the homeserver's public events
+        let homeserver = PublicKey::try_from(homeserver.as_str())?;
+        pubky
+            .event_stream_for(&homeserver)
+            .all_users(args.cursor.map(EventCursor::new))
+    } else if users.len() == 1 {
         // Single user: use the simple constructor
         let (user, cursor) = &users[0];
         pubky.event_stream_for_user(user, *cursor)
@@ -116,9 +131,13 @@ async fn main() -> Result<()> {
         builder = builder.path(path);
     }
 
-    println!("Subscribing to events for {} user(s)", args.users.len());
-    for user in &args.users {
-        println!("  - {}", user);
+    if let Some(homeserver) = &args.all_users {
+        println!("Subscribing to events for every user on {homeserver}");
+    } else {
+        println!("Subscribing to events for {} user(s)", args.users.len());
+        for user in &args.users {
+            println!("  - {}", user);
+        }
     }
     let mut stream = builder.subscribe().await?;
 

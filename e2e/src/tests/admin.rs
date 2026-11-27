@@ -686,3 +686,68 @@ where
         .expect("valid SSE event")
         .data
 }
+
+/// The admin stream resumes each user from its own `user=<pk>:<cursor>` suffix:
+/// one user after their first event, the other from the beginning, private
+/// events included.
+#[tokio::test]
+#[pubky_testnet::test]
+async fn admin_event_stream_resumes_per_user() {
+    let config = ConfigToml::default_test_config();
+    let admin_password = config.admin.admin_password.clone();
+
+    let mut testnet = Testnet::new().await.unwrap();
+    let pubky = testnet.sdk().unwrap();
+    let server = testnet
+        .create_homeserver_with(config, Keypair::random())
+        .await
+        .unwrap();
+    let admin_socket = server
+        .admin_server()
+        .expect("admin server should be enabled")
+        .listen_socket();
+
+    // The testnet starts from an empty database and signup emits no events,
+    // so these writes are event ids 1 to 4 in order.
+    let mut users = Vec::new();
+    for name in ["alice", "bob"] {
+        let signer = pubky.signer(Keypair::random());
+        let session = signer
+            .signup_cookie(&server.public_key(), None)
+            .await
+            .unwrap();
+        for path in [format!("/pub/{name}.txt"), format!("/priv/{name}.txt")] {
+            session.storage().put(path, vec![1]).await.unwrap();
+        }
+        users.push(signer.public_key().z32());
+    }
+    let (alice, bob) = (&users[0], &users[1]);
+
+    let body = PubkyHttpClient::new()
+        .unwrap()
+        .request(
+            Method::GET,
+            &format!("http://{admin_socket}/events-stream?user={alice}:1&user={bob}"),
+        )
+        .header("X-Admin-Password", &admin_password)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    let events: Vec<_> = body
+        .split_whitespace()
+        .filter(|word| word.starts_with("pubky://"))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            format!("pubky://{alice}/priv/alice.txt"),
+            format!("pubky://{bob}/pub/bob.txt"),
+            format!("pubky://{bob}/priv/bob.txt"),
+        ],
+        "{body}"
+    );
+}
