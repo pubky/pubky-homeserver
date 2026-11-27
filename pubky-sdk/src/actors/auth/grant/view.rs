@@ -14,7 +14,6 @@ use reqwest::Method;
 
 use super::{CustomPopError, DelegatedGrantCredentialState, GrantCredential};
 use crate::actors::session::core::PubkySession;
-use crate::client::user_endpoint_url;
 use crate::custom_pop::CustomPop;
 use crate::errors::{RequestError, Result};
 
@@ -132,13 +131,11 @@ impl<'a> GrantSessionView<'a> {
     ///   auth or no read permission on the root scope).
     /// - Returns [`RequestError::DecodeJson`] if the response does not parse.
     pub async fn account(&self) -> Result<AccountInfo> {
-        let user = self.session.info().public_key().clone();
-        let url = user_endpoint_url(&user, "/account")?;
-        let client = &self.session.client;
-        let rb = client.cross_request(Method::GET, url).await?;
-        let resp = self.session.credential().send(rb, client).await?;
-        let resp = client.check_http_status(resp).await?;
-        let account: AccountInfo = resp.json().await.map_err(|e| RequestError::DecodeJson {
+        let resp = self
+            .session
+            .send_account_request(Method::GET, "/account")
+            .await?;
+        let account = resp.json().await.map_err(|e| RequestError::DecodeJson {
             message: format!("decoding /account response: {e}"),
         })?;
         Ok(account)
