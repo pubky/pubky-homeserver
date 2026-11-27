@@ -73,6 +73,8 @@ pub struct DriveToml {
     pub icann_client_identity: ClientIdentityToml,
     /// How the Pubky TLS listener determines the client address.
     pub pubky_client_identity: ClientIdentityToml,
+    /// Serve every user's public folder as a read-only WebDAV share under `/dav`.
+    pub webdav: bool,
     /// Per-path request-count rate limits, validated during deserialization.
     #[serde(deserialize_with = "deserialize_path_limits")]
     pub rate_limits: Vec<PathLimit>,
@@ -511,6 +513,7 @@ mod tests {
         assert_eq!(c.pkdns.dht_bootstrap_nodes, None);
         assert_eq!(c.pkdns.dht_request_timeout_ms, None);
         assert_eq!(c.pkdns.relay_request_timeout_ms, None);
+        assert!(!c.drive.webdav);
         assert_eq!(c.drive.rate_limits.len(), 2);
         assert_eq!(c.drive.rate_limits[0].path.0, "/signup_tokens/*");
         assert_eq!(c.drive.rate_limits[1].path.0, "/account");

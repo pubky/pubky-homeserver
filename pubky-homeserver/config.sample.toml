@@ -29,6 +29,11 @@ icann_listen_socket = "127.0.0.1:6286"
 # `<user-key>` or `<label>.<user-key>`. See docs/WEBSITES.md.
 websites = true
 
+# Serve every user's public folder as a read-only WebDAV share at
+# /dav/<user-key>/pub/ on the two sockets above. Anyone can read and list
+# these folders without signing in. Default: false. See docs/WEBDAV.md.
+webdav = false
+
 # Configure each listener independently. Default: "direct" (TCP peer address).
 # Behind a proxy, direct mode shares its IP-based limits across visitors.
 icann_client_identity = { mode = "direct" }
@@ -54,8 +59,9 @@ pubky_client_identity = { mode = "direct" }
 # Rate limit endpoints by request count.
 # `path` is a glob pattern of the path. See syntax in https://crates.io/crates/fast-glob
 #  Storage requests match their decoded, normalized, owner-relative storage
-#  path: `/%70ub/file`, `/pub//file`, `/pub/./file` and `/storage/<user>/pub/file`
-#  all match "/pub/file". Write encoded names decoded: "/pub/a b" matches
+#  path: `/%70ub/file`, `/pub//file`, `/pub/./file`, `/storage/<user>/pub/file`
+#  and, with `webdav = true`, `/dav/<user>/pub/file` all match "/pub/file".
+#  Write encoded names decoded: "/pub/a b" matches
 #  `/pub/a%20b`. Other endpoints match the request path as sent.
 # `method` is the HTTP method. Examples: GET, POST, PUT, HEAD, DELETE
 # `quota` defines the limit in the format $rate"r"/$time_unit (request-count only).
@@ -84,6 +90,14 @@ pubky_client_identity = { mode = "direct" }
 # path = "/account"
 # method = "GET"
 # quota = "60r/m"
+# key = "ip"
+#
+# With `webdav = true`, limit folder listings. One PROPFIND lists a whole
+# folder, however large, and anyone can send it.
+# [[drive.rate_limits]]
+# path = "/pub/**"
+# method = "PROPFIND"
+# quota = "30r/m"
 # key = "ip"
 #
 # Limit login attempts to 20 requests per minute per IP.

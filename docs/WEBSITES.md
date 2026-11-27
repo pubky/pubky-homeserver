@@ -29,9 +29,11 @@ Operators can turn it off with `[drive] websites = false`.
 ## Paths that stay on the API
 
 Only GET and HEAD reach a site. Requests whose first path segment is
-`account`, `auth`, `events`, `events-stream`, `info`, `priv`, `pub`, `session`,
-`signup`, `signup_tokens` or `storage` go to the client API as before, so a site
-cannot use these as top-level folders. Nested folders such as `/blog/pub/` are fine.
+`account`, `auth`, `dav`, `events`, `events-stream`, `info`, `priv`, `pub`,
+`session`, `signup`, `signup_tokens` or `storage` go to the client API as
+before, so a site cannot use these as top-level folders. Nested folders such as
+`/blog/pub/` are fine. `dav` is reserved for the [WebDAV share](WEBDAV.md) even
+on a homeserver that has it turned off.
 
 ## Responses
 

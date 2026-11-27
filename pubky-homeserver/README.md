@@ -31,6 +31,7 @@ ignore unknown identifiers.
 - [PKARR republishing](../docs/REPUBLISHING.md) — cache-first resolution, network fallback, and retry behavior.
 - [Storage-addressing migration](../docs/STORAGE_ADDRESSING_MIGRATION.md) — adoption metrics, migration clock, and legacy-removal review.
 - [Websites](../docs/WEBSITES.md) — static sites served from `/pub/website/` by `Host`.
+- [WebDAV](../docs/WEBDAV.md) — read-only WebDAV share of each user's public folder.
 
 ## Library Usage
 
