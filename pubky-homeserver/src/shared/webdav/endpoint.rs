@@ -9,6 +9,9 @@
 //! handler is built, which verbs a share answers, and how `OPTIONS` is told
 //! apart from a CORS preflight.
 //!
+//! A server assembles its endpoint from three pieces: [`router`] for the
+//! routes, its own middleware around them, and [`with_cors`] outermost.
+//!
 //! | | admin | client |
 //! |---|---|---|
 //! | auth | Basic `admin:<password>`, in its handler | none |
@@ -48,7 +51,7 @@ use dav_server_opendalfs::OpendalFs;
 use opendal::Operator;
 
 /// URL prefix stripped before a path is resolved against storage.
-pub(crate) const DAV_PREFIX: &str = "/dav";
+const DAV_PREFIX: &str = "/dav";
 
 /// The axum routes for a `/dav` endpoint: the root, and everything beneath
 /// it. Two because a catch-all must match at least one character, and `/dav/`
@@ -139,15 +142,8 @@ impl DavAccess {
     }
 }
 
-/// Mount `handler` at `/dav/` and everything beneath it, with the endpoint's
-/// own CORS.
-///
-/// A server merges this *beside* its other routes, not under its blanket
-/// `CorsLayer`: that layer answers every `OPTIONS` itself, which strips the
-/// `DAV:` header a file manager reads before it will mount anything. The CORS
-/// here answers only real preflights and lets a bare `OPTIONS` through to
-/// dav-server.
-pub(crate) fn router<H, T, S>(access: DavAccess, handler: H) -> Router<S>
+/// Mount `handler` at `/dav/` and everything beneath it.
+pub(crate) fn router<H, T, S>(handler: H) -> Router<S>
 where
     H: Handler<T, S>,
     T: 'static,
@@ -156,7 +152,24 @@ where
     Router::new()
         .route(DAV_ROOT_ROUTE, any(handler.clone()))
         .route(DAV_ROUTE, any(handler))
-        .layer(axum_middleware::from_fn_with_state(access, cors))
+}
+
+/// Wrap a server's `/dav` routes in the endpoint's own CORS.
+///
+/// This goes outermost, around whatever middleware the server puts on the
+/// routes, so a preflight is answered before any of it runs and a refusal
+/// from any of it reaches a browser readable.
+///
+/// A server merges the result *beside* its other routes, not under its
+/// blanket `CorsLayer`: that layer answers every `OPTIONS` itself, which
+/// strips the `DAV:` header a file manager reads before it will mount
+/// anything. The CORS here answers only real preflights and lets a bare
+/// `OPTIONS` through to dav-server.
+pub(crate) fn with_cors<S>(dav_routes: Router<S>, access: DavAccess) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    dav_routes.layer(axum_middleware::from_fn_with_state(access, cors))
 }
 
 /// `dav-server` over an operator that has already been scoped to what the
@@ -228,7 +241,7 @@ impl DavEndpoint {
     }
 }
 
-/// Cross-origin support for a `/dav` route, hand-rolled because the two kinds
+/// Cross-origin support for the `/dav` routes, hand-rolled because the two kinds
 /// of `OPTIONS` request must be told apart.
 ///
 /// `tower_http::cors::CorsLayer` answers *every* `OPTIONS` itself. That
@@ -258,20 +271,20 @@ async fn cors(State(access): State<DavAccess>, req: Request<Body>, next: Next) -
         return preflight(access, requested);
     }
 
-    let cross_origin = req.headers().contains_key(header::ORIGIN);
     let mut response = next.run(req).await;
 
-    if cross_origin {
-        let headers = response.headers_mut();
-        headers.insert(
-            header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            HeaderValue::from_static("*"),
-        );
-        headers.insert(
-            header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static(EXPOSE_HEADERS),
-        );
-    }
+    // On every response, not only those to a request with an `Origin`: the
+    // answer is the same for all of them, so a cache may hand one request's
+    // response to another without a `Vary`.
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static(EXPOSE_HEADERS),
+    );
 
     response
 }
@@ -343,7 +356,8 @@ mod tests {
         let backend = opendal::services::Fs::default().root(dir.path().to_str().unwrap());
         let operator = Operator::new(backend).unwrap();
         operator.write("pub/a.txt", "hello").await.unwrap();
-        let app = router(access, serve).with_state(DavEndpoint::new(operator, access));
+        let routes = router(serve).with_state(DavEndpoint::new(operator, access));
+        let app = with_cors(routes, access);
         (TestServer::new(app), dir)
     }
 
@@ -384,9 +398,9 @@ mod tests {
             response.assert_status_ok();
             response.assert_header("dav", "1");
             assert_eq!(allow_set(&response), verbs(expected), "{path}");
-            // A bare OPTIONS is not a preflight: no CORS answer, no CORS headers.
+            // A bare OPTIONS is not a preflight: dav-server answered it.
             assert!(response
-                .maybe_header(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .maybe_header(header::ACCESS_CONTROL_ALLOW_METHODS)
                 .is_none());
         }
     }
@@ -454,25 +468,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_cross_origin_responses_carry_cors_headers() {
+    async fn every_response_carries_the_same_cors_headers() {
+        // With or without an `Origin`, so a response cached from a direct
+        // visit still works when a web app fetches the same URL.
         let (server, _dir) = share(DavAccess::ReadOnly).await;
 
         let cross_origin = server
             .get("/dav/pub/a.txt")
-            .add_header(header::ORIGIN, "https://webdav.example")
-            .await;
-        cross_origin.assert_status_ok();
-        cross_origin.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
-        cross_origin.assert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, EXPOSE_HEADERS);
-
-        let same_origin = server.get("/dav/pub/a.txt").await;
-        same_origin.assert_status_ok();
-        assert!(same_origin
-            .maybe_header(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-            .is_none());
-        assert!(same_origin
-            .maybe_header(header::ACCESS_CONTROL_EXPOSE_HEADERS)
-            .is_none());
+            .add_header(header::ORIGIN, "https://webdav.example");
+        for request in [cross_origin, server.get("/dav/pub/a.txt")] {
+            let response = request.await;
+            response.assert_status_ok();
+            response.assert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+            response.assert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, EXPOSE_HEADERS);
+        }
     }
 
     #[tokio::test]

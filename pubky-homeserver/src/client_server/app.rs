@@ -37,6 +37,7 @@ use super::middleware::{
     upload_idle_timeout,
 };
 use super::routes::{account, dav, events, info, root, signup_tokens, tenants, website};
+use crate::shared::webdav::endpoint as dav_endpoint;
 
 // Starts after client identification and any TLS handshake, and ends at request dispatch.
 const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -328,15 +329,18 @@ pub fn create_app(state: AppState) -> std::result::Result<Router, ClientServerBu
     }
 
     // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
-    // not under them — see `dav_endpoint::router`. It is anonymous, but it
+    // not under them — see `dav_endpoint::with_cors`. It is anonymous, but it
     // runs behind the REST routes' middleware so the configured request and
-    // bandwidth limits apply to it. Request-count limiters are shared with
-    // REST; bandwidth buckets are per route, so a client's read allowance on
-    // `/dav` is counted separately from its allowance on `/storage`.
+    // bandwidth limits apply to it. Request-count limits match the storage
+    // path and their limiters are shared with REST, so a limit on `/pub/a`
+    // covers both routes. Bandwidth buckets are per route, so a client's read
+    // allowance on `/dav` is counted separately from its allowance on
+    // `/storage`.
     let dav = dav::router(state).layer(middleware);
-    // No `RequestTenant` here: the endpoint resolves its own tenant from the
-    // URL and nothing on this router reads it.
-    let dav_app = with_trace_layer(dav);
+    // As above: resolve the target before tracing and rate limiting, and keep
+    // CORS outermost.
+    let dav_app = with_trace_layer(dav).layer(axum_middleware::from_fn(RequestTenant::resolve_dav));
+    let dav_app = dav_endpoint::with_cors(dav_app, dav::ACCESS);
 
     Ok(cors_app.merge(dav_app))
 }

@@ -21,9 +21,9 @@ info:
     <label>.<user-key>` serves `/pub/website/<label>/`. OpenAPI cannot route by
     `Host`, so this is described here; see `docs/WEBSITES.md`.
 
-    Paths whose first segment is `auth`, `events`, `events-stream`, `info`,
-    `priv`, `pub`, `session`, `signup`, `signup_tokens` or `storage` stay on the
-    API. Other paths serve the site: folders serve `index.html`, `/dir`
+    Paths whose first segment is `auth`, `dav`, `events`, `events-stream`,
+    `info`, `priv`, `pub`, `session`, `signup`, `signup_tokens` or `storage` stay
+    on the API. Other paths serve the site: folders serve `index.html`, `/dir`
     redirects with `301` to `/dir/` when only `dir/index.html` exists, and a
     missing file returns `404` with the site's `404.html` when present. Folders
     are never listed. Responses carry `Cache-Control: no-cache` and
@@ -59,6 +59,21 @@ info:
     (RFC 4918) on file paths, advertised as the `webdav-locks` feature. The
     deprecated owner-relative routes do not, but their writes obey locks the
     same way. OpenAPI cannot list these methods, so they are described here.
+
+    ## Public WebDAV share
+
+    When the operator turns it on, `/dav/{user_z32}/pub/` serves the user's
+    public folder as a read-only WebDAV share (RFC 4918, class 1) to anyone,
+    without authentication. `/info` does not list it, and while it is off
+    these paths are handled as deprecated owner-relative storage paths. It
+    answers `OPTIONS`, `GET`, `HEAD` and
+    `PROPFIND`. OpenAPI cannot list `PROPFIND`, so it is described here; see
+    `docs/WEBDAV.md`.
+
+    `PROPFIND` lists a folder with `Depth: 0` or `Depth: 1`, and treats a
+    missing `Depth` as `1`. `Depth: infinity` returns `501`. Other WebDAV
+    methods return `405` with `Allow`, and unknown methods `501`. Paths outside
+    `/pub/` return `404`, and a path that names no user `400`.
 
     `LOCK` takes an exclusive write lock on one file path, mapped or not, for the
     caller with write capability on it. `Timeout: Second-N` requests a lifetime
@@ -881,6 +896,119 @@ paths:
           description: The `If` header names a token that is not the live lock on this path.
         '423':
           description: The path is locked and the request carries no lock token.
+  "/dav/{user_z32}/{path}":
+    description: |-
+      Read-only WebDAV share of a user's public folder. Served only when the
+      operator turns it on. Also answers `PROPFIND`; see Public WebDAV share
+      above.
+    parameters:
+    - name: user_z32
+      in: path
+      required: true
+      description: Raw 52-character z-base-32 public key of the storage owner.
+      schema:
+        type: string
+        minLength: 52
+        maxLength: 52
+        pattern: "^[ybndrfg8ejkmcpqxot1uwisza345h769]{52}$"
+    - name: path
+      in: path
+      required: true
+      description: Owner-relative storage path. Must be `pub` or start with
+        `pub/`, and may contain slashes.
+      schema:
+        type: string
+      examples:
+        file:
+          value: pub/documents/notes.txt
+        directory:
+          value: pub/documents/
+    get:
+      tags:
+      - Data
+      summary: Get a public file over WebDAV
+      description: |-
+        Returns the file. The content type is guessed from the file name's
+        extension, not the one stored at upload. Range and conditional
+        requests are supported. A folder has no index page and returns `405`.
+      operationId: getDavFile
+      security:
+      - {}
+      parameters:
+      - name: Range
+        in: header
+        schema:
+          type: string
+      - name: If-None-Match
+        in: header
+        schema:
+          type: string
+      - name: If-Modified-Since
+        in: header
+        schema:
+          type: string
+      responses:
+        '200':
+          description: File content.
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+                example: "*"
+        '206':
+          description: The requested byte range.
+        '304':
+          description: Not modified.
+        '400':
+          description: The path names no user or is malformed.
+        '404':
+          description: No such file, or the path is outside `/pub/`.
+        '405':
+          description: The path is a folder. `Allow` lists `OPTIONS, PROPFIND`.
+        '429':
+          description: Rate limited.
+    head:
+      tags:
+      - Data
+      summary: Get a public file's headers over WebDAV
+      operationId: headDavFile
+      security:
+      - {}
+      responses:
+        '200':
+          description: The headers `GET` would return, without a body.
+        '404':
+          description: No such file, or the path is outside `/pub/`.
+        '405':
+          description: The path is a folder. `Allow` lists `OPTIONS, PROPFIND`.
+    options:
+      tags:
+      - Data
+      summary: Probe WebDAV support, or answer a CORS preflight
+      description: |-
+        Without `Access-Control-Request-Method`, this is a WebDAV capability
+        probe answered with `DAV: 1` and the methods the path takes in `Allow`.
+        It is answered for any path under a valid user, inside `/pub/` or not.
+        With that header, it is a CORS preflight answered with `204`.
+      operationId: optionsDav
+      security:
+      - {}
+      responses:
+        '200':
+          description: WebDAV capabilities.
+          headers:
+            DAV:
+              schema:
+                type: string
+                example: '1'
+            Allow:
+              schema:
+                type: string
+                example: OPTIONS, GET, HEAD, PROPFIND
+        '204':
+          description: CORS preflight. Any origin is allowed, without credentials.
+        '400':
+          description: The path names no user or is malformed.
   "/{path}":
     parameters:
     - name: path

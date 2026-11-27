@@ -67,8 +67,11 @@ pub(crate) fn create_app(state: AppState) -> axum::routing::IntoMakeService<Rout
         .layer(CorsLayer::very_permissive());
 
     // WebDAV brings its own CORS and is merged beside the CORS-wrapped routes,
-    // not under them — see `dav_endpoint::router`.
-    let dav = dav_endpoint::router(DavAccess::ReadWrite, dav::dav_handler).with_state(state);
+    // not under them — see `dav_endpoint::with_cors`.
+    let dav = dav_endpoint::with_cors(
+        dav_endpoint::router(dav::dav_handler).with_state(state),
+        DavAccess::ReadWrite,
+    );
 
     with_trace_layer(app.merge(dav)).into_make_service()
 }

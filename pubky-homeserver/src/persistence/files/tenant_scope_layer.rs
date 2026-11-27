@@ -216,6 +216,8 @@ impl<D: oio::Delete> oio::Delete for TenantScopeDeleter<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::files::test_support::get_fs_operator;
+    use opendal::{ErrorKind, Operator};
     use pubky_common::crypto::Keypair;
 
     fn prefix_for(owner: &str) -> String {
@@ -314,9 +316,6 @@ mod tests {
     // The string checks above pin the rule; these pin that every accessor
     // override actually applies it. The unscoped operator plants files the
     // scoped one must and must not be able to reach.
-
-    use crate::persistence::files::test_support::get_fs_operator;
-    use opendal::{ErrorKind, Operator};
 
     struct Drives {
         owner: String,

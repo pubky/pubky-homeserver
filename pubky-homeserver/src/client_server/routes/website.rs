@@ -33,6 +33,7 @@ use super::tenants::read::{is_not_modified, not_modified_response};
 const API_SEGMENTS: &[&str] = &[
     "account",
     "auth",
+    "dav",
     "events",
     "events-stream",
     "info",
@@ -405,6 +406,9 @@ mod tests {
             "/events/",
             "/storage/x/pub/y",
             "/info",
+            // Reserved whether or not this server has WebDAV enabled, so a
+            // site does not break when it moves to one that has.
+            "/dav/x/pub/y",
         ] {
             assert_eq!(classify(Method::GET, path), Ok(None), "{path}");
         }
