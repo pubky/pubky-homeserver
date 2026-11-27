@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-For testing, use `AppContext::new_ephemeral` to run on a temporary data directory and a throwaway database, both cleaned up after use. The database is created on the Postgres server given as the third argument, else the one in `TEST_PUBKY_CONNECTION_STRING`, else `localhost:5432`. Enable the `testing` feature:
+For testing, use `AppContext::new_ephemeral` to run on a temporary data directory and a throwaway database, both cleaned up after use. The database is created on the Postgres server given as the third argument, else the one in `TEST_PUBKY_CONNECTION_STRING`, else `localhost:5432`. A config that leaves `pkdns.dht_bootstrap_nodes` unset gets a placeholder node and no relays instead of mainnet, and one that lists mainline's default bootstrap nodes or pkarr's default relays is rejected. Enable the `testing` feature:
 
 ```toml
 [dev-dependencies]
